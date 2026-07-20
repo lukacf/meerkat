@@ -1121,24 +1121,14 @@ fn some_string(value: &str) -> Expr {
     Expr::Some(Box::new(Expr::String(value.into())))
 }
 
-fn seam_runtime_authority_idle_input() -> CompositionWitnessInput {
+fn seam_runtime_session_registration_input() -> CompositionWitnessInput {
     witness_input(
         "meerkat",
-        "RecoverRuntimeAuthority",
-        vec![
-            witness_field("session_id", Expr::String("sessionid_1".into())),
-            witness_field(
-                "state",
-                named_variant("RuntimeLifecycleObservedState", "Idle"),
-            ),
-            witness_field("agent_runtime_id", Expr::None),
-            witness_field("fence_token", Expr::None),
-            witness_field("runtime_generation", Expr::None),
-            witness_field("runtime_epoch_id", Expr::None),
-            witness_field("current_run_id", Expr::None),
-            witness_field("pre_run_phase", Expr::None),
-            witness_field("silent_intent_overrides", Expr::EmptySet),
-        ],
+        "RegisterSession",
+        vec![witness_field(
+            "session_id",
+            Expr::String("sessionid_1".into()),
+        )],
     )
 }
 
@@ -1278,7 +1268,7 @@ fn basic_round_trip_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("basic_round_trip"),
         preload_inputs: vec![
-            seam_runtime_authority_idle_input(),
+            seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
             seam_commit_spawn_membership_input(),
@@ -1292,7 +1282,7 @@ fn basic_round_trip_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
-            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder: opener -> commit. The membership
             // commit (renamed SpawnRunningFresh) is what emits RequestRuntimeBinding,
@@ -1319,7 +1309,7 @@ fn retire_runtime_path_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("retire_runtime_path"),
         preload_inputs: vec![
-            seam_runtime_authority_idle_input(),
+            seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
             seam_commit_spawn_membership_input(),
@@ -1332,7 +1322,7 @@ fn retire_runtime_path_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
-            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder (see basic_round_trip_witness).
             witness_transition("mob", "BeginSpawnExecFresh"),
@@ -1356,7 +1346,7 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
     CompositionWitness {
         name: witness_id("destroy_runtime_path"),
         preload_inputs: vec![
-            seam_runtime_authority_idle_input(),
+            seam_runtime_session_registration_input(),
             seam_authorize_spawn_profile_input(),
             seam_begin_spawn_exec_input(),
             seam_commit_spawn_membership_input(),
@@ -1369,7 +1359,7 @@ fn destroy_runtime_path_witness() -> CompositionWitness {
         expected_scheduler_rules: vec![],
         expected_states: vec![],
         expected_transitions: vec![
-            witness_transition("meerkat", "RecoverRuntimeAuthorityIdle"),
+            witness_transition("meerkat", "RegisterSessionIdle"),
             witness_transition("mob", "AuthorizeSpawnProfileRunning"),
             // Machine-driven spawn phase ladder (see basic_round_trip_witness).
             witness_transition("mob", "BeginSpawnExecFresh"),

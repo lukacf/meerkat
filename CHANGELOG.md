@@ -15,6 +15,12 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
+- Generated `MeerkatMachine` recovery alphabets replace the eight
+  phase-shaped `RecoverRuntimeAuthority*` inputs with the single total
+  `ClassifyRuntimeAuthorityReconciliation` observation input. Downstream
+  exhaustive matches over generated inputs, input kinds, or transition kinds
+  must handle the new classifier instead of replaying a persisted process
+  phase as runtime authority.
 - `meerkat_core::RefreshFailureObservation::requires_reauth` was removed;
   `meerkat_auth_core::auth_oauth::OAuthRefreshPermanence` and
   `OAuthError::refresh_permanence` were removed with the competing public
@@ -141,6 +147,12 @@ via cargo-semver-checks against the published baselines).
 
 ### Added
 
+- Mob identity convergence now exposes actor-serialized declaration-manifest
+  apply/read APIs backed by durable direct desired material and wiring,
+  bounded incarnation-fenced leases, immutable operation receipts, total
+  stored-row observations, and output-only convergence status. The generated
+  stateless classifier selects one resource-local obligation per fresh
+  observation pass; conflicts requeue and re-observe.
 - Mob members can now admit completion-bearing tracked turns through
   `MemberHandle::start_turn` and `MemberTurnOptions`. The returned
   `MemberTurnHandle` separates ingress admission, actual executor-applied LLM
@@ -155,6 +167,19 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Cold runtime recovery is level-triggered over every persisted lifecycle
+  shape. Decodable prior-process rows normalize through target-local CAS to a
+  fresh unbound Idle shell over the existing session; unsupported or unsafe
+  malformed rows return typed repair refusal, transport failures back off, and
+  no recovery shape can fall through `NoMatchingTransition`. Checkpoint
+  content authority is now structurally independent from lease ownership:
+  lineage, generation, revision, digest, and provenance establish the head,
+  while fencing values seed only lease high-water. A Meerkat-to-MobKit crash
+  matrix and the checksum-transferred HomeCore `parent-1` fixture prove that a
+  continuity fence of 14462 with snapshot fence 11130 retains the exact
+  generation-0/revision-859 session, all 371 messages, and consumed initial
+  input across migration, lease takeover, runtime CAS, member registration,
+  lost replies, status corruption, and cold restart.
 - Runtime member-disposal retries now re-admit an exact machine-proven
   retained cleanup sidecar while cancellation-safe retirement is still
   uncertain. Stale registration or attachment witnesses continue to fail

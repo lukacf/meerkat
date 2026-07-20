@@ -107,7 +107,8 @@ impl MobCommand {
             | Self::ResumeLifecycle { .. }
             | Self::Complete { .. }
             | Self::Destroy { .. }
-            | Self::Reset { .. } => Some(ControlScope::Retire),
+            | Self::Reset { .. }
+            | Self::ApplyIdentityDeclarationManifest { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -134,6 +135,9 @@ impl MobCommand {
             Self::FlowStatus { .. }
             | Self::ProjectMemberStatus { .. }
             | Self::ProjectMemberList { .. }
+            | Self::GetIdentityIntent { .. }
+            | Self::GetIdentityDeclarationReceipt { .. }
+            | Self::GetIdentityConvergenceStatus { .. }
             | Self::MemberMachineProjection { .. }
             | Self::QueryPhase { .. } => Some(ControlScope::List),
 
@@ -274,6 +278,18 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ProjectMemberStatus { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ApplyIdentityDeclarationManifest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::GetIdentityIntent { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::GetIdentityDeclarationReceipt { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::GetIdentityConvergenceStatus { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::AdmitControlScope { reply_tx, .. } => {

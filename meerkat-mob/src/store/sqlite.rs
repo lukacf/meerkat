@@ -3,25 +3,56 @@
 //! SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
+use super::in_memory::{
+    IdentityAuthorityState, apply_identity_declaration_locked, validate_manifest_replay_state,
+};
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
-    ExternalBindingOverlayRecord, MobEventStore, MobHostAuthorityDeletionAuthority,
-    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobMemberEventCursorRecord,
-    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
-    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    ExternalBindingOverlayRecord, IdentityMemberEventCommitOutcome,
+    IdentityMemberTargetObservation, IdentityMemberTargetState, IdentityWiringEventCommitOutcome,
+    IdentityWiringTargetObservation, IdentityWiringTargetState, MobEventStore,
+    MobHostAuthorityDeletionAuthority, MobHostAuthorityPersistenceAuthority,
+    MobHostAuthorityRecord, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore,
+    MobIdentityStoreClock, MobMemberEventCursorRecord, MobMemberLiveCleanupRecord,
+    MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin, MobMemberOperatorRequestKey,
+    MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
     MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
     MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
     MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
     MobPlacedSpawnPendingPersistenceAuthority, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
     MobStoreError, PlacedSpawnCarrierPhase, PromotePlacedSpawnBindingResult,
     SupervisorAuthorityDeletionAuthority, SupervisorAuthorityPersistenceAuthority,
-    SupervisorAuthorityRecord, private, step_failed_event_identity, terminal_event_identity,
-    validate_mob_event_write_authority,
+    SupervisorAuthorityRecord, SystemMobIdentityStoreClock, identity_member_target_state,
+    identity_structural_projection_is_anchor, identity_wiring_target_state, private,
+    step_failed_event_identity, terminal_event_identity,
+    validate_identity_declaration_replay_request, validate_identity_member_commit_authority,
+    validate_identity_wiring_commit_authority, validate_mob_event_write_authority,
+};
+#[cfg(feature = "runtime-adapter")]
+use super::{
+    identity_runtime_fence_error, validate_identity_runtime_target_binding,
+    validate_identity_runtime_write_authority,
 };
 use crate::definition::MobDefinition;
 use crate::error::MobError;
-use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event};
+use crate::event::{
+    MobEvent, MobEventKind, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event,
+};
+#[cfg(feature = "runtime-adapter")]
+use crate::identity::DesiredSessionTarget;
+use crate::identity::{
+    IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION, IDENTITY_INTENT_SCHEMA_VERSION,
+    IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
+    IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
+    IdentityConvergenceStatus, IdentityDeclarationApplyPlan,
+    IdentityDeclarationManifestApplyOutcome, IdentityDeclarationScopeHead,
+    IdentityDeclarationScopeId, IdentityIntent, IdentityIntentError, IdentityIntentRecord,
+    IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationKind,
+    IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
+    IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
+    IdentityRetirementPlan, IdentityStoredObservation, IdentityTargetObservationVersion,
+};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -37,10 +68,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use notify::{RecursiveMode, Watcher};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread;
@@ -51,10 +83,13 @@ const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
 const EVENT_WATCH_POLL_FALLBACK_MS: u64 = 250;
+const IDENTITY_STORE_INSTANCE_KEY: &str = "store_instance_id";
+const IDENTITY_RECEIPT_SLOT_KEY_VERSION: i64 = 1;
 
 const CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
     cursor INTEGER PRIMARY KEY,
+    mob_id TEXT,
     event_json BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mob_event_meta (
@@ -140,6 +175,74 @@ CREATE TABLE IF NOT EXISTS mob_runtime_binding_overlays (
     record_json BLOB NOT NULL,
     PRIMARY KEY (mob_id, agent_identity, generation)
 );
+CREATE TABLE IF NOT EXISTS mob_identity_declaration_scopes (
+    mob_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    head_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, scope_id)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_identity_intents (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    declaration_scope TEXT,
+    session_id TEXT,
+    lineage_id TEXT,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mob_identity_intents_session
+    ON mob_identity_intents (session_id)
+    WHERE session_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS mob_identity_intents_lineage
+    ON mob_identity_intents (lineage_id)
+    WHERE lineage_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS mob_identity_intents_scope
+    ON mob_identity_intents (mob_id, declaration_scope);
+CREATE TABLE IF NOT EXISTS mob_identity_leases (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    epoch_highwater BLOB NOT NULL,
+    active_holder_id TEXT,
+    active_incarnation_id TEXT,
+    active_epoch BLOB,
+    active_renewed_at_ms BLOB,
+    active_expires_at_ms BLOB,
+    authority_digest TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_operation_receipts (
+    mob_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    slot_kind TEXT NOT NULL,
+    slot_key_version INTEGER NOT NULL,
+    slot_digest TEXT NOT NULL,
+    subject_json BLOB NOT NULL,
+    slot_json BLOB NOT NULL,
+    subject_scope_id TEXT,
+    subject_identity TEXT,
+    effect_kind TEXT NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (
+        mob_id, subject_kind, subject_id, slot_kind,
+        slot_key_version, slot_digest
+    )
+);
+CREATE INDEX IF NOT EXISTS mob_identity_receipts_scope
+    ON mob_identity_operation_receipts (mob_id, subject_scope_id);
+CREATE INDEX IF NOT EXISTS mob_identity_receipts_identity
+    ON mob_identity_operation_receipts (mob_id, subject_identity);
+CREATE TABLE IF NOT EXISTS mob_identity_statuses (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    status_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
 CREATE TABLE IF NOT EXISTS realm_profiles (
     name TEXT PRIMARY KEY,
     profile_json BLOB NOT NULL,
@@ -158,6 +261,405 @@ fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, MobStoreError> {
 
 fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobStoreError> {
     serde_json::from_slice(bytes).map_err(|e| MobStoreError::Serialization(e.to_string()))
+}
+
+fn identity_raw_evidence_digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn identity_contract_error(error: IdentityIntentError) -> MobStoreError {
+    MobStoreError::Serialization(error.to_string())
+}
+
+fn identity_authority_blocked(
+    evidence_digest: Option<String>,
+    detail: impl Into<String>,
+) -> MobStoreError {
+    MobStoreError::IdentityAuthorityBlocked {
+        evidence_digest,
+        detail: detail.into(),
+    }
+}
+
+fn classify_identity_blob<T>(
+    storage_type: &str,
+    bytes: &[u8],
+    expected_schema_version: Option<u32>,
+    validate: impl FnOnce(&T) -> Result<(), IdentityIntentError>,
+    physical_key_matches: impl FnOnce(&T) -> Result<(), String>,
+) -> IdentityStoredObservation<T>
+where
+    T: DeserializeOwned,
+{
+    let evidence_digest = identity_raw_evidence_digest(bytes);
+    if storage_type != "blob" {
+        return IdentityStoredObservation::Malformed {
+            evidence_digest,
+            detail: format!(
+                "identity row uses SQLite storage class '{storage_type}', expected blob"
+            ),
+        };
+    }
+    let json = match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return IdentityStoredObservation::Malformed {
+                evidence_digest,
+                detail: format!("identity row JSON is malformed: {error}"),
+            };
+        }
+    };
+    if let Some(expected) = expected_schema_version
+        && let Some(observed) = json
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+        && observed != u64::from(expected)
+    {
+        return IdentityStoredObservation::Unsupported {
+            evidence_digest,
+            detail: format!("unsupported identity row schema version {observed}"),
+        };
+    }
+    let value = match serde_json::from_value::<T>(json) {
+        Ok(value) => value,
+        Err(error) => {
+            return IdentityStoredObservation::Malformed {
+                evidence_digest,
+                detail: format!("identity row JSON does not match its current schema: {error}"),
+            };
+        }
+    };
+    if let Err(detail) = physical_key_matches(&value) {
+        return IdentityStoredObservation::Malformed {
+            evidence_digest,
+            detail,
+        };
+    }
+    match validate(&value) {
+        Ok(()) => IdentityStoredObservation::Valid(value),
+        Err(error @ IdentityIntentError::UnsupportedSchemaVersion { .. }) => {
+            IdentityStoredObservation::Unsupported {
+                evidence_digest,
+                detail: error.to_string(),
+            }
+        }
+        Err(error) => IdentityStoredObservation::Malformed {
+            evidence_digest,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn require_identity_authority<T>(
+    observation: IdentityStoredObservation<T>,
+    row_name: &str,
+) -> Result<Option<T>, MobStoreError> {
+    match observation {
+        IdentityStoredObservation::Missing => Ok(None),
+        IdentityStoredObservation::Valid(value) => Ok(Some(value)),
+        IdentityStoredObservation::Unsupported {
+            evidence_digest,
+            detail,
+        }
+        | IdentityStoredObservation::Malformed {
+            evidence_digest,
+            detail,
+        } => Err(identity_authority_blocked(
+            Some(evidence_digest),
+            format!("{row_name}: {detail}"),
+        )),
+    }
+}
+
+fn validate_identity_store_text(field: &str, value: &str) -> Result<(), MobStoreError> {
+    if value.is_empty() || value.trim() != value {
+        return Err(MobStoreError::Serialization(format!(
+            "{field} must be nonempty canonical text"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_optional_identity_text(
+    storage_type: &str,
+    bytes: Option<Vec<u8>>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match (storage_type, bytes) {
+        ("null", None) => Ok(None),
+        ("text", Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|error| format!("{field} is not valid UTF-8 text: {error}")),
+        (observed, _) => Err(format!(
+            "{field} uses SQLite storage class '{observed}', expected text or null"
+        )),
+    }
+}
+
+fn decode_required_identity_text(
+    storage_type: &str,
+    bytes: Vec<u8>,
+    field: &str,
+) -> Result<String, String> {
+    if storage_type != "text" {
+        return Err(format!(
+            "{field} uses SQLite storage class '{storage_type}', expected text"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("{field} is not valid UTF-8 text: {error}"))
+}
+
+fn identity_intent_projection(
+    record: &IdentityIntentRecord,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let target = match &record.retirement_plan {
+        IdentityRetirementPlan::Targets { session, .. } => Some(session),
+        IdentityRetirementPlan::NoKnownRealization => match &record.intent {
+            IdentityIntent::Present { session, .. } => Some(session),
+            IdentityIntent::Absent { .. } => None,
+        },
+    };
+    (
+        record
+            .declaration_scope
+            .as_ref()
+            .map(|scope| scope.as_str().to_string()),
+        target.map(|target| target.session_id.to_string()),
+        target.map(|target| target.lineage_id.as_str().to_string()),
+    )
+}
+
+fn identity_intent_physical_key_matches(
+    record: &IdentityIntentRecord,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    declaration_scope: Option<&str>,
+    session_id: Option<&str>,
+    lineage_id: Option<&str>,
+) -> Result<(), String> {
+    if record.mob_id != *mob_id || record.intent.identity() != identity {
+        return Err(
+            "identity intent record does not match its physical mob/identity key".to_string(),
+        );
+    }
+    let expected = identity_intent_projection(record);
+    if expected.0.as_deref() != declaration_scope
+        || expected.1.as_deref() != session_id
+        || expected.2.as_deref() != lineage_id
+    {
+        return Err(
+            "identity intent record does not match its derived scope/session/lineage keys"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn identity_operation_kind_key(kind: IdentityOperationKind) -> &'static str {
+    match kind {
+        IdentityOperationKind::ApplyDeclarationManifest => "apply_declaration_manifest",
+        IdentityOperationKind::SessionCreationConsumed => "session_creation_consumed",
+        IdentityOperationKind::RetirementProven => "retirement_proven",
+        IdentityOperationKind::ExternalBinding => "external_binding",
+        IdentityOperationKind::InitialDelivery => "initial_delivery",
+    }
+}
+
+fn identity_receipt_keys(
+    subject: &IdentityOperationSubject,
+    slot: &IdentityOperationSlot,
+) -> Result<(String, String, Vec<u8>, Vec<u8>), MobStoreError> {
+    let subject_text = serde_json::to_string(subject)
+        .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    let slot_text = serde_json::to_string(slot)
+        .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    Ok((
+        subject_text.clone(),
+        slot_text.clone(),
+        subject_text.into_bytes(),
+        slot_text.into_bytes(),
+    ))
+}
+
+fn identity_receipt_subject_projection(
+    subject: &IdentityOperationSubject,
+) -> (Option<&str>, Option<&str>) {
+    match subject {
+        IdentityOperationSubject::DeclarationScope { scope_id } => (Some(scope_id.as_str()), None),
+        IdentityOperationSubject::Identity { identity } => (None, Some(identity.as_str())),
+    }
+}
+
+fn identity_receipt_sql_key(
+    subject: &IdentityOperationSubject,
+    slot: &IdentityOperationSlot,
+) -> Result<(&'static str, String, &'static str, i64, String), MobStoreError> {
+    #[derive(Serialize)]
+    struct SlotDigestMaterial<'a> {
+        domain: &'static str,
+        version: i64,
+        slot: &'a IdentityOperationSlot,
+    }
+    let (subject_kind, subject_id) = match subject {
+        IdentityOperationSubject::DeclarationScope { scope_id } => {
+            ("declaration_scope", scope_id.as_str().to_string())
+        }
+        IdentityOperationSubject::Identity { identity } => {
+            ("identity", identity.as_str().to_string())
+        }
+    };
+    let slot_kind = identity_operation_kind_key(slot.kind());
+    let material = serde_json::to_vec(&SlotDigestMaterial {
+        domain: "meerkat.identity.operation_slot_key.v1",
+        version: IDENTITY_RECEIPT_SLOT_KEY_VERSION,
+        slot,
+    })
+    .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    Ok((
+        subject_kind,
+        subject_id,
+        slot_kind,
+        IDENTITY_RECEIPT_SLOT_KEY_VERSION,
+        identity_raw_evidence_digest(&material),
+    ))
+}
+
+fn identity_lease_authority_digest(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    record: &IdentityLeaseRecord,
+) -> Result<String, MobStoreError> {
+    #[derive(Serialize)]
+    struct LeaseAuthorityMaterial<'a> {
+        domain: &'static str,
+        mob_id: &'a MobId,
+        identity: &'a AgentIdentity,
+        schema_version: u32,
+        epoch_highwater: u64,
+        active: &'a Option<IdentityLeaseClaim>,
+    }
+    let bytes = serde_json::to_vec(&LeaseAuthorityMaterial {
+        domain: "meerkat.identity.lease.authority.v1",
+        mob_id,
+        identity,
+        schema_version: record.schema_version,
+        epoch_highwater: record.epoch_highwater,
+        active: &record.active,
+    })
+    .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    Ok(identity_raw_evidence_digest(&bytes))
+}
+
+fn identity_receipt_target(receipt: &IdentityOperationReceipt) -> Option<IdentityActuatorTarget> {
+    match receipt.effect_kind {
+        IdentityOperationKind::SessionCreationConsumed => {
+            Some(IdentityActuatorTarget::SessionCreationReceipt)
+        }
+        IdentityOperationKind::RetirementProven => Some(IdentityActuatorTarget::RetirementReceipt),
+        IdentityOperationKind::ExternalBinding => {
+            Some(IdentityActuatorTarget::ExternalBindingReceipt)
+        }
+        IdentityOperationKind::InitialDelivery => {
+            Some(IdentityActuatorTarget::InitialDeliveryReceipt)
+        }
+        IdentityOperationKind::ApplyDeclarationManifest => None,
+    }
+}
+
+fn identity_actuator_receipt_matches_intent(
+    receipt: &IdentityOperationReceipt,
+    intent: &IdentityIntentRecord,
+) -> bool {
+    use crate::identity::IdentityOperationReceiptPayload as Payload;
+
+    let normalized_tombstone = intent.tombstone_generation.unwrap_or(0);
+    match (&receipt.slot, &receipt.payload, &intent.intent) {
+        (
+            IdentityOperationSlot::SessionCreationConsumed {
+                tombstone_generation,
+                session_id,
+                lineage_id,
+                lineage_generation,
+            },
+            Payload::SessionCreationConsumed { checkpoint },
+            IdentityIntent::Present { session, .. },
+        ) => {
+            *tombstone_generation == normalized_tombstone
+                && session_id == &session.session_id
+                && lineage_id == &session.lineage_id
+                && *lineage_generation == session.lineage_generation
+                && checkpoint.session_id() == &session.session_id
+                && checkpoint.lineage_id() == &session.lineage_id
+                && checkpoint.generation() == session.lineage_generation
+        }
+        (
+            IdentityOperationSlot::RetirementProven {
+                tombstone_generation,
+            },
+            Payload::RetirementProven {
+                absent_authority_digest,
+            },
+            IdentityIntent::Absent { .. },
+        ) => {
+            *tombstone_generation == normalized_tombstone
+                && absent_authority_digest == &intent.authority_digest
+        }
+        (
+            IdentityOperationSlot::ExternalBinding {
+                tombstone_generation,
+                remote_signing_identity,
+                controller_signing_identity,
+            },
+            Payload::ExternalBinding {
+                expected_address,
+                expected_identity,
+                expected_controller_identity,
+                ..
+            },
+            IdentityIntent::Present { member, .. },
+        ) => {
+            let crate::identity::DesiredExecution::External { address, identity } =
+                member.execution()
+            else {
+                return false;
+            };
+            *tombstone_generation == normalized_tombstone
+                && expected_address == address
+                && expected_identity == identity
+                && remote_signing_identity == identity
+                && controller_signing_identity == expected_controller_identity
+        }
+        (
+            IdentityOperationSlot::InitialDelivery {
+                tombstone_generation,
+                session_id,
+                lineage_id,
+                lineage_generation,
+                delivery_generation,
+            },
+            Payload::InitialDelivery {
+                delivery_generation: payload_generation,
+                delivery_id,
+                message_digest,
+            },
+            IdentityIntent::Present {
+                session, member, ..
+            },
+        ) => {
+            let Some(delivery) = &member.initial_delivery else {
+                return false;
+            };
+            *tombstone_generation == normalized_tombstone
+                && session_id == &session.session_id
+                && lineage_id == &session.lineage_id
+                && *lineage_generation == session.lineage_generation
+                && delivery_generation == payload_generation
+                && *delivery_generation == delivery.delivery_generation
+                && delivery_id == &delivery.delivery_id
+                && message_digest == &delivery.message_digest
+        }
+        _ => false,
+    }
 }
 
 fn validate_member_operator_request_row(
@@ -215,6 +717,77 @@ fn i64_to_cursor(value: i64) -> u64 {
     // SQLite INTEGER is signed; cursors start at 1 and are monotonic.
     // Negative values should never appear, but clamp to 0 defensively.
     u64::try_from(value).unwrap_or(0)
+}
+
+/// Read only the stable routing envelope shared by every current stored mob
+/// event. This deliberately does not decode `kind`: future or malformed event
+/// payloads can still be attributed to their physical mob without poisoning
+/// unrelated identity observations.
+fn stored_event_envelope_mob_id(bytes: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let mob_id = value.get("event")?.get("mob_id")?.as_str()?.to_string();
+    (!mob_id.is_empty() && mob_id.trim() == mob_id).then_some(mob_id)
+}
+
+/// Add and backfill the derived mob route for legacy event tables. The event
+/// bytes remain the durable source; this column is only a physical locality
+/// key. Completely unreadable legacy bytes stay NULL and therefore remain
+/// conservatively visible to every identity observation.
+fn ensure_mob_event_route_schema(conn: &mut Connection) -> Result<(), MobStoreError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(se)?;
+    let has_mob_id = {
+        let mut statement = tx.prepare("PRAGMA table_info(mob_events)").map_err(se)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(se)?;
+        let mut found = false;
+        for column in columns {
+            if column.map_err(se)? == "mob_id" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_mob_id {
+        tx.execute("ALTER TABLE mob_events ADD COLUMN mob_id TEXT", [])
+            .map_err(se)?;
+    }
+
+    let unrouted = {
+        let mut statement = tx
+            .prepare(
+                "SELECT cursor, CAST(event_json AS BLOB)
+                 FROM mob_events
+                 WHERE mob_id IS NULL
+                 ORDER BY cursor",
+            )
+            .map_err(se)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(se)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(se)?
+    };
+    for (cursor, bytes) in unrouted {
+        if let Some(mob_id) = stored_event_envelope_mob_id(&bytes) {
+            tx.execute(
+                "UPDATE mob_events SET mob_id = ?2 WHERE cursor = ?1 AND mob_id IS NULL",
+                params![cursor, mob_id],
+            )
+            .map_err(se)?;
+        }
+    }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS mob_events_mob_cursor ON mob_events (mob_id, cursor)",
+        [],
+    )
+    .map_err(se)?;
+    tx.commit().map_err(se)
 }
 
 fn ensure_member_operator_execution_fence_schema(
@@ -318,7 +891,9 @@ fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
     conn.pragma_update(None, "synchronous", "FULL")
         .map_err(se)?;
     conn.execute_batch(CREATE_SCHEMA_SQL).map_err(se)?;
+    ensure_mob_event_route_schema(&mut conn)?;
     ensure_member_operator_execution_fence_schema(&mut conn)?;
+    repair_next_event_cursor(&conn)?;
     Ok(conn)
 }
 
@@ -337,6 +912,88 @@ fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreErro
     conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
         .map_err(se)?;
     Ok(conn)
+}
+
+fn initialize_identity_store_instance(conn: &Connection) -> Result<String, MobStoreError> {
+    let candidate = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT OR IGNORE INTO mob_identity_store_meta (key, value) VALUES (?1, ?2)",
+        params![IDENTITY_STORE_INSTANCE_KEY, candidate],
+    )
+    .map_err(se)?;
+    conn.query_row(
+        "SELECT value FROM mob_identity_store_meta WHERE key = ?1",
+        params![IDENTITY_STORE_INSTANCE_KEY],
+        |row| row.get(0),
+    )
+    .map_err(se)
+}
+
+fn verify_identity_store_instance(
+    conn: &Connection,
+    expected_store_instance_id: &str,
+) -> Result<(), MobStoreError> {
+    let actual: String = conn
+        .query_row(
+            "SELECT value FROM mob_identity_store_meta WHERE key = ?1",
+            params![IDENTITY_STORE_INSTANCE_KEY],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            MobStoreError::ReadFailed(format!(
+                "identity store instance marker is unavailable: {error}"
+            ))
+        })?;
+    if actual != expected_store_instance_id {
+        return Err(identity_authority_blocked(
+            None,
+            "identity store database was replaced while this store handle was live",
+        ));
+    }
+    Ok(())
+}
+
+fn open_existing_identity_read_connection(
+    path: &Path,
+    expected_store_instance_id: &str,
+) -> Result<Connection, MobStoreError> {
+    let conn = open_existing_read_connection(path).map_err(|error| {
+        MobStoreError::ReadFailed(format!("identity store database is unavailable: {error}"))
+    })?;
+    verify_identity_store_instance(&conn, expected_store_instance_id)?;
+    Ok(conn)
+}
+
+fn open_existing_identity_write_connection(
+    path: &Path,
+    _expected_store_instance_id: &str,
+) -> Result<Connection, MobStoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        MobStoreError::WriteFailed(format!("identity store database is unavailable: {error}"))
+    })?;
+    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+        .map_err(se)?;
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(se)?;
+    Ok(conn)
+}
+
+fn begin_identity_immediate<'connection>(
+    conn: &'connection mut Connection,
+    expected_store_instance_id: &str,
+) -> Result<Transaction<'connection>, MobStoreError> {
+    let tx = begin_immediate(conn)?;
+    // Verify inside the same writer transaction that will sample the lease
+    // clock and perform the mutation. A replaced database can never restart
+    // epoch or idempotency authority through this handle.
+    verify_identity_store_instance(&tx, expected_store_instance_id)?;
+    Ok(tx)
 }
 
 fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, MobStoreError> {
@@ -702,16 +1359,22 @@ fn sqlite_watch_event_relevant(
 pub struct SqliteMobStores {
     path: PathBuf,
     event_bus: Arc<SqliteMobEventBus>,
+    identity_store_instance_id: String,
 }
 
 impl SqliteMobStores {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
         let path = path.as_ref().to_path_buf();
         // Validate the path works by opening and immediately closing.
-        let _conn = open_connection(&path)?;
+        let conn = open_connection(&path)?;
+        let identity_store_instance_id = initialize_identity_store_instance(&conn)?;
         let path = std::fs::canonicalize(&path).map_err(se)?;
         let event_bus = sqlite_event_bus_for_path(path.clone())?;
-        Ok(Self { path, event_bus })
+        Ok(Self {
+            path,
+            event_bus,
+            identity_store_instance_id,
+        })
     }
 
     pub fn event_store(&self) -> SqliteMobEventStore {
@@ -739,10 +1402,2491 @@ impl SqliteMobStores {
         }
     }
 
+    pub fn identity_store(&self) -> SqliteMobIdentityStore {
+        SqliteMobIdentityStore {
+            path: self.path.clone(),
+            store_instance_id: self.identity_store_instance_id.clone(),
+            clock: Arc::new(SystemMobIdentityStoreClock),
+            event_bus: Some(Arc::clone(&self.event_bus)),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn identity_store_with_clock(
+        &self,
+        clock: Arc<dyn MobIdentityStoreClock>,
+    ) -> SqliteMobIdentityStore {
+        SqliteMobIdentityStore {
+            path: self.path.clone(),
+            store_instance_id: self.identity_store_instance_id.clone(),
+            clock,
+            event_bus: Some(Arc::clone(&self.event_bus)),
+        }
+    }
+
+    pub fn identity_status_store(&self) -> SqliteMobIdentityStatusStore {
+        SqliteMobIdentityStatusStore {
+            path: self.path.clone(),
+            store_instance_id: self.identity_store_instance_id.clone(),
+        }
+    }
+
     pub fn realm_profile_store(&self) -> SqliteRealmProfileStore {
         SqliteRealmProfileStore {
             path: self.path.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SqliteMobIdentityStore / SqliteMobIdentityStatusStore
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SqliteMobIdentityStore {
+    path: PathBuf,
+    store_instance_id: String,
+    clock: Arc<dyn MobIdentityStoreClock>,
+    event_bus: Option<Arc<SqliteMobEventBus>>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+struct SqliteIdentityRuntimeWriteFence {
+    path: PathBuf,
+    store_instance_id: String,
+    clock: Arc<dyn MobIdentityStoreClock>,
+    permit: IdentityActuationPermit,
+    expected_session: DesiredSessionTarget,
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn sqlite_is_busy_or_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if matches!(sqlite_error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl meerkat_runtime::RuntimeStoreWriteFence for SqliteIdentityRuntimeWriteFence {
+    fn execute_if_current(
+        &self,
+        operation: Box<dyn FnOnce() -> Result<(), meerkat_runtime::RuntimeStoreError> + '_>,
+    ) -> Result<meerkat_runtime::RuntimeStoreWriteFenceOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        let mut conn = match Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(conn) => conn,
+            Err(error) => {
+                return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+                    reason: format!(
+                        "identity runtime write fence could not open the store: {error}"
+                    ),
+                });
+            }
+        };
+        if let Err(error) = conn.busy_timeout(Duration::ZERO) {
+            return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+                reason: format!(
+                    "identity runtime write fence could not configure nonblocking admission: {error}"
+                ),
+            });
+        }
+        let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+            Ok(tx) => tx,
+            Err(error) if sqlite_is_busy_or_locked(&error) => {
+                return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+                    reason: "identity runtime write fence authority guard is contended".to_string(),
+                });
+            }
+            Err(error) => {
+                return identity_runtime_fence_error(MobStoreError::WriteFailed(format!(
+                    "identity runtime write fence could not begin its authority transaction: {error}"
+                )));
+            }
+        };
+        if let Err(error) = verify_identity_store_instance(&tx, &self.store_instance_id) {
+            return identity_runtime_fence_error(error);
+        }
+        let intent = match query_identity_intent_observation(
+            &tx,
+            &self.permit.mob_id,
+            &self.permit.identity,
+        )
+        .and_then(|observation| require_identity_authority(observation, "identity intent"))
+        {
+            Ok(intent) => intent,
+            Err(error) => return identity_runtime_fence_error(error),
+        };
+        let lease =
+            match query_identity_lease_observation(&tx, &self.permit.mob_id, &self.permit.identity)
+                .and_then(|observation| require_identity_authority(observation, "identity lease"))
+            {
+                Ok(lease) => lease,
+                Err(error) => return identity_runtime_fence_error(error),
+            };
+        let observed_at_ms = match self.clock.now_ms() {
+            Ok(observed_at_ms) => observed_at_ms,
+            Err(error) => return identity_runtime_fence_error(error),
+        };
+        if let Err(error) = validate_identity_runtime_write_authority(
+            &self.permit,
+            &self.expected_session,
+            intent.as_ref(),
+            lease.as_ref(),
+            observed_at_ms,
+        ) {
+            return identity_runtime_fence_error(error);
+        }
+        operation()?;
+        Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Applied)
+    }
+}
+
+impl std::fmt::Debug for SqliteMobIdentityStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteMobIdentityStore")
+            .field("path", &self.path)
+            .field("store_instance_id", &self.store_instance_id)
+            .field("clock", &"<dyn MobIdentityStoreClock>")
+            .field("member_event_capability", &self.event_bus.is_some())
+            .finish()
+    }
+}
+
+impl SqliteMobIdentityStore {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_clock(
+        path: PathBuf,
+        store_instance_id: String,
+        clock: Arc<dyn MobIdentityStoreClock>,
+    ) -> Self {
+        Self {
+            path,
+            store_instance_id,
+            clock,
+            event_bus: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteMobIdentityStatusStore {
+    path: PathBuf,
+    store_instance_id: String,
+}
+
+fn sqlite_identity_write_error(error: rusqlite::Error, context: &str) -> MobStoreError {
+    if matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if sqlite_error.code == ErrorCode::ConstraintViolation
+                && matches!(
+                    sqlite_error.extended_code,
+                    rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                        | rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                )
+    ) {
+        MobStoreError::CasConflict(format!("{context}: {error}"))
+    } else {
+        MobStoreError::WriteFailed(format!("{context}: {error}"))
+    }
+}
+
+fn query_identity_scope_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    scope_id: &IdentityDeclarationScopeId,
+) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError> {
+    let row: Option<(String, Vec<u8>)> = conn
+        .query_row(
+            "SELECT typeof(head_json), CAST(head_json AS BLOB)
+             FROM mob_identity_declaration_scopes
+             WHERE mob_id = ?1 AND scope_id = ?2",
+            params![mob_id.as_str(), scope_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((storage_type, bytes)) = row else {
+        return Ok(IdentityStoredObservation::Missing);
+    };
+    Ok(classify_identity_blob(
+        &storage_type,
+        &bytes,
+        Some(IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION),
+        IdentityDeclarationScopeHead::validate,
+        |head| {
+            if head.mob_id == *mob_id && head.scope_id == *scope_id {
+                Ok(())
+            } else {
+                Err("identity declaration scope head does not match its physical key".to_string())
+            }
+        },
+    ))
+}
+
+fn query_identity_intent_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<IdentityStoredObservation<IdentityIntentRecord>, MobStoreError> {
+    let row: Option<(
+        String,
+        Option<Vec<u8>>,
+        String,
+        Option<Vec<u8>>,
+        String,
+        Option<Vec<u8>>,
+        String,
+        Vec<u8>,
+    )> = conn
+        .query_row(
+            "SELECT typeof(declaration_scope), CAST(declaration_scope AS BLOB),
+                    typeof(session_id), CAST(session_id AS BLOB),
+                    typeof(lineage_id), CAST(lineage_id AS BLOB),
+                    typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1 AND agent_identity = ?2",
+            params![mob_id.as_str(), identity.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((
+        declaration_scope_type,
+        declaration_scope_bytes,
+        session_id_type,
+        session_id_bytes,
+        lineage_id_type,
+        lineage_id_bytes,
+        storage_type,
+        bytes,
+    )) = row
+    else {
+        return Ok(IdentityStoredObservation::Missing);
+    };
+    let declaration_scope = decode_optional_identity_text(
+        &declaration_scope_type,
+        declaration_scope_bytes,
+        "identity intent declaration_scope",
+    );
+    let session_id = decode_optional_identity_text(
+        &session_id_type,
+        session_id_bytes,
+        "identity intent session_id",
+    );
+    let lineage_id = decode_optional_identity_text(
+        &lineage_id_type,
+        lineage_id_bytes,
+        "identity intent lineage_id",
+    );
+    let projection_error = declaration_scope
+        .as_ref()
+        .err()
+        .or_else(|| session_id.as_ref().err())
+        .or_else(|| lineage_id.as_ref().err())
+        .cloned();
+    let declaration_scope = declaration_scope.unwrap_or(None);
+    let session_id = session_id.unwrap_or(None);
+    let lineage_id = lineage_id.unwrap_or(None);
+    Ok(classify_identity_blob(
+        &storage_type,
+        &bytes,
+        Some(IDENTITY_INTENT_SCHEMA_VERSION),
+        IdentityIntentRecord::validate,
+        |record| {
+            if let Some(detail) = projection_error {
+                return Err(detail);
+            }
+            identity_intent_physical_key_matches(
+                record,
+                mob_id,
+                identity,
+                declaration_scope.as_deref(),
+                session_id.as_deref(),
+                lineage_id.as_deref(),
+            )
+        },
+    ))
+}
+
+struct LoadedIdentityLeaseRow {
+    observation: IdentityStoredObservation<IdentityLeaseRecord>,
+}
+
+fn query_identity_lease_row(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<Option<LoadedIdentityLeaseRow>, MobStoreError> {
+    type LeaseSqlRow = (
+        Vec<u8>,
+        Option<String>,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        String,
+        String,
+        Vec<u8>,
+    );
+    let row: Option<LeaseSqlRow> = conn
+        .query_row(
+            "SELECT epoch_highwater, active_holder_id, active_incarnation_id,
+                    active_epoch, active_renewed_at_ms, active_expires_at_ms,
+                    authority_digest, typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_leases
+             WHERE mob_id = ?1 AND agent_identity = ?2",
+            params![mob_id.as_str(), identity.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((
+        epoch_highwater,
+        active_holder_id,
+        active_incarnation_id,
+        active_epoch,
+        active_renewed_at_ms,
+        active_expires_at_ms,
+        authority_digest,
+        storage_type,
+        bytes,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let evidence_digest = identity_raw_evidence_digest(&bytes);
+    let authority = (|| -> Result<IdentityLeaseRecord, String> {
+        let epoch_highwater = sql_key_to_u64(&epoch_highwater, "identity lease epoch highwater")
+            .map_err(|error| error.to_string())?;
+        let active = match (
+            active_holder_id,
+            active_incarnation_id,
+            active_epoch,
+            active_renewed_at_ms,
+            active_expires_at_ms,
+        ) {
+            (None, None, None, None, None) => None,
+            (Some(holder_id), Some(incarnation_id), Some(epoch), Some(renewed), Some(expires)) => {
+                Some(IdentityLeaseClaim {
+                    holder_id,
+                    incarnation_id,
+                    epoch: sql_key_to_u64(&epoch, "identity lease active epoch")
+                        .map_err(|error| error.to_string())?,
+                    renewed_at_ms: sql_key_to_u64(&renewed, "identity lease renewed time")
+                        .map_err(|error| error.to_string())?,
+                    expires_at_ms: sql_key_to_u64(&expires, "identity lease expiry time")
+                        .map_err(|error| error.to_string())?,
+                })
+            }
+            _ => {
+                return Err(
+                    "identity lease normalized active-claim columns are partially populated"
+                        .to_string(),
+                );
+            }
+        };
+        let record = IdentityLeaseRecord {
+            schema_version: IDENTITY_LEASE_SCHEMA_VERSION,
+            epoch_highwater,
+            active,
+        };
+        record.validate().map_err(|error| error.to_string())?;
+        let expected_digest = identity_lease_authority_digest(mob_id, identity, &record)
+            .map_err(|error| error.to_string())?;
+        if authority_digest != expected_digest {
+            return Err(
+                "identity lease normalized authority seal does not match its physical mob/identity key"
+                    .to_string(),
+            );
+        }
+        Ok(record)
+    })();
+    let observation = match &authority {
+        Ok(authority) => classify_identity_blob(
+            &storage_type,
+            &bytes,
+            Some(IDENTITY_LEASE_SCHEMA_VERSION),
+            IdentityLeaseRecord::validate,
+            |record| {
+                if record == authority {
+                    Ok(())
+                } else {
+                    Err(
+                        "identity lease projection differs from its sealed normalized authority"
+                            .to_string(),
+                    )
+                }
+            },
+        ),
+        Err(detail) => IdentityStoredObservation::Malformed {
+            evidence_digest: evidence_digest.clone(),
+            detail: detail.clone(),
+        },
+    };
+    Ok(Some(LoadedIdentityLeaseRow { observation }))
+}
+
+fn query_identity_lease_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<IdentityStoredObservation<IdentityLeaseRecord>, MobStoreError> {
+    Ok(query_identity_lease_row(conn, mob_id, identity)?
+        .map_or(IdentityStoredObservation::Missing, |row| row.observation))
+}
+
+fn query_identity_lease_authority(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<Option<IdentityLeaseRecord>, MobStoreError> {
+    let Some(row) = query_identity_lease_row(conn, mob_id, identity)? else {
+        return Ok(None);
+    };
+    match row.observation {
+        IdentityStoredObservation::Valid(record) => Ok(Some(record)),
+        IdentityStoredObservation::Unsupported {
+            evidence_digest,
+            detail,
+        }
+        | IdentityStoredObservation::Malformed {
+            evidence_digest,
+            detail,
+        } => Err(identity_authority_blocked(
+            Some(evidence_digest),
+            format!("identity lease: {detail}"),
+        )),
+        IdentityStoredObservation::Missing => Err(identity_authority_blocked(
+            None,
+            "identity lease row disappeared while loading authority",
+        )),
+    }
+}
+
+enum IdentityStructuralEventLog {
+    Valid(Vec<MobEvent>),
+    Malformed {
+        evidence_digest: String,
+        detail: String,
+    },
+}
+
+fn query_identity_structural_event_log(
+    conn: &Connection,
+    mob_id: &MobId,
+) -> Result<IdentityStructuralEventLog, MobStoreError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT cursor, typeof(mob_id), CAST(mob_id AS BLOB),
+                    typeof(event_json), event_json
+             FROM mob_events
+             WHERE mob_id = ?1
+                OR mob_id IS NULL
+                OR typeof(mob_id) <> 'text'
+                OR length(mob_id) = 0
+                OR trim(mob_id) <> mob_id
+             ORDER BY cursor",
+        )
+        .map_err(se)?;
+    let rows = statement
+        .query_map(params![mob_id.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, rusqlite::types::Value>(4)?,
+            ))
+        })
+        .map_err(se)?;
+    let mut events = Vec::new();
+    let mut resettable_malformed: Option<(String, String)> = None;
+    let mut unordered_malformed: Option<(String, String)> = None;
+    for row in rows {
+        let (physical_cursor, route_type, route_bytes, storage_type, raw) = row.map_err(se)?;
+        let raw_bytes = match raw {
+            rusqlite::types::Value::Blob(bytes) => bytes,
+            rusqlite::types::Value::Text(text) => text.into_bytes(),
+            rusqlite::types::Value::Integer(value) => value.to_string().into_bytes(),
+            rusqlite::types::Value::Real(value) => value.to_string().into_bytes(),
+            rusqlite::types::Value::Null => Vec::new(),
+        };
+        let evidence_digest = identity_raw_evidence_digest(&raw_bytes);
+        let physical_route = match (route_type.as_str(), route_bytes) {
+            ("text", Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(route) if !route.is_empty() && route.trim() == route => Ok(Some(route)),
+                Ok(_) => Err("mob event row has a non-canonical physical mob route".to_string()),
+                Err(error) => Err(format!(
+                    "mob event physical mob route is not UTF-8: {error}"
+                )),
+            },
+            ("null", None) => Ok(None),
+            (observed, _) => Err(format!(
+                "mob event physical mob route uses SQLite storage class '{observed}', expected text or null"
+            )),
+        };
+        if physical_route
+            .as_ref()
+            .ok()
+            .and_then(|route| route.as_deref())
+            .is_some_and(|route| route != mob_id.as_str())
+        {
+            continue;
+        }
+        if !matches!(physical_route.as_ref(), Ok(Some(_)))
+            && stored_event_envelope_mob_id(&raw_bytes)
+                .as_deref()
+                .is_some_and(|route| route != mob_id.as_str())
+        {
+            continue;
+        }
+        let physical_route = match physical_route {
+            Ok(route) => route,
+            Err(detail) => {
+                resettable_malformed.get_or_insert_with(|| (evidence_digest.clone(), detail));
+                None
+            }
+        };
+
+        let cursor = match u64::try_from(physical_cursor)
+            .ok()
+            .filter(|cursor| *cursor > 0)
+        {
+            Some(cursor) => cursor,
+            None => {
+                unordered_malformed.get_or_insert_with(|| {
+                    (
+                        evidence_digest,
+                        format!("mob event row has invalid physical cursor {physical_cursor}"),
+                    )
+                });
+                continue;
+            }
+        };
+        if storage_type != "blob" {
+            resettable_malformed.get_or_insert_with(|| {
+                (
+                    evidence_digest,
+                    format!(
+                        "mob event row uses SQLite storage class '{storage_type}', expected blob"
+                    ),
+                )
+            });
+            continue;
+        }
+        let decoded = match decode_stored_mob_event(&raw_bytes) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                resettable_malformed.get_or_insert_with(|| {
+                    (
+                        evidence_digest,
+                        format!("mob event row is malformed or unsupported: {error}"),
+                    )
+                });
+                continue;
+            }
+        };
+        if decoded.mob_id != *mob_id {
+            if physical_route.is_some() {
+                resettable_malformed.get_or_insert_with(|| {
+                    (
+                        evidence_digest,
+                        format!(
+                            "mob event physical mob route '{}' differs from payload mob '{}'",
+                            mob_id, decoded.mob_id
+                        ),
+                    )
+                });
+            }
+            continue;
+        }
+        if decoded.cursor != cursor {
+            resettable_malformed.get_or_insert_with(|| {
+                (
+                    evidence_digest,
+                    format!(
+                        "mob event row cursor mismatch: physical={cursor} payload={}",
+                        decoded.cursor
+                    ),
+                )
+            });
+            continue;
+        }
+        if matches!(&decoded.kind, MobEventKind::MobReset) {
+            // A valid, physically ordered reset is a content epoch boundary.
+            // Earlier target-routed or unattributable structural garbage can
+            // no longer affect the post-reset realization.
+            events.clear();
+            resettable_malformed = None;
+        }
+        events.push(decoded);
+    }
+    if let Some((evidence_digest, detail)) = unordered_malformed {
+        return Ok(IdentityStructuralEventLog::Malformed {
+            evidence_digest,
+            detail,
+        });
+    }
+    if let Some((evidence_digest, detail)) = resettable_malformed {
+        return Ok(IdentityStructuralEventLog::Malformed {
+            evidence_digest,
+            detail,
+        });
+    }
+    Ok(IdentityStructuralEventLog::Valid(events))
+}
+
+fn query_identity_member_target_state(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<IdentityMemberTargetState, MobStoreError> {
+    match query_identity_structural_event_log(conn, mob_id)? {
+        IdentityStructuralEventLog::Valid(events) => {
+            Ok(identity_member_target_state(&events, mob_id, identity))
+        }
+        IdentityStructuralEventLog::Malformed {
+            evidence_digest,
+            detail,
+        } => Ok(IdentityMemberTargetState {
+            observation: IdentityMemberTargetObservation::Malformed {
+                observed_version: Some(evidence_digest),
+                detail,
+            },
+            exact_current_spawn: None,
+        }),
+    }
+}
+
+fn query_identity_wiring_target_state(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<IdentityWiringTargetState, MobStoreError> {
+    match query_identity_structural_event_log(conn, mob_id)? {
+        IdentityStructuralEventLog::Valid(events) => {
+            Ok(identity_wiring_target_state(&events, mob_id, identity))
+        }
+        IdentityStructuralEventLog::Malformed {
+            evidence_digest,
+            detail,
+        } => Ok(IdentityWiringTargetState {
+            observation: IdentityWiringTargetObservation::Malformed {
+                observed_version: Some(evidence_digest),
+                detail,
+            },
+        }),
+    }
+}
+
+fn query_identity_receipt_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    subject: &IdentityOperationSubject,
+    slot: &IdentityOperationSlot,
+) -> Result<IdentityStoredObservation<IdentityOperationReceipt>, MobStoreError> {
+    let (subject_kind, subject_id, slot_kind, slot_key_version, slot_digest) =
+        identity_receipt_sql_key(subject, slot)?;
+    let row: Option<(
+        String,
+        Vec<u8>,
+        String,
+        Vec<u8>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Vec<u8>,
+    )> = conn
+        .query_row(
+            "SELECT typeof(subject_json), CAST(subject_json AS BLOB),
+                    typeof(slot_json), CAST(slot_json AS BLOB),
+                    subject_scope_id, subject_identity, effect_kind,
+                    typeof(receipt_json), CAST(receipt_json AS BLOB)
+             FROM mob_identity_operation_receipts
+             WHERE mob_id = ?1
+               AND subject_kind = ?2 AND subject_id = ?3
+               AND slot_kind = ?4 AND slot_key_version = ?5 AND slot_digest = ?6",
+            params![
+                mob_id.as_str(),
+                subject_kind,
+                subject_id,
+                slot_kind,
+                slot_key_version,
+                slot_digest,
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((
+        subject_type,
+        stored_subject_key,
+        slot_type,
+        stored_slot_key,
+        subject_scope_id,
+        subject_identity,
+        effect_kind,
+        receipt_type,
+        receipt_bytes,
+    )) = row
+    else {
+        return Ok(IdentityStoredObservation::Missing);
+    };
+    if subject_type != "blob"
+        || slot_type != "blob"
+        || stored_subject_key != serde_json::to_vec(subject).map_err(se)?
+        || stored_slot_key != serde_json::to_vec(slot).map_err(se)?
+    {
+        return Ok(IdentityStoredObservation::Malformed {
+            evidence_digest: identity_raw_evidence_digest(&receipt_bytes),
+            detail: "identity operation receipt key is not canonical blob JSON".to_string(),
+        });
+    }
+    let (expected_scope, expected_identity) = identity_receipt_subject_projection(subject);
+    Ok(classify_identity_blob(
+        &receipt_type,
+        &receipt_bytes,
+        Some(IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION),
+        IdentityOperationReceipt::validate,
+        |receipt| {
+            if receipt.mob_id != *mob_id
+                || receipt.subject != *subject
+                || receipt.slot != *slot
+                || receipt.effect_kind != slot.kind()
+                || subject_scope_id.as_deref() != expected_scope
+                || subject_identity.as_deref() != expected_identity
+                || effect_kind != identity_operation_kind_key(receipt.effect_kind)
+            {
+                Err("identity operation receipt does not match its physical key".to_string())
+            } else {
+                Ok(())
+            }
+        },
+    ))
+}
+
+fn query_identity_status_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<IdentityStoredObservation<IdentityConvergenceStatus>, MobStoreError> {
+    let row: Option<(String, Vec<u8>)> = conn
+        .query_row(
+            "SELECT typeof(status_json), CAST(status_json AS BLOB)
+             FROM mob_identity_statuses
+             WHERE mob_id = ?1 AND agent_identity = ?2",
+            params![mob_id.as_str(), identity.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((storage_type, bytes)) = row else {
+        return Ok(IdentityStoredObservation::Missing);
+    };
+    Ok(classify_identity_blob(
+        &storage_type,
+        &bytes,
+        None,
+        |_| Ok(()),
+        |status: &IdentityConvergenceStatus| {
+            if status.identity == *identity {
+                Ok(())
+            } else {
+                Err("identity convergence status does not match its physical key".to_string())
+            }
+        },
+    ))
+}
+
+fn write_identity_scope_head(
+    tx: &Transaction<'_>,
+    head: &IdentityDeclarationScopeHead,
+) -> Result<(), MobStoreError> {
+    tx.execute(
+        "INSERT INTO mob_identity_declaration_scopes (mob_id, scope_id, head_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(mob_id, scope_id) DO UPDATE SET head_json = excluded.head_json",
+        params![
+            head.mob_id.as_str(),
+            head.scope_id.as_str(),
+            encode_json(head)?
+        ],
+    )
+    .map_err(|error| sqlite_identity_write_error(error, "write identity scope head"))?;
+    Ok(())
+}
+
+fn write_identity_intent(
+    tx: &Transaction<'_>,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    record: &IdentityIntentRecord,
+) -> Result<(), MobStoreError> {
+    record.validate().map_err(identity_contract_error)?;
+    if record.mob_id != *mob_id || record.intent.identity() != identity {
+        return Err(identity_authority_blocked(
+            Some(identity_raw_evidence_digest(&encode_json(record)?)),
+            "identity intent write does not match its physical mob/identity key",
+        ));
+    }
+    let (declaration_scope, session_id, lineage_id) = identity_intent_projection(record);
+    tx.execute(
+        "INSERT INTO mob_identity_intents
+             (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+             declaration_scope = excluded.declaration_scope,
+             session_id = excluded.session_id,
+             lineage_id = excluded.lineage_id,
+             record_json = excluded.record_json",
+        params![
+            mob_id.as_str(),
+            identity.as_str(),
+            declaration_scope,
+            session_id,
+            lineage_id,
+            encode_json(record)?,
+        ],
+    )
+    .map_err(|error| sqlite_identity_write_error(error, "write identity intent"))?;
+    Ok(())
+}
+
+fn write_identity_lease(
+    tx: &Transaction<'_>,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    record: &IdentityLeaseRecord,
+) -> Result<(), MobStoreError> {
+    let record_json = encode_json(record)?;
+    let authority_digest = identity_lease_authority_digest(mob_id, identity, record)?;
+    let (active_holder_id, active_incarnation_id, active_epoch, active_renewed, active_expires) =
+        record
+            .active
+            .as_ref()
+            .map_or((None, None, None, None, None), |active| {
+                (
+                    Some(active.holder_id.as_str()),
+                    Some(active.incarnation_id.as_str()),
+                    Some(u64_to_sql_key(active.epoch)),
+                    Some(u64_to_sql_key(active.renewed_at_ms)),
+                    Some(u64_to_sql_key(active.expires_at_ms)),
+                )
+            });
+    tx.execute(
+        "INSERT INTO mob_identity_leases
+             (mob_id, agent_identity, epoch_highwater, active_holder_id,
+              active_incarnation_id, active_epoch, active_renewed_at_ms,
+              active_expires_at_ms, authority_digest, record_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+             epoch_highwater = excluded.epoch_highwater,
+             active_holder_id = excluded.active_holder_id,
+             active_incarnation_id = excluded.active_incarnation_id,
+             active_epoch = excluded.active_epoch,
+             active_renewed_at_ms = excluded.active_renewed_at_ms,
+             active_expires_at_ms = excluded.active_expires_at_ms,
+             authority_digest = excluded.authority_digest,
+             record_json = excluded.record_json",
+        params![
+            mob_id.as_str(),
+            identity.as_str(),
+            u64_to_sql_key(record.epoch_highwater),
+            active_holder_id,
+            active_incarnation_id,
+            active_epoch,
+            active_renewed,
+            active_expires,
+            authority_digest,
+            record_json,
+        ],
+    )
+    .map_err(|error| sqlite_identity_write_error(error, "write identity lease"))?;
+    Ok(())
+}
+
+fn insert_identity_receipt(
+    tx: &Transaction<'_>,
+    receipt: &IdentityOperationReceipt,
+) -> Result<(), MobStoreError> {
+    let (_, _, subject_key, slot_key) = identity_receipt_keys(&receipt.subject, &receipt.slot)?;
+    let (subject_kind, subject_id, slot_kind, slot_key_version, slot_digest) =
+        identity_receipt_sql_key(&receipt.subject, &receipt.slot)?;
+    let (subject_scope_id, subject_identity) =
+        identity_receipt_subject_projection(&receipt.subject);
+    tx.execute(
+        "INSERT INTO mob_identity_operation_receipts
+             (mob_id, subject_kind, subject_id, slot_kind, slot_key_version, slot_digest,
+              subject_json, slot_json, subject_scope_id, subject_identity, effect_kind,
+              receipt_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            receipt.mob_id.as_str(),
+            subject_kind,
+            subject_id,
+            slot_kind,
+            slot_key_version,
+            slot_digest,
+            subject_key,
+            slot_key,
+            subject_scope_id,
+            subject_identity,
+            identity_operation_kind_key(receipt.effect_kind),
+            encode_json(receipt)?,
+        ],
+    )
+    .map_err(|error| sqlite_identity_write_error(error, "insert identity operation receipt"))?;
+    Ok(())
+}
+
+fn load_identity_authority_state_for_manifest(
+    tx: &Transaction<'_>,
+    mob_id: &MobId,
+    plan: &IdentityDeclarationApplyPlan,
+) -> Result<IdentityAuthorityState, MobStoreError> {
+    let mut state = IdentityAuthorityState::default();
+    if let Some(head) = require_identity_authority(
+        query_identity_scope_observation(tx, mob_id, plan.scope_id())?,
+        "identity declaration scope head",
+    )? {
+        state
+            .scope_heads
+            .insert((mob_id.clone(), plan.scope_id().clone()), head);
+    }
+
+    let declared_identities = plan.members.keys().cloned().collect::<BTreeSet<_>>();
+    let candidate_session_ids = plan
+        .members
+        .values()
+        .map(|member| member.candidate_session_target().session_id.to_string())
+        .chain(
+            plan.legacy_imports()
+                .values()
+                .map(|legacy_import| legacy_import.session().session_id.to_string()),
+        )
+        .collect::<BTreeSet<_>>();
+    let candidate_lineage_ids = plan
+        .members
+        .values()
+        .map(|member| {
+            member
+                .candidate_session_target()
+                .lineage_id
+                .as_str()
+                .to_string()
+        })
+        .chain(
+            plan.legacy_imports()
+                .values()
+                .map(|legacy_import| legacy_import.session().lineage_id.as_str().to_string()),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut stmt = tx
+        .prepare(
+            "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
+                    typeof(declaration_scope), CAST(declaration_scope AS BLOB),
+                    typeof(session_id), CAST(session_id AS BLOB),
+                    typeof(lineage_id), CAST(lineage_id AS BLOB),
+                    typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1",
+        )
+        .map_err(se)?;
+    let rows = stmt
+        .query_map(params![mob_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<Vec<u8>>>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Vec<u8>>(9)?,
+            ))
+        })
+        .map_err(se)?;
+    for row in rows {
+        let (
+            identity_type,
+            identity_bytes,
+            declaration_scope_type,
+            declaration_scope_bytes,
+            session_id_type,
+            session_id_bytes,
+            lineage_id_type,
+            lineage_id_bytes,
+            storage_type,
+            bytes,
+        ) = row.map_err(se)?;
+        let identity_key =
+            decode_required_identity_text(&identity_type, identity_bytes.clone(), "agent_identity");
+        let identity_key_error = identity_key.as_ref().err().cloned();
+        let identity = AgentIdentity::from(identity_key.unwrap_or_else(|_| {
+            format!(
+                "malformed-physical-identity:{}",
+                identity_raw_evidence_digest(&identity_bytes)
+            )
+        }));
+        let declaration_scope = decode_optional_identity_text(
+            &declaration_scope_type,
+            declaration_scope_bytes,
+            "identity intent declaration_scope",
+        );
+        let session_id = decode_optional_identity_text(
+            &session_id_type,
+            session_id_bytes,
+            "identity intent session_id",
+        );
+        let lineage_id = decode_optional_identity_text(
+            &lineage_id_type,
+            lineage_id_bytes,
+            "identity intent lineage_id",
+        );
+        let projection_error = identity_key_error
+            .or_else(|| declaration_scope.as_ref().err().cloned())
+            .or_else(|| session_id.as_ref().err().cloned())
+            .or_else(|| lineage_id.as_ref().err().cloned());
+        let declaration_scope = declaration_scope.unwrap_or(None);
+        let session_id = session_id.unwrap_or(None);
+        let lineage_id = lineage_id.unwrap_or(None);
+        let observation = classify_identity_blob(
+            &storage_type,
+            &bytes,
+            Some(IDENTITY_INTENT_SCHEMA_VERSION),
+            IdentityIntentRecord::validate,
+            |record| {
+                if let Some(detail) = projection_error {
+                    return Err(detail);
+                }
+                identity_intent_physical_key_matches(
+                    record,
+                    mob_id,
+                    &identity,
+                    declaration_scope.as_deref(),
+                    session_id.as_deref(),
+                    lineage_id.as_deref(),
+                )
+            },
+        );
+        match observation {
+            IdentityStoredObservation::Valid(record) => {
+                state.intents.insert((mob_id.clone(), identity), record);
+            }
+            IdentityStoredObservation::Unsupported {
+                evidence_digest,
+                detail,
+            }
+            | IdentityStoredObservation::Malformed {
+                evidence_digest,
+                detail,
+            } => {
+                let relevant = declared_identities.contains(&identity)
+                    || declaration_scope.as_deref() == Some(plan.scope_id().as_str())
+                    || session_id
+                        .as_ref()
+                        .is_some_and(|value| candidate_session_ids.contains(value))
+                    || lineage_id
+                        .as_ref()
+                        .is_some_and(|value| candidate_lineage_ids.contains(value));
+                if relevant {
+                    return Err(identity_authority_blocked(
+                        Some(evidence_digest),
+                        format!("relevant identity intent row '{identity}' is unsafe: {detail}"),
+                    ));
+                }
+            }
+            IdentityStoredObservation::Missing => unreachable!("query row cannot be missing"),
+        }
+    }
+    drop(stmt);
+
+    let relevant_identities = state
+        .intents
+        .iter()
+        .filter_map(|((stored_mob_id, identity), record)| {
+            (stored_mob_id == mob_id
+                && (declared_identities.contains(identity)
+                    || record.declaration_scope.as_ref() == Some(plan.scope_id())))
+            .then_some(identity.clone())
+        })
+        .chain(declared_identities.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut stmt = tx
+        .prepare(
+            "SELECT subject_kind, subject_id, slot_kind, slot_key_version, slot_digest,
+                    typeof(subject_json), CAST(subject_json AS BLOB),
+                    typeof(slot_json), CAST(slot_json AS BLOB),
+                    subject_scope_id, subject_identity, effect_kind,
+                    typeof(receipt_json), CAST(receipt_json AS BLOB)
+             FROM mob_identity_operation_receipts
+             WHERE mob_id = ?1",
+        )
+        .map_err(se)?;
+    let rows = stmt
+        .query_map(params![mob_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, Vec<u8>>(13)?,
+            ))
+        })
+        .map_err(se)?;
+    for row in rows {
+        let (
+            subject_kind,
+            subject_id,
+            slot_kind,
+            slot_key_version,
+            slot_digest,
+            subject_type,
+            subject_bytes,
+            slot_type,
+            slot_bytes,
+            subject_scope_id,
+            subject_identity,
+            effect_kind,
+            receipt_type,
+            receipt_bytes,
+        ) = row.map_err(se)?;
+        let relevant = (subject_kind == "declaration_scope"
+            && subject_id == plan.scope_id().as_str())
+            || (subject_kind == "identity"
+                && relevant_identities.contains(&AgentIdentity::from(subject_id.as_str())))
+            || subject_scope_id.as_deref() == Some(plan.scope_id().as_str())
+            || subject_identity.as_ref().is_some_and(|value| {
+                relevant_identities.contains(&AgentIdentity::from(value.as_str()))
+            });
+        let subject = serde_json::from_slice::<IdentityOperationSubject>(&subject_bytes);
+        let slot = serde_json::from_slice::<IdentityOperationSlot>(&slot_bytes);
+        let (Ok(subject), Ok(slot)) = (subject, slot) else {
+            if relevant {
+                return Err(identity_authority_blocked(
+                    Some(identity_raw_evidence_digest(&receipt_bytes)),
+                    "relevant identity receipt has a malformed physical subject/slot key",
+                ));
+            }
+            continue;
+        };
+        let canonical_subject = serde_json::to_vec(&subject).map_err(se)?;
+        let canonical_slot = serde_json::to_vec(&slot).map_err(se)?;
+        let (expected_scope, expected_identity) = identity_receipt_subject_projection(&subject);
+        let (
+            expected_subject_kind,
+            expected_subject_id,
+            expected_slot_kind,
+            expected_slot_key_version,
+            expected_slot_digest,
+        ) = identity_receipt_sql_key(&subject, &slot)?;
+        let observation = if subject_type != "blob"
+            || slot_type != "blob"
+            || subject_bytes != canonical_subject
+            || slot_bytes != canonical_slot
+            || subject_kind != expected_subject_kind
+            || subject_id != expected_subject_id
+            || slot_kind != expected_slot_kind
+            || slot_key_version != expected_slot_key_version
+            || slot_digest != expected_slot_digest
+        {
+            IdentityStoredObservation::Malformed {
+                evidence_digest: identity_raw_evidence_digest(&receipt_bytes),
+                detail: "identity receipt has a noncanonical physical subject/slot key".to_string(),
+            }
+        } else {
+            classify_identity_blob(
+                &receipt_type,
+                &receipt_bytes,
+                Some(IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION),
+                IdentityOperationReceipt::validate,
+                |receipt| {
+                    if receipt.mob_id != *mob_id
+                        || receipt.subject != subject
+                        || receipt.slot != slot
+                        || receipt.effect_kind != slot.kind()
+                        || subject_scope_id.as_deref() != expected_scope
+                        || subject_identity.as_deref() != expected_identity
+                        || effect_kind != identity_operation_kind_key(receipt.effect_kind)
+                    {
+                        Err("identity receipt does not match its physical key".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        };
+        match observation {
+            IdentityStoredObservation::Valid(receipt) => {
+                let (subject_key, slot_key, _, _) =
+                    identity_receipt_keys(&receipt.subject, &receipt.slot)?;
+                state
+                    .receipts
+                    .insert((mob_id.clone(), subject_key, slot_key), receipt);
+            }
+            IdentityStoredObservation::Unsupported {
+                evidence_digest,
+                detail,
+            }
+            | IdentityStoredObservation::Malformed {
+                evidence_digest,
+                detail,
+            } if relevant => {
+                return Err(identity_authority_blocked(
+                    Some(evidence_digest),
+                    format!("relevant identity operation receipt is unsafe: {detail}"),
+                ));
+            }
+            IdentityStoredObservation::Unsupported { .. }
+            | IdentityStoredObservation::Malformed { .. } => {}
+            IdentityStoredObservation::Missing => unreachable!("query row cannot be missing"),
+        }
+    }
+
+    let manifest_receipt_already_exists = state.receipts.values().any(|receipt| {
+        matches!(
+            (&receipt.subject, &receipt.slot),
+            (
+                IdentityOperationSubject::DeclarationScope { scope_id },
+                IdentityOperationSlot::ApplyDeclarationManifest {
+                    scope_id: slot_scope,
+                    mutation_id,
+                },
+            ) if scope_id == plan.scope_id()
+                && slot_scope == plan.scope_id()
+                && mutation_id == plan.operation_id()
+        )
+    });
+    if !manifest_receipt_already_exists {
+        for identity in plan.legacy_imports().keys() {
+            if let Some(lease) = query_identity_lease_authority(tx, mob_id, identity)? {
+                state
+                    .leases
+                    .insert((mob_id.clone(), identity.clone()), lease);
+            }
+        }
+    }
+    Ok(state)
+}
+
+#[async_trait]
+impl MobIdentityStore for SqliteMobIdentityStore {
+    #[cfg(feature = "runtime-adapter")]
+    fn prepare_runtime_write_fence(
+        &self,
+        permit: IdentityActuationPermit,
+        expected_session: DesiredSessionTarget,
+        observed: &meerkat_runtime::RuntimeSessionLifecycleObservation,
+    ) -> Result<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>, MobStoreError> {
+        validate_identity_runtime_target_binding(&permit, &expected_session, observed)?;
+        Ok(Arc::new(SqliteIdentityRuntimeWriteFence {
+            path: self.path.clone(),
+            store_instance_id: self.store_instance_id.clone(),
+            clock: Arc::clone(&self.clock),
+            permit,
+            expected_session,
+        }))
+    }
+
+    async fn observe_identity_declaration_scope(
+        &self,
+        mob_id: &MobId,
+        scope_id: &IdentityDeclarationScopeId,
+    ) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let scope_id = scope_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_scope_observation(&conn, &mob_id, &scope_id)
+        })
+        .await
+    }
+
+    async fn observe_identity_intent(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityIntentRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_intent_observation(&conn, &mob_id, &identity)
+        })
+        .await
+    }
+
+    async fn list_identity_intents(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<
+        BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>>,
+        MobStoreError,
+    > {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
+                            typeof(declaration_scope), CAST(declaration_scope AS BLOB),
+                            typeof(session_id), CAST(session_id AS BLOB),
+                            typeof(lineage_id), CAST(lineage_id AS BLOB),
+                            typeof(record_json), CAST(record_json AS BLOB)
+                     FROM mob_identity_intents
+                     WHERE mob_id = ?1
+                     ORDER BY agent_identity",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Vec<u8>>(9)?,
+                    ))
+                })
+                .map_err(se)?;
+            let mut observations = BTreeMap::new();
+            for row in rows {
+                let (
+                    identity_type,
+                    identity_bytes,
+                    declaration_scope_type,
+                    declaration_scope_bytes,
+                    session_id_type,
+                    session_id_bytes,
+                    lineage_id_type,
+                    lineage_id_bytes,
+                    storage_type,
+                    bytes,
+                ) = row.map_err(se)?;
+                let identity_key = decode_required_identity_text(
+                    &identity_type,
+                    identity_bytes.clone(),
+                    "agent_identity",
+                );
+                let identity_key_error = identity_key.as_ref().err().cloned();
+                let identity = AgentIdentity::from(identity_key.unwrap_or_else(|_| {
+                    format!(
+                        "malformed-physical-identity:{}",
+                        identity_raw_evidence_digest(&identity_bytes)
+                    )
+                }));
+                let declaration_scope = decode_optional_identity_text(
+                    &declaration_scope_type,
+                    declaration_scope_bytes,
+                    "identity intent declaration_scope",
+                );
+                let session_id = decode_optional_identity_text(
+                    &session_id_type,
+                    session_id_bytes,
+                    "identity intent session_id",
+                );
+                let lineage_id = decode_optional_identity_text(
+                    &lineage_id_type,
+                    lineage_id_bytes,
+                    "identity intent lineage_id",
+                );
+                let projection_error = identity_key_error
+                    .or_else(|| declaration_scope.as_ref().err().cloned())
+                    .or_else(|| session_id.as_ref().err().cloned())
+                    .or_else(|| lineage_id.as_ref().err().cloned());
+                let declaration_scope = declaration_scope.unwrap_or(None);
+                let session_id = session_id.unwrap_or(None);
+                let lineage_id = lineage_id.unwrap_or(None);
+                let observation = classify_identity_blob(
+                    &storage_type,
+                    &bytes,
+                    Some(IDENTITY_INTENT_SCHEMA_VERSION),
+                    IdentityIntentRecord::validate,
+                    |record| {
+                        if let Some(detail) = projection_error {
+                            return Err(detail);
+                        }
+                        identity_intent_physical_key_matches(
+                            record,
+                            &mob_id,
+                            &identity,
+                            declaration_scope.as_deref(),
+                            session_id.as_deref(),
+                            lineage_id.as_deref(),
+                        )
+                    },
+                );
+                observations.insert(identity, observation);
+            }
+            Ok(observations)
+        })
+        .await
+    }
+
+    async fn replay_identity_declaration(
+        &self,
+        mob_id: &MobId,
+        scope_id: &IdentityDeclarationScopeId,
+        operation_id: &meerkat_core::ops::OperationId,
+        request_digest: &str,
+    ) -> Result<Option<IdentityDeclarationManifestApplyOutcome>, MobStoreError> {
+        validate_identity_declaration_replay_request(
+            mob_id,
+            scope_id,
+            operation_id,
+            request_digest,
+        )?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let scope_id = scope_id.clone();
+        let operation_id = operation_id.clone();
+        let request_digest = request_digest.to_string();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let tx = conn.transaction().map_err(se)?;
+            let subject = IdentityOperationSubject::DeclarationScope {
+                scope_id: scope_id.clone(),
+            };
+            let slot = IdentityOperationSlot::ApplyDeclarationManifest {
+                scope_id: scope_id.clone(),
+                mutation_id: operation_id.clone(),
+            };
+            let Some(receipt) = require_identity_authority(
+                query_identity_receipt_observation(&tx, &mob_id, &subject, &slot)?,
+                "identity declaration replay receipt",
+            )?
+            else {
+                tx.commit().map_err(se)?;
+                return Ok(None);
+            };
+            let IdentityOperationReceiptPayload::ApplyDeclarationManifest { outcome } =
+                receipt.payload
+            else {
+                return Err(identity_authority_blocked(
+                    None,
+                    "identity declaration replay slot contains a non-manifest receipt",
+                ));
+            };
+            if outcome.request_digest != request_digest {
+                return Err(MobStoreError::CasConflict(format!(
+                    "identity declaration operation '{operation_id}' was reused with different content"
+                )));
+            }
+
+            let mut state = IdentityAuthorityState::default();
+            if let Some(head) = require_identity_authority(
+                query_identity_scope_observation(&tx, &mob_id, &scope_id)?,
+                "identity declaration replay scope head",
+            )? {
+                state
+                    .scope_heads
+                    .insert((mob_id.clone(), scope_id.clone()), head);
+            }
+            for identity in outcome.identities.keys() {
+                if let Some(record) = require_identity_authority(
+                    query_identity_intent_observation(&tx, &mob_id, identity)?,
+                    "identity declaration replay intent",
+                )? {
+                    state
+                        .intents
+                        .insert((mob_id.clone(), identity.clone()), record);
+                }
+            }
+            validate_manifest_replay_state(&state, &mob_id, &outcome)?;
+            tx.commit().map_err(se)?;
+            Ok(Some(outcome))
+        })
+        .await
+    }
+
+    async fn apply_identity_declaration(
+        &self,
+        mob_id: &MobId,
+        plan: &IdentityDeclarationApplyPlan,
+    ) -> Result<IdentityDeclarationManifestApplyOutcome, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let plan = plan.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let mut state = load_identity_authority_state_for_manifest(&tx, &mob_id, &plan)?;
+            let prior_scope_heads = state.scope_heads.clone();
+            let prior_intents = state.intents.clone();
+            let prior_leases = state.leases.clone();
+            let prior_receipts = state.receipts.clone();
+            let outcome = apply_identity_declaration_locked(&mut state, &mob_id, &plan)?;
+
+            for ((stored_mob_id, identity), record) in &state.intents {
+                if stored_mob_id == &mob_id
+                    && prior_intents.get(&(stored_mob_id.clone(), identity.clone())) != Some(record)
+                {
+                    write_identity_intent(&tx, &mob_id, identity, record)?;
+                }
+            }
+            for ((stored_mob_id, identity), record) in &state.leases {
+                if stored_mob_id == &mob_id
+                    && prior_leases.get(&(stored_mob_id.clone(), identity.clone())) != Some(record)
+                {
+                    write_identity_lease(&tx, &mob_id, identity, record)?;
+                }
+            }
+            for ((stored_mob_id, _), head) in &state.scope_heads {
+                if stored_mob_id == &mob_id
+                    && prior_scope_heads.get(&(stored_mob_id.clone(), head.scope_id.clone()))
+                        != Some(head)
+                {
+                    write_identity_scope_head(&tx, head)?;
+                }
+            }
+            for (key, receipt) in &state.receipts {
+                if key.0 == mob_id && prior_receipts.get(key) != Some(receipt) {
+                    insert_identity_receipt(&tx, receipt)?;
+                }
+            }
+            tx.commit().map_err(se)?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn observe_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityLeaseRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_lease_observation(&conn, &mob_id, &identity)
+        })
+        .await
+    }
+
+    async fn claim_or_renew_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        holder_id: &str,
+        incarnation_id: &str,
+        ttl_ms: u64,
+    ) -> Result<IdentityLeaseClaimOutcome, MobStoreError> {
+        validate_identity_store_text("mob_id", mob_id.as_str())?;
+        validate_identity_store_text("identity", identity.as_str())?;
+        validate_identity_store_text("holder_id", holder_id)?;
+        validate_identity_store_text("incarnation_id", incarnation_id)?;
+        if ttl_ms == 0 || ttl_ms > IDENTITY_LEASE_MAX_TTL_MS {
+            return Err(identity_contract_error(
+                IdentityIntentError::InvalidLeaseLifetime,
+            ));
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        let holder_id = holder_id.to_string();
+        let incarnation_id = incarnation_id.to_string();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            // Time is sampled only after the writer lock is held, so a queued
+            // claimant cannot author a lease that was already stale at commit.
+            let observed_at_ms = clock.now_ms()?;
+            let expires_at_ms = observed_at_ms.checked_add(ttl_ms).ok_or_else(|| {
+                MobStoreError::WriteFailed("identity lease expiry overflow".to_string())
+            })?;
+            let current = query_identity_lease_authority(&tx, &mob_id, &identity)?;
+            if let Some(record) = &current
+                && let Some(active) = &record.active
+                && observed_at_ms < active.expires_at_ms
+            {
+                if active.holder_id != holder_id || active.incarnation_id != incarnation_id {
+                    return Ok(IdentityLeaseClaimOutcome::HeldByOther(active.clone()));
+                }
+                if observed_at_ms < active.renewed_at_ms {
+                    return Err(MobStoreError::WriteFailed(
+                        "identity lease clock regressed before the last renewal".to_string(),
+                    ));
+                }
+                let claim = IdentityLeaseClaim {
+                    holder_id,
+                    incarnation_id,
+                    epoch: active.epoch,
+                    renewed_at_ms: observed_at_ms,
+                    expires_at_ms,
+                };
+                let record = IdentityLeaseRecord {
+                    schema_version: IDENTITY_LEASE_SCHEMA_VERSION,
+                    epoch_highwater: record.epoch_highwater,
+                    active: Some(claim.clone()),
+                };
+                record.validate().map_err(identity_contract_error)?;
+                write_identity_lease(&tx, &mob_id, &identity, &record)?;
+                tx.commit().map_err(se)?;
+                return Ok(IdentityLeaseClaimOutcome::Renewed(claim));
+            }
+
+            let epoch = current
+                .as_ref()
+                .map_or(0, |record| record.epoch_highwater)
+                .checked_add(1)
+                .ok_or_else(|| MobStoreError::IdentityCounterExhausted {
+                    counter: "identity lease epoch".to_string(),
+                })?;
+            let claim = IdentityLeaseClaim {
+                holder_id,
+                incarnation_id,
+                epoch,
+                renewed_at_ms: observed_at_ms,
+                expires_at_ms,
+            };
+            let record = IdentityLeaseRecord {
+                schema_version: IDENTITY_LEASE_SCHEMA_VERSION,
+                epoch_highwater: epoch,
+                active: Some(claim.clone()),
+            };
+            record.validate().map_err(identity_contract_error)?;
+            write_identity_lease(&tx, &mob_id, &identity, &record)?;
+            tx.commit().map_err(se)?;
+            Ok(IdentityLeaseClaimOutcome::Acquired(claim))
+        })
+        .await
+    }
+
+    async fn release_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        expected: &IdentityLeaseClaim,
+    ) -> Result<bool, MobStoreError> {
+        let expected_record = IdentityLeaseRecord {
+            schema_version: IDENTITY_LEASE_SCHEMA_VERSION,
+            epoch_highwater: expected.epoch,
+            active: Some(expected.clone()),
+        };
+        expected_record
+            .validate()
+            .map_err(identity_contract_error)?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        let expected = expected.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let Some(current) = query_identity_lease_authority(&tx, &mob_id, &identity)? else {
+                return Ok(false);
+            };
+            if current.active.as_ref() != Some(&expected) {
+                return Ok(false);
+            }
+            let released = IdentityLeaseRecord {
+                schema_version: IDENTITY_LEASE_SCHEMA_VERSION,
+                epoch_highwater: current.epoch_highwater,
+                active: None,
+            };
+            released.validate().map_err(identity_contract_error)?;
+            write_identity_lease(&tx, &mob_id, &identity, &released)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn validate_identity_actuation_permit(
+        &self,
+        permit: &IdentityActuationPermit,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let permit = permit.clone();
+        run_sqlite_task(move || {
+            let observed_at_ms = clock.now_ms()?;
+            permit.validate_for_write(observed_at_ms).map_err(|error| {
+                MobStoreError::CasConflict(format!(
+                    "identity actuation permit is no longer current: {error}"
+                ))
+            })?;
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let intent = require_identity_authority(
+                query_identity_intent_observation(&conn, &permit.mob_id, &permit.identity)?,
+                "identity intent",
+            )?
+            .ok_or_else(|| {
+                MobStoreError::CasConflict(
+                    "identity actuation observed no current intent".to_string(),
+                )
+            })?;
+            if intent.intent_revision != permit.intent_revision
+                || intent.intent_digest != permit.intent_digest
+                || intent.authority_digest != permit.intent_authority_digest
+            {
+                return Err(MobStoreError::CasConflict(
+                    "identity actuation intent authority is stale".to_string(),
+                ));
+            }
+            let lease = query_identity_lease_authority(&conn, &permit.mob_id, &permit.identity)?
+                .ok_or_else(|| {
+                    MobStoreError::CasConflict(
+                        "identity actuation observed no current lease".to_string(),
+                    )
+                })?;
+            let active = lease.active.ok_or_else(|| {
+                MobStoreError::CasConflict(
+                    "identity actuation observed no active lease".to_string(),
+                )
+            })?;
+            if active.epoch != permit.lease_epoch
+                || active.holder_id != permit.lease_holder_id
+                || active.incarnation_id != permit.lease_incarnation_id
+                || active.expires_at_ms != permit.lease_expires_at_ms
+                || observed_at_ms >= active.expires_at_ms
+            {
+                return Err(MobStoreError::CasConflict(
+                    "identity actuation lease authority is stale".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn observe_identity_operation_receipt(
+        &self,
+        mob_id: &MobId,
+        subject: &IdentityOperationSubject,
+        slot: &IdentityOperationSlot,
+    ) -> Result<IdentityStoredObservation<IdentityOperationReceipt>, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let subject = subject.clone();
+        let slot = slot.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_receipt_observation(&conn, &mob_id, &subject, &slot)
+        })
+        .await
+    }
+
+    async fn insert_identity_operation_receipt_if_absent(
+        &self,
+        receipt: &IdentityOperationReceipt,
+        permit: &IdentityActuationPermit,
+    ) -> Result<IdentityOperationReceiptInsertOutcome, MobStoreError> {
+        receipt.validate().map_err(identity_contract_error)?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let receipt = receipt.clone();
+        let permit = permit.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            if let Some(existing) = require_identity_authority(
+                query_identity_receipt_observation(
+                    &tx,
+                    &receipt.mob_id,
+                    &receipt.subject,
+                    &receipt.slot,
+                )?,
+                "identity operation receipt",
+            )? {
+                return Ok(if existing.request_digest == receipt.request_digest {
+                    IdentityOperationReceiptInsertOutcome::ExistingExact(existing)
+                } else {
+                    IdentityOperationReceiptInsertOutcome::Conflict(existing)
+                });
+            }
+
+            let observed_at_ms = clock.now_ms()?;
+            permit.validate_for_write(observed_at_ms).map_err(|error| {
+                MobStoreError::CasConflict(format!(
+                    "identity receipt insertion permit is no longer current: {error}"
+                ))
+            })?;
+            let IdentityOperationSubject::Identity { identity } = &receipt.subject else {
+                return Err(MobStoreError::WriteFailed(
+                    "declaration/apply receipts must be inserted by their owning desired-state transaction"
+                        .to_string(),
+                ));
+            };
+            if receipt.mob_id != permit.mob_id
+                || identity != &permit.identity
+                || identity_receipt_target(&receipt) != Some(permit.target)
+                || receipt.intent_revision != Some(permit.intent_revision)
+                || receipt.intent_digest.as_ref() != Some(&permit.intent_digest)
+                || receipt.intent_authority_digest.as_ref()
+                    != Some(&permit.intent_authority_digest)
+                || !matches!(
+                    permit.target_observation,
+                    IdentityTargetObservationVersion::InsertIfAbsent
+                )
+            {
+                return Err(MobStoreError::CasConflict(
+                    "identity receipt insertion permit does not match the immutable receipt slot"
+                        .to_string(),
+                ));
+            }
+
+            let intent = require_identity_authority(
+                query_identity_intent_observation(&tx, &receipt.mob_id, identity)?,
+                "identity intent",
+            )?
+            .ok_or_else(|| {
+                MobStoreError::CasConflict(
+                    "identity receipt insertion observed no current intent".to_string(),
+                )
+            })?;
+            if intent.intent_revision != permit.intent_revision
+                || intent.intent_digest != permit.intent_digest
+                || intent.authority_digest != permit.intent_authority_digest
+                || !identity_actuator_receipt_matches_intent(&receipt, &intent)
+                || receipt
+                    .audit_lease_epoch
+                    .is_some_and(|epoch| epoch != permit.lease_epoch)
+            {
+                return Err(MobStoreError::CasConflict(
+                    "identity receipt insertion intent authority is stale".to_string(),
+                ));
+            }
+
+            let lease = query_identity_lease_authority(&tx, &receipt.mob_id, identity)?
+            .ok_or_else(|| {
+                MobStoreError::CasConflict(
+                    "identity receipt insertion observed no current lease".to_string(),
+                )
+            })?;
+            let active = lease.active.ok_or_else(|| {
+                MobStoreError::CasConflict(
+                    "identity receipt insertion observed no active lease".to_string(),
+                )
+            })?;
+            if active.epoch != permit.lease_epoch
+                || active.holder_id != permit.lease_holder_id
+                || active.incarnation_id != permit.lease_incarnation_id
+                || active.expires_at_ms != permit.lease_expires_at_ms
+                || observed_at_ms >= active.expires_at_ms
+            {
+                return Err(MobStoreError::CasConflict(
+                    "identity receipt insertion lease authority is stale".to_string(),
+                ));
+            }
+            insert_identity_receipt(&tx, &receipt)?;
+            tx.commit().map_err(se)?;
+            Ok(IdentityOperationReceiptInsertOutcome::Inserted(receipt))
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl MobIdentityMemberStore for SqliteMobIdentityStore {
+    async fn observe_identity_member_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityMemberTargetObservation, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            Ok(query_identity_member_target_state(&conn, &mob_id, &identity)?.observation)
+        })
+        .await
+    }
+
+    async fn commit_identity_member_spawned(
+        &self,
+        permit: &IdentityActuationPermit,
+        event: &NewMobEvent,
+    ) -> Result<IdentityMemberEventCommitOutcome, MobStoreError> {
+        let Some(event_bus) = self.event_bus.clone() else {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        };
+        if let Err(error) = validate_mob_event_write_authority(&event.kind) {
+            return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                evidence_digest: None,
+                detail: error.to_string(),
+            });
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let permit = permit.clone();
+        let event = event.clone();
+        let result = run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            // Sample only after BEGIN IMMEDIATE has acquired the writer lock.
+            let observed_at_ms = match clock.now_ms() {
+                Ok(observed_at_ms) => observed_at_ms,
+                Err(error) => {
+                    return Ok(IdentityMemberEventCommitOutcome::Backoff {
+                        detail: error.to_string(),
+                    });
+                }
+            };
+            let proposed = MobEvent {
+                cursor: 0,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+
+            let intent =
+                match query_identity_intent_observation(&tx, &permit.mob_id, &permit.identity)? {
+                    IdentityStoredObservation::Valid(intent) => intent,
+                    IdentityStoredObservation::Missing => {
+                        return Ok(IdentityMemberEventCommitOutcome::Conflict {
+                            current: None,
+                            detail: "identity member commit observed no current intent".to_string(),
+                        });
+                    }
+                    IdentityStoredObservation::Unsupported {
+                        evidence_digest,
+                        detail,
+                    }
+                    | IdentityStoredObservation::Malformed {
+                        evidence_digest,
+                        detail,
+                    } => {
+                        return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                            evidence_digest: Some(evidence_digest),
+                            detail: format!(
+                                "identity member commit observed unsafe intent authority: {detail}"
+                            ),
+                        });
+                    }
+                };
+            let lease =
+                match query_identity_lease_observation(&tx, &permit.mob_id, &permit.identity)? {
+                    IdentityStoredObservation::Valid(lease) => lease,
+                    IdentityStoredObservation::Missing => {
+                        return Ok(IdentityMemberEventCommitOutcome::Conflict {
+                            current: None,
+                            detail: "identity member commit observed no current lease".to_string(),
+                        });
+                    }
+                    IdentityStoredObservation::Unsupported {
+                        evidence_digest,
+                        detail,
+                    }
+                    | IdentityStoredObservation::Malformed {
+                        evidence_digest,
+                        detail,
+                    } => {
+                        return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                            evidence_digest: Some(evidence_digest),
+                            detail: format!(
+                                "identity member commit observed unsafe lease authority: {detail}"
+                            ),
+                        });
+                    }
+                };
+            if let Err(outcome) = validate_identity_member_commit_authority(
+                &permit,
+                &intent,
+                &lease,
+                &proposed,
+                observed_at_ms,
+            ) {
+                return Ok(outcome);
+            }
+
+            let current =
+                query_identity_member_target_state(&tx, &permit.mob_id, &permit.identity)?;
+            if let IdentityMemberTargetObservation::Malformed {
+                observed_version,
+                detail,
+            } = &current.observation
+            {
+                return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                    evidence_digest: observed_version.clone(),
+                    detail: detail.clone(),
+                });
+            }
+            let expected = current.observation.target_precondition();
+            if expected.as_ref() != Some(&permit.target_observation) {
+                tx.commit().map_err(se)?;
+                return Ok(IdentityMemberEventCommitOutcome::Conflict {
+                    current: Some(current.observation),
+                    detail: "identity member target observation is stale".to_string(),
+                });
+            }
+            if let Some(existing) = current.exact_current_spawn
+                && existing.kind == proposed.kind
+            {
+                tx.commit().map_err(se)?;
+                return Ok(IdentityMemberEventCommitOutcome::AlreadyExact { event: existing });
+            }
+            if !matches!(
+                permit.target_observation,
+                IdentityTargetObservationVersion::Absent { .. }
+            ) {
+                tx.commit().map_err(se)?;
+                return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                    evidence_digest: current
+                        .observation
+                        .target_precondition()
+                        .and_then(|target| match target {
+                            IdentityTargetObservationVersion::Version { version } => Some(version),
+                            _ => None,
+                        }),
+                    detail: "MemberSpawned append requires an exact absent-target witness"
+                        .to_string(),
+                });
+            }
+
+            let cursor = next_event_cursor(&tx)?;
+            if cursor == 0 || cursor >= i64::MAX as u64 {
+                return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                    evidence_digest: None,
+                    detail: "mob event cursor is exhausted".to_string(),
+                });
+            }
+            let stored = MobEvent {
+                cursor,
+                timestamp: proposed.timestamp,
+                mob_id: proposed.mob_id,
+                kind: proposed.kind,
+            };
+            let encoded = match encode_stored_mob_event(&stored) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                        evidence_digest: None,
+                        detail: format!("MemberSpawned event is not serializable: {error}"),
+                    });
+                }
+            };
+            tx.execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
+            )
+            .map_err(se)?;
+            let Some(next_cursor) = cursor.checked_add(1) else {
+                return Ok(IdentityMemberEventCommitOutcome::RepairBlocked {
+                    evidence_digest: None,
+                    detail: "mob event cursor is exhausted".to_string(),
+                });
+            };
+            set_next_cursor(&tx, next_cursor)?;
+            tx.commit().map_err(se)?;
+            Ok(IdentityMemberEventCommitOutcome::Applied { event: stored })
+        })
+        .await;
+
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(MobStoreError::IdentityAuthorityBlocked {
+                evidence_digest,
+                detail,
+            }) => IdentityMemberEventCommitOutcome::RepairBlocked {
+                evidence_digest,
+                detail,
+            },
+            Err(error) => IdentityMemberEventCommitOutcome::Backoff {
+                detail: error.to_string(),
+            },
+        };
+        if let IdentityMemberEventCommitOutcome::Applied { event } = &outcome {
+            // Publish only after the SQLite transaction committed. A failed
+            // transaction is never observable through the append bus.
+            event_bus.publish_committed(event.clone());
+        }
+        Ok(outcome)
+    }
+
+    async fn observe_identity_wiring_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityWiringTargetObservation, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            Ok(query_identity_wiring_target_state(&conn, &mob_id, &identity)?.observation)
+        })
+        .await
+    }
+
+    async fn commit_identity_wiring_event(
+        &self,
+        permit: &IdentityActuationPermit,
+        event: &NewMobEvent,
+    ) -> Result<IdentityWiringEventCommitOutcome, MobStoreError> {
+        let Some(event_bus) = self.event_bus.clone() else {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        };
+        if let Err(error) = validate_mob_event_write_authority(&event.kind) {
+            return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                evidence_digest: None,
+                detail: error.to_string(),
+            });
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let permit = permit.clone();
+        let event = event.clone();
+        let result = run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let observed_at_ms = match clock.now_ms() {
+                Ok(observed_at_ms) => observed_at_ms,
+                Err(error) => {
+                    return Ok(IdentityWiringEventCommitOutcome::Backoff {
+                        detail: error.to_string(),
+                    });
+                }
+            };
+            let proposed = MobEvent {
+                cursor: 0,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            let intent =
+                match query_identity_intent_observation(&tx, &permit.mob_id, &permit.identity)? {
+                    IdentityStoredObservation::Valid(intent) => intent,
+                    IdentityStoredObservation::Missing => {
+                        return Ok(IdentityWiringEventCommitOutcome::Conflict {
+                            current: None,
+                            detail: "identity wiring commit observed no current intent".to_string(),
+                        });
+                    }
+                    IdentityStoredObservation::Unsupported {
+                        evidence_digest,
+                        detail,
+                    }
+                    | IdentityStoredObservation::Malformed {
+                        evidence_digest,
+                        detail,
+                    } => {
+                        return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                            evidence_digest: Some(evidence_digest),
+                            detail: format!(
+                                "identity wiring commit observed unsafe intent authority: {detail}"
+                            ),
+                        });
+                    }
+                };
+            let lease =
+                match query_identity_lease_observation(&tx, &permit.mob_id, &permit.identity)? {
+                    IdentityStoredObservation::Valid(lease) => lease,
+                    IdentityStoredObservation::Missing => {
+                        return Ok(IdentityWiringEventCommitOutcome::Conflict {
+                            current: None,
+                            detail: "identity wiring commit observed no current lease".to_string(),
+                        });
+                    }
+                    IdentityStoredObservation::Unsupported {
+                        evidence_digest,
+                        detail,
+                    }
+                    | IdentityStoredObservation::Malformed {
+                        evidence_digest,
+                        detail,
+                    } => {
+                        return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                            evidence_digest: Some(evidence_digest),
+                            detail: format!(
+                                "identity wiring commit observed unsafe lease authority: {detail}"
+                            ),
+                        });
+                    }
+                };
+            let (edge, adding) = match validate_identity_wiring_commit_authority(
+                &permit,
+                &intent,
+                &lease,
+                &proposed,
+                observed_at_ms,
+            ) {
+                Ok(validated) => validated,
+                Err(outcome) => return Ok(outcome),
+            };
+
+            let current =
+                query_identity_wiring_target_state(&tx, &permit.mob_id, &permit.identity)?;
+            if let IdentityWiringTargetObservation::Malformed {
+                observed_version,
+                detail,
+            } = &current.observation
+            {
+                return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                    evidence_digest: observed_version.clone(),
+                    detail: detail.clone(),
+                });
+            }
+            if current.observation.target_precondition().as_ref()
+                != Some(&permit.target_observation)
+            {
+                tx.commit().map_err(se)?;
+                return Ok(IdentityWiringEventCommitOutcome::Conflict {
+                    current: Some(current.observation),
+                    detail: "identity wiring target observation is stale".to_string(),
+                });
+            }
+            if current.observation.contains(&edge) == adding {
+                tx.commit().map_err(se)?;
+                return Ok(IdentityWiringEventCommitOutcome::AlreadyExact {
+                    current: current.observation,
+                });
+            }
+
+            let cursor = next_event_cursor(&tx)?;
+            if cursor == 0 || cursor >= i64::MAX as u64 {
+                return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                    evidence_digest: None,
+                    detail: "mob event cursor is exhausted".to_string(),
+                });
+            }
+            let stored = MobEvent {
+                cursor,
+                timestamp: proposed.timestamp,
+                mob_id: proposed.mob_id,
+                kind: proposed.kind,
+            };
+            let encoded = match encode_stored_mob_event(&stored) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                        evidence_digest: None,
+                        detail: format!("identity wiring event is not serializable: {error}"),
+                    });
+                }
+            };
+            tx.execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
+            )
+            .map_err(se)?;
+            let Some(next_cursor) = cursor.checked_add(1) else {
+                return Ok(IdentityWiringEventCommitOutcome::RepairBlocked {
+                    evidence_digest: None,
+                    detail: "mob event cursor is exhausted".to_string(),
+                });
+            };
+            set_next_cursor(&tx, next_cursor)?;
+            tx.commit().map_err(se)?;
+            Ok(IdentityWiringEventCommitOutcome::Applied { event: stored })
+        })
+        .await;
+
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(MobStoreError::IdentityAuthorityBlocked {
+                evidence_digest,
+                detail,
+            }) => IdentityWiringEventCommitOutcome::RepairBlocked {
+                evidence_digest,
+                detail,
+            },
+            Err(error) => IdentityWiringEventCommitOutcome::Backoff {
+                detail: error.to_string(),
+            },
+        };
+        if let IdentityWiringEventCommitOutcome::Applied { event } = &outcome {
+            event_bus.publish_committed(event.clone());
+        }
+        Ok(outcome)
+    }
+}
+
+#[async_trait]
+impl MobIdentityStatusStore for SqliteMobIdentityStatusStore {
+    async fn load_identity_convergence_status(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityConvergenceStatus>, MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_status_observation(&conn, &mob_id, &identity)
+        })
+        .await
+    }
+
+    async fn list_identity_convergence_statuses(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<
+        BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityConvergenceStatus>>,
+        MobStoreError,
+    > {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT agent_identity, typeof(status_json), CAST(status_json AS BLOB)
+                     FROM mob_identity_statuses
+                     WHERE mob_id = ?1
+                     ORDER BY agent_identity",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(se)?;
+            let mut observations = BTreeMap::new();
+            for row in rows {
+                let (identity, storage_type, bytes) = row.map_err(se)?;
+                let identity = AgentIdentity::from(identity);
+                let observation = classify_identity_blob(
+                    &storage_type,
+                    &bytes,
+                    None,
+                    |_| Ok(()),
+                    |status: &IdentityConvergenceStatus| {
+                        if status.identity == identity {
+                            Ok(())
+                        } else {
+                            Err(
+                                "identity convergence status does not match its physical key"
+                                    .to_string(),
+                            )
+                        }
+                    },
+                );
+                observations.insert(identity, observation);
+            }
+            Ok(observations)
+        })
+        .await
+    }
+
+    async fn replace_identity_convergence_status(
+        &self,
+        mob_id: &MobId,
+        status: &IdentityConvergenceStatus,
+    ) -> Result<(), MobStoreError> {
+        validate_identity_store_text("mob_id", mob_id.as_str())?;
+        validate_identity_store_text("identity", status.identity.as_str())?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let status = status.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            tx.execute(
+                "INSERT INTO mob_identity_statuses (mob_id, agent_identity, status_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+                     status_json = excluded.status_json",
+                params![
+                    mob_id.as_str(),
+                    status.identity.as_str(),
+                    encode_json(&status)?,
+                ],
+            )
+            .map_err(|error| {
+                sqlite_identity_write_error(error, "replace identity convergence status")
+            })?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -2313,11 +5457,11 @@ impl MobEventStore for SqliteMobEventStore {
             let encoded = encode_stored_mob_event(&stored)
                 .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
             tx.execute(
-                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                params![cursor_to_i64(cursor)?, encoded],
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
             )
             .map_err(se)?;
-            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            set_next_cursor(&tx, checked_event_cursor_successor(cursor)?)?;
             tx.commit().map_err(se)?;
             Ok(stored)
         })
@@ -2375,11 +5519,11 @@ impl MobEventStore for SqliteMobEventStore {
             let encoded = encode_stored_mob_event(&stored)
                 .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
             tx.execute(
-                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                params![cursor_to_i64(cursor)?, encoded],
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
             )
             .map_err(se)?;
-            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            set_next_cursor(&tx, checked_event_cursor_successor(cursor)?)?;
             tx.commit().map_err(se)?;
             Ok(Some(stored))
         })
@@ -2451,11 +5595,11 @@ impl MobEventStore for SqliteMobEventStore {
             let encoded = encode_stored_mob_event(&stored)
                 .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
             tx.execute(
-                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                params![cursor_to_i64(cursor)?, encoded],
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
             )
             .map_err(se)?;
-            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            set_next_cursor(&tx, checked_event_cursor_successor(cursor)?)?;
             tx.commit().map_err(se)?;
             Ok(Some(stored))
         })
@@ -2475,7 +5619,7 @@ impl MobEventStore for SqliteMobEventStore {
         let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
-            let mut cursor = get_next_cursor(&tx)?;
+            let mut cursor = next_event_cursor(&tx)?;
             let mut results = Vec::with_capacity(batch.len());
             for event in batch {
                 let stored = MobEvent {
@@ -2487,12 +5631,12 @@ impl MobEventStore for SqliteMobEventStore {
                 let encoded = encode_stored_mob_event(&stored)
                     .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
                 tx.execute(
-                    "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                    params![cursor_to_i64(cursor)?, encoded],
+                    "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                    params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
                 )
                 .map_err(se)?;
                 results.push(stored);
-                cursor = cursor.saturating_add(1);
+                cursor = checked_event_cursor_successor(cursor)?;
             }
             set_next_cursor(&tx, cursor)?;
             tx.commit().map_err(se)?;
@@ -2579,7 +5723,9 @@ impl MobEventStore for SqliteMobEventStore {
             for (cursor_val, bytes) in rows {
                 let event: MobEvent = decode_stored_mob_event(&bytes)
                     .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
-                if event.timestamp < older_than {
+                if event.timestamp < older_than
+                    && !identity_structural_projection_is_anchor(&event.kind)
+                {
                     tx.execute(
                         "DELETE FROM mob_events WHERE cursor = ?1",
                         params![cursor_val],
@@ -2596,7 +5742,29 @@ impl MobEventStore for SqliteMobEventStore {
 }
 
 fn get_next_cursor(conn: &Connection) -> Result<u64, MobStoreError> {
-    let result: Option<i64> = conn
+    repair_next_event_cursor(conn)
+}
+
+/// Reconcile the cached allocator high-water with the physical event table.
+/// Missing, malformed, or regressed metadata can never turn into a permanent
+/// primary-key conflict. A valid metadata value above MAX(cursor) is retained
+/// so pruning never reuses a previously issued cursor.
+fn repair_next_event_cursor(conn: &Connection) -> Result<u64, MobStoreError> {
+    let physical_max: Option<i64> = conn
+        .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
+        .map_err(se)?;
+    let physical_floor = match physical_max {
+        Some(max) if max > 0 => {
+            let cursor = u64::try_from(max).map_err(se)?;
+            if cursor >= i64::MAX as u64 {
+                i64::MAX as u64
+            } else {
+                cursor + 1
+            }
+        }
+        _ => 1,
+    };
+    let stored: Option<rusqlite::types::Value> = conn
         .query_row(
             "SELECT value FROM mob_event_meta WHERE key = ?1",
             params![EVENT_CURSOR_KEY],
@@ -2604,11 +5772,32 @@ fn get_next_cursor(conn: &Connection) -> Result<u64, MobStoreError> {
         )
         .optional()
         .map_err(se)?;
-    Ok(result.map_or(1, i64_to_cursor))
+    let stored_next = match &stored {
+        Some(rusqlite::types::Value::Integer(value)) if *value > 0 => u64::try_from(*value).ok(),
+        _ => None,
+    };
+    let next = stored_next.map_or(physical_floor, |stored| stored.max(physical_floor));
+    if stored_next != Some(next) {
+        set_next_cursor(conn, next)?;
+    }
+    Ok(next)
 }
 
 fn next_event_cursor(tx: &Transaction<'_>) -> Result<u64, MobStoreError> {
-    get_next_cursor(tx)
+    let cursor = get_next_cursor(tx)?;
+    if cursor >= i64::MAX as u64 {
+        return Err(MobStoreError::Internal(
+            "mob event cursor is exhausted".to_string(),
+        ));
+    }
+    Ok(cursor)
+}
+
+fn checked_event_cursor_successor(cursor: u64) -> Result<u64, MobStoreError> {
+    cursor
+        .checked_add(1)
+        .filter(|next| i64::try_from(*next).is_ok())
+        .ok_or_else(|| MobStoreError::Internal("mob event cursor is exhausted".to_string()))
 }
 
 fn set_next_cursor(conn: &Connection, value: u64) -> Result<(), MobStoreError> {
@@ -3151,11 +6340,11 @@ impl MobRunStore for SqliteMobRunStore {
             let encoded = encode_stored_mob_event(&stored)
                 .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
             tx.execute(
-                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                params![cursor_to_i64(cursor)?, encoded],
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
             )
             .map_err(se)?;
-            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            set_next_cursor(&tx, checked_event_cursor_successor(cursor)?)?;
             tx.commit().map_err(se)?;
             Ok(Some(stored))
         })
@@ -4138,12 +7327,200 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, FlowSpec, WiringRules};
     use crate::event::{MemberRef, MobEventKind};
+    use crate::identity::{
+        DesiredMemberMaterial, DesiredMemberOverlay, DesiredSessionAuthorityPolicy,
+        IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityDeclarationManifest,
+        IdentityDeclarationMemberPlan, IdentityDeclarationScopePrecondition,
+        IdentityMemberDeclaration, IdentityMemberMaterialDeclaration,
+        IdentityOperationReceiptPayload,
+    };
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
     use crate::store::ExternalBindingOverlayStatus;
     use futures::future::join_all;
     use indexmap::IndexMap;
+    use meerkat_contracts::wire::{
+        PortableDefinitionExtract, PortableProfile, PortableSystemPrompt,
+    };
+    use meerkat_core::lifecycle::InputId;
+    use meerkat_core::ops::OperationId;
+    use meerkat_core::{ContentInput, Provider, SessionId, SessionLineageId};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Debug)]
+    struct TestIdentityClock {
+        now_ms: AtomicU64,
+    }
+
+    impl TestIdentityClock {
+        fn new(now_ms: u64) -> Self {
+            Self {
+                now_ms: AtomicU64::new(now_ms),
+            }
+        }
+
+        fn set(&self, now_ms: u64) {
+            self.now_ms.store(now_ms, Ordering::SeqCst);
+        }
+    }
+
+    impl MobIdentityStoreClock for TestIdentityClock {
+        fn now_ms(&self) -> Result<u64, MobStoreError> {
+            Ok(self.now_ms.load(Ordering::SeqCst))
+        }
+    }
+
+    fn sqlite_identity_material(model: &str) -> DesiredMemberMaterial {
+        DesiredMemberMaterial {
+            profile_name: ProfileName::from("default"),
+            profile: PortableProfile {
+                model: model.to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: Default::default(),
+                peer_description: String::new(),
+                external_addressable: false,
+                runtime_mode: Default::default(),
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            },
+            definition_extract: PortableDefinitionExtract {
+                profile_names: vec!["default".to_string()],
+                ..PortableDefinitionExtract::default()
+            },
+            overlay: DesiredMemberOverlay {
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                system_prompt: PortableSystemPrompt::Disable,
+                tool_access_policy: None,
+                auth_binding: None,
+                budget_limits: None,
+                runtime_mode: Default::default(),
+            },
+            required_env_keys: Vec::new(),
+            required_local_callback_tools: Vec::new(),
+            execution: crate::identity::DesiredExecution::ControllingSession,
+        }
+    }
+
+    fn sqlite_identity_plan(
+        scope: &str,
+        operation_id: OperationId,
+        expected_scope: IdentityDeclarationScopePrecondition,
+        members: Vec<(AgentIdentity, DesiredMemberMaterial, Option<ContentInput>)>,
+    ) -> IdentityDeclarationApplyPlan {
+        let mut declarations = BTreeMap::new();
+        let mut compiled = BTreeMap::new();
+        for (identity, material, initial_message) in members {
+            declarations.insert(
+                identity.clone(),
+                IdentityMemberDeclaration {
+                    material: IdentityMemberMaterialDeclaration::Resolved {
+                        material: material.clone(),
+                    },
+                    session_authority_policy: DesiredSessionAuthorityPolicy::CreateIfAbsent,
+                    initial_message: initial_message.clone(),
+                    legacy_import: None,
+                },
+            );
+            compiled.insert(
+                identity,
+                IdentityDeclarationMemberPlan {
+                    material,
+                    session_authority_policy: DesiredSessionAuthorityPolicy::CreateIfAbsent,
+                    initial_message: initial_message.clone(),
+                    candidate_session_id: SessionId::new(),
+                    candidate_lineage_id: SessionLineageId::new(format!(
+                        "sqlite-identity-lineage-{}",
+                        uuid::Uuid::new_v4()
+                    ))
+                    .unwrap(),
+                    candidate_initial_delivery_id: initial_message.map(|_| InputId::new()),
+                },
+            );
+        }
+        let manifest = IdentityDeclarationManifest {
+            scope_id: IdentityDeclarationScopeId::new(scope).unwrap(),
+            operation_id,
+            expected_scope,
+            members: declarations,
+            wiring: BTreeSet::new(),
+        };
+        IdentityDeclarationApplyPlan::from_compiled_manifest(&manifest, compiled).unwrap()
+    }
+
+    fn sqlite_initial_delivery_receipt(
+        mob_id: &MobId,
+        record: &IdentityIntentRecord,
+    ) -> IdentityOperationReceipt {
+        let IdentityIntent::Present {
+            identity,
+            session,
+            member,
+            ..
+        } = &record.intent
+        else {
+            panic!("initial delivery fixture requires a present intent");
+        };
+        let delivery = member.initial_delivery.as_ref().unwrap();
+        let mut receipt = IdentityOperationReceipt {
+            schema_version: IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION,
+            mob_id: mob_id.clone(),
+            subject: IdentityOperationSubject::Identity {
+                identity: identity.clone(),
+            },
+            effect_kind: IdentityOperationKind::InitialDelivery,
+            slot: IdentityOperationSlot::InitialDelivery {
+                tombstone_generation: record.tombstone_generation.unwrap_or(0),
+                session_id: session.session_id.clone(),
+                lineage_id: session.lineage_id.clone(),
+                lineage_generation: session.lineage_generation,
+                delivery_generation: delivery.delivery_generation,
+            },
+            receipt_id: OperationId::new(),
+            intent_revision: Some(record.intent_revision),
+            intent_digest: Some(record.intent_digest.clone()),
+            intent_authority_digest: Some(record.authority_digest.clone()),
+            tombstone_generation: record.tombstone_generation,
+            audit_lease_epoch: None,
+            request_digest: String::new(),
+            payload: IdentityOperationReceiptPayload::InitialDelivery {
+                delivery_generation: delivery.delivery_generation,
+                delivery_id: delivery.delivery_id.clone(),
+                message_digest: delivery.message_digest.clone(),
+            },
+        };
+        receipt.request_digest = receipt.canonical_request_digest().unwrap();
+        receipt.validate().unwrap();
+        receipt
+    }
+
+    fn sqlite_receipt_permit(
+        mob_id: &MobId,
+        record: &IdentityIntentRecord,
+        claim: &IdentityLeaseClaim,
+    ) -> IdentityActuationPermit {
+        IdentityActuationPermit {
+            mob_id: mob_id.clone(),
+            identity: record.intent.identity().clone(),
+            target: IdentityActuatorTarget::InitialDeliveryReceipt,
+            intent_revision: record.intent_revision,
+            intent_digest: record.intent_digest.clone(),
+            intent_authority_digest: record.authority_digest.clone(),
+            lease_epoch: claim.epoch,
+            lease_holder_id: claim.holder_id.clone(),
+            lease_incarnation_id: claim.incarnation_id.clone(),
+            lease_expires_at_ms: claim.expires_at_ms,
+            target_observation: IdentityTargetObservationVersion::InsertIfAbsent,
+        }
+    }
 
     fn default_bridge_protocol_version()
     -> meerkat_contracts::wire::supervisor_bridge::BridgeProtocolVersion {
@@ -4267,6 +7644,683 @@ mod tests {
             serde_json::json!({"a":1}),
         )
         .expect("authority-backed sample run")
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_empty_scope_reopens_and_replays_exact_outcome() {
+        let (_dir, path) = temp_db_path();
+        let mob_id = MobId::from("sqlite-identity-empty-scope");
+        let first = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            Vec::new(),
+        );
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let first_outcome = stores
+            .identity_store()
+            .apply_identity_declaration(&mob_id, &first)
+            .await
+            .unwrap();
+        assert_eq!(first_outcome.scope_revision, 1);
+        drop(stores);
+
+        let reopened = SqliteMobStores::open(&path).unwrap().identity_store();
+        assert_eq!(
+            reopened
+                .apply_identity_declaration(&mob_id, &first)
+                .await
+                .unwrap(),
+            first_outcome
+        );
+        let second = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
+            Vec::new(),
+        );
+        assert_eq!(
+            reopened
+                .apply_identity_declaration(&mob_id, &second)
+                .await
+                .unwrap()
+                .scope_revision,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_session_and_lineage_allocation_is_global_to_database() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().identity_store();
+        let first_identity = AgentIdentity::from("member-a");
+        let first = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            vec![(
+                first_identity.clone(),
+                sqlite_identity_material("model-a"),
+                None,
+            )],
+        );
+        let first_outcome = store
+            .apply_identity_declaration(&MobId::from("mob-a"), &first)
+            .await
+            .unwrap();
+        let IdentityIntent::Present { session, .. } =
+            &first_outcome.identities[&first_identity].intent
+        else {
+            panic!("present intent");
+        };
+
+        let second_identity = AgentIdentity::from("member-b");
+        let mut second = sqlite_identity_plan(
+            "provider-b",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            vec![(
+                second_identity.clone(),
+                sqlite_identity_material("model-b"),
+                None,
+            )],
+        );
+        let member = second.members.get_mut(&second_identity).unwrap();
+        member.candidate_session_id = session.session_id.clone();
+        member.candidate_lineage_id = session.lineage_id.clone();
+        assert!(matches!(
+            store
+                .apply_identity_declaration(&MobId::from("mob-b"), &second)
+                .await,
+            Err(MobStoreError::CasConflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_live_handle_never_recreates_a_deleted_database() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let store = stores.identity_store();
+        drop(stores);
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            store
+                .observe_identity_intent(
+                    &MobId::from("deleted-db"),
+                    &AgentIdentity::from("member-a"),
+                )
+                .await,
+            Err(MobStoreError::ReadFailed(_))
+        ));
+        assert!(
+            !path.exists(),
+            "identity read must not recreate the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_unrelated_malformed_row_is_total_and_does_not_block_allocation() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-identity-malformed");
+        let malformed_bytes = b"{".to_vec();
+        {
+            let conn = open_connection(&stores.path).unwrap();
+            conn.execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                 VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+                params![mob_id.as_str(), "unrelated-garbage", "other-scope", malformed_bytes],
+            )
+            .unwrap();
+        }
+        let identity = AgentIdentity::from("member-a");
+        let plan = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            vec![(identity.clone(), sqlite_identity_material("model-a"), None)],
+        );
+        stores
+            .identity_store()
+            .apply_identity_declaration(&mob_id, &plan)
+            .await
+            .unwrap();
+        assert!(matches!(
+            stores
+                .identity_store()
+                .observe_identity_intent(&mob_id, &identity)
+                .await
+                .unwrap(),
+            IdentityStoredObservation::Valid(_)
+        ));
+        match stores
+            .identity_store()
+            .observe_identity_intent(&mob_id, &AgentIdentity::from("unrelated-garbage"))
+            .await
+            .unwrap()
+        {
+            IdentityStoredObservation::Malformed {
+                evidence_digest, ..
+            } => assert_eq!(evidence_digest, identity_raw_evidence_digest(b"{")),
+            other => panic!("expected malformed raw row, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_future_schema_is_unsupported_before_typed_decode() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-identity-future-schema");
+        let bytes = br#"{"schema_version":2,"future_shape":true}"#.to_vec();
+        {
+            let conn = open_connection(&stores.path).unwrap();
+            conn.execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+                params![mob_id.as_str(), "future-member", bytes],
+            )
+            .unwrap();
+        }
+        match stores
+            .identity_store()
+            .observe_identity_intent(&mob_id, &AgentIdentity::from("future-member"))
+            .await
+            .unwrap()
+        {
+            IdentityStoredObservation::Unsupported {
+                evidence_digest, ..
+            } => assert_eq!(
+                evidence_digest,
+                identity_raw_evidence_digest(br#"{"schema_version":2,"future_shape":true}"#)
+            ),
+            other => panic!("expected unsupported future schema, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_lease_takeover_strictly_advances_epoch() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let clock = Arc::new(TestIdentityClock::new(100));
+        let store = SqliteMobIdentityStore::with_clock(
+            stores.path.clone(),
+            stores.identity_store_instance_id.clone(),
+            clock.clone(),
+        );
+        let mob_id = MobId::from("sqlite-identity-lease");
+        let identity = AgentIdentity::from("member-a");
+        let first = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-a", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected acquire, got {other:?}"),
+        };
+        assert!(matches!(
+            store
+                .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
+                .await
+                .unwrap(),
+            IdentityLeaseClaimOutcome::HeldByOther(_)
+        ));
+        clock.set(first.expires_at_ms);
+        let takeover = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected takeover, got {other:?}"),
+        };
+        assert_eq!(takeover.epoch, first.epoch + 1);
+        assert!(
+            !store
+                .release_identity_lease(&mob_id, &identity, &first)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_lease_repairs_malformed_projection_from_normalized_authority() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let clock = Arc::new(TestIdentityClock::new(100));
+        let store = SqliteMobIdentityStore::with_clock(
+            stores.path.clone(),
+            stores.identity_store_instance_id.clone(),
+            clock.clone(),
+        );
+        let mob_id = MobId::from("sqlite-identity-lease-projection-repair");
+        let identity = AgentIdentity::from("member-a");
+        let first = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-a", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected acquire, got {other:?}"),
+        };
+        {
+            let conn = open_connection(&stores.path).unwrap();
+            conn.execute(
+                "UPDATE mob_identity_leases SET record_json = ?3
+                 WHERE mob_id = ?1 AND agent_identity = ?2",
+                params![mob_id.as_str(), identity.as_str(), b"{".as_slice()],
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            store
+                .observe_identity_lease(&mob_id, &identity)
+                .await
+                .unwrap(),
+            IdentityStoredObservation::Malformed { .. }
+        ));
+        clock.set(first.expires_at_ms);
+        let takeover = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected takeover, got {other:?}"),
+        };
+        assert_eq!(takeover.epoch, first.epoch + 1);
+        assert!(matches!(
+            store
+                .observe_identity_lease(&mob_id, &identity)
+                .await
+                .unwrap(),
+            IdentityStoredObservation::Valid(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_receipt_insert_fences_stale_intent_and_holder_but_replays() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let clock = Arc::new(TestIdentityClock::new(100));
+        let store = SqliteMobIdentityStore::with_clock(
+            stores.path.clone(),
+            stores.identity_store_instance_id.clone(),
+            clock.clone(),
+        );
+        let mob_id = MobId::from("sqlite-identity-receipt-fence");
+        let identity = AgentIdentity::from("member-a");
+        let first = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            vec![(
+                identity.clone(),
+                sqlite_identity_material("model-a"),
+                Some(ContentInput::from("deliver once")),
+            )],
+        );
+        store
+            .apply_identity_declaration(&mob_id, &first)
+            .await
+            .unwrap();
+        let first_record = match store
+            .observe_identity_intent(&mob_id, &identity)
+            .await
+            .unwrap()
+        {
+            IdentityStoredObservation::Valid(record) => record,
+            other => panic!("expected intent, got {other:?}"),
+        };
+        let claim_a = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-a", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected acquire, got {other:?}"),
+        };
+        let stale_intent_receipt = sqlite_initial_delivery_receipt(&mob_id, &first_record);
+        let stale_intent_permit = sqlite_receipt_permit(&mob_id, &first_record, &claim_a);
+
+        let update = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
+            vec![(
+                identity.clone(),
+                sqlite_identity_material("model-b"),
+                Some(ContentInput::from("deliver once")),
+            )],
+        );
+        store
+            .apply_identity_declaration(&mob_id, &update)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .insert_identity_operation_receipt_if_absent(
+                    &stale_intent_receipt,
+                    &stale_intent_permit,
+                )
+                .await,
+            Err(MobStoreError::CasConflict(_))
+        ));
+
+        let current_record = match store
+            .observe_identity_intent(&mob_id, &identity)
+            .await
+            .unwrap()
+        {
+            IdentityStoredObservation::Valid(record) => record,
+            other => panic!("expected current intent, got {other:?}"),
+        };
+        clock.set(claim_a.expires_at_ms);
+        let claim_b = match store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected takeover, got {other:?}"),
+        };
+        let receipt = sqlite_initial_delivery_receipt(&mob_id, &current_record);
+        let stale_lease_permit = sqlite_receipt_permit(&mob_id, &current_record, &claim_a);
+        assert!(matches!(
+            store
+                .insert_identity_operation_receipt_if_absent(&receipt, &stale_lease_permit)
+                .await,
+            Err(MobStoreError::CasConflict(_))
+        ));
+        let current_permit = sqlite_receipt_permit(&mob_id, &current_record, &claim_b);
+        assert!(matches!(
+            store
+                .insert_identity_operation_receipt_if_absent(&receipt, &current_permit)
+                .await
+                .unwrap(),
+            IdentityOperationReceiptInsertOutcome::Inserted(_)
+        ));
+        clock.set(claim_b.expires_at_ms);
+        let _ = store
+            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-c", 10)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .insert_identity_operation_receipt_if_absent(&receipt, &stale_lease_permit)
+                .await
+                .unwrap(),
+            IdentityOperationReceiptInsertOutcome::ExistingExact(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_cross_mob_transplant_is_malformed_and_cannot_authorize_cleanup() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let store = stores.identity_store();
+        let donor_mob = MobId::from("sqlite-identity-donor");
+        let recipient_mob = MobId::from("sqlite-identity-recipient");
+        let identity = AgentIdentity::from("member-a");
+        let present = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Missing,
+            vec![(identity.clone(), sqlite_identity_material("model-a"), None)],
+        );
+        store
+            .apply_identity_declaration(&donor_mob, &present)
+            .await
+            .unwrap();
+        let absent = sqlite_identity_plan(
+            "provider-a",
+            OperationId::new(),
+            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
+            Vec::new(),
+        );
+        store
+            .apply_identity_declaration(&donor_mob, &absent)
+            .await
+            .unwrap();
+        let donor_record = match store
+            .observe_identity_intent(&donor_mob, &identity)
+            .await
+            .unwrap()
+        {
+            IdentityStoredObservation::Valid(record) => record,
+            other => panic!("expected donor tombstone, got {other:?}"),
+        };
+        assert!(matches!(donor_record.intent, IdentityIntent::Absent { .. }));
+        assert!(matches!(
+            donor_record.retirement_plan,
+            IdentityRetirementPlan::Targets { .. }
+        ));
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE mob_identity_intents SET mob_id = ?1
+                 WHERE mob_id = ?2 AND agent_identity = ?3",
+                params![
+                    recipient_mob.as_str(),
+                    donor_mob.as_str(),
+                    identity.as_str()
+                ],
+            )
+            .unwrap();
+        }
+
+        let transplanted = store
+            .observe_identity_intent(&recipient_mob, &identity)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transplanted,
+            IdentityStoredObservation::Malformed { .. }
+        ));
+        assert!(matches!(
+            store
+                .list_identity_intents(&recipient_mob)
+                .await
+                .unwrap()
+                .get(&identity),
+            Some(IdentityStoredObservation::Malformed { .. })
+        ));
+
+        let claim = match store
+            .claim_or_renew_identity_lease(
+                &recipient_mob,
+                &identity,
+                "controller",
+                "recipient-incarnation",
+                1_000,
+            )
+            .await
+            .unwrap()
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("expected recipient lease claim, got {other:?}"),
+        };
+        let permit = IdentityActuationPermit {
+            mob_id: recipient_mob,
+            identity,
+            target: IdentityActuatorTarget::Wiring,
+            intent_revision: donor_record.intent_revision,
+            intent_digest: donor_record.intent_digest,
+            intent_authority_digest: donor_record.authority_digest,
+            lease_epoch: claim.epoch,
+            lease_holder_id: claim.holder_id,
+            lease_incarnation_id: claim.incarnation_id,
+            lease_expires_at_ms: claim.expires_at_ms,
+            target_observation: IdentityTargetObservationVersion::Absent {
+                absence_version: identity_raw_evidence_digest(b"recipient-wiring-absent"),
+            },
+        };
+        assert!(matches!(
+            store.validate_identity_actuation_permit(&permit).await,
+            Err(MobStoreError::IdentityAuthorityBlocked { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_wiring_is_mob_local_and_reset_heals_target_garbage() {
+        let (_dir, path) = temp_db_path();
+        let target_mob = MobId::from("sqlite-wiring-target");
+        let malformed_mob = MobId::from("sqlite-wiring-malformed");
+        let identity = AgentIdentity::from("member-a");
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let encoded = encode_stored_mob_event(&MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: malformed_mob.clone(),
+            kind: MobEventKind::MobCompleted,
+        })
+        .unwrap();
+        let mut malformed_value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+        malformed_value["event"]["kind"]["type"] =
+            serde_json::Value::String("future_structural_event".to_string());
+        let malformed_bytes = serde_json::to_vec(&malformed_value).unwrap();
+        let malformed_digest = identity_raw_evidence_digest(&malformed_bytes);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, NULL, ?2)",
+                params![1i64, &malformed_bytes],
+            )
+            .unwrap();
+        }
+        drop(stores);
+
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let physical_route: String = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT mob_id FROM mob_events WHERE cursor = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_route, malformed_mob.as_str());
+        assert!(matches!(
+            stores
+                .identity_store()
+                .observe_identity_wiring_target(&target_mob, &identity)
+                .await
+                .unwrap(),
+            IdentityWiringTargetObservation::Absent { .. }
+        ));
+        match stores
+            .identity_store()
+            .observe_identity_wiring_target(&malformed_mob, &identity)
+            .await
+            .unwrap()
+        {
+            IdentityWiringTargetObservation::Malformed {
+                observed_version, ..
+            } => assert_eq!(observed_version.as_deref(), Some(malformed_digest.as_str())),
+            other => panic!("expected target-local malformed event evidence, got {other:?}"),
+        }
+
+        let reset = stores
+            .event_store()
+            .append(NewMobEvent {
+                mob_id: malformed_mob.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reset.cursor, 2);
+        assert!(matches!(
+            stores
+                .identity_store()
+                .observe_identity_wiring_target(&malformed_mob, &identity)
+                .await
+                .unwrap(),
+            IdentityWiringTargetObservation::Absent { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_event_cursor_repairs_regressed_meta_in_transaction_and_missing_meta_on_open() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let events = stores.event_store();
+        let first = events
+            .append(NewMobEvent {
+                mob_id: MobId::from("cursor-repair"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.cursor, 1);
+
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE mob_event_meta SET value = 1 WHERE key = ?1",
+                params![EVENT_CURSOR_KEY],
+            )
+            .unwrap();
+            let tx = begin_immediate(&mut conn).unwrap();
+            assert_eq!(next_event_cursor(&tx).unwrap(), 2);
+            tx.commit().unwrap();
+            assert_eq!(get_next_cursor(&conn).unwrap(), 2);
+        }
+        let second = events
+            .append(NewMobEvent {
+                mob_id: MobId::from("cursor-repair"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.cursor, 2);
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "DELETE FROM mob_event_meta WHERE key = ?1",
+                params![EVENT_CURSOR_KEY],
+            )
+            .unwrap();
+        }
+        drop(events);
+        drop(stores);
+
+        let reopened = SqliteMobStores::open(&path).unwrap();
+        let repaired_meta: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM mob_event_meta WHERE key = ?1",
+                params![EVENT_CURSOR_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repaired_meta, 3);
+        let third = reopened
+            .event_store()
+            .append(NewMobEvent {
+                mob_id: MobId::from("cursor-repair"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        assert_eq!(third.cursor, 3);
+        assert_eq!(
+            reopened
+                .event_store()
+                .replay_all()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[tokio::test]

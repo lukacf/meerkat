@@ -4601,42 +4601,295 @@ pub(crate) fn machine_recover_ephemeral_driver(
     })
 }
 
+pub(crate) struct ReconciledRuntimeAuthority {
+    pub(crate) authority: crate::meerkat_machine::dsl::MeerkatMachineAuthority,
+    pub(crate) unregister_progress: Option<crate::store::MachineUnregisterProgressSnapshot>,
+}
+
+fn runtime_authority_reconcile_decision(
+    observation_kind: crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind,
+    observation: Option<&crate::store::DecodedMachineLifecycleObservation>,
+) -> Result<crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision, RuntimeDriverError> {
+    let state = observation
+        .and_then(crate::store::DecodedMachineLifecycleObservation::runtime_state)
+        .map(crate::meerkat_machine::dsl_authority::observed_runtime_lifecycle_state);
+    let binding = observation.map(crate::store::DecodedMachineLifecycleObservation::binding);
+    let run = observation.map(crate::store::DecodedMachineLifecycleObservation::run);
+    let pre_run_phase = run
+        .and_then(crate::store::MachineLifecycleRunFacts::pre_run_phase)
+        .map(|phase| match phase {
+            crate::store::MachineLifecyclePreRunPhase::Idle => {
+                crate::meerkat_machine::dsl::PreRunPhase::Idle
+            }
+            crate::store::MachineLifecyclePreRunPhase::Attached => {
+                crate::meerkat_machine::dsl::PreRunPhase::Attached
+            }
+            crate::store::MachineLifecyclePreRunPhase::Retired => {
+                crate::meerkat_machine::dsl::PreRunPhase::Retired
+            }
+        });
+    let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::ClassifyRuntimeAuthorityReconciliation {
+            observation_kind,
+            state,
+            agent_runtime_id: binding
+                .and_then(crate::store::MachineLifecycleBindingFacts::agent_runtime_id)
+                .map(crate::meerkat_machine::dsl::AgentRuntimeId::from),
+            fence_token: binding
+                .and_then(crate::store::MachineLifecycleBindingFacts::fence_token)
+                .map(crate::meerkat_machine::dsl::FenceToken::from),
+            runtime_generation: binding
+                .and_then(crate::store::MachineLifecycleBindingFacts::runtime_generation)
+                .map(crate::meerkat_machine::dsl::Generation::from),
+            runtime_epoch_id: binding
+                .and_then(crate::store::MachineLifecycleBindingFacts::runtime_epoch_id)
+                .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
+            current_run_id: run
+                .and_then(crate::store::MachineLifecycleRunFacts::current_run_id)
+                .map(crate::meerkat_machine::dsl::RunId::from_domain),
+            pre_run_phase,
+            malformed_reclaim_safe: false,
+        },
+    )
+    .map_err(|error| {
+        RuntimeDriverError::Internal(format!(
+            "generated runtime-authority classifier rejected a typed observation: {error}"
+        ))
+    })?;
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::RuntimeAuthorityReconciliationClassified { decision } => Some(decision),
+            _ => None,
+        })
+        .ok_or_else(|| RuntimeDriverError::Internal(
+            "generated runtime-authority classifier emitted no decision".to_string(),
+        ))
+}
+
+pub(crate) fn runtime_authority_reconcile_decision_for_observation(
+    observed: &crate::store::MachineLifecycleObservation,
+) -> Result<crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision, RuntimeDriverError> {
+    let (kind, decoded) = match observed {
+        crate::store::MachineLifecycleObservation::Missing => (
+            crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Missing,
+            None,
+        ),
+        crate::store::MachineLifecycleObservation::Decoded { record, .. } => (
+            crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Decoded,
+            Some(record),
+        ),
+        crate::store::MachineLifecycleObservation::Unsupported { .. } => (
+            crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Unsupported,
+            None,
+        ),
+        crate::store::MachineLifecycleObservation::Malformed { .. } => (
+            crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Malformed,
+            None,
+        ),
+    };
+    runtime_authority_reconcile_decision(kind, decoded)
+}
+
+pub(crate) fn registered_runtime_authority_from_converged_record(
+    session_id: &SessionId,
+    record: &crate::store::DecodedMachineLifecycleObservation,
+) -> Result<ReconciledRuntimeAuthority, RuntimeDriverError> {
+    registered_runtime_authority_from_converged_record_id(
+        &crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        record,
+    )
+}
+
+fn registered_runtime_authority_from_converged_record_id(
+    session_id: &crate::meerkat_machine::dsl::SessionId,
+    record: &crate::store::DecodedMachineLifecycleObservation,
+) -> Result<ReconciledRuntimeAuthority, RuntimeDriverError> {
+    let mut authority =
+        crate::meerkat_machine::dsl_authority::new_registered_authority_id(session_id.clone())
+            .map_err(|error| {
+                RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                    error,
+                    "fresh cold runtime registration",
+                ))
+            })?;
+    crate::meerkat_machine::dsl_authority::recover_supervisor_authority_snapshot(
+        &mut authority,
+        record.supervisor_authority().clone(),
+    )
+    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+        reason: crate::meerkat_machine::dsl_authority::map_error(
+            error,
+            "independent supervisor custody recovery",
+        ),
+    })?;
+    Ok(ReconciledRuntimeAuthority {
+        authority,
+        unregister_progress: record.unregister_progress().cloned(),
+    })
+}
+
+/// Level-triggered cold convergence for the one runtime-lifecycle row.
+///
+/// The observed phase is never adopted. Every non-fixed decoded shape is
+/// replaced with a clean unbound Idle projection using the exact raw row
+/// version, conflicts restart from observation, and only then is a fresh
+/// Initialize/RegisterSession authority constructed. Supervisor and unregister
+/// custody are recovered independently from the converged row.
+pub(crate) async fn reconcile_runtime_authority_for_cold_recovery(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    session_id: &SessionId,
+) -> Result<ReconciledRuntimeAuthority, RuntimeDriverError> {
+    reconcile_runtime_authority_for_cold_recovery_id(
+        store,
+        runtime_id,
+        &crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+    )
+    .await
+}
+
+async fn reconcile_runtime_authority_for_cold_recovery_id(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    session_id: &crate::meerkat_machine::dsl::SessionId,
+) -> Result<ReconciledRuntimeAuthority, RuntimeDriverError> {
+    loop {
+        let observed = match store.observe_machine_lifecycle(runtime_id).await {
+            Ok(observed) => observed,
+            Err(crate::store::RuntimeStoreError::Unsupported(reason)) => {
+                let decision = runtime_authority_reconcile_decision(
+                    crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Unsupported,
+                    None,
+                )?;
+                debug_assert_eq!(
+                    decision,
+                    crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::RepairBlocked
+                );
+                return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: format!("runtime lifecycle observation is unsupported: {reason}"),
+                });
+            }
+            Err(error) => {
+                let decision = runtime_authority_reconcile_decision(
+                    crate::meerkat_machine::dsl::RuntimeAuthorityObservationKind::Unavailable,
+                    None,
+                )?;
+                debug_assert_eq!(
+                    decision,
+                    crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Backoff
+                );
+                return Err(RuntimeDriverError::RecoveryBackoff {
+                    reason: error.to_string(),
+                });
+            }
+        };
+        match runtime_authority_reconcile_decision_for_observation(&observed)? {
+            crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Converged => {
+                let crate::store::MachineLifecycleObservation::Decoded { record, .. } = observed
+                else {
+                    return Err(RuntimeDriverError::Internal(
+                        "runtime-authority classifier converged a non-decoded row".to_string(),
+                    ));
+                };
+                return registered_runtime_authority_from_converged_record_id(session_id, &record);
+            }
+            crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::NormalizeOrReplace => {
+                let expected = match observed.version() {
+                    Some(version) => {
+                        crate::store::MachineLifecycleExpectedVersion::Version(version.clone())
+                    }
+                    None => crate::store::MachineLifecycleExpectedVersion::Missing,
+                };
+                let replacement =
+                    crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        None,
+                    );
+                match store
+                    .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                    .await
+                {
+                    Ok(crate::store::MachineLifecycleCasOutcome::Applied { .. }) => continue,
+                    Ok(crate::store::MachineLifecycleCasOutcome::Conflict { .. }) => {
+                        // A concurrent writer won the target-local CAS. The
+                        // caller owns scheduling: return a typed requeue rather
+                        // than spinning inside one recovery invocation.
+                        return Err(RuntimeDriverError::RecoveryBackoff {
+                            reason: "runtime lifecycle CAS conflicted; re-observe on the next reconciliation pass".to_string(),
+                        });
+                    }
+                    Err(crate::store::RuntimeStoreError::MachineLifecycleRepairBlocked {
+                        evidence_digest,
+                        detail,
+                    }) => {
+                        return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                            evidence_digest,
+                            reason: detail,
+                        });
+                    }
+                    Err(error) => {
+                        return Err(RuntimeDriverError::RecoveryBackoff {
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+            }
+            crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::RepairBlocked
+            | crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Quarantine => {
+                return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: observed.evidence_digest().map(ToOwned::to_owned),
+                    reason: "runtime lifecycle evidence cannot be normalized safely".to_string(),
+                });
+            }
+            crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Backoff => {
+                return Err(RuntimeDriverError::RecoveryBackoff {
+                    reason: "runtime lifecycle observation is temporarily unavailable".to_string(),
+                });
+            }
+        }
+    }
+}
+
 pub(crate) async fn machine_recover_persistent_driver(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
-    let recovered_lifecycle = crate::store::load_machine_lifecycle(store, runtime_id)
-        .await
-        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
-    let recovered_runtime_state = recovered_lifecycle
-        .as_ref()
-        .map(crate::store::MachineLifecycleSnapshot::runtime_state);
-    let recovered_unregister_progress = recovered_lifecycle
-        .as_ref()
-        .and_then(crate::store::MachineLifecycleSnapshot::unregister_progress)
-        .cloned();
-    if let Some(snapshot) = recovered_lifecycle {
-        let session_id = driver.session_authority_id_for_recovery();
-        let binding = snapshot.binding();
-        let agent_runtime_id = binding
-            .agent_runtime_id()
-            .map(|value| LogicalRuntimeId::new(value.to_owned()));
-        driver.recover_runtime_authority_from_binding_observation(
-            session_id,
-            snapshot.runtime_state(),
-            agent_runtime_id.as_ref(),
-            binding.fence_token(),
-            binding
-                .runtime_generation()
-                .map(crate::meerkat_machine::dsl::Generation::from),
-            binding
-                .runtime_epoch_id()
-                .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
-            snapshot.supervisor_authority().clone(),
-        )?;
-    }
+    let session_id = driver.session_authority_id_for_recovery();
+    let reconciled =
+        reconcile_runtime_authority_for_cold_recovery_id(store, runtime_id, &session_id).await?;
+    let recovered_unregister_progress = reconciled.unregister_progress;
+    driver.replace_runtime_authority(reconciled.authority);
 
+    machine_recover_persistent_inputs(
+        store,
+        runtime_id,
+        driver,
+        recovered_unregister_progress.as_ref(),
+    )
+    .await
+}
+
+/// Recover durable input work after the caller has already converged and
+/// installed fresh runtime lifecycle authority.
+///
+/// Cold registration uses this path so the lifecycle row has exactly one
+/// observe/classify/CAS owner. Direct `PersistentRuntimeDriver::recover`
+/// retains the wrapper above for compatibility with callers that have not
+/// established runtime authority yet.
+pub(crate) async fn machine_recover_persistent_inputs(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
+    recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
     for (_stored_runtime_id, bundle) in load_input_states_for_runtime(store, runtime_id)
@@ -4706,21 +4959,14 @@ pub(crate) async fn machine_recover_persistent_driver(
     // stored ingress. The durable unregister prefix is later lifecycle
     // authority, so replay it after that reconstruction and before the
     // PersistentRuntimeDriver persists the recovered image.
-    if let Some(progress) = recovered_unregister_progress.as_ref() {
+    if let Some(progress) = recovered_unregister_progress {
         let session_id = driver.session_authority_id_for_recovery();
-        let session_id = SessionId::parse(&session_id.0).map_err(|error| {
-            RuntimeDriverError::RecoveryCorruption {
-                reason: format!(
-                    "invalid session identity while replaying durable unregister progress: {error}"
-                ),
-            }
-        })?;
         let authority = driver.shared_dsl_authority();
         {
             let mut authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            super::session_management::replay_durable_unregister_progress(
+            super::session_management::replay_durable_unregister_progress_id(
                 &mut authority,
                 &session_id,
                 Some(progress),
@@ -4735,22 +4981,6 @@ pub(crate) async fn machine_recover_persistent_driver(
         if should_requeue && !driver.has_queued_input(&input_id) {
             return Err(RuntimeDriverError::Internal(format!(
                 "persistent recover left queued input '{input_id}' out of the runtime queue projection"
-            )));
-        }
-    }
-
-    if let Some(runtime_state) = recovered_runtime_state
-        && matches!(
-            runtime_state,
-            RuntimeState::Stopped | RuntimeState::Destroyed
-        )
-    {
-        let active = driver.active_input_ids();
-        if !active.is_empty() {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered runtime-state projection '{}' conflicts with {} active inputs",
-                runtime_state,
-                active.len()
             )));
         }
     }
@@ -4866,11 +5096,9 @@ mod tests {
         let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
             "queue-next-turn-no-wake",
         ));
-        driver.contract_force_runtime_authority(
-            RuntimeState::Running,
-            Some(RunId::new()),
-            Some(RuntimeState::Attached),
-        );
+        driver
+            .contract_begin_run_authority(RunId::new())
+            .expect("test run must start through generated authority");
         let input = Input::Prompt(crate::input::PromptInput::new(
             "queued behind an active turn",
             None,
@@ -5688,32 +5916,31 @@ pub(crate) fn machine_resolve_pre_resolved_runtime_completion_result(
     finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
 ) -> Result<RuntimeCompletionResultAuthority, RuntimeDriverError> {
     let dsl_run_id = run_id.map(crate::meerkat_machine::dsl::RunId::from_domain);
-    let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     let session_id = SessionId::new();
+    let mut authority = crate::meerkat_machine::dsl_authority::new_registered_authority(
+        &session_id,
+    )
+    .map_err(|error| RuntimeDriverError::ValidationFailed {
+        reason: crate::meerkat_machine::dsl_authority::map_error(
+            error,
+            "fresh pre-resolved completion authority",
+        ),
+    })?;
 
-    apply_runtime_completion_authority_preview(
-        &mut authority,
-        crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverRuntimeAuthority {
-            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-            state: if dsl_run_id.is_some() {
-                crate::meerkat_machine::dsl::RuntimeLifecycleObservedState::Running
-            } else {
-                crate::meerkat_machine::dsl::RuntimeLifecycleObservedState::Idle
+    if let Some(run_id) = dsl_run_id.clone() {
+        apply_runtime_completion_authority_preview(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id,
+                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: crate::meerkat_machine::dsl::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
             },
-            agent_runtime_id: Some(crate::meerkat_machine::dsl::AgentRuntimeId::from(
-                "pre-resolved-completion",
-            )),
-            fence_token: Some(crate::meerkat_machine::dsl::FenceToken::from(0)),
-            runtime_generation: Some(crate::meerkat_machine::dsl::Generation::from(0)),
-            runtime_epoch_id: None,
-            current_run_id: dsl_run_id.clone(),
-            pre_run_phase: dsl_run_id
-                .as_ref()
-                .map(|_| crate::meerkat_machine::dsl::PreRunPhase::Idle),
-            silent_intent_overrides: std::collections::BTreeSet::new(),
-        },
-        "RecoverRuntimeAuthority",
-    )?;
+            "StartConversationRun",
+        )?;
+    }
 
     if finalization
         == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded
@@ -6264,11 +6491,9 @@ mod run_failed_cause_tests {
         let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
             LogicalRuntimeId::new("run-failed-cause-test"),
         );
-        driver.contract_force_runtime_authority(
-            RuntimeState::Running,
-            Some(run_id.clone()),
-            Some(RuntimeState::Attached),
-        );
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("test run must start through generated authority");
         DriverEntry::Ephemeral(driver)
     }
 
@@ -6956,9 +7181,8 @@ mod recovery_tests {
             PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
         persistent
             .inner_mut()
-            .recover_runtime_authority_from_binding_observation(
+            .install_registered_authority_for_test(
                 crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-                RuntimeState::Idle,
                 Some(&runtime_id),
                 Some(2),
                 Some(crate::meerkat_machine::dsl::Generation::from(2)),
@@ -7445,9 +7669,8 @@ mod recovery_tests {
             PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
         persistent
             .inner_mut()
-            .recover_runtime_authority_from_binding_observation(
+            .install_registered_authority_for_test(
                 crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-                RuntimeState::Idle,
                 Some(&runtime_id),
                 Some(2),
                 Some(crate::meerkat_machine::dsl::Generation::from(2)),
@@ -7538,9 +7761,8 @@ mod recovery_tests {
             PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
         persistent
             .inner_mut()
-            .recover_runtime_authority_from_binding_observation(
+            .install_registered_authority_for_test(
                 crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-                RuntimeState::Idle,
                 Some(&runtime_id),
                 Some(2),
                 Some(crate::meerkat_machine::dsl::Generation::from(2)),
@@ -7854,7 +8076,8 @@ mod recovery_tests {
     async fn persistent_recovery_normalizes_cold_running_lifecycle_to_idle() {
         use crate::store::RuntimeStore;
 
-        let runtime_id = LogicalRuntimeId::new("cold-running-without-run-witness");
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
             .commit_machine_lifecycle(
@@ -7877,6 +8100,181 @@ mod recovery_tests {
         assert_eq!(driver.phase(), RuntimeState::Idle);
         assert!(driver.current_run_id().is_none());
         assert!(driver.pre_run_phase().is_none());
+    }
+
+    #[tokio::test]
+    async fn cold_runtime_driver_totalizes_decoded_torn_observation_product() {
+        use crate::store::{MachineLifecycleObservation, RuntimeStore};
+
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        let run_id = RunId::new();
+        let states = [
+            None,
+            Some(RuntimeState::Initializing),
+            Some(RuntimeState::Idle),
+            Some(RuntimeState::Attached),
+            Some(RuntimeState::Running),
+            Some(RuntimeState::Retired),
+            Some(RuntimeState::Stopped),
+            Some(RuntimeState::Destroyed),
+        ];
+        let pre_run_phases = [
+            None,
+            Some(crate::store::MachineLifecyclePreRunPhase::Idle),
+            Some(crate::store::MachineLifecyclePreRunPhase::Attached),
+            Some(crate::store::MachineLifecyclePreRunPhase::Retired),
+        ];
+
+        let mut classified = 0usize;
+        for state in states {
+            for binding_bits in 0u8..16 {
+                for run_present in [false, true] {
+                    for pre_run_phase in pre_run_phases {
+                        let raw = serde_json::to_vec(&serde_json::json!({
+                            "record_version": crate::store::MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+                            "runtime_state": state,
+                            "binding": {
+                                "agent_runtime_id": (binding_bits & 1 != 0).then(|| runtime_id.0.clone()),
+                                "fence_token": (binding_bits & 2 != 0).then_some(41_u64),
+                                "runtime_generation": (binding_bits & 4 != 0).then_some(7_u64),
+                                "runtime_epoch_id": (binding_bits & 8 != 0).then_some("dead-process-epoch"),
+                            },
+                            "current_run_id": run_present.then_some(&run_id),
+                            "pre_run_phase": pre_run_phase,
+                            "supervisor_authority": { "kind": "unbound_no_receipt" },
+                            "unregister_progress": null,
+                        }))
+                        .expect("serialize torn runtime observation");
+                        let store = crate::store::InMemoryRuntimeStore::new();
+                        store.seed_machine_lifecycle_raw(&runtime_id, raw).await;
+
+                        let reconciled = reconcile_runtime_authority_for_cold_recovery(
+                            &store,
+                            &runtime_id,
+                            &session_id,
+                        )
+                        .await
+                        .expect("every decoded torn tuple must converge through a typed decision");
+                        assert_eq!(
+                            reconciled.authority.state().lifecycle_phase,
+                            crate::meerkat_machine::dsl::MeerkatPhase::Idle
+                        );
+                        let MachineLifecycleObservation::Decoded { record, .. } =
+                            store.observe_machine_lifecycle(&runtime_id).await.unwrap()
+                        else {
+                            panic!("reconciled lifecycle row must decode");
+                        };
+                        assert_eq!(record.runtime_state(), Some(RuntimeState::Idle));
+                        assert_eq!(
+                            record.binding(),
+                            &crate::store::MachineLifecycleBindingFacts::default()
+                        );
+                        assert_eq!(
+                            record.run(),
+                            &crate::store::MachineLifecycleRunFacts::default()
+                        );
+                        classified += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(classified, 1_024);
+    }
+
+    #[tokio::test]
+    async fn cold_runtime_driver_blocks_unsafe_bytes_and_requeues_transport_or_conflict() {
+        use crate::store::{MachineLifecycleObservation, RuntimeStore};
+
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        for raw in [
+            br"not-json".to_vec(),
+            br#"{"record_version":999,"future":"opaque"}"#.to_vec(),
+        ] {
+            let store = crate::store::InMemoryRuntimeStore::new();
+            store
+                .seed_machine_lifecycle_raw(&runtime_id, raw.clone())
+                .await;
+            let error = match reconcile_runtime_authority_for_cold_recovery(
+                &store,
+                &runtime_id,
+                &session_id,
+            )
+            .await
+            {
+                Ok(_) => panic!("malformed and unsupported rows must fail closed"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                RuntimeDriverError::RecoveryRepairBlocked { .. }
+            ));
+            assert_eq!(
+                store
+                    .load_machine_lifecycle_record(&runtime_id)
+                    .await
+                    .unwrap(),
+                Some(raw),
+                "blocked evidence must remain byte-identical"
+            );
+        }
+
+        let unavailable = crate::store::InMemoryRuntimeStore::new();
+        unavailable.fail_next_machine_lifecycle_observation();
+        assert!(matches!(
+            reconcile_runtime_authority_for_cold_recovery(&unavailable, &runtime_id, &session_id,)
+                .await,
+            Err(RuntimeDriverError::RecoveryBackoff { .. })
+        ));
+
+        let conflict = crate::store::InMemoryRuntimeStore::new();
+        conflict
+            .commit_machine_lifecycle(
+                &runtime_id,
+                crate::store::MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Running,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        conflict.conflict_next_machine_lifecycle_cas();
+        assert!(matches!(
+            reconcile_runtime_authority_for_cold_recovery(&conflict, &runtime_id, &session_id,)
+                .await,
+            Err(RuntimeDriverError::RecoveryBackoff { .. })
+        ));
+        assert!(matches!(
+            conflict.observe_machine_lifecycle(&runtime_id).await.unwrap(),
+            MachineLifecycleObservation::Decoded { ref record, .. }
+                if record.runtime_state() == Some(RuntimeState::Running)
+        ));
+
+        reconcile_runtime_authority_for_cold_recovery(&conflict, &runtime_id, &session_id)
+            .await
+            .expect("requeued conflict must converge on its next pass");
+        let fixed_version = conflict
+            .observe_machine_lifecycle(&runtime_id)
+            .await
+            .unwrap()
+            .version()
+            .cloned()
+            .expect("fixed lifecycle row version");
+        reconcile_runtime_authority_for_cold_recovery(&conflict, &runtime_id, &session_id)
+            .await
+            .expect("fixed point must remain converged");
+        assert_eq!(
+            conflict
+                .observe_machine_lifecycle(&runtime_id)
+                .await
+                .unwrap()
+                .version(),
+            Some(&fixed_version),
+            "a converged second pass must not rewrite the lifecycle row"
+        );
     }
 
     #[tokio::test]

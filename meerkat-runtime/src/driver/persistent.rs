@@ -44,6 +44,28 @@ pub struct PersistentRuntimeDriver {
 }
 
 impl PersistentRuntimeDriver {
+    pub(crate) async fn recover_inputs_after_runtime_authority(
+        &mut self,
+        recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+    ) -> Result<RecoveryReport, RuntimeDriverError> {
+        let report = crate::meerkat_machine::machine_recover_persistent_inputs(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut self.inner,
+            recovered_unregister_progress,
+        )
+        .await?;
+
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        self.store
+            .persist_input_states_atomically(&self.runtime_id, &input_states)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("recovered input persistence failed: {err}"))
+            })?;
+        Ok(report)
+    }
+
     /// Create a new persistent runtime driver.
     pub fn new(
         runtime_id: LogicalRuntimeId,
@@ -606,20 +628,6 @@ impl PersistentRuntimeDriver {
         run_id: RunId,
     ) -> Result<(), RuntimeDriverError> {
         self.inner.contract_begin_run_authority(run_id)
-    }
-
-    /// Test-only authority override for crate-unit tests that need to seed
-    /// impossible or already-realized runtime phases.
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn contract_force_runtime_authority(
-        &mut self,
-        next_phase: RuntimeState,
-        current_run_id: Option<RunId>,
-        pre_run_phase: Option<RuntimeState>,
-    ) {
-        self.inner
-            .contract_force_runtime_authority(next_phase, current_run_id, pre_run_phase);
     }
 
     /// Get pending events (delegates to inner).
@@ -1291,28 +1299,20 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        let mut staged = self.inner.clone_with_isolated_dsl_authority();
         let report = crate::meerkat_machine::machine_recover_persistent_driver(
-            self.store.as_ref(),
-            &self.runtime_id,
-            &mut staged,
-        )
-        .await?;
-
-        let input_states = staged.authorized_stored_input_states_snapshot()?;
-        let commit = Self::lifecycle_commit_for_persistence_from_inner(&staged)?;
-        self.store
-            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
-            .await
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!("recovery persist failed: {err}"))
-            })?;
-        let _ = crate::meerkat_machine::machine_recover_persistent_driver(
             self.store.as_ref(),
             &self.runtime_id,
             &mut self.inner,
         )
         .await?;
+
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        self.store
+            .persist_input_states_atomically(&self.runtime_id, &input_states)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("recovered input persistence failed: {err}"))
+            })?;
         Ok(report)
     }
 

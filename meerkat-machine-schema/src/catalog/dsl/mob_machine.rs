@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::OptionValueExt;
 
 #[macro_export]
@@ -1064,6 +1066,26 @@ macro_rules! mob_catalog_machine_dsl {
             // or it is a hard fatal rejection (`Fatal`). The actor mirrors the
             // emitted verdict to gate re-attempt-vs-error control flow.
             ClassifyPendingSupervisorAcceptance { rejection_cause: Enum<MobBridgeRejectionCause> },
+            // Total, level-triggered identity convergence classification.
+            // These are ephemeral observations only: no intent, lease, receipt,
+            // or realization fact is mirrored into MobMachine state.
+            ClassifyIdentityReconciliation {
+                intent: Enum<IdentityAuthorityCondition>,
+                lease: Enum<IdentityLeaseCondition>,
+                external_binding_required: bool,
+                initial_delivery_required: bool,
+                session_creation_receipt: Enum<IdentityReceiptCondition>,
+                retirement_receipt: Enum<IdentityReceiptCondition>,
+                session: Enum<IdentitySessionCondition>,
+                runtime: Enum<IdentityResourceCondition>,
+                member: Enum<IdentityResourceCondition>,
+                external_binding_receipt: Enum<IdentityReceiptCondition>,
+                external_trust: Enum<IdentityExternalTrustCondition>,
+                external_ceremony: Enum<IdentityExternalCeremonyCondition>,
+                initial_delivery_receipt: Enum<IdentityReceiptCondition>,
+                initial_delivery: Enum<IdentityInitialDeliveryCondition>,
+                wiring: Enum<IdentityResourceCondition>,
+            },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             // Classify member-scoped pending-spawn teardown for a public
@@ -1812,6 +1834,10 @@ macro_rules! mob_catalog_machine_dsl {
             // message; Fatal -> bubble the rejection) instead of reducing the
             // raw wire cause into an acceptance/recovery conclusion itself.
             PendingSupervisorAcceptanceClassified { rejection_cause: Enum<MobBridgeRejectionCause>, verdict: Enum<MobPendingSupervisorAcceptanceKind> },
+            // Pure level-triggered obligation selected from the caller's fresh
+            // observations. It grants no write authority by itself; target-local
+            // actuation still requires the intent/lease/resource CAS permit.
+            IdentityReconciliationClassified { decision: Enum<IdentityReconcileDecision> },
             // Machine-owned frame-seed disposition. `CreateFrameSeed` is
             // idempotent: a fresh seed emits `Seeded`, while re-seeding an
             // already-tracked frame emits `AlreadySeeded` (a no-op) instead of
@@ -1967,6 +1993,522 @@ macro_rules! mob_catalog_machine_dsl {
             GrantRevoked { principal: PrincipalId, revoked: Set<Enum<ControlScope>>, remaining: Set<Enum<ControlScope>> },
         }
 
+        // One total, pure classifier over desired authority, lease ownership,
+        // and fresh observed realization. The ordering is deliberately
+        // resource-local: an unavailable later resource cannot stall an
+        // independent earlier obligation. Target observation versions and the
+        // write-authorizing intent/lease witness remain outside this helper in
+        // the actor's target-local actuation permit.
+        helper identity_reconcile_decision(
+            intent: Enum<IdentityAuthorityCondition>,
+            lease: Enum<IdentityLeaseCondition>,
+            external_binding_required: bool,
+            initial_delivery_required: bool,
+            session_creation_receipt: Enum<IdentityReceiptCondition>,
+            retirement_receipt: Enum<IdentityReceiptCondition>,
+            session: Enum<IdentitySessionCondition>,
+            runtime: Enum<IdentityResourceCondition>,
+            member: Enum<IdentityResourceCondition>,
+            external_binding_receipt: Enum<IdentityReceiptCondition>,
+            external_trust: Enum<IdentityExternalTrustCondition>,
+            external_ceremony: Enum<IdentityExternalCeremonyCondition>,
+            initial_delivery_receipt: Enum<IdentityReceiptCondition>,
+            initial_delivery: Enum<IdentityInitialDeliveryCondition>,
+            wiring: Enum<IdentityResourceCondition>
+        ) -> Enum<IdentityReconcileDecision> {
+            if intent == IdentityAuthorityCondition::Unavailable {
+                IdentityReconcileDecision::Backoff
+            } else {
+                if intent == IdentityAuthorityCondition::Missing
+                    || intent == IdentityAuthorityCondition::Malformed
+                {
+                    IdentityReconcileDecision::RepairBlocked
+                } else {
+                    if lease == IdentityLeaseCondition::Unavailable {
+                        IdentityReconcileDecision::Backoff
+                    } else {
+                        if lease == IdentityLeaseCondition::Missing
+                            || lease == IdentityLeaseCondition::HeldByExpiredIncarnation
+                        {
+                            IdentityReconcileDecision::AcquireLease
+                        } else {
+                            if lease == IdentityLeaseCondition::Malformed {
+                                IdentityReconcileDecision::RepairBlocked
+                            } else {
+                                if lease == IdentityLeaseCondition::HeldByOtherLiveIncarnation {
+                                    IdentityReconcileDecision::AwaitLease
+                                } else {
+                                    if intent == IdentityAuthorityCondition::Absent {
+                                        if wiring == IdentityResourceCondition::Unavailable {
+                                            IdentityReconcileDecision::Backoff
+                                        } else {
+                                            if wiring == IdentityResourceCondition::Malformed {
+                                                IdentityReconcileDecision::RepairBlocked
+                                            } else {
+                                                if wiring == IdentityResourceCondition::Matching
+                                                    || wiring == IdentityResourceCondition::Divergent
+                                                {
+                                                    IdentityReconcileDecision::ReconcileWiring
+                                                } else {
+                                                    if member == IdentityResourceCondition::Unavailable {
+                                                        IdentityReconcileDecision::Backoff
+                                                    } else {
+                                                        if member == IdentityResourceCondition::Malformed {
+                                                            IdentityReconcileDecision::RepairBlocked
+                                                        } else {
+                                                            if member == IdentityResourceCondition::Matching
+                                                                || member == IdentityResourceCondition::Divergent
+                                                            {
+                                                                IdentityReconcileDecision::RetireMemberMaterialization
+                                                            } else {
+                                                                if runtime == IdentityResourceCondition::Unavailable {
+                                                                    IdentityReconcileDecision::Backoff
+                                                                } else {
+                                                                    if runtime == IdentityResourceCondition::Malformed {
+                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                    } else {
+                                                                        if runtime == IdentityResourceCondition::Matching
+                                                                            || runtime == IdentityResourceCondition::Divergent
+                                                                        {
+                                                                            IdentityReconcileDecision::RetireRuntimeRegistration
+                                                                        } else {
+                                                                            if session == IdentitySessionCondition::Unavailable {
+                                                                                IdentityReconcileDecision::Backoff
+                                                                            } else {
+                                                                                if session == IdentitySessionCondition::Malformed
+                                                                                    || session == IdentitySessionCondition::AmbiguousDivergence
+                                                                                {
+                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                } else {
+                                                                                    if session == IdentitySessionCondition::Matching
+                                                                                        || session == IdentitySessionCondition::RecoverableDivergence
+                                                                                        || session == IdentitySessionCondition::IrrecoverablyCorrupt
+                                                                                    {
+                                                                                        IdentityReconcileDecision::ReleaseSessionAuthority
+                                                                                    } else {
+                                                                                        if retirement_receipt == IdentityReceiptCondition::Unavailable {
+                                                                                            IdentityReconcileDecision::Backoff
+                                                                                        } else {
+                                                                                            if retirement_receipt == IdentityReceiptCondition::Missing {
+                                                                                                IdentityReconcileDecision::SealRetirementProven
+                                                                                            } else {
+                                                                                                if retirement_receipt == IdentityReceiptCondition::Matching {
+                                                                                                    IdentityReconcileDecision::Tombstoned
+                                                                                                } else {
+                                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        if session == IdentitySessionCondition::Unavailable {
+                                            IdentityReconcileDecision::Backoff
+                                        } else {
+                                            if session == IdentitySessionCondition::Malformed
+                                                || session == IdentitySessionCondition::IrrecoverablyCorrupt
+                                                || session == IdentitySessionCondition::AmbiguousDivergence
+                                                || (session == IdentitySessionCondition::Missing
+                                                    && intent == IdentityAuthorityCondition::PresentRequireExisting)
+                                            {
+                                                if wiring == IdentityResourceCondition::Unavailable {
+                                                    IdentityReconcileDecision::Backoff
+                                                } else {
+                                                    if wiring == IdentityResourceCondition::Malformed {
+                                                        IdentityReconcileDecision::RepairBlocked
+                                                    } else {
+                                                        if wiring == IdentityResourceCondition::Matching
+                                                            || wiring == IdentityResourceCondition::Divergent
+                                                        {
+                                                            IdentityReconcileDecision::ReconcileWiring
+                                                        } else {
+                                                            if member == IdentityResourceCondition::Unavailable {
+                                                                IdentityReconcileDecision::Backoff
+                                                            } else {
+                                                                if member == IdentityResourceCondition::Malformed {
+                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                } else {
+                                                                    if member == IdentityResourceCondition::Matching
+                                                                        || member == IdentityResourceCondition::Divergent
+                                                                    {
+                                                                        IdentityReconcileDecision::RetireMemberMaterialization
+                                                                    } else {
+                                                                        if runtime == IdentityResourceCondition::Unavailable {
+                                                                            IdentityReconcileDecision::Backoff
+                                                                        } else {
+                                                                            if runtime == IdentityResourceCondition::Malformed {
+                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                            } else {
+                                                                                if runtime == IdentityResourceCondition::Matching
+                                                                                    || runtime == IdentityResourceCondition::Divergent
+                                                                                {
+                                                                                    IdentityReconcileDecision::RetireRuntimeRegistration
+                                                                                } else {
+                                                                                    if session == IdentitySessionCondition::IrrecoverablyCorrupt {
+                                                                                        IdentityReconcileDecision::Quarantined
+                                                                                    } else {
+                                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                if session == IdentitySessionCondition::Missing
+                                                    || session == IdentitySessionCondition::RecoverableDivergence
+                                                {
+                                                    if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                        && session_creation_receipt == IdentityReceiptCondition::Unavailable
+                                                    {
+                                                        IdentityReconcileDecision::Backoff
+                                                    } else {
+                                                        if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                            && (session_creation_receipt == IdentityReceiptCondition::Conflicting
+                                                                || session_creation_receipt == IdentityReceiptCondition::Malformed
+                                                                || session_creation_receipt == IdentityReceiptCondition::NotRequired)
+                                                        {
+                                                            IdentityReconcileDecision::RepairBlocked
+                                                        } else {
+                                                            if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                                && session_creation_receipt == IdentityReceiptCondition::Matching
+                                                                && session == IdentitySessionCondition::Missing
+                                                            {
+                                                                IdentityReconcileDecision::RepairBlocked
+                                                            } else {
+                                                                if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                                    && (session_creation_receipt == IdentityReceiptCondition::Missing
+                                                                        || session_creation_receipt == IdentityReceiptCondition::Matching)
+                                                                {
+                                                                    IdentityReconcileDecision::EnsureSessionAuthority
+                                                                } else {
+                                                                    if intent == IdentityAuthorityCondition::PresentRequireExisting
+                                                                        && session_creation_receipt == IdentityReceiptCondition::NotRequired
+                                                                    {
+                                                                        IdentityReconcileDecision::EnsureSessionAuthority
+                                                                    } else {
+                                                                        if intent == IdentityAuthorityCondition::PresentRequireExisting
+                                                                            && session_creation_receipt == IdentityReceiptCondition::Unavailable
+                                                                        {
+                                                                            IdentityReconcileDecision::Backoff
+                                                                        } else {
+                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                        && session_creation_receipt == IdentityReceiptCondition::Unavailable
+                                                    {
+                                                        IdentityReconcileDecision::Backoff
+                                                    } else {
+                                                        if intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                            && session_creation_receipt == IdentityReceiptCondition::Missing
+                                                        {
+                                                            IdentityReconcileDecision::SealSessionCreationConsumed
+                                                        } else {
+                                                            if !((intent == IdentityAuthorityCondition::PresentCreateIfAbsent
+                                                                    && session_creation_receipt == IdentityReceiptCondition::Matching)
+                                                                || (intent == IdentityAuthorityCondition::PresentRequireExisting
+                                                                    && session_creation_receipt == IdentityReceiptCondition::NotRequired))
+                                                            {
+                                                                IdentityReconcileDecision::RepairBlocked
+                                                            } else {
+                                                                if runtime == IdentityResourceCondition::Unavailable {
+                                                                    IdentityReconcileDecision::Backoff
+                                                                } else {
+                                                                    if runtime == IdentityResourceCondition::Malformed {
+                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                    } else {
+                                                                        if runtime == IdentityResourceCondition::Missing
+                                                                            || runtime == IdentityResourceCondition::Divergent
+                                                                        {
+                                                                            IdentityReconcileDecision::EnsureRuntimeRegistration
+                                                                        } else {
+                                                                            if external_binding_required == true {
+                                                                                if external_binding_receipt == IdentityReceiptCondition::Unavailable {
+                                                                                    IdentityReconcileDecision::Backoff
+                                                                                } else {
+                                                                                    if external_binding_receipt == IdentityReceiptCondition::Missing {
+                                                                                        IdentityReconcileDecision::EnsureExternalBindingReceipt
+                                                                                    } else {
+                                                                                        if external_binding_receipt == IdentityReceiptCondition::Conflicting
+                                                                                            || external_binding_receipt == IdentityReceiptCondition::Malformed
+                                                                                            || external_binding_receipt == IdentityReceiptCondition::NotRequired
+                                                                                        {
+                                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                                        } else {
+                                                                                            if external_trust == IdentityExternalTrustCondition::Unavailable {
+                                                                                                IdentityReconcileDecision::Backoff
+                                                                                            } else {
+                                                                                                if external_trust == IdentityExternalTrustCondition::Absent {
+                                                                                                    if external_ceremony == IdentityExternalCeremonyCondition::FreshAvailable {
+                                                                                                        IdentityReconcileDecision::EnsureExternalBinding
+                                                                                                    } else {
+                                                                                                        if external_ceremony == IdentityExternalCeremonyCondition::AwaitFresh {
+                                                                                                            IdentityReconcileDecision::AwaitExternalBindingCeremony
+                                                                                                        } else {
+                                                                                                            if external_ceremony == IdentityExternalCeremonyCondition::TemporarilyUnavailable {
+                                                                                                                IdentityReconcileDecision::Backoff
+                                                                                                            } else {
+                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                            }
+                                                                                                        }
+                                                                                                    }
+                                                                                                } else {
+                                                                                                    if external_trust == IdentityExternalTrustCondition::Contradictory
+                                                                                                        || external_trust == IdentityExternalTrustCondition::Indeterminate
+                                                                                                        || external_trust == IdentityExternalTrustCondition::Malformed
+                                                                                                        || external_trust == IdentityExternalTrustCondition::NotRequired
+                                                                                                    {
+                                                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                                                    } else {
+                                                                                                        if member == IdentityResourceCondition::Unavailable {
+                                                                                                            IdentityReconcileDecision::Backoff
+                                                                                                        } else {
+                                                                                                            if member == IdentityResourceCondition::Malformed
+                                                                                                                || member == IdentityResourceCondition::Divergent
+                                                                                                            {
+                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                            } else {
+                                                                                                                if member == IdentityResourceCondition::Missing {
+                                                                                                                    IdentityReconcileDecision::EnsureMemberMaterialization
+                                                                                                                } else {
+                                                                                                                    if initial_delivery_required == true {
+                                                                                                                        if initial_delivery_receipt == IdentityReceiptCondition::Unavailable {
+                                                                                                                            IdentityReconcileDecision::Backoff
+                                                                                                                        } else {
+                                                                                                                            if initial_delivery_receipt == IdentityReceiptCondition::Missing {
+                                                                                                                                IdentityReconcileDecision::EnsureInitialDeliveryReceipt
+                                                                                                                            } else {
+                                                                                                                                if initial_delivery_receipt == IdentityReceiptCondition::Conflicting
+                                                                                                                                    || initial_delivery_receipt == IdentityReceiptCondition::Malformed
+                                                                                                                                    || initial_delivery_receipt == IdentityReceiptCondition::NotRequired
+                                                                                                                                {
+                                                                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                                                                } else {
+                                                                                                                                    if initial_delivery == IdentityInitialDeliveryCondition::Unavailable {
+                                                                                                                                        IdentityReconcileDecision::Backoff
+                                                                                                                                    } else {
+                                                                                                                                        if initial_delivery == IdentityInitialDeliveryCondition::ProvenAbsent {
+                                                                                                                                            IdentityReconcileDecision::EnsureInitialDelivery
+                                                                                                                                        } else {
+                                                                                                                                            if initial_delivery == IdentityInitialDeliveryCondition::AcceptedPendingExact {
+                                                                                                                                                IdentityReconcileDecision::AwaitInitialDelivery
+                                                                                                                                            } else {
+                                                                                                                                                if initial_delivery == IdentityInitialDeliveryCondition::ContentOnlyMatch
+                                                                                                                                                    || initial_delivery == IdentityInitialDeliveryCondition::OperationCollision
+                                                                                                                                                    || initial_delivery == IdentityInitialDeliveryCondition::Contradictory
+                                                                                                                                                    || initial_delivery == IdentityInitialDeliveryCondition::Indeterminate
+                                                                                                                                                    || initial_delivery == IdentityInitialDeliveryCondition::Malformed
+                                                                                                                                                    || initial_delivery == IdentityInitialDeliveryCondition::NotRequired
+                                                                                                                                                {
+                                                                                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                                                                                } else {
+                                                                                                                                                    if retirement_receipt != IdentityReceiptCondition::NotRequired {
+                                                                                                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                                                                                                    } else {
+                                                                                                                                                        if wiring == IdentityResourceCondition::Unavailable {
+                                                                                                                                                            IdentityReconcileDecision::Backoff
+                                                                                                                                                        } else {
+                                                                                                                                                            if wiring == IdentityResourceCondition::Malformed {
+                                                                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                                                                            } else {
+                                                                                                                                                                if wiring == IdentityResourceCondition::Missing
+                                                                                                                                                                    || wiring == IdentityResourceCondition::Divergent
+                                                                                                                                                                {
+                                                                                                                                                                    IdentityReconcileDecision::ReconcileWiring
+                                                                                                                                                                } else {
+                                                                                                                                                                    IdentityReconcileDecision::Converged
+                                                                                                                                                                }
+                                                                                                                                                            }
+                                                                                                                                                        }
+                                                                                                                                                    }
+                                                                                                                                                }
+                                                                                                                                            }
+                                                                                                                                        }
+                                                                                                                                    }
+                                                                                                                                }
+                                                                                                                            }
+                                                                                                                        }
+                                                                                                                    } else {
+                                                                                                                        if initial_delivery_receipt != IdentityReceiptCondition::NotRequired
+                                                                                                                            || initial_delivery != IdentityInitialDeliveryCondition::NotRequired
+                                                                                                                        {
+                                                                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                                                                        } else {
+                                                                                                                            if retirement_receipt != IdentityReceiptCondition::NotRequired {
+                                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                                            } else {
+                                                                                                                                if wiring == IdentityResourceCondition::Unavailable {
+                                                                                                                                    IdentityReconcileDecision::Backoff
+                                                                                                                                } else {
+                                                                                                                                    if wiring == IdentityResourceCondition::Malformed {
+                                                                                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                                                                                    } else {
+                                                                                                                                        if wiring == IdentityResourceCondition::Missing
+                                                                                                                                            || wiring == IdentityResourceCondition::Divergent
+                                                                                                                                        {
+                                                                                                                                            IdentityReconcileDecision::ReconcileWiring
+                                                                                                                                        } else {
+                                                                                                                                            IdentityReconcileDecision::Converged
+                                                                                                                                        }
+                                                                                                                                    }
+                                                                                                                                }
+                                                                                                                            }
+                                                                                                                        }
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            }
+                                                                                                        }
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            } else {
+                                                                                if external_binding_receipt != IdentityReceiptCondition::NotRequired
+                                                                                    || external_trust != IdentityExternalTrustCondition::NotRequired
+                                                                                    || external_ceremony != IdentityExternalCeremonyCondition::NotRequired
+                                                                                {
+                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                } else {
+                                                                                    if member == IdentityResourceCondition::Unavailable {
+                                                                                        IdentityReconcileDecision::Backoff
+                                                                                    } else {
+                                                                                        if member == IdentityResourceCondition::Malformed
+                                                                                            || member == IdentityResourceCondition::Divergent
+                                                                                        {
+                                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                                        } else {
+                                                                                            if member == IdentityResourceCondition::Missing {
+                                                                                                IdentityReconcileDecision::EnsureMemberMaterialization
+                                                                                            } else {
+                                                                                                if initial_delivery_required == true {
+                                                                                                    if initial_delivery_receipt == IdentityReceiptCondition::Unavailable {
+                                                                                                        IdentityReconcileDecision::Backoff
+                                                                                                    } else {
+                                                                                                        if initial_delivery_receipt == IdentityReceiptCondition::Missing {
+                                                                                                            IdentityReconcileDecision::EnsureInitialDeliveryReceipt
+                                                                                                        } else {
+                                                                                                            if initial_delivery_receipt == IdentityReceiptCondition::Conflicting
+                                                                                                                || initial_delivery_receipt == IdentityReceiptCondition::Malformed
+                                                                                                                || initial_delivery_receipt == IdentityReceiptCondition::NotRequired
+                                                                                                            {
+                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                            } else {
+                                                                                                                if initial_delivery == IdentityInitialDeliveryCondition::Unavailable {
+                                                                                                                    IdentityReconcileDecision::Backoff
+                                                                                                                } else {
+                                                                                                                    if initial_delivery == IdentityInitialDeliveryCondition::ProvenAbsent {
+                                                                                                                        IdentityReconcileDecision::EnsureInitialDelivery
+                                                                                                                    } else {
+                                                                                                                        if initial_delivery == IdentityInitialDeliveryCondition::AcceptedPendingExact {
+                                                                                                                            IdentityReconcileDecision::AwaitInitialDelivery
+                                                                                                                        } else {
+                                                                                                                            if initial_delivery == IdentityInitialDeliveryCondition::ContentOnlyMatch
+                                                                                                                                || initial_delivery == IdentityInitialDeliveryCondition::OperationCollision
+                                                                                                                                || initial_delivery == IdentityInitialDeliveryCondition::Contradictory
+                                                                                                                                || initial_delivery == IdentityInitialDeliveryCondition::Indeterminate
+                                                                                                                                || initial_delivery == IdentityInitialDeliveryCondition::Malformed
+                                                                                                                                || initial_delivery == IdentityInitialDeliveryCondition::NotRequired
+                                                                                                                            {
+                                                                                                                                IdentityReconcileDecision::RepairBlocked
+                                                                                                                            } else {
+                                                                                                                                if retirement_receipt != IdentityReceiptCondition::NotRequired {
+                                                                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                                                                } else {
+                                                                                                                                    if wiring == IdentityResourceCondition::Unavailable {
+                                                                                                                                        IdentityReconcileDecision::Backoff
+                                                                                                                                    } else {
+                                                                                                                                        if wiring == IdentityResourceCondition::Malformed {
+                                                                                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                                                                                        } else {
+                                                                                                                                            if wiring == IdentityResourceCondition::Missing
+                                                                                                                                                || wiring == IdentityResourceCondition::Divergent
+                                                                                                                                            {
+                                                                                                                                                IdentityReconcileDecision::ReconcileWiring
+                                                                                                                                            } else {
+                                                                                                                                                IdentityReconcileDecision::Converged
+                                                                                                                                            }
+                                                                                                                                        }
+                                                                                                                                    }
+                                                                                                                                }
+                                                                                                                            }
+                                                                                                                        }
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            }
+                                                                                                        }
+                                                                                                    }
+                                                                                                } else {
+                                                                                                    if initial_delivery_receipt != IdentityReceiptCondition::NotRequired
+                                                                                                        || initial_delivery != IdentityInitialDeliveryCondition::NotRequired
+                                                                                                    {
+                                                                                                        IdentityReconcileDecision::RepairBlocked
+                                                                                                    } else {
+                                                                                                        if retirement_receipt != IdentityReceiptCondition::NotRequired {
+                                                                                                            IdentityReconcileDecision::RepairBlocked
+                                                                                                        } else {
+                                                                                                            if wiring == IdentityResourceCondition::Unavailable {
+                                                                                                                IdentityReconcileDecision::Backoff
+                                                                                                            } else {
+                                                                                                                if wiring == IdentityResourceCondition::Malformed {
+                                                                                                                    IdentityReconcileDecision::RepairBlocked
+                                                                                                                } else {
+                                                                                                                    if wiring == IdentityResourceCondition::Missing
+                                                                                                                        || wiring == IdentityResourceCondition::Divergent
+                                                                                                                    {
+                                                                                                                        IdentityReconcileDecision::ReconcileWiring
+                                                                                                                    } else {
+                                                                                                                        IdentityReconcileDecision::Converged
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            }
+                                                                                                        }
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
         disposition SpawnProfileAuthorized => local seam NoOwnerRealization,
         disposition RequestRuntimeIngress => routed [MeerkatMachine] seam NoOwnerRealization,
@@ -2047,6 +2589,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RetireAbsentPendingSpawnPreservationResolved => local seam SurfaceResultAlignment,
         disposition BridgeRejectionRecoveryClassified => local seam SurfaceResultAlignment,
         disposition PendingSupervisorAcceptanceClassified => local seam SurfaceResultAlignment,
+        disposition IdentityReconciliationClassified => local seam SurfaceResultAlignment,
         disposition FrameSeedConfirmed => local seam SurfaceResultAlignment,
         disposition WiringGraphChanged => external seam SurfaceResultAlignment,
         disposition MemberSessionBindingChanged => external seam SurfaceResultAlignment,
@@ -4631,6 +5174,51 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit PendingSupervisorAcceptanceClassified { rejection_cause: rejection_cause, verdict: MobPendingSupervisorAcceptanceKind::Fatal }
+        }
+
+        // Stateless total identity classifier. This transition deliberately
+        // spans every phase and performs no update: lifecycle admission for a
+        // physical actuator remains an actor concern, while the desired-state
+        // decision itself depends only on the supplied fresh facts.
+        transition ClassifyIdentityReconciliation {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyIdentityReconciliation {
+                intent,
+                lease,
+                external_binding_required,
+                initial_delivery_required,
+                session_creation_receipt,
+                retirement_receipt,
+                session,
+                runtime,
+                member,
+                external_binding_receipt,
+                external_trust,
+                external_ceremony,
+                initial_delivery_receipt,
+                initial_delivery,
+                wiring
+            }
+            update {}
+            to Running
+            emit IdentityReconciliationClassified {
+                decision: identity_reconcile_decision(
+                    intent,
+                    lease,
+                    external_binding_required,
+                    initial_delivery_required,
+                    session_creation_receipt,
+                    retirement_receipt,
+                    session,
+                    runtime,
+                    member,
+                    external_binding_receipt,
+                    external_trust,
+                    external_ceremony,
+                    initial_delivery_receipt,
+                    initial_delivery,
+                    wiring)
+            }
         }
 
         transition ClassifySpawnManyFailureProfileNotFound {
@@ -20748,6 +21336,130 @@ impl std::fmt::Display for KickoffIntent {
 // Wave-G1 catalog fold enums. All are unit-variant closed mirrors carried as
 // the typed verdict/disposition/capability fields on the G1 inputs/effects.
 // ---------------------------------------------------------------------------
+
+/// Catalog-expansion twins of the public identity reconciliation vocabulary.
+/// The production MobMachine expansion imports the exact domain types from
+/// `meerkat_mob::identity`; keeping these variants here makes the catalog DSL
+/// independently compilable and causes vocabulary drift to fail at compile
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityAuthorityCondition {
+    Unavailable,
+    Missing,
+    Malformed,
+    PresentCreateIfAbsent,
+    PresentRequireExisting,
+    Absent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityLeaseCondition {
+    Unavailable,
+    Missing,
+    Malformed,
+    HeldByCurrentIncarnation,
+    HeldByOtherLiveIncarnation,
+    HeldByExpiredIncarnation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityResourceCondition {
+    Unavailable,
+    Missing,
+    Matching,
+    Divergent,
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentitySessionCondition {
+    Unavailable,
+    Missing,
+    Matching,
+    RecoverableDivergence,
+    AmbiguousDivergence,
+    Malformed,
+    IrrecoverablyCorrupt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityReceiptCondition {
+    NotRequired,
+    Unavailable,
+    Missing,
+    Matching,
+    Conflicting,
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityExternalTrustCondition {
+    NotRequired,
+    Unavailable,
+    Matching,
+    Absent,
+    Contradictory,
+    Indeterminate,
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityExternalCeremonyCondition {
+    NotRequired,
+    FreshAvailable,
+    TemporarilyUnavailable,
+    AwaitFresh,
+    SpentOrUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityInitialDeliveryCondition {
+    NotRequired,
+    Unavailable,
+    ProvenAbsent,
+    AcceptedPendingExact,
+    CommittedExact,
+    ContentOnlyMatch,
+    OperationCollision,
+    Contradictory,
+    Indeterminate,
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityReconcileDecision {
+    Backoff,
+    RepairBlocked,
+    AcquireLease,
+    AwaitLease,
+    SealRetirementProven,
+    SealSessionCreationConsumed,
+    EnsureSessionAuthority,
+    EnsureRuntimeRegistration,
+    AwaitExternalBindingCeremony,
+    EnsureExternalBindingReceipt,
+    EnsureExternalBinding,
+    EnsureMemberMaterialization,
+    EnsureInitialDeliveryReceipt,
+    EnsureInitialDelivery,
+    AwaitInitialDelivery,
+    ReconcileWiring,
+    RetireMemberMaterialization,
+    RetireRuntimeRegistration,
+    ReleaseSessionAuthority,
+    Converged,
+    Tombstoned,
+    Quarantined,
+}
 
 /// Row #14: machine-owned duplicate-member admission verdict for
 /// [`MobMachineInput::ProbeMemberAdmission`]. The actor mirrors `Admitted ->

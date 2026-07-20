@@ -2558,6 +2558,10 @@ pub enum SpawnSource {
     Respawn,
     Resume,
     Fork,
+    /// Actor-owned level-triggered materialization from an already sealed
+    /// `IdentityIntent`. Portable customization has already happened before
+    /// apply and must not run again on recovery.
+    IdentityReconcile,
 }
 
 impl SpawnSource {
@@ -2573,6 +2577,7 @@ impl SpawnSource {
             Self::Respawn => "respawn",
             Self::Resume => "resume",
             Self::Fork => "fork",
+            Self::IdentityReconcile => "identity_reconcile",
         }
     }
 
@@ -2597,6 +2602,7 @@ impl SpawnSource {
 #[non_exhaustive]
 pub enum SpawnSystemPromptOverride {
     Replace(String),
+    Disable,
 }
 
 /// Durable identity continuity intent attached to a spawn.
@@ -3419,6 +3425,53 @@ impl MobHandle {
                     })
                     .await??;
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
+            }
+            MobMachineCommand::ApplyIdentityDeclarationManifest { manifest } => {
+                let outcome =
+                    self.send_actor_command(|reply_tx| {
+                        MobCommand::ApplyIdentityDeclarationManifest { manifest, reply_tx }
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::IdentityDeclarationManifestApplied(
+                    Box::new(outcome),
+                ))
+            }
+            MobMachineCommand::GetIdentityIntent { agent_identity } => {
+                let observation = self
+                    .send_actor_command(|reply_tx| MobCommand::GetIdentityIntent {
+                        agent_identity,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::IdentityIntent(Box::new(
+                    observation,
+                )))
+            }
+            MobMachineCommand::GetIdentityDeclarationReceipt {
+                scope_id,
+                operation_id,
+            } => {
+                let observation = self
+                    .send_actor_command(|reply_tx| MobCommand::GetIdentityDeclarationReceipt {
+                        scope_id,
+                        operation_id,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::IdentityDeclarationReceipt(
+                    Box::new(observation),
+                ))
+            }
+            MobMachineCommand::GetIdentityConvergenceStatus { agent_identity } => {
+                let observation = self
+                    .send_actor_command(|reply_tx| MobCommand::GetIdentityConvergenceStatus {
+                        agent_identity,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::IdentityConvergenceStatus(
+                    observation,
+                ))
             }
             MobMachineCommand::ConcludeObjective {
                 agent_identity,
@@ -4904,6 +4957,105 @@ impl MobHandle {
             })
             .await?;
         Self::project_get_member_result(result)
+    }
+
+    /// Atomically apply one complete provider-scoped identity declaration.
+    ///
+    /// In the 0.8.2 production slice, a new operation is admitted only for a
+    /// non-empty, missing scope whose members all adopt exact verified legacy
+    /// sessions, require their existing history, use controlling-session
+    /// execution, and declare no initial delivery. Desired wiring remains part
+    /// of the sealed intent, but non-empty topology is reported as typed
+    /// `RepairBlocked` in this narrow release until a target-atomic actuator
+    /// exists. Replaying an already committed operation still returns its exact
+    /// original outcome before this admission check.
+    pub async fn apply_identity_declaration_manifest(
+        &self,
+        manifest: crate::identity::IdentityDeclarationManifest,
+    ) -> Result<crate::identity::IdentityDeclarationManifestApplyOutcome, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::ApplyIdentityDeclarationManifest {
+                manifest: Box::new(manifest),
+            })
+            .await?
+        {
+            MobMachineCommandResult::IdentityDeclarationManifestApplied(outcome) => Ok(*outcome),
+            _ => Err(MobError::Internal(
+                "unexpected identity declaration command result variant".into(),
+            )),
+        }
+    }
+
+    /// Read the total stored observation for one identity intent row.
+    pub async fn identity_intent(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<
+        crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
+        MobError,
+    > {
+        match self
+            .execute_machine_command(MobMachineCommand::GetIdentityIntent {
+                agent_identity: identity.clone(),
+            })
+            .await?
+        {
+            MobMachineCommandResult::IdentityIntent(observation) => Ok(*observation),
+            _ => Err(MobError::Internal(
+                "unexpected identity intent command result variant".into(),
+            )),
+        }
+    }
+
+    /// Read the immutable receipt for one exact declaration operation.
+    ///
+    /// The returned total store observation preserves malformed or unsupported
+    /// physical evidence. A valid receipt contains the exact original sealed
+    /// apply outcome and its request digest, so lost-ack recovery can resume
+    /// without recompiling portable material or rewriting desired state. This
+    /// is historical custody only: callers must not treat it as the current
+    /// intent or as mutation authority.
+    pub async fn identity_declaration_receipt(
+        &self,
+        scope_id: &crate::identity::IdentityDeclarationScopeId,
+        operation_id: &meerkat_core::ops::OperationId,
+    ) -> Result<
+        crate::identity::IdentityStoredObservation<crate::identity::IdentityOperationReceipt>,
+        MobError,
+    > {
+        match self
+            .execute_machine_command(MobMachineCommand::GetIdentityDeclarationReceipt {
+                scope_id: scope_id.clone(),
+                operation_id: operation_id.clone(),
+            })
+            .await?
+        {
+            MobMachineCommandResult::IdentityDeclarationReceipt(observation) => Ok(*observation),
+            _ => Err(MobError::Internal(
+                "unexpected identity declaration receipt command result variant".into(),
+            )),
+        }
+    }
+
+    /// Read replaceable, output-only convergence diagnostics for one identity.
+    pub async fn identity_convergence_status(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<
+        crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
+        MobError,
+    > {
+        match self
+            .execute_machine_command(MobMachineCommand::GetIdentityConvergenceStatus {
+                agent_identity: identity.clone(),
+            })
+            .await?
+        {
+            MobMachineCommandResult::IdentityConvergenceStatus(observation) => Ok(observation),
+            _ => Err(MobError::Internal(
+                "unexpected identity convergence status command result variant".into(),
+            )),
+        }
     }
 
     /// Map a `GetMember` command result into the typed member projection.

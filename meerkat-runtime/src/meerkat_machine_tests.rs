@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,6 +67,245 @@ fn realtime_policy(target_realtime_capable: bool) -> ModelRoutingRealtimePolicy 
 
 fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
     Arc::new(meerkat_store::MemoryBlobStore::new())
+}
+
+#[derive(Clone)]
+struct SequencedRuntimeWriteFence {
+    outcomes: Arc<std::sync::Mutex<VecDeque<crate::store::RuntimeStoreWriteFenceOutcome>>>,
+    checks: Arc<AtomicUsize>,
+    operations: Arc<AtomicUsize>,
+}
+
+impl SequencedRuntimeWriteFence {
+    fn new(
+        outcomes: impl IntoIterator<Item = crate::store::RuntimeStoreWriteFenceOutcome>,
+    ) -> Self {
+        Self {
+            outcomes: Arc::new(std::sync::Mutex::new(outcomes.into_iter().collect())),
+            checks: Arc::new(AtomicUsize::new(0)),
+            operations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn checks(&self) -> usize {
+        self.checks.load(Ordering::SeqCst)
+    }
+
+    fn operations(&self) -> usize {
+        self.operations.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::store::RuntimeStoreWriteFence for SequencedRuntimeWriteFence {
+    fn execute_if_current(
+        &self,
+        operation: Box<dyn FnOnce() -> Result<(), crate::store::RuntimeStoreError> + '_>,
+    ) -> Result<crate::store::RuntimeStoreWriteFenceOutcome, crate::store::RuntimeStoreError> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
+        let mut outcomes = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let outcome = outcomes
+            .pop_front()
+            .unwrap_or(crate::store::RuntimeStoreWriteFenceOutcome::Applied);
+        match outcome {
+            crate::store::RuntimeStoreWriteFenceOutcome::Applied => {
+                self.operations.fetch_add(1, Ordering::SeqCst);
+                operation()?;
+                Ok(crate::store::RuntimeStoreWriteFenceOutcome::Applied)
+            }
+            other => Ok(other),
+        }
+    }
+}
+
+async fn assert_fenced_registration_target_and_authority_contract(
+    store: Arc<dyn crate::store::RuntimeStore>,
+) {
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+
+    let stale_target_session = SessionId::new();
+    let stale_target_observation = machine
+        .observe_cold_runtime_lifecycle(&stale_target_session)
+        .await
+        .expect("observe missing stale-target lifecycle");
+    let stale_target_runtime = runtime_id_for_session(&stale_target_session);
+    let seed = crate::store::MachineLifecycleCommit::new_with_binding(
+        RuntimeState::Idle,
+        crate::store::MachineLifecycleBindingFacts::default(),
+        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+    );
+    assert!(matches!(
+        store
+            .compare_and_swap_machine_lifecycle(
+                &stale_target_runtime,
+                crate::store::MachineLifecycleExpectedVersion::Missing,
+                seed,
+            )
+            .await
+            .expect("seed target race"),
+        crate::store::MachineLifecycleCasOutcome::Applied { .. }
+    ));
+    let unused_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            stale_target_observation,
+            Arc::clone(&unused_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        RuntimeSessionRegistrationOutcome::Conflict { .. }
+    ));
+    assert_eq!(
+        unused_fence.checks(),
+        0,
+        "target conflict must return before external fence admission"
+    );
+    assert!(!machine.contains_session(&stale_target_session).await);
+
+    let stale_fence_session = SessionId::new();
+    let stale_fence_observation = machine
+        .observe_cold_runtime_lifecycle(&stale_fence_session)
+        .await
+        .expect("observe missing stale-fence lifecycle");
+    let stale_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Conflict {
+            reason: "lease incarnation was superseded".to_string(),
+        },
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            stale_fence_observation,
+            Arc::clone(&stale_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        RuntimeSessionRegistrationOutcome::Conflict { .. }
+    ));
+    assert_eq!(stale_fence.checks(), 1);
+    assert_eq!(stale_fence.operations(), 0);
+    assert_eq!(
+        store
+            .observe_machine_lifecycle(&runtime_id_for_session(&stale_fence_session))
+            .await
+            .expect("re-observe stale-fence target"),
+        crate::store::MachineLifecycleObservation::Missing
+    );
+    assert!(!machine.contains_session(&stale_fence_session).await);
+
+    let applied_session = SessionId::new();
+    let applied_observation = machine
+        .observe_cold_runtime_lifecycle(&applied_session)
+        .await
+        .expect("observe missing applied lifecycle");
+    let applied_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            applied_observation,
+            Arc::clone(&applied_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    let RuntimeSessionRegistrationOutcome::Applied {
+        registration,
+        lifecycle,
+    } = outcome
+    else {
+        panic!("current target and fence must publish one fresh runtime shell")
+    };
+    assert_eq!(registration.session_id(), &applied_session);
+    assert!(matches!(
+        lifecycle.lifecycle(),
+        crate::store::MachineLifecycleObservation::Decoded { record, .. }
+            if record.runtime_state() == Some(RuntimeState::Idle)
+                && record.binding() == &crate::store::MachineLifecycleBindingFacts::default()
+    ));
+    assert_eq!(applied_fence.checks(), 2);
+    assert_eq!(applied_fence.operations(), 2);
+    assert!(machine.contains_session(&applied_session).await);
+
+    let publication_fence_session = SessionId::new();
+    let publication_observation = machine
+        .observe_cold_runtime_lifecycle(&publication_fence_session)
+        .await
+        .expect("observe missing publication-fence lifecycle");
+    let publication_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Conflict {
+            reason: "lease expired before live publication".to_string(),
+        },
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            publication_observation,
+            Arc::clone(&publication_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        RuntimeSessionRegistrationOutcome::Conflict { .. }
+    ));
+    assert_eq!(publication_fence.checks(), 2);
+    assert_eq!(publication_fence.operations(), 1);
+    assert!(!machine.contains_session(&publication_fence_session).await);
+
+    let retry_observation = machine
+        .observe_cold_runtime_lifecycle(&publication_fence_session)
+        .await
+        .expect("re-observe committed fresh shell");
+    let committed_version = retry_observation
+        .lifecycle()
+        .version()
+        .expect("committed lifecycle version")
+        .clone();
+    let retry_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            retry_observation,
+            Arc::clone(&retry_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    let RuntimeSessionRegistrationOutcome::AlreadyExact {
+        registration,
+        lifecycle,
+    } = outcome
+    else {
+        panic!("acknowledgement-loss retry must register from exact durable shell")
+    };
+    assert_eq!(registration.session_id(), &publication_fence_session);
+    assert_eq!(lifecycle.lifecycle().version(), Some(&committed_version));
+    assert_eq!(retry_fence.checks(), 2);
+    assert_eq!(retry_fence.operations(), 2);
+    assert!(machine.contains_session(&publication_fence_session).await);
+}
+
+#[tokio::test]
+async fn memory_conditional_registration_rejects_stale_target_and_fence() {
+    assert_fenced_registration_target_and_authority_contract(Arc::new(
+        crate::store::InMemoryRuntimeStore::new(),
+    ))
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn sqlite_conditional_registration_rejects_stale_target_and_fence() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .expect("SQLite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    assert_fenced_registration_target_and_authority_contract(store).await;
 }
 
 fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
@@ -1027,7 +1266,7 @@ async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatc
 }
 
 #[tokio::test]
-async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_state() {
+async fn persistent_retire_signal_failure_cold_recovery_normalizes_dead_process_phase() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let machine = MeerkatMachine::persistent(
         store.clone() as Arc<dyn crate::store::RuntimeStore>,
@@ -1090,41 +1329,17 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let signal_surface = install_recording_meerkat_signal_dispatcher(&recovered);
-    crate::traits::RuntimeControlPlane::retire(&recovered, &runtime_id)
-        .await
-        .expect("cold-restart retry should replay generated RuntimeRetired effect");
-    let log = signal_surface.log.lock().await;
-    let (_, fields) = log
-        .iter()
-        .find(|(variant, _)| variant.as_str() == "ObserveRuntimeRetired")
-        .expect("cold-restart retry must deliver generated RuntimeRetired");
-    assert!(
-        fields.iter().any(|(field, value)| {
-            field.as_str() == "agent_runtime_id"
-                && matches!(value, crate::composition::OwnedFieldValue::Str(value) if value == &expected_runtime_id)
-        }),
-        "RuntimeRetired replay must carry the recovered generated runtime id"
-    );
-    assert!(
-        fields.iter().any(|(field, value)| {
-            field.as_str() == "fence_token"
-                && matches!(value, crate::composition::OwnedFieldValue::U64(0))
-        }),
-        "RuntimeRetired replay must carry the recovered generated fence token"
-    );
-    drop(log);
     assert_eq!(
         recovered.existing_session_runtime_state(&session_id).await,
-        Some(RuntimeState::Retired),
-        "cold restart must preserve the durable machine-owned terminal state"
+        Some(RuntimeState::Idle),
+        "cold restart treats the persisted terminal phase as a dead-process observation"
     );
     assert_eq!(
         crate::store::load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .expect("load persisted runtime state after recovery"),
-        Some(RuntimeState::Retired),
-        "recovery must not rewrite the durable terminal projection back to a live lifecycle"
+        Some(RuntimeState::Idle),
+        "exact CAS must publish a fresh unbound Idle shell"
     );
 }
 
@@ -9328,6 +9543,26 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
     impl RuntimeStore for BlockingDestroyCommitStore {
         fn supports_compaction_projection_outbox(&self) -> bool {
             self.inner.supports_compaction_projection_outbox()
+        }
+
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<crate::store::MachineLifecycleObservation, crate::store::RuntimeStoreError>
+        {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: crate::store::MachineLifecycleExpectedVersion,
+            replacement: crate::store::MachineLifecycleCommit,
+        ) -> Result<crate::store::MachineLifecycleCasOutcome, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
         }
 
         async fn commit_session_snapshot(
@@ -24613,6 +24848,9 @@ struct RuntimeCommitAtomicityStore {
     block_delete_ops_lifecycle: Option<(Arc<Notify>, Arc<Notify>)>,
     block_unregister_finalization_after_commit: Option<(Arc<Notify>, Arc<Notify>)>,
     block_initialize_ops_after_selection: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    machine_lifecycle_observation_calls: AtomicUsize,
+    machine_lifecycle_cas_calls: AtomicUsize,
+    persist_input_states_atomically_calls: AtomicUsize,
     commit_machine_lifecycle_calls: AtomicUsize,
     unregister_finalization_calls: AtomicUsize,
     delete_ops_lifecycle_calls: AtomicUsize,
@@ -24639,6 +24877,9 @@ impl RuntimeCommitAtomicityStore {
             block_delete_ops_lifecycle: None,
             block_unregister_finalization_after_commit: None,
             block_initialize_ops_after_selection: std::sync::Mutex::new(None),
+            machine_lifecycle_observation_calls: AtomicUsize::new(0),
+            machine_lifecycle_cas_calls: AtomicUsize::new(0),
+            persist_input_states_atomically_calls: AtomicUsize::new(0),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             unregister_finalization_calls: AtomicUsize::new(0),
             delete_ops_lifecycle_calls: AtomicUsize::new(0),
@@ -24750,6 +24991,20 @@ impl RuntimeCommitAtomicityStore {
 
     fn commit_machine_lifecycle_calls(&self) -> usize {
         self.commit_machine_lifecycle_calls.load(Ordering::SeqCst)
+    }
+
+    fn machine_lifecycle_observation_calls(&self) -> usize {
+        self.machine_lifecycle_observation_calls
+            .load(Ordering::SeqCst)
+    }
+
+    fn machine_lifecycle_cas_calls(&self) -> usize {
+        self.machine_lifecycle_cas_calls.load(Ordering::SeqCst)
+    }
+
+    fn persist_input_states_atomically_calls(&self) -> usize {
+        self.persist_input_states_atomically_calls
+            .load(Ordering::SeqCst)
     }
 
     fn unregister_finalization_calls(&self) -> usize {
@@ -24943,6 +25198,8 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
         states: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.persist_input_states_atomically_calls
+            .fetch_add(1, Ordering::SeqCst);
         self.inner
             .persist_input_states_atomically(runtime_id, states)
             .await
@@ -24965,6 +25222,28 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         input_id: &InputId,
     ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError> {
         self.inner.load_input_state(runtime_id, input_id).await
+    }
+
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<crate::store::MachineLifecycleObservation, crate::store::RuntimeStoreError> {
+        self.machine_lifecycle_observation_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner.observe_machine_lifecycle(runtime_id).await
+    }
+
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: crate::store::MachineLifecycleExpectedVersion,
+        replacement: crate::store::MachineLifecycleCommit,
+    ) -> Result<crate::store::MachineLifecycleCasOutcome, crate::store::RuntimeStoreError> {
+        self.machine_lifecycle_cas_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+            .await
     }
 
     async fn load_machine_lifecycle_record(
@@ -25163,6 +25442,133 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         }
         self.inner.delete_ops_lifecycle(runtime_id).await
     }
+}
+
+#[tokio::test]
+async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let retained_session = runtime_recovery_session(&session_id, "retained cold transcript");
+    let retained_snapshot =
+        serde_json::to_vec(&retained_session).expect("serialize retained cold-recovery session");
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    inner
+        .commit_session_snapshot(
+            &runtime_id,
+            crate::store::SessionDelta {
+                session_snapshot: retained_snapshot.clone(),
+            },
+        )
+        .await
+        .expect("seed retained session snapshot");
+    inner
+        .commit_machine_lifecycle(
+            &runtime_id,
+            crate::store::MachineLifecycleCommit::new_with_binding(
+                RuntimeState::Running,
+                crate::store::MachineLifecycleBindingFacts::default(),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            ),
+            &[],
+        )
+        .await
+        .expect("seed dead-process Running lifecycle");
+
+    let counted_store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let store: Arc<dyn RuntimeStore> = counted_store.clone();
+    let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+
+    machine
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("cold ensure should normalize lifecycle and attach a fresh shell");
+
+    assert_eq!(
+        counted_store.machine_lifecycle_observation_calls(),
+        2,
+        "one lifecycle convergence pass observes the torn row, applies one CAS, then re-observes its fixed point; Driver::recover must not observe it again",
+    );
+    assert_eq!(
+        counted_store.machine_lifecycle_cas_calls(),
+        1,
+        "cold ensure must perform exactly one target-local lifecycle normalization CAS",
+    );
+    assert_eq!(
+        counted_store.persist_input_states_atomically_calls(),
+        1,
+        "the one input-recovery pass must publish its normalized ledger once",
+    );
+
+    let retained_after = inner
+        .load_session_snapshot(&runtime_id)
+        .await
+        .expect("load retained session snapshot")
+        .expect("retained session snapshot remains present");
+    assert_eq!(
+        retained_after, retained_snapshot,
+        "runtime-shell convergence must not replace or rewrite session content",
+    );
+    let decoded_after: meerkat_core::Session =
+        serde_json::from_slice(&retained_after).expect("decode retained session after cold ensure");
+    assert_eq!(decoded_after.id(), &session_id);
+    assert_eq!(decoded_after.messages().len(), 1);
+
+    let lifecycle_after = inner
+        .observe_machine_lifecycle(&runtime_id)
+        .await
+        .expect("observe normalized lifecycle");
+    let crate::store::MachineLifecycleObservation::Decoded { record, .. } = lifecycle_after else {
+        panic!("cold ensure must leave a decoded lifecycle row");
+    };
+    assert_eq!(record.runtime_state(), Some(RuntimeState::Idle));
+    assert_eq!(
+        record.run(),
+        &crate::store::MachineLifecycleRunFacts::default()
+    );
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("single-pass recovery fixture should unregister cleanly");
 }
 
 struct RotationEndpointRuntime {
@@ -25446,9 +25852,10 @@ async fn mark_staged_runtime_turn_machine_failed(driver: &SharedDriver, run_id: 
 }
 
 #[tokio::test]
-async fn persistent_driver_recover_preserves_durable_runtime_authority() {
+async fn persistent_driver_recover_replaces_dead_process_phase_with_fresh_idle_shell() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let runtime_id = LogicalRuntimeId::new("persistent-recover-authority");
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
     crate::store::RuntimeStore::commit_machine_lifecycle(
         store.as_ref(),
         &runtime_id,
@@ -25472,13 +25879,13 @@ async fn persistent_driver_recover_preserves_durable_runtime_authority() {
         .await
         .expect("public persistent recover should use generated runtime authority");
 
-    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
     assert_eq!(
         crate::store::load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .expect("load runtime state after recovery"),
-        Some(RuntimeState::Retired),
-        "recovery must not rewrite durable lifecycle truth from the default shell"
+        Some(RuntimeState::Idle),
+        "cold recovery must normalize the dead process phase before rebuilding authority"
     );
 
     let authority = driver.inner_ref().shared_dsl_authority();
@@ -25487,7 +25894,7 @@ async fn persistent_driver_recover_preserves_durable_runtime_authority() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority.state().lifecycle_phase,
-        mm_dsl::MeerkatPhase::Retired
+        mm_dsl::MeerkatPhase::Idle
     );
 }
 
@@ -32830,7 +33237,7 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
 }
 
 #[tokio::test]
-async fn rejected_cold_executor_attach_rolls_back_recovered_session_entry() {
+async fn cold_executor_attach_replaces_retired_process_projection() {
     struct NoopExecutor;
 
     #[async_trait::async_trait]
@@ -32893,19 +33300,23 @@ async fn rejected_cold_executor_attach_rolls_back_recovered_session_entry() {
     .await
     .expect("seed retired generated lifecycle authority");
 
-    let rejected = adapter
+    adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
         .await
-        .expect_err("retired generated lifecycle authority must reject executor attach");
+        .expect("cold retired process projection must normalize before executor attach");
     assert!(
-        rejected.to_string().contains("executor registration")
-            || rejected.to_string().contains("active"),
-        "unexpected rejection: {rejected}"
+        adapter.contains_session(&session_id).await,
+        "fresh executor attachment should own the normalized runtime shell"
     );
-    assert!(
-        !adapter.contains_session(&session_id).await,
-        "failed generated executor attach claim must not leave a runtime session entry"
+    assert_eq!(
+        adapter.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Attached),
+        "the dead Retired process projection is normalized before the fresh executor is attached",
     );
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("clean normalized executor attachment");
 }
 
 #[tokio::test]
@@ -36637,6 +37048,16 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
         }
+        RuntimeDriverError::RecoveryBackoff { reason } => {
+            format!("recovery_backoff:{reason}")
+        }
+        RuntimeDriverError::RecoveryRepairBlocked {
+            evidence_digest,
+            reason,
+        } => format!(
+            "recovery_repair_blocked:{}:{reason}",
+            evidence_digest.as_deref().unwrap_or("none")
+        ),
         RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { reason } => {
             format!("unregister_finalization_outcome_unknown:{reason}")
         }
@@ -37445,46 +37866,6 @@ async fn reset_from_running_surfaces_dsl_rejection() {
         ),
         "expected DSL authority rejection for Reset from Running, got {err:?}"
     );
-}
-
-#[tokio::test]
-async fn destroy_from_bound_initializing_is_backed_by_dsl_guard() {
-    let adapter = Arc::new(MeerkatMachine::ephemeral());
-    let session_id = SessionId::new();
-    let runtime_id = runtime_id_for_session(&session_id);
-
-    adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .expect("bindings should establish active runtime identity");
-
-    let driver = {
-        let sessions = adapter.sessions.read().await;
-        Arc::clone(
-            &sessions
-                .get(&session_id)
-                .expect("prepared session should exist")
-                .driver,
-        )
-    };
-    {
-        let mut entry = driver.lock().await;
-        let DriverEntry::Ephemeral(driver) = &mut *entry else {
-            panic!("test uses ephemeral driver");
-        };
-        driver.contract_force_runtime_authority(RuntimeState::Initializing, None, None);
-        driver.sync_control_projection_from_dsl_authority();
-    }
-
-    let report = crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
-        .await
-        .expect("bound Initializing destroy should follow the DSL DestroyInitializing guard");
-    assert_eq!(report.inputs_abandoned, 0);
-
-    let state = crate::traits::RuntimeControlPlane::runtime_state(adapter.as_ref(), &runtime_id)
-        .await
-        .expect("runtime state should remain readable after destroy");
-    assert_eq!(state, RuntimeState::Destroyed);
 }
 
 /// Two concurrent Retire commands on the same session must serialize: the

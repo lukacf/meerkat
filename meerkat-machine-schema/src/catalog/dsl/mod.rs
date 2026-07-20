@@ -54,6 +54,7 @@ use crate::{
 pub struct MachineSchemaMetadata {
     pub named_types: Vec<NamedTypeBinding>,
     pub runtime_internal_inputs: Vec<InputVariantId>,
+    pub tlc_representative_inputs: Vec<InputVariantId>,
     pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
@@ -63,6 +64,7 @@ impl MachineSchemaMetadata {
     pub fn attach_to(self, mut schema: MachineSchema) -> MachineSchema {
         schema.named_types = self.named_types;
         schema.runtime_internal_inputs = self.runtime_internal_inputs;
+        schema.tlc_representative_inputs = self.tlc_representative_inputs;
         schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
         schema.deep_domain_overrides = self.deep_domain_overrides;
@@ -71,6 +73,14 @@ impl MachineSchemaMetadata {
 
     pub fn with_ci_step_limit(mut self, ci_step_limit: u32) -> Self {
         self.ci_step_limit = Some(ci_step_limit);
+        self
+    }
+
+    /// Mark one state-independent input for singleton payload sampling in TLC
+    /// lifecycle exploration. Runtime codegen and the input alphabet are not
+    /// changed by this model-checking-only annotation.
+    pub fn with_tlc_representative_input(mut self, input: InputVariantId) -> Self {
+        self.tlc_representative_inputs.push(input);
         self
     }
 
@@ -202,6 +212,7 @@ fn machine_schema_metadata(
     MachineSchemaMetadata {
         named_types,
         runtime_internal_inputs,
+        tlc_representative_inputs: Vec::new(),
         command_plans: Vec::new(),
         ci_step_limit: None,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -2015,6 +2026,26 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeAuthorityObservationKind",
+                &[
+                    "Missing",
+                    "Decoded",
+                    "Unsupported",
+                    "Malformed",
+                    "Unavailable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeAuthorityReconcileDecision",
+                &[
+                    "RepairBlocked",
+                    "Converged",
+                    "NormalizeOrReplace",
+                    "Quarantine",
+                    "Backoff",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RuntimeLifecycleTerminality",
                 &["NonTerminal", "Terminal"],
             ),
@@ -2358,7 +2389,7 @@ runtime_internal_inputs!(
         PublishLocalEndpoint,
         RecoverableFailure,
         RecoverInputLifecycle,
-        RecoverRuntimeAuthority,
+        ClassifyRuntimeAuthorityReconciliation,
         RecoverRuntimeCompletionResultCorrelation,
         RegisterOp,
         RegisterPendingOps,
@@ -2679,6 +2710,125 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "TurnTimeoutDisposition",
                 &["Detached", "Canceled", "Retryable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityAuthorityCondition",
+                &[
+                    "Unavailable",
+                    "Missing",
+                    "Malformed",
+                    "PresentCreateIfAbsent",
+                    "PresentRequireExisting",
+                    "Absent",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityLeaseCondition",
+                &[
+                    "Unavailable",
+                    "Missing",
+                    "Malformed",
+                    "HeldByCurrentIncarnation",
+                    "HeldByOtherLiveIncarnation",
+                    "HeldByExpiredIncarnation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityResourceCondition",
+                &[
+                    "Unavailable",
+                    "Missing",
+                    "Matching",
+                    "Divergent",
+                    "Malformed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentitySessionCondition",
+                &[
+                    "Unavailable",
+                    "Missing",
+                    "Matching",
+                    "RecoverableDivergence",
+                    "AmbiguousDivergence",
+                    "Malformed",
+                    "IrrecoverablyCorrupt",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityReceiptCondition",
+                &[
+                    "NotRequired",
+                    "Unavailable",
+                    "Missing",
+                    "Matching",
+                    "Conflicting",
+                    "Malformed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityExternalTrustCondition",
+                &[
+                    "NotRequired",
+                    "Unavailable",
+                    "Matching",
+                    "Absent",
+                    "Contradictory",
+                    "Indeterminate",
+                    "Malformed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityExternalCeremonyCondition",
+                &[
+                    "NotRequired",
+                    "FreshAvailable",
+                    "TemporarilyUnavailable",
+                    "AwaitFresh",
+                    "SpentOrUnknown",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityInitialDeliveryCondition",
+                &[
+                    "NotRequired",
+                    "Unavailable",
+                    "ProvenAbsent",
+                    "AcceptedPendingExact",
+                    "CommittedExact",
+                    "ContentOnlyMatch",
+                    "OperationCollision",
+                    "Contradictory",
+                    "Indeterminate",
+                    "Malformed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityReconcileDecision",
+                &[
+                    "Backoff",
+                    "RepairBlocked",
+                    "AcquireLease",
+                    "AwaitLease",
+                    "SealRetirementProven",
+                    "SealSessionCreationConsumed",
+                    "EnsureSessionAuthority",
+                    "EnsureRuntimeRegistration",
+                    "AwaitExternalBindingCeremony",
+                    "EnsureExternalBindingReceipt",
+                    "EnsureExternalBinding",
+                    "EnsureMemberMaterialization",
+                    "EnsureInitialDeliveryReceipt",
+                    "EnsureInitialDelivery",
+                    "AwaitInitialDelivery",
+                    "ReconcileWiring",
+                    "RetireMemberMaterialization",
+                    "RetireRuntimeRegistration",
+                    "ReleaseSessionAuthority",
+                    "Converged",
+                    "Tombstoned",
+                    "Quarantined",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "CancelAllWorkRejectReasonKind",
@@ -3395,6 +3545,11 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
         input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
     .with_ci_step_limit(1)
+    // Identity classification is a stateless pure projection. TLC proves its
+    // lifecycle integration with one typed payload representative per field;
+    // the generated-kernel product tests exhaustively prove all classifier
+    // payload combinations and decision mapping.
+    .with_tlc_representative_input(input_variant_id("ClassifyIdentityReconciliation"))
     // ADJ-P4-5: the plan's 2 hosts x 3 members deep-verification bound —
     // deep-profile model-checker configuration, not machine vocabulary.
     .with_deep_domain_override("AgentIdentityValues", 3);
@@ -3444,6 +3599,7 @@ runtime_internal_inputs!(
         ClassifyRetirePendingSpawnDisposition,
         ClassifyBridgeRejectionRecovery,
         ClassifyPendingSupervisorAcceptance,
+        ClassifyIdentityReconciliation,
         CreateFrameSeed,
         CreateLoopSeed,
         CreateRunSeed,

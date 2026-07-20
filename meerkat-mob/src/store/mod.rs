@@ -1,23 +1,36 @@
 //! Mob store traits and implementations.
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_contract_tests;
 mod in_memory;
 mod realm_profile;
 #[cfg(not(target_arch = "wasm32"))]
 mod sqlite;
 
 pub use in_memory::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
-    InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    InMemoryMobEventStore, InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore,
+    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
+    InMemoryRealmProfileStore,
 };
 pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
-    SqliteMobEventStore, SqliteMobRunStore, SqliteMobRuntimeMetadataStore, SqliteMobSpecStore,
-    SqliteMobStores, SqliteRealmProfileStore,
+    SqliteMobEventStore, SqliteMobIdentityStatusStore, SqliteMobIdentityStore, SqliteMobRunStore,
+    SqliteMobRuntimeMetadataStore, SqliteMobSpecStore, SqliteMobStores, SqliteRealmProfileStore,
 };
 
 use crate::definition::MobDefinition;
 use crate::event::{MemberRef, MobEvent, MobEventKind, NewMobEvent};
+#[cfg(feature = "runtime-adapter")]
+use crate::identity::DesiredSessionTarget;
+use crate::identity::{
+    IdentityActuationPermit, IdentityConvergenceStatus, IdentityDeclarationApplyPlan,
+    IdentityDeclarationManifestApplyOutcome, IdentityDeclarationScopeHead, IdentityIntent,
+    IdentityIntentRecord, IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord,
+    IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome, IdentityOperationSlot,
+    IdentityOperationSubject, IdentityResourceObservation, IdentityStoredObservation,
+    IdentityTargetObservationVersion,
+};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, PlacedSpawnId,
     RunId, StepId,
@@ -40,6 +53,7 @@ use meerkat_contracts::wire::supervisor_bridge::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -61,6 +75,27 @@ pub(crate) fn terminal_event_identity(kind: &MobEventKind) -> Option<(&RunId, &F
         | MobEventKind::FlowCanceled { run_id, flow_id } => Some((run_id, flow_id)),
         _ => None,
     }
+}
+
+/// Identity member/wiring projection events are current structural anchors,
+/// not disposable history. Until the store has compacted current-head
+/// representations, timestamp pruning must retain the full reducer inputs so
+/// live targets cannot become spuriously absent after restart.
+pub(crate) fn identity_structural_projection_is_anchor(kind: &MobEventKind) -> bool {
+    matches!(
+        kind,
+        MobEventKind::MemberSpawned(_)
+            | MobEventKind::MemberRetirementStarted { .. }
+            | MobEventKind::RemoteMemberRuntimeRetired { .. }
+            | MobEventKind::RemoteMemberSupervisorRevoked { .. }
+            | MobEventKind::MemberRetired { .. }
+            | MobEventKind::MemberReset { .. }
+            | MobEventKind::MemberSessionBindingRecovered(_)
+            | MobEventKind::MembersWired { .. }
+            | MobEventKind::MembersWiredBatch { .. }
+            | MobEventKind::MembersUnwired { .. }
+            | MobEventKind::MobReset
+    )
 }
 
 pub(crate) fn step_failed_event_identity(kind: &MobEventKind) -> Option<(&RunId, &StepId, &str)> {
@@ -135,6 +170,19 @@ pub enum MobStoreError {
     #[error("CAS conflict: {0}")]
     CasConflict(String),
 
+    /// Durable identity authority is present but cannot safely authorize a
+    /// mutation. Controllers must project RepairBlocked instead of retrying
+    /// this as a transient transport failure.
+    #[error("identity authority is repair-blocked: {detail}")]
+    IdentityAuthorityBlocked {
+        evidence_digest: Option<String>,
+        detail: String,
+    },
+
+    /// A monotonic identity counter reached the end of the u64 domain.
+    #[error("identity {counter} counter exhausted")]
+    IdentityCounterExhausted { counter: String },
+
     /// Spec revision compare-and-swap failed (structured variant for typed conversion).
     #[error("spec revision conflict for mob {mob_id}: expected {expected:?}, actual {actual}")]
     SpecRevisionConflict {
@@ -147,6 +195,16 @@ pub enum MobStoreError {
     #[error("frame-aware atomic persistence unavailable for operation '{operation}'")]
     FrameAtomicPersistenceUnavailable { operation: FrameAtomicOperation },
 
+    /// This storage composition cannot atomically fence identity authority and
+    /// append the structural member or wiring event in one backend transaction.
+    #[error("identity structural-event atomic persistence is unavailable")]
+    IdentityMemberAtomicPersistenceUnavailable,
+
+    /// This identity store cannot retain its authority serialization guard
+    /// across a runtime target mutation.
+    #[error("identity runtime write fencing is unavailable")]
+    IdentityRuntimeWriteFenceUnavailable,
+
     /// Serialization or deserialization failed.
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -154,6 +212,286 @@ pub enum MobStoreError {
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+/// Result of the single target-local CAS that finalizes a level-triggered
+/// identity member materialization.
+///
+/// The structural event is the member target. `Conflict` means the caller
+/// must re-observe and reclassify; `RepairBlocked` is durable unsafe evidence;
+/// `Backoff` is a transient store/clock failure. Status is deliberately absent
+/// because it is an output projection and never participates in this write.
+#[derive(Debug, Clone)]
+pub(crate) enum IdentityMemberEventCommitOutcome {
+    Applied {
+        event: MobEvent,
+    },
+    AlreadyExact {
+        event: MobEvent,
+    },
+    Conflict {
+        current: Option<IdentityMemberTargetObservation>,
+        detail: String,
+    },
+    RepairBlocked {
+        evidence_digest: Option<String>,
+        detail: String,
+    },
+    Backoff {
+        detail: String,
+    },
+}
+
+/// Result of one target-local identity wiring projection CAS.
+///
+/// This operation seals only the durable structural event projection. It does
+/// not prove that comms trust or generated-machine wiring side effects are
+/// physically realized. The actor must observe and actuate those resources at
+/// their owning seam, then use this CAS as the durable structural projection.
+/// Authority is revalidated in the same transaction that appends exactly one
+/// existing `MembersWired` or `MembersUnwired` event. Status is deliberately
+/// absent: it is an output projection only.
+#[derive(Debug, Clone)]
+pub(crate) enum IdentityWiringEventCommitOutcome {
+    Applied {
+        event: MobEvent,
+    },
+    AlreadyExact {
+        current: IdentityWiringTargetObservation,
+    },
+    Conflict {
+        current: Option<IdentityWiringTargetObservation>,
+        detail: String,
+    },
+    RepairBlocked {
+        evidence_digest: Option<String>,
+        detail: String,
+    },
+    Backoff {
+        detail: String,
+    },
+}
+
+/// Raw structural observation of one identity's member-event target.
+///
+/// `Present` intentionally does not mean that the realization matches desired
+/// material. The actor compares the fresh realization to `IdentityIntent` for
+/// classification, while this value supplies only the resource-local CAS
+/// version used by the final event append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityMemberTargetObservation {
+    Absent {
+        absence_version: String,
+    },
+    Present {
+        version: String,
+        evidence: IdentityMemberTargetEvidence,
+    },
+    /// A current realization is held by an already-admitted recovery/cleanup
+    /// sequence. No member write permit may be minted until that sequence
+    /// reaches a fresh observable target.
+    Recovering {
+        version: String,
+        detail: String,
+    },
+    Malformed {
+        observed_version: Option<String>,
+        detail: String,
+    },
+}
+
+/// Desired-state-comparable evidence carried by the current structural
+/// `MemberSpawned` realization. The authority digest seals the complete
+/// current intent while the explicit fields make its session/material binding
+/// auditable. Missing digest evidence is a legacy divergent realization, not
+/// an implicit match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdentityMemberTargetEvidence {
+    pub identity: AgentIdentity,
+    pub intent_authority_digest: Option<String>,
+    pub session_id: meerkat_core::SessionId,
+    pub role: crate::ids::ProfileName,
+    pub runtime_mode: crate::runtime_mode::MobRuntimeMode,
+    pub labels: BTreeMap<String, String>,
+}
+
+impl IdentityMemberTargetObservation {
+    pub fn target_precondition(&self) -> Option<IdentityTargetObservationVersion> {
+        match self {
+            Self::Absent { absence_version } => Some(IdentityTargetObservationVersion::Absent {
+                absence_version: absence_version.clone(),
+            }),
+            Self::Present { version, .. } => Some(IdentityTargetObservationVersion::Version {
+                version: version.clone(),
+            }),
+            Self::Recovering { .. } | Self::Malformed { .. } => None,
+        }
+    }
+
+    /// Compare fresh structural member evidence with the sole desired intent
+    /// while retaining this target's exact CAS version. Callers must classify
+    /// malformed intent authority independently before using this projection.
+    #[must_use]
+    pub fn resource_observation_against(
+        &self,
+        intent: &IdentityIntentRecord,
+    ) -> IdentityResourceObservation {
+        match self {
+            Self::Absent { absence_version } => IdentityResourceObservation::Missing {
+                absence_version: absence_version.clone(),
+            },
+            Self::Malformed {
+                observed_version,
+                detail,
+            } => IdentityResourceObservation::Malformed {
+                observed_version: observed_version.clone(),
+                detail: detail.clone(),
+            },
+            Self::Recovering { detail, .. } => IdentityResourceObservation::Unavailable {
+                detail: detail.clone(),
+            },
+            Self::Present { version, evidence } => {
+                let matches = match &intent.intent {
+                    IdentityIntent::Present {
+                        identity,
+                        session,
+                        member,
+                        ..
+                    } => {
+                        let expected_runtime_mode = desired_member_runtime_mode(member);
+                        let expected_labels =
+                            member.material.overlay.labels.clone().unwrap_or_default();
+                        evidence.identity == *identity
+                            && evidence.intent_authority_digest.as_deref()
+                                == Some(intent.authority_digest.as_str())
+                            && evidence.session_id == session.session_id
+                            && evidence.role == member.material.profile_name
+                            && evidence.runtime_mode == expected_runtime_mode
+                            && evidence.labels == expected_labels
+                    }
+                    IdentityIntent::Absent { .. } => false,
+                };
+                if matches {
+                    IdentityResourceObservation::Matching {
+                        version: version.clone(),
+                    }
+                } else {
+                    IdentityResourceObservation::Divergent {
+                        version: version.clone(),
+                        detail: "member realization does not match the current sealed intent authority and session/material projection".to_string(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fresh structural observation of all local wiring edges incident to one
+/// identity.
+///
+/// The version is content-addressed from `(mob, identity, incident_edges)`.
+/// Unrelated event-log writes and unrelated edges therefore cannot invalidate
+/// a permit, while any semantic change to this target does. Returning to the
+/// same exact edge set is a safe content-level ABA: the proposed idempotent
+/// edge mutation sees the same target state it was authorized against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityWiringTargetObservation {
+    Absent {
+        absence_version: String,
+    },
+    Present {
+        version: String,
+        incident_edges: BTreeSet<crate::identity::DesiredIdentityEdge>,
+    },
+    Malformed {
+        observed_version: Option<String>,
+        detail: String,
+    },
+}
+
+impl IdentityWiringTargetObservation {
+    pub fn target_precondition(&self) -> Option<IdentityTargetObservationVersion> {
+        match self {
+            Self::Absent { absence_version } => Some(IdentityTargetObservationVersion::Absent {
+                absence_version: absence_version.clone(),
+            }),
+            Self::Present { version, .. } => Some(IdentityTargetObservationVersion::Version {
+                version: version.clone(),
+            }),
+            Self::Malformed { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn incident_edges(&self) -> Option<&BTreeSet<crate::identity::DesiredIdentityEdge>> {
+        match self {
+            Self::Absent { .. } => Some(empty_identity_wiring_edges()),
+            Self::Present { incident_edges, .. } => Some(incident_edges),
+            Self::Malformed { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn contains(&self, edge: &crate::identity::DesiredIdentityEdge) -> bool {
+        matches!(self, Self::Present { incident_edges, .. } if incident_edges.contains(edge))
+    }
+}
+
+fn empty_identity_wiring_edges() -> &'static BTreeSet<crate::identity::DesiredIdentityEdge> {
+    static EMPTY: std::sync::OnceLock<BTreeSet<crate::identity::DesiredIdentityEdge>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(BTreeSet::new)
+}
+
+/// Store-owned wall clock for bounded identity leases and actuation fences.
+///
+/// The public mutation API deliberately does not accept a caller-authored
+/// timestamp: advancing time is lease authority. Built-in stores use the
+/// system clock; deterministic stores may inject an implementation for tests.
+pub trait MobIdentityStoreClock: Send + Sync {
+    fn now_ms(&self) -> Result<u64, MobStoreError>;
+}
+
+pub(crate) fn validate_identity_declaration_replay_request(
+    mob_id: &MobId,
+    scope_id: &crate::identity::IdentityDeclarationScopeId,
+    operation_id: &meerkat_core::ops::OperationId,
+    request_digest: &str,
+) -> Result<(), MobStoreError> {
+    let digest = request_digest.strip_prefix("sha256:");
+    if mob_id.as_str().is_empty()
+        || mob_id.as_str().trim() != mob_id.as_str()
+        || scope_id.as_str().is_empty()
+        || scope_id.as_str().trim() != scope_id.as_str()
+        || operation_id.0.is_nil()
+        || digest.is_none_or(|hex| {
+            hex.len() != 64
+                || !hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(MobStoreError::Serialization(
+            "invalid identity declaration replay key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+pub struct SystemMobIdentityStoreClock;
+
+impl MobIdentityStoreClock for SystemMobIdentityStoreClock {
+    fn now_ms(&self) -> Result<u64, MobStoreError> {
+        let millis = meerkat_core::time_compat::SystemTime::now()
+            .duration_since(meerkat_core::time_compat::SystemTime::UNIX_EPOCH)
+            .map_err(|error| {
+                MobStoreError::Internal(format!("system clock before epoch: {error}"))
+            })?
+            .as_millis();
+        u64::try_from(millis)
+            .map_err(|_| MobStoreError::Internal("system clock millisecond overflow".to_string()))
+    }
 }
 
 pub(crate) fn validate_mob_event_write_authority(kind: &MobEventKind) -> Result<(), MobStoreError> {
@@ -3313,6 +3651,1073 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
 
     /// Delete all overlays for the given mob.
     async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError>;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IdentityMemberTargetState {
+    pub(crate) observation: IdentityMemberTargetObservation,
+    /// Present only while the current target is exactly the last
+    /// `MemberSpawned` payload, with no later member-lifecycle mutation.
+    pub(crate) exact_current_spawn: Option<MobEvent>,
+}
+
+fn identity_member_target_version(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    present: bool,
+    latest_member_cursor: u64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat.mob.identity-member-target.v1\0");
+    digest.update((mob_id.as_str().len() as u64).to_be_bytes());
+    digest.update(mob_id.as_str().as_bytes());
+    digest.update((identity.as_str().len() as u64).to_be_bytes());
+    digest.update(identity.as_str().as_bytes());
+    digest.update([u8::from(present)]);
+    digest.update(latest_member_cursor.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn malformed_member_target(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    cursor: u64,
+    detail: impl Into<String>,
+) -> IdentityMemberTargetState {
+    IdentityMemberTargetState {
+        observation: IdentityMemberTargetObservation::Malformed {
+            observed_version: Some(identity_member_target_version(
+                mob_id, identity, false, cursor,
+            )),
+            detail: detail.into(),
+        },
+        exact_current_spawn: None,
+    }
+}
+
+fn validate_identity_member_spawn_event(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    event: &MobEvent,
+) -> Result<(), String> {
+    if event.mob_id != *mob_id {
+        return Err("MemberSpawned event does not match the target mob".to_string());
+    }
+    let MobEventKind::MemberSpawned(spawned) = &event.kind else {
+        return Err("identity member commit requires a MemberSpawned event".to_string());
+    };
+    if spawned.agent_identity != *identity
+        || spawned.agent_runtime_id.identity != *identity
+        || spawned.agent_runtime_id.generation != spawned.generation
+    {
+        return Err(
+            "MemberSpawned identity, runtime identity, and generation are incoherent".to_string(),
+        );
+    }
+    if spawned.fence_token.get() == 0 {
+        return Err("MemberSpawned fencing token must be non-zero".to_string());
+    }
+    if spawned.bridge_member_ref().is_none() {
+        return Err("MemberSpawned is missing its canonical bridge member reference".to_string());
+    }
+    Ok(())
+}
+
+/// Replay only member-lifecycle events relevant to one identity. The global
+/// cursor is used solely as an immutable version atom after an event has been
+/// selected as identity-local; unrelated mob events never perturb this CAS.
+pub(crate) fn identity_member_target_state(
+    events: &[MobEvent],
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> IdentityMemberTargetState {
+    let mut current_head: Option<(
+        Generation,
+        crate::ids::AgentRuntimeId,
+        crate::ids::FenceToken,
+    )> = None;
+    let mut generation_highwater: Option<Generation> = None;
+    let mut latest_member_cursor = 0;
+    let mut exact_current_spawn = None;
+    let mut current_evidence: Option<IdentityMemberTargetEvidence> = None;
+    let mut lifecycle_recovery: Option<String> = None;
+
+    for event in events.iter().filter(|event| event.mob_id == *mob_id) {
+        match &event.kind {
+            MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == *identity => {
+                if let Err(detail) = validate_identity_member_spawn_event(mob_id, identity, event) {
+                    return malformed_member_target(mob_id, identity, event.cursor, detail);
+                }
+                if current_head.is_some() {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberSpawned overwrites a current member realization without terminal retirement",
+                    );
+                }
+                if let Some(highwater) = generation_highwater {
+                    if highwater.next() != Some(spawned.generation) {
+                        return malformed_member_target(
+                            mob_id,
+                            identity,
+                            event.cursor,
+                            "MemberSpawned generation is not the exact successor of retired history",
+                        );
+                    }
+                }
+                current_head = Some((
+                    spawned.generation,
+                    spawned.agent_runtime_id.clone(),
+                    spawned.fence_token,
+                ));
+                let Some(session_id) = spawned
+                    .bridge_member_ref()
+                    .and_then(MemberRef::bridge_session_id)
+                    .cloned()
+                else {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberSpawned is missing its canonical bridge session",
+                    );
+                };
+                current_evidence = Some(IdentityMemberTargetEvidence {
+                    identity: spawned.agent_identity.clone(),
+                    intent_authority_digest: spawned
+                        .identity_intent_authority_digest()
+                        .map(str::to_string),
+                    session_id,
+                    role: spawned.role.clone(),
+                    runtime_mode: spawned.runtime_mode,
+                    labels: spawned.labels.clone(),
+                });
+                generation_highwater = Some(spawned.generation);
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = Some(event.clone());
+                lifecycle_recovery = None;
+            }
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                agent_runtime_id,
+                generation,
+                ..
+            } if agent_identity == identity => {
+                let Some((current_generation, current_runtime_id, _)) = &current_head else {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberRetirementStarted has no current member realization",
+                    );
+                };
+                if current_generation != generation || current_runtime_id != agent_runtime_id {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberRetirementStarted does not name the exact current runtime",
+                    );
+                }
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+                lifecycle_recovery = Some(
+                    "member retirement was durably admitted but has not completed".to_string(),
+                );
+            }
+            MobEventKind::RemoteMemberRuntimeRetired {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                ..
+            }
+            | MobEventKind::RemoteMemberSupervisorRevoked {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                ..
+            } if agent_identity == identity => {
+                if generation_highwater.is_some_and(|highwater| *generation < highwater) {
+                    // Delayed recovery progress from an older incarnation is
+                    // a proven stale no-op, just like an older terminal.
+                    continue;
+                }
+                let Some((current_generation, current_runtime_id, current_fence)) = &current_head
+                else {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "remote retirement progress has no current member realization",
+                    );
+                };
+                if current_generation != generation
+                    || current_runtime_id != agent_runtime_id
+                    || current_fence != fence_token
+                {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "remote retirement progress does not name the exact current runtime",
+                    );
+                }
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+                lifecycle_recovery =
+                    Some("remote member retirement progress is incomplete".to_string());
+            }
+            MobEventKind::MemberRetired {
+                agent_identity,
+                generation,
+                ..
+            } if agent_identity == identity
+                && current_head
+                    .as_ref()
+                    .is_some_and(|(current_generation, _, _)| current_generation == generation) =>
+            {
+                current_head = None;
+                current_evidence = None;
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+                lifecycle_recovery = None;
+            }
+            MobEventKind::MemberRetired {
+                agent_identity,
+                generation,
+                ..
+            } if agent_identity == identity => {
+                if generation_highwater.is_some_and(|highwater| *generation < highwater) {
+                    // A delayed older-generation terminal is a proven stale
+                    // no-op and cannot erase the successor realization.
+                    continue;
+                }
+                return malformed_member_target(
+                    mob_id,
+                    identity,
+                    event.cursor,
+                    "MemberRetired has no exact current generation to retire",
+                );
+            }
+            MobEventKind::MemberReset {
+                agent_identity,
+                previous_generation,
+                new_generation,
+                fence_token,
+                agent_runtime_id,
+                ..
+            } if agent_identity == identity => {
+                let Some((current_generation, _, _)) = &current_head else {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberReset has no current member realization",
+                    );
+                };
+                if current_generation != previous_generation
+                    || previous_generation.next() != Some(*new_generation)
+                    || agent_runtime_id.identity != *identity
+                    || agent_runtime_id.generation != *new_generation
+                    || fence_token.get() == 0
+                {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "MemberReset does not name an exact successor runtime",
+                    );
+                }
+                current_head = Some((*new_generation, agent_runtime_id.clone(), *fence_token));
+                generation_highwater = Some(*new_generation);
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+                lifecycle_recovery = None;
+            }
+            MobEventKind::MemberSessionBindingRecovered(recovered)
+                if recovered.agent_identity == *identity =>
+            {
+                let Some((current_generation, current_runtime_id, _)) = &current_head else {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "member session-binding recovery has no current member realization",
+                    );
+                };
+                if current_generation != &recovered.agent_runtime_id.generation
+                    || current_runtime_id != &recovered.agent_runtime_id
+                    || recovered.bridge_session_id().is_none()
+                {
+                    return malformed_member_target(
+                        mob_id,
+                        identity,
+                        event.cursor,
+                        "member session-binding recovery does not name the exact current runtime and session",
+                    );
+                }
+                if let (Some(evidence), Some(session_id)) =
+                    (&mut current_evidence, recovered.bridge_session_id())
+                {
+                    evidence.session_id = session_id.clone();
+                }
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+            }
+            MobEventKind::MobReset => {
+                current_head = None;
+                current_evidence = None;
+                generation_highwater = None;
+                latest_member_cursor = event.cursor;
+                exact_current_spawn = None;
+                lifecycle_recovery = None;
+            }
+            _ => {}
+        }
+    }
+
+    let present = current_head.is_some();
+    let version = identity_member_target_version(mob_id, identity, present, latest_member_cursor);
+    let observation = if let Some(detail) = lifecycle_recovery {
+        IdentityMemberTargetObservation::Recovering { version, detail }
+    } else if present {
+        let Some(evidence) = current_evidence else {
+            return malformed_member_target(
+                mob_id,
+                identity,
+                latest_member_cursor,
+                "present member realization is missing its desired-state evidence",
+            );
+        };
+        IdentityMemberTargetObservation::Present { version, evidence }
+    } else {
+        IdentityMemberTargetObservation::Absent {
+            absence_version: version,
+        }
+    };
+    IdentityMemberTargetState {
+        observation,
+        exact_current_spawn,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IdentityWiringTargetState {
+    pub(crate) observation: IdentityWiringTargetObservation,
+}
+
+fn identity_wiring_target_version(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    reset_cursor: u64,
+    incident_edges: &BTreeSet<crate::identity::DesiredIdentityEdge>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat.mob.identity-wiring-target.v1\0");
+    digest.update((mob_id.as_str().len() as u64).to_be_bytes());
+    digest.update(mob_id.as_str().as_bytes());
+    digest.update((identity.as_str().len() as u64).to_be_bytes());
+    digest.update(identity.as_str().as_bytes());
+    digest.update(reset_cursor.to_be_bytes());
+    digest.update((incident_edges.len() as u64).to_be_bytes());
+    for edge in incident_edges {
+        digest.update((edge.a.as_str().len() as u64).to_be_bytes());
+        digest.update(edge.a.as_str().as_bytes());
+        digest.update((edge.b.as_str().len() as u64).to_be_bytes());
+        digest.update(edge.b.as_str().as_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn malformed_wiring_target(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    reset_cursor: u64,
+    incident_edges: &BTreeSet<crate::identity::DesiredIdentityEdge>,
+    detail: impl Into<String>,
+) -> IdentityWiringTargetState {
+    IdentityWiringTargetState {
+        observation: IdentityWiringTargetObservation::Malformed {
+            observed_version: Some(identity_wiring_target_version(
+                mob_id,
+                identity,
+                reset_cursor,
+                incident_edges,
+            )),
+            detail: detail.into(),
+        },
+    }
+}
+
+fn validate_stored_wiring_edge(
+    identity: &AgentIdentity,
+    a: &AgentIdentity,
+    b: &AgentIdentity,
+) -> Result<(), String> {
+    if a == identity || b == identity {
+        if a >= b {
+            return Err(
+                "identity wiring event carries a non-canonical or self-referential edge"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reduce the durable local structural wiring projection for one identity.
+///
+/// This deliberately does not route through `Roster::project`: roster member
+/// presence is a separate realization fact and can legitimately be torn from
+/// edge history. An edge remains observable until an exact `MembersUnwired`
+/// event removes it, even if either endpoint is currently absent. Events
+/// belonging to other mobs and decodable unrelated edge shapes are ignored.
+/// Malformed raw rows are classified by the backend before this reducer runs.
+pub(crate) fn identity_wiring_target_state(
+    events: &[MobEvent],
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> IdentityWiringTargetState {
+    let mob_events = events
+        .iter()
+        .filter(|event| event.mob_id == *mob_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut incident_edges = BTreeSet::new();
+    let mut reset_cursor = 0;
+
+    let apply_edge = |incident_edges: &mut BTreeSet<crate::identity::DesiredIdentityEdge>,
+                      a: &AgentIdentity,
+                      b: &AgentIdentity,
+                      adding: bool| {
+        if a != identity && b != identity {
+            return Ok(());
+        }
+        validate_stored_wiring_edge(identity, a, b)?;
+        let edge = crate::identity::DesiredIdentityEdge::new(a.clone(), b.clone())
+            .map_err(|error| error.to_string())?;
+        if adding {
+            incident_edges.insert(edge);
+        } else {
+            incident_edges.remove(&edge);
+        }
+        Ok::<(), String>(())
+    };
+    for event in &mob_events {
+        let result = match &event.kind {
+            MobEventKind::MembersWired { a, b } => apply_edge(&mut incident_edges, a, b, true),
+            MobEventKind::MembersUnwired { a, b } => apply_edge(&mut incident_edges, a, b, false),
+            MobEventKind::MembersWiredBatch { edges } => edges
+                .iter()
+                .try_for_each(|edge| apply_edge(&mut incident_edges, &edge.a, &edge.b, true)),
+            MobEventKind::MobReset => {
+                incident_edges.clear();
+                reset_cursor = event.cursor;
+                Ok(())
+            }
+            _ => Ok(()),
+        };
+        if let Err(detail) = result {
+            return malformed_wiring_target(
+                mob_id,
+                identity,
+                reset_cursor,
+                &incident_edges,
+                detail,
+            );
+        }
+    }
+
+    let version = identity_wiring_target_version(mob_id, identity, reset_cursor, &incident_edges);
+    let observation = if incident_edges.is_empty() {
+        IdentityWiringTargetObservation::Absent {
+            absence_version: version,
+        }
+    } else {
+        IdentityWiringTargetObservation::Present {
+            version,
+            incident_edges,
+        }
+    };
+    IdentityWiringTargetState { observation }
+}
+
+fn wiring_commit_repair_blocked(detail: impl Into<String>) -> IdentityWiringEventCommitOutcome {
+    IdentityWiringEventCommitOutcome::RepairBlocked {
+        evidence_digest: None,
+        detail: detail.into(),
+    }
+}
+
+#[allow(clippy::result_large_err)] // exact typed target outcome is required at this boundary
+fn proposed_identity_wiring_edge(
+    permit: &IdentityActuationPermit,
+    event: &MobEvent,
+) -> Result<(crate::identity::DesiredIdentityEdge, bool), IdentityWiringEventCommitOutcome> {
+    if permit.target != crate::identity::IdentityActuatorTarget::Wiring
+        || permit.mob_id != event.mob_id
+    {
+        return Err(wiring_commit_repair_blocked(
+            "identity wiring permit is not scoped to the proposed structural event",
+        ));
+    }
+    let (a, b, adding) = match &event.kind {
+        MobEventKind::MembersWired { a, b } => (a, b, true),
+        MobEventKind::MembersUnwired { a, b } => (a, b, false),
+        _ => {
+            return Err(wiring_commit_repair_blocked(
+                "identity wiring commit requires one MembersWired or MembersUnwired event",
+            ));
+        }
+    };
+    if a >= b || (a != &permit.identity && b != &permit.identity) {
+        return Err(wiring_commit_repair_blocked(
+            "identity wiring event is non-canonical or not incident to the permitted identity",
+        ));
+    }
+    let edge = crate::identity::DesiredIdentityEdge::new(a.clone(), b.clone())
+        .map_err(|error| wiring_commit_repair_blocked(error.to_string()))?;
+    Ok((edge, adding))
+}
+
+#[allow(clippy::result_large_err)] // exact typed target outcome is required at this boundary
+pub(crate) fn validate_identity_wiring_commit_authority(
+    permit: &IdentityActuationPermit,
+    intent: &IdentityIntentRecord,
+    lease: &IdentityLeaseRecord,
+    event: &MobEvent,
+    observed_at_ms: u64,
+) -> Result<(crate::identity::DesiredIdentityEdge, bool), IdentityWiringEventCommitOutcome> {
+    let (edge, adding) = proposed_identity_wiring_edge(permit, event)?;
+    if let Err(error) = permit.validate_for_write(observed_at_ms) {
+        return Err(IdentityWiringEventCommitOutcome::Conflict {
+            current: None,
+            detail: format!("identity wiring permit is no longer current: {error}"),
+        });
+    }
+    if let Err(error) = intent.validate() {
+        return Err(wiring_commit_repair_blocked(format!(
+            "identity wiring commit observed malformed intent authority: {error}"
+        )));
+    }
+    if intent.mob_id != permit.mob_id
+        || intent.intent.identity() != &permit.identity
+        || intent.intent_revision != permit.intent_revision
+        || intent.intent_digest != permit.intent_digest
+        || intent.authority_digest != permit.intent_authority_digest
+    {
+        return Err(IdentityWiringEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity wiring commit intent authority is stale".to_string(),
+        });
+    }
+    if adding && edge.owner() != &permit.identity {
+        return Err(wiring_commit_repair_blocked(
+            "identity wiring addition requires the lexicographic edge owner's authority",
+        ));
+    }
+    let cleanup_edges = match &intent.retirement_plan {
+        crate::identity::IdentityRetirementPlan::Targets {
+            incident_wiring, ..
+        } => incident_wiring,
+        crate::identity::IdentityRetirementPlan::NoKnownRealization => {
+            empty_identity_wiring_edges()
+        }
+    };
+    match (&intent.intent, adding) {
+        (IdentityIntent::Present { owned_wiring, .. }, true) if owned_wiring.contains(&edge) => {}
+        // Removal is a resource-local safety operation selected by the
+        // stateless generated classifier from fresh realization evidence.
+        // The store revalidates only the exact current intent, active lease,
+        // owner-only addition/either-endpoint safety removal, and target
+        // observation; it must not grow a shadow session/status classifier. A
+        // still-desired Present edge may therefore be drained after unsafe
+        // session evidence and will be re-established by a later fresh
+        // ReconcileWiring decision if it becomes safe again.
+        (IdentityIntent::Present { .. }, false) => {}
+        (IdentityIntent::Absent { .. }, false) if cleanup_edges.contains(&edge) => {}
+        (IdentityIntent::Absent { .. }, true) => {
+            return Err(wiring_commit_repair_blocked(
+                "MembersWired cannot be authorized by an absent identity intent",
+            ));
+        }
+        _ => {
+            return Err(wiring_commit_repair_blocked(
+                "identity wiring event contradicts the store-sealed desired or cleanup edge set",
+            ));
+        }
+    }
+    if let Err(error) = lease.validate() {
+        return Err(wiring_commit_repair_blocked(format!(
+            "identity wiring commit observed malformed lease authority: {error}"
+        )));
+    }
+    let Some(active) = &lease.active else {
+        return Err(IdentityWiringEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity wiring commit observed no active lease".to_string(),
+        });
+    };
+    if active.epoch != permit.lease_epoch
+        || active.holder_id != permit.lease_holder_id
+        || active.incarnation_id != permit.lease_incarnation_id
+        || active.expires_at_ms != permit.lease_expires_at_ms
+        || observed_at_ms >= active.expires_at_ms
+    {
+        return Err(IdentityWiringEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity wiring commit lease authority is stale, expired, or superseded"
+                .to_string(),
+        });
+    }
+    Ok((edge, adding))
+}
+
+fn member_commit_repair_blocked(detail: impl Into<String>) -> IdentityMemberEventCommitOutcome {
+    IdentityMemberEventCommitOutcome::RepairBlocked {
+        evidence_digest: None,
+        detail: detail.into(),
+    }
+}
+
+fn desired_member_runtime_mode(
+    member: &crate::identity::DesiredMemberSpec,
+) -> crate::runtime_mode::MobRuntimeMode {
+    match member.material.overlay.runtime_mode {
+        meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost => {
+            crate::runtime_mode::MobRuntimeMode::AutonomousHost
+        }
+        meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven => {
+            crate::runtime_mode::MobRuntimeMode::TurnDriven
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)] // exact typed target outcome is required at this boundary
+pub(crate) fn validate_identity_member_commit_authority(
+    permit: &IdentityActuationPermit,
+    intent: &IdentityIntentRecord,
+    lease: &IdentityLeaseRecord,
+    event: &MobEvent,
+    observed_at_ms: u64,
+) -> Result<(), IdentityMemberEventCommitOutcome> {
+    if permit.target != crate::identity::IdentityActuatorTarget::Member
+        || permit.mob_id != event.mob_id
+    {
+        return Err(member_commit_repair_blocked(
+            "identity member commit permit is not scoped to the proposed MemberSpawned event",
+        ));
+    }
+    if let Err(detail) =
+        validate_identity_member_spawn_event(&permit.mob_id, &permit.identity, event)
+    {
+        return Err(member_commit_repair_blocked(detail));
+    }
+    if let Err(error) = permit.validate_for_write(observed_at_ms) {
+        return Err(IdentityMemberEventCommitOutcome::Conflict {
+            current: None,
+            detail: format!("identity member actuation permit is no longer current: {error}"),
+        });
+    }
+    if let Err(error) = intent.validate() {
+        return Err(member_commit_repair_blocked(format!(
+            "identity member commit observed malformed intent authority: {error}"
+        )));
+    }
+    if intent.mob_id != permit.mob_id
+        || intent.intent.identity() != &permit.identity
+        || intent.intent_revision != permit.intent_revision
+        || intent.intent_digest != permit.intent_digest
+        || intent.authority_digest != permit.intent_authority_digest
+    {
+        return Err(IdentityMemberEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity member commit intent authority is stale".to_string(),
+        });
+    }
+    let IdentityIntent::Present {
+        session, member, ..
+    } = &intent.intent
+    else {
+        return Err(member_commit_repair_blocked(
+            "MemberSpawned finalization cannot be authorized by an absent intent",
+        ));
+    };
+    let MobEventKind::MemberSpawned(spawned) = &event.kind else {
+        return Err(member_commit_repair_blocked(
+            "identity member commit requires a MemberSpawned event",
+        ));
+    };
+    let expected_runtime_mode = desired_member_runtime_mode(member);
+    let expected_labels = member.material.overlay.labels.clone().unwrap_or_default();
+    if spawned.identity_intent_authority_digest() != Some(intent.authority_digest.as_str())
+        || spawned.role != member.material.profile_name
+        || spawned.runtime_mode != expected_runtime_mode
+        || spawned.labels != expected_labels
+        || spawned
+            .bridge_member_ref()
+            .and_then(MemberRef::bridge_session_id)
+            != Some(&session.session_id)
+    {
+        return Err(member_commit_repair_blocked(
+            "MemberSpawned payload does not match the sealed desired member/session material",
+        ));
+    }
+    if let Err(error) = lease.validate() {
+        return Err(member_commit_repair_blocked(format!(
+            "identity member commit observed malformed lease authority: {error}"
+        )));
+    }
+    let Some(active) = &lease.active else {
+        return Err(IdentityMemberEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity member commit observed no active lease".to_string(),
+        });
+    };
+    if active.epoch != permit.lease_epoch
+        || active.holder_id != permit.lease_holder_id
+        || active.incarnation_id != permit.lease_incarnation_id
+        || active.expires_at_ms != permit.lease_expires_at_ms
+        || observed_at_ms >= active.expires_at_ms
+    {
+        return Err(IdentityMemberEventCommitOutcome::Conflict {
+            current: None,
+            detail: "identity member commit lease authority is stale, expired, or superseded"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Atomic built-in capability joining the sole identity authority with the
+/// existing structural member/wiring event log. Custom storage compositions
+/// do not receive this capability because two independent trait objects cannot
+/// make the required one-transaction guarantee.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub(crate) trait MobIdentityMemberStore: Send + Sync {
+    async fn observe_identity_member_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityMemberTargetObservation, MobStoreError>;
+
+    async fn commit_identity_member_spawned(
+        &self,
+        permit: &IdentityActuationPermit,
+        event: &NewMobEvent,
+    ) -> Result<IdentityMemberEventCommitOutcome, MobStoreError>;
+
+    async fn observe_identity_wiring_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityWiringTargetObservation, MobStoreError>;
+
+    async fn commit_identity_wiring_event(
+        &self,
+        permit: &IdentityActuationPermit,
+        event: &NewMobEvent,
+    ) -> Result<IdentityWiringEventCommitOutcome, MobStoreError>;
+}
+
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn identity_runtime_target_observation_version(
+    observed: &meerkat_runtime::RuntimeSessionLifecycleObservation,
+) -> IdentityTargetObservationVersion {
+    match observed.lifecycle().expected_version() {
+        meerkat_runtime::store::MachineLifecycleExpectedVersion::Missing => {
+            IdentityTargetObservationVersion::Absent {
+                absence_version: format!("runtime-lifecycle-absent:{}", observed.runtime_id()),
+            }
+        }
+        meerkat_runtime::store::MachineLifecycleExpectedVersion::Version(version) => {
+            IdentityTargetObservationVersion::Version {
+                version: version.as_str().to_string(),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn validate_identity_runtime_target_binding(
+    permit: &IdentityActuationPermit,
+    expected_session: &DesiredSessionTarget,
+    observed: &meerkat_runtime::RuntimeSessionLifecycleObservation,
+) -> Result<(), MobStoreError> {
+    let expected_target = identity_runtime_target_observation_version(observed);
+    if permit.target != crate::identity::IdentityActuatorTarget::Runtime
+        || observed.session_id() != &expected_session.session_id
+        || permit.target_observation != expected_target
+    {
+        return Err(MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest: observed.lifecycle().evidence_digest().map(str::to_string),
+            detail: "runtime write fence is not bound to the exact runtime target observation"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn validate_identity_runtime_write_authority(
+    permit: &IdentityActuationPermit,
+    expected_session: &DesiredSessionTarget,
+    intent: Option<&IdentityIntentRecord>,
+    lease: Option<&IdentityLeaseRecord>,
+    observed_at_ms: u64,
+) -> Result<(), MobStoreError> {
+    permit.validate_for_write(observed_at_ms).map_err(|error| {
+        MobStoreError::CasConflict(format!(
+            "identity runtime actuation permit is no longer current: {error}"
+        ))
+    })?;
+
+    let intent = intent.ok_or_else(|| {
+        MobStoreError::CasConflict(
+            "identity runtime actuation observed no current intent".to_string(),
+        )
+    })?;
+    intent
+        .validate()
+        .map_err(|error| MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest: None,
+            detail: format!("identity runtime actuation observed malformed intent: {error}"),
+        })?;
+    if intent.mob_id != permit.mob_id
+        || intent.intent.identity() != &permit.identity
+        || intent.intent_revision != permit.intent_revision
+        || intent.intent_digest != permit.intent_digest
+        || intent.authority_digest != permit.intent_authority_digest
+    {
+        return Err(MobStoreError::CasConflict(
+            "identity runtime actuation intent authority is stale".to_string(),
+        ));
+    }
+    match &intent.intent {
+        IdentityIntent::Present { session, .. } if session == expected_session => {}
+        IdentityIntent::Present { .. } => {
+            return Err(MobStoreError::CasConflict(
+                "identity runtime actuation session target is stale".to_string(),
+            ));
+        }
+        IdentityIntent::Absent { .. } => {
+            return Err(MobStoreError::IdentityAuthorityBlocked {
+                evidence_digest: None,
+                detail: "runtime registration cannot be authorized by an absent identity intent"
+                    .to_string(),
+            });
+        }
+    }
+
+    let lease = lease.ok_or_else(|| {
+        MobStoreError::CasConflict(
+            "identity runtime actuation observed no current lease".to_string(),
+        )
+    })?;
+    lease
+        .validate()
+        .map_err(|error| MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest: None,
+            detail: format!("identity runtime actuation observed malformed lease: {error}"),
+        })?;
+    let active = lease.active.as_ref().ok_or_else(|| {
+        MobStoreError::CasConflict(
+            "identity runtime actuation observed no active lease".to_string(),
+        )
+    })?;
+    if active.epoch != permit.lease_epoch
+        || active.holder_id != permit.lease_holder_id
+        || active.incarnation_id != permit.lease_incarnation_id
+        || active.expires_at_ms != permit.lease_expires_at_ms
+        || observed_at_ms >= active.expires_at_ms
+    {
+        return Err(MobStoreError::CasConflict(
+            "identity runtime actuation lease authority is stale, expired, or superseded"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn identity_runtime_fence_error(
+    error: MobStoreError,
+) -> Result<meerkat_runtime::RuntimeStoreWriteFenceOutcome, meerkat_runtime::RuntimeStoreError> {
+    match error {
+        MobStoreError::CasConflict(detail) | MobStoreError::NotFound(detail) => {
+            Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Conflict { reason: detail })
+        }
+        MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest,
+            detail,
+        } => Err(
+            meerkat_runtime::RuntimeStoreError::MachineLifecycleRepairBlocked {
+                evidence_digest,
+                detail,
+            },
+        ),
+        MobStoreError::Serialization(detail) => Err(
+            meerkat_runtime::RuntimeStoreError::MachineLifecycleRepairBlocked {
+                evidence_digest: None,
+                detail,
+            },
+        ),
+        other => Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+            reason: other.to_string(),
+        }),
+    }
+}
+
+/// First-class persistence owner for level-triggered mob identity intent.
+///
+/// This is intentionally separate from [`MobRuntimeMetadataStore`]: intent,
+/// leases, and immutable operation custody are semantic convergence inputs,
+/// while runtime metadata contains observed-realization projections. Built-in
+/// SQLite composition may share one database, but callers must inject this
+/// capability explicitly through `MobStorage`.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobIdentityStore: Send + Sync {
+    /// Prepare an observation-bound runtime write fence.
+    ///
+    /// Built-in stores retain their identity-authority serialization guard
+    /// continuously across each synchronous target callback. Custom stores
+    /// fail closed unless they can provide the same atomic boundary.
+    #[cfg(feature = "runtime-adapter")]
+    fn prepare_runtime_write_fence(
+        &self,
+        _permit: IdentityActuationPermit,
+        _expected_session: DesiredSessionTarget,
+        _observed: &meerkat_runtime::RuntimeSessionLifecycleObservation,
+    ) -> Result<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>, MobStoreError> {
+        Err(MobStoreError::IdentityRuntimeWriteFenceUnavailable)
+    }
+
+    async fn observe_identity_declaration_scope(
+        &self,
+        mob_id: &MobId,
+        scope_id: &crate::identity::IdentityDeclarationScopeId,
+    ) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError>;
+
+    async fn observe_identity_intent(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityIntentRecord>, MobStoreError>;
+
+    async fn list_identity_intents(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<
+        BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>>,
+        MobStoreError,
+    >;
+
+    /// Return the immutable original result for an exact declaration
+    /// operation before the actor recompiles portable material. This protects
+    /// lost-ACK replay from profile, skill, or base-prompt drift.
+    ///
+    /// The store validates that current scope/intent authority is a monotonic
+    /// descendant of the receipt. A reused operation id with a different
+    /// request digest is a CAS conflict; `None` means the exact slot is absent.
+    async fn replay_identity_declaration(
+        &self,
+        mob_id: &MobId,
+        scope_id: &crate::identity::IdentityDeclarationScopeId,
+        operation_id: &meerkat_core::ops::OperationId,
+        request_digest: &str,
+    ) -> Result<Option<IdentityDeclarationManifestApplyOutcome>, MobStoreError>;
+
+    /// One transaction validates the scope CAS, reuses or allocates targets,
+    /// seals all affected intents, optionally installs a verified legacy
+    /// lease high-water for a previously missing identity, advances the scope
+    /// head, and inserts the immutable operation receipt. A legacy seed is
+    /// accepted only when both intent and lease rows are missing; its snapshot
+    /// fence is audit-only and never participates in checkpoint coherence.
+    /// No prepared/shadow rows exist.
+    async fn apply_identity_declaration(
+        &self,
+        mob_id: &MobId,
+        plan: &IdentityDeclarationApplyPlan,
+    ) -> Result<IdentityDeclarationManifestApplyOutcome, MobStoreError>;
+
+    async fn observe_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityLeaseRecord>, MobStoreError>;
+
+    async fn claim_or_renew_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        holder_id: &str,
+        incarnation_id: &str,
+        ttl_ms: u64,
+    ) -> Result<IdentityLeaseClaimOutcome, MobStoreError>;
+
+    async fn release_identity_lease(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        expected: &IdentityLeaseClaim,
+    ) -> Result<bool, MobStoreError>;
+
+    /// Revalidate the desired-state and lease half of one ephemeral actuator
+    /// permit against the store-owned clock. Target writers still own their
+    /// resource-local observation CAS; this check prevents an expired,
+    /// superseded, or previous-incarnation controller from reaching that
+    /// writer at all.
+    async fn validate_identity_actuation_permit(
+        &self,
+        permit: &IdentityActuationPermit,
+    ) -> Result<(), MobStoreError>;
+
+    async fn observe_identity_operation_receipt(
+        &self,
+        mob_id: &MobId,
+        subject: &IdentityOperationSubject,
+        slot: &IdentityOperationSlot,
+    ) -> Result<IdentityStoredObservation<IdentityOperationReceipt>, MobStoreError>;
+
+    async fn insert_identity_operation_receipt_if_absent(
+        &self,
+        receipt: &IdentityOperationReceipt,
+        permit: &IdentityActuationPermit,
+    ) -> Result<IdentityOperationReceiptInsertOutcome, MobStoreError>;
+}
+
+/// Replaceable identity convergence diagnostics.
+///
+/// This projection capability is intentionally separate from
+/// [`MobIdentityStore`]. Status never participates in a desired-state CAS,
+/// grants no repair authority, and is never read by the classifier.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobIdentityStatusStore: Send + Sync {
+    async fn load_identity_convergence_status(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityStoredObservation<IdentityConvergenceStatus>, MobStoreError>;
+
+    async fn list_identity_convergence_statuses(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<
+        BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityConvergenceStatus>>,
+        MobStoreError,
+    >;
+
+    async fn replace_identity_convergence_status(
+        &self,
+        mob_id: &MobId,
+        status: &IdentityConvergenceStatus,
+    ) -> Result<(), MobStoreError>;
 }
 
 /// Trait for persisting and querying flow runs.

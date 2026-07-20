@@ -919,6 +919,13 @@ pub struct MemberSpawnedEvent {
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
     pub(crate) bridge_member_ref: Option<MemberRef>,
+    /// Exact sealed identity authority that authorized this realization.
+    ///
+    /// This is replay-only provenance, not public event material. Older
+    /// journals decode it as absent and therefore classify as divergent from
+    /// a current identity intent instead of being assumed to match.
+    #[serde(skip, default)]
+    pub(crate) identity_intent_authority_digest: Option<String>,
     /// Controller-minted id of the canonical placed-spawn carrier.
     ///
     /// Like `bridge_member_ref`, this is stored only by the internal event
@@ -955,6 +962,7 @@ impl MemberSpawnedEvent {
             effective_model_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
+            identity_intent_authority_digest: None,
             placed_spawn_id: None,
             member_peer_endpoint: None,
         }
@@ -975,6 +983,18 @@ impl MemberSpawnedEvent {
 
     pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
         self.bridge_member_ref.as_ref()
+    }
+
+    pub(crate) fn with_identity_intent_authority_digest(
+        mut self,
+        authority_digest: Option<String>,
+    ) -> Self {
+        self.identity_intent_authority_digest = authority_digest;
+        self
+    }
+
+    pub(crate) fn identity_intent_authority_digest(&self) -> Option<&str> {
+        self.identity_intent_authority_digest.as_deref()
     }
 
     pub(crate) fn with_placed_spawn_id(
@@ -1213,6 +1233,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         );
     }
     if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(authority_digest) = member_spawned.identity_intent_authority_digest()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "identity_intent_authority_digest".to_string(),
+            serde_json::to_value(authority_digest)?,
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(placed_spawn_id) = member_spawned.placed_spawn_id()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -1336,6 +1365,18 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| kind.remove("bridge_member_ref"))
         .map(serde_json::from_value)
         .transpose()?;
+    let identity_intent_authority_digest = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("identity_intent_authority_digest")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
     let placed_spawn_id = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -1445,6 +1486,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
+    }
+    if let Some(authority_digest) = identity_intent_authority_digest
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.identity_intent_authority_digest = Some(authority_digest);
     }
     if let Some(placed_spawn_id) = placed_spawn_id
         && let Some(member_spawned) = event.kind.member_spawned_mut()

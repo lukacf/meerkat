@@ -25,8 +25,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::TranscriptRewriteSelection;
 use crate::session::{
-    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SYSTEM_CONTEXT_SEPARATOR, SessionMeta,
-    TranscriptRevisionBody,
+    SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+    SYSTEM_CONTEXT_SEPARATOR, SessionMeta, TranscriptRevisionBody,
 };
 use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, SystemMessage, Usage};
@@ -1667,8 +1667,21 @@ impl SessionHead {
     ) -> Result<Self, SessionStoreError> {
         let head_revision =
             transcript_messages_digest(session.messages()).map_err(SessionStoreError::from)?;
+        let history_digest =
+            crate::session_transcript_history_checkpoint_digest(session).map_err(|error| {
+                SessionStoreError::Serialization(format!(
+                    "failed to derive transcript-history checkpoint witness: {error}"
+                ))
+            })?;
         let mut metadata = session.metadata().clone();
         metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        metadata.remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
+        if let Some(history_digest) = history_digest {
+            metadata.insert(
+                SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY.to_string(),
+                serde_json::Value::String(history_digest.as_str().to_string()),
+            );
+        }
         Ok(Self {
             id: session.id().clone(),
             version: session.version(),
@@ -4342,7 +4355,17 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn session_head_from_session_strips_history_state_and_round_trips() {
-        let (_, compacted, _) = compacted_session_fixture();
+        let (_, mut compacted, _) = compacted_session_fixture();
+        let stamp = crate::SessionCheckpointStamp::root(
+            &compacted,
+            crate::SessionCheckpointProvenance::SessionCreated,
+        )
+        .expect("typed root stamp");
+        compacted
+            .install_checkpoint_stamp(stamp.clone())
+            .expect("install typed root stamp");
+        let full_checkpoint_digest =
+            crate::session_checkpoint_digest(&compacted).expect("full checkpoint digest");
         assert!(
             compacted
                 .metadata()
@@ -4356,6 +4379,11 @@ mod tests {
                 .metadata
                 .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
             "SessionHead::from_session must strip the inline history state"
+        );
+        assert!(
+            head.metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
+            "head must retain the semantic history witness"
         );
         assert_eq!(head.message_count, compacted.messages().len() as u64);
         assert_eq!(head.rewrite_count, 1);
@@ -4387,6 +4415,15 @@ mod tests {
         );
         assert_eq!(slim.messages().len(), compacted.messages().len());
         assert_eq!(slim.id(), compacted.id());
+        assert_eq!(
+            crate::session_checkpoint_digest(&slim).expect("slim checkpoint digest"),
+            full_checkpoint_digest,
+            "full and out-of-line history representations must have one checkpoint identity"
+        );
+        assert_eq!(
+            slim.try_checkpoint_state().expect("verify slim stamp"),
+            crate::SessionCheckpointState::Verified(stamp)
+        );
     }
 
     #[test]

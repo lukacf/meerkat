@@ -1686,6 +1686,688 @@ impl std::fmt::Display for HostBindPhase {
 pub type HostBindingGenerationTombstone =
     meerkat_machine_schema::catalog::dsl::mob_machine::HostBindingGenerationTombstone;
 pub type HostId = meerkat_machine_schema::catalog::dsl::mob_machine::HostId;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityAuthorityCondition {
+    #[default]
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Malformed")]
+    Malformed,
+    #[serde(rename = "PresentCreateIfAbsent")]
+    PresentCreateIfAbsent,
+    #[serde(rename = "PresentRequireExisting")]
+    PresentRequireExisting,
+    #[serde(rename = "Absent")]
+    Absent,
+}
+impl IdentityAuthorityCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Missing => "Missing",
+            Self::Malformed => "Malformed",
+            Self::PresentCreateIfAbsent => "PresentCreateIfAbsent",
+            Self::PresentRequireExisting => "PresentRequireExisting",
+            Self::Absent => "Absent",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityAuthorityCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unavailable" => Ok(Self::Unavailable),
+            "Missing" => Ok(Self::Missing),
+            "Malformed" => Ok(Self::Malformed),
+            "PresentCreateIfAbsent" => Ok(Self::PresentCreateIfAbsent),
+            "PresentRequireExisting" => Ok(Self::PresentRequireExisting),
+            "Absent" => Ok(Self::Absent),
+            other => Err(format!(
+                "invalid IdentityAuthorityCondition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityAuthorityCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityAuthorityCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityExternalCeremonyCondition {
+    #[default]
+    #[serde(rename = "NotRequired")]
+    NotRequired,
+    #[serde(rename = "FreshAvailable")]
+    FreshAvailable,
+    #[serde(rename = "TemporarilyUnavailable")]
+    TemporarilyUnavailable,
+    #[serde(rename = "AwaitFresh")]
+    AwaitFresh,
+    #[serde(rename = "SpentOrUnknown")]
+    SpentOrUnknown,
+}
+impl IdentityExternalCeremonyCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "NotRequired",
+            Self::FreshAvailable => "FreshAvailable",
+            Self::TemporarilyUnavailable => "TemporarilyUnavailable",
+            Self::AwaitFresh => "AwaitFresh",
+            Self::SpentOrUnknown => "SpentOrUnknown",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityExternalCeremonyCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotRequired" => Ok(Self::NotRequired),
+            "FreshAvailable" => Ok(Self::FreshAvailable),
+            "TemporarilyUnavailable" => Ok(Self::TemporarilyUnavailable),
+            "AwaitFresh" => Ok(Self::AwaitFresh),
+            "SpentOrUnknown" => Ok(Self::SpentOrUnknown),
+            other => Err(format!(
+                "invalid IdentityExternalCeremonyCondition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityExternalCeremonyCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityExternalCeremonyCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityExternalTrustCondition {
+    #[default]
+    #[serde(rename = "NotRequired")]
+    NotRequired,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Matching")]
+    Matching,
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Contradictory")]
+    Contradictory,
+    #[serde(rename = "Indeterminate")]
+    Indeterminate,
+    #[serde(rename = "Malformed")]
+    Malformed,
+}
+impl IdentityExternalTrustCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "NotRequired",
+            Self::Unavailable => "Unavailable",
+            Self::Matching => "Matching",
+            Self::Absent => "Absent",
+            Self::Contradictory => "Contradictory",
+            Self::Indeterminate => "Indeterminate",
+            Self::Malformed => "Malformed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityExternalTrustCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotRequired" => Ok(Self::NotRequired),
+            "Unavailable" => Ok(Self::Unavailable),
+            "Matching" => Ok(Self::Matching),
+            "Absent" => Ok(Self::Absent),
+            "Contradictory" => Ok(Self::Contradictory),
+            "Indeterminate" => Ok(Self::Indeterminate),
+            "Malformed" => Ok(Self::Malformed),
+            other => Err(format!(
+                "invalid IdentityExternalTrustCondition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityExternalTrustCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityExternalTrustCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityInitialDeliveryCondition {
+    #[default]
+    #[serde(rename = "NotRequired")]
+    NotRequired,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "ProvenAbsent")]
+    ProvenAbsent,
+    #[serde(rename = "AcceptedPendingExact")]
+    AcceptedPendingExact,
+    #[serde(rename = "CommittedExact")]
+    CommittedExact,
+    #[serde(rename = "ContentOnlyMatch")]
+    ContentOnlyMatch,
+    #[serde(rename = "OperationCollision")]
+    OperationCollision,
+    #[serde(rename = "Contradictory")]
+    Contradictory,
+    #[serde(rename = "Indeterminate")]
+    Indeterminate,
+    #[serde(rename = "Malformed")]
+    Malformed,
+}
+impl IdentityInitialDeliveryCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "NotRequired",
+            Self::Unavailable => "Unavailable",
+            Self::ProvenAbsent => "ProvenAbsent",
+            Self::AcceptedPendingExact => "AcceptedPendingExact",
+            Self::CommittedExact => "CommittedExact",
+            Self::ContentOnlyMatch => "ContentOnlyMatch",
+            Self::OperationCollision => "OperationCollision",
+            Self::Contradictory => "Contradictory",
+            Self::Indeterminate => "Indeterminate",
+            Self::Malformed => "Malformed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityInitialDeliveryCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotRequired" => Ok(Self::NotRequired),
+            "Unavailable" => Ok(Self::Unavailable),
+            "ProvenAbsent" => Ok(Self::ProvenAbsent),
+            "AcceptedPendingExact" => Ok(Self::AcceptedPendingExact),
+            "CommittedExact" => Ok(Self::CommittedExact),
+            "ContentOnlyMatch" => Ok(Self::ContentOnlyMatch),
+            "OperationCollision" => Ok(Self::OperationCollision),
+            "Contradictory" => Ok(Self::Contradictory),
+            "Indeterminate" => Ok(Self::Indeterminate),
+            "Malformed" => Ok(Self::Malformed),
+            other => Err(format!(
+                "invalid IdentityInitialDeliveryCondition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityInitialDeliveryCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityInitialDeliveryCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityLeaseCondition {
+    #[default]
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Malformed")]
+    Malformed,
+    #[serde(rename = "HeldByCurrentIncarnation")]
+    HeldByCurrentIncarnation,
+    #[serde(rename = "HeldByOtherLiveIncarnation")]
+    HeldByOtherLiveIncarnation,
+    #[serde(rename = "HeldByExpiredIncarnation")]
+    HeldByExpiredIncarnation,
+}
+impl IdentityLeaseCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Missing => "Missing",
+            Self::Malformed => "Malformed",
+            Self::HeldByCurrentIncarnation => "HeldByCurrentIncarnation",
+            Self::HeldByOtherLiveIncarnation => "HeldByOtherLiveIncarnation",
+            Self::HeldByExpiredIncarnation => "HeldByExpiredIncarnation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityLeaseCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unavailable" => Ok(Self::Unavailable),
+            "Missing" => Ok(Self::Missing),
+            "Malformed" => Ok(Self::Malformed),
+            "HeldByCurrentIncarnation" => Ok(Self::HeldByCurrentIncarnation),
+            "HeldByOtherLiveIncarnation" => Ok(Self::HeldByOtherLiveIncarnation),
+            "HeldByExpiredIncarnation" => Ok(Self::HeldByExpiredIncarnation),
+            other => Err(format!("invalid IdentityLeaseCondition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityLeaseCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityLeaseCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityReceiptCondition {
+    #[default]
+    #[serde(rename = "NotRequired")]
+    NotRequired,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Matching")]
+    Matching,
+    #[serde(rename = "Conflicting")]
+    Conflicting,
+    #[serde(rename = "Malformed")]
+    Malformed,
+}
+impl IdentityReceiptCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "NotRequired",
+            Self::Unavailable => "Unavailable",
+            Self::Missing => "Missing",
+            Self::Matching => "Matching",
+            Self::Conflicting => "Conflicting",
+            Self::Malformed => "Malformed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityReceiptCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotRequired" => Ok(Self::NotRequired),
+            "Unavailable" => Ok(Self::Unavailable),
+            "Missing" => Ok(Self::Missing),
+            "Matching" => Ok(Self::Matching),
+            "Conflicting" => Ok(Self::Conflicting),
+            "Malformed" => Ok(Self::Malformed),
+            other => Err(format!("invalid IdentityReceiptCondition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityReceiptCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityReceiptCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityReconcileDecision {
+    #[default]
+    #[serde(rename = "Backoff")]
+    Backoff,
+    #[serde(rename = "RepairBlocked")]
+    RepairBlocked,
+    #[serde(rename = "AcquireLease")]
+    AcquireLease,
+    #[serde(rename = "AwaitLease")]
+    AwaitLease,
+    #[serde(rename = "SealRetirementProven")]
+    SealRetirementProven,
+    #[serde(rename = "SealSessionCreationConsumed")]
+    SealSessionCreationConsumed,
+    #[serde(rename = "EnsureSessionAuthority")]
+    EnsureSessionAuthority,
+    #[serde(rename = "EnsureRuntimeRegistration")]
+    EnsureRuntimeRegistration,
+    #[serde(rename = "AwaitExternalBindingCeremony")]
+    AwaitExternalBindingCeremony,
+    #[serde(rename = "EnsureExternalBindingReceipt")]
+    EnsureExternalBindingReceipt,
+    #[serde(rename = "EnsureExternalBinding")]
+    EnsureExternalBinding,
+    #[serde(rename = "EnsureMemberMaterialization")]
+    EnsureMemberMaterialization,
+    #[serde(rename = "EnsureInitialDeliveryReceipt")]
+    EnsureInitialDeliveryReceipt,
+    #[serde(rename = "EnsureInitialDelivery")]
+    EnsureInitialDelivery,
+    #[serde(rename = "AwaitInitialDelivery")]
+    AwaitInitialDelivery,
+    #[serde(rename = "ReconcileWiring")]
+    ReconcileWiring,
+    #[serde(rename = "RetireMemberMaterialization")]
+    RetireMemberMaterialization,
+    #[serde(rename = "RetireRuntimeRegistration")]
+    RetireRuntimeRegistration,
+    #[serde(rename = "ReleaseSessionAuthority")]
+    ReleaseSessionAuthority,
+    #[serde(rename = "Converged")]
+    Converged,
+    #[serde(rename = "Tombstoned")]
+    Tombstoned,
+    #[serde(rename = "Quarantined")]
+    Quarantined,
+}
+impl IdentityReconcileDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backoff => "Backoff",
+            Self::RepairBlocked => "RepairBlocked",
+            Self::AcquireLease => "AcquireLease",
+            Self::AwaitLease => "AwaitLease",
+            Self::SealRetirementProven => "SealRetirementProven",
+            Self::SealSessionCreationConsumed => "SealSessionCreationConsumed",
+            Self::EnsureSessionAuthority => "EnsureSessionAuthority",
+            Self::EnsureRuntimeRegistration => "EnsureRuntimeRegistration",
+            Self::AwaitExternalBindingCeremony => "AwaitExternalBindingCeremony",
+            Self::EnsureExternalBindingReceipt => "EnsureExternalBindingReceipt",
+            Self::EnsureExternalBinding => "EnsureExternalBinding",
+            Self::EnsureMemberMaterialization => "EnsureMemberMaterialization",
+            Self::EnsureInitialDeliveryReceipt => "EnsureInitialDeliveryReceipt",
+            Self::EnsureInitialDelivery => "EnsureInitialDelivery",
+            Self::AwaitInitialDelivery => "AwaitInitialDelivery",
+            Self::ReconcileWiring => "ReconcileWiring",
+            Self::RetireMemberMaterialization => "RetireMemberMaterialization",
+            Self::RetireRuntimeRegistration => "RetireRuntimeRegistration",
+            Self::ReleaseSessionAuthority => "ReleaseSessionAuthority",
+            Self::Converged => "Converged",
+            Self::Tombstoned => "Tombstoned",
+            Self::Quarantined => "Quarantined",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityReconcileDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Backoff" => Ok(Self::Backoff),
+            "RepairBlocked" => Ok(Self::RepairBlocked),
+            "AcquireLease" => Ok(Self::AcquireLease),
+            "AwaitLease" => Ok(Self::AwaitLease),
+            "SealRetirementProven" => Ok(Self::SealRetirementProven),
+            "SealSessionCreationConsumed" => Ok(Self::SealSessionCreationConsumed),
+            "EnsureSessionAuthority" => Ok(Self::EnsureSessionAuthority),
+            "EnsureRuntimeRegistration" => Ok(Self::EnsureRuntimeRegistration),
+            "AwaitExternalBindingCeremony" => Ok(Self::AwaitExternalBindingCeremony),
+            "EnsureExternalBindingReceipt" => Ok(Self::EnsureExternalBindingReceipt),
+            "EnsureExternalBinding" => Ok(Self::EnsureExternalBinding),
+            "EnsureMemberMaterialization" => Ok(Self::EnsureMemberMaterialization),
+            "EnsureInitialDeliveryReceipt" => Ok(Self::EnsureInitialDeliveryReceipt),
+            "EnsureInitialDelivery" => Ok(Self::EnsureInitialDelivery),
+            "AwaitInitialDelivery" => Ok(Self::AwaitInitialDelivery),
+            "ReconcileWiring" => Ok(Self::ReconcileWiring),
+            "RetireMemberMaterialization" => Ok(Self::RetireMemberMaterialization),
+            "RetireRuntimeRegistration" => Ok(Self::RetireRuntimeRegistration),
+            "ReleaseSessionAuthority" => Ok(Self::ReleaseSessionAuthority),
+            "Converged" => Ok(Self::Converged),
+            "Tombstoned" => Ok(Self::Tombstoned),
+            "Quarantined" => Ok(Self::Quarantined),
+            other => Err(format!("invalid IdentityReconcileDecision value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityReconcileDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityReconcileDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityResourceCondition {
+    #[default]
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Matching")]
+    Matching,
+    #[serde(rename = "Divergent")]
+    Divergent,
+    #[serde(rename = "Malformed")]
+    Malformed,
+}
+impl IdentityResourceCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Missing => "Missing",
+            Self::Matching => "Matching",
+            Self::Divergent => "Divergent",
+            Self::Malformed => "Malformed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityResourceCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unavailable" => Ok(Self::Unavailable),
+            "Missing" => Ok(Self::Missing),
+            "Matching" => Ok(Self::Matching),
+            "Divergent" => Ok(Self::Divergent),
+            "Malformed" => Ok(Self::Malformed),
+            other => Err(format!("invalid IdentityResourceCondition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityResourceCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityResourceCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentitySessionCondition {
+    #[default]
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Matching")]
+    Matching,
+    #[serde(rename = "RecoverableDivergence")]
+    RecoverableDivergence,
+    #[serde(rename = "AmbiguousDivergence")]
+    AmbiguousDivergence,
+    #[serde(rename = "Malformed")]
+    Malformed,
+    #[serde(rename = "IrrecoverablyCorrupt")]
+    IrrecoverablyCorrupt,
+}
+impl IdentitySessionCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Missing => "Missing",
+            Self::Matching => "Matching",
+            Self::RecoverableDivergence => "RecoverableDivergence",
+            Self::AmbiguousDivergence => "AmbiguousDivergence",
+            Self::Malformed => "Malformed",
+            Self::IrrecoverablyCorrupt => "IrrecoverablyCorrupt",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentitySessionCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unavailable" => Ok(Self::Unavailable),
+            "Missing" => Ok(Self::Missing),
+            "Matching" => Ok(Self::Matching),
+            "RecoverableDivergence" => Ok(Self::RecoverableDivergence),
+            "AmbiguousDivergence" => Ok(Self::AmbiguousDivergence),
+            "Malformed" => Ok(Self::Malformed),
+            "IrrecoverablyCorrupt" => Ok(Self::IrrecoverablyCorrupt),
+            other => Err(format!("invalid IdentitySessionCondition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentitySessionCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentitySessionCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -6158,6 +6840,24 @@ pub mod inputs {
         pub rejection_cause: MobBridgeRejectionCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyIdentityReconciliation {
+        pub intent: IdentityAuthorityCondition,
+        pub lease: IdentityLeaseCondition,
+        pub external_binding_required: bool,
+        pub initial_delivery_required: bool,
+        pub session_creation_receipt: IdentityReceiptCondition,
+        pub retirement_receipt: IdentityReceiptCondition,
+        pub session: IdentitySessionCondition,
+        pub runtime: IdentityResourceCondition,
+        pub member: IdentityResourceCondition,
+        pub external_binding_receipt: IdentityReceiptCondition,
+        pub external_trust: IdentityExternalTrustCondition,
+        pub external_ceremony: IdentityExternalCeremonyCondition,
+        pub initial_delivery_receipt: IdentityReceiptCondition,
+        pub initial_delivery: IdentityInitialDeliveryCondition,
+        pub wiring: IdentityResourceCondition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -7141,6 +7841,7 @@ pub enum Input {
     ClassifyMemberOperationEligibility(inputs::ClassifyMemberOperationEligibility),
     ClassifyBridgeRejectionRecovery(inputs::ClassifyBridgeRejectionRecovery),
     ClassifyPendingSupervisorAcceptance(inputs::ClassifyPendingSupervisorAcceptance),
+    ClassifyIdentityReconciliation(inputs::ClassifyIdentityReconciliation),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     ClassifyRetirePendingSpawnDisposition(inputs::ClassifyRetirePendingSpawnDisposition),
@@ -7360,6 +8061,7 @@ impl Input {
             Self::ClassifyPendingSupervisorAcceptance(_) => {
                 InputKind::ClassifyPendingSupervisorAcceptance
             }
+            Self::ClassifyIdentityReconciliation(_) => InputKind::ClassifyIdentityReconciliation,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::ClassifyRetirePendingSpawnDisposition(_) => {
@@ -7624,6 +8326,7 @@ pub enum InputKind {
     ClassifyMemberOperationEligibility,
     ClassifyBridgeRejectionRecovery,
     ClassifyPendingSupervisorAcceptance,
+    ClassifyIdentityReconciliation,
     EnsureMember,
     Reconcile,
     ClassifyRetirePendingSpawnDisposition,
@@ -8812,6 +9515,10 @@ pub mod effects {
         pub verdict: MobPendingSupervisorAcceptanceKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityReconciliationClassified {
+        pub decision: IdentityReconcileDecision,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FrameSeedConfirmed {
         pub frame_id: FrameId,
         pub disposition: MobFrameSeedDisposition,
@@ -9331,6 +10038,7 @@ pub enum Effect {
     ),
     BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
     PendingSupervisorAcceptanceClassified(effects::PendingSupervisorAcceptanceClassified),
+    IdentityReconciliationClassified(effects::IdentityReconciliationClassified),
     FrameSeedConfirmed(effects::FrameSeedConfirmed),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
@@ -9473,6 +10181,7 @@ pub enum EffectKind {
     RetireAbsentPendingSpawnPreservationResolved,
     BridgeRejectionRecoveryClassified,
     PendingSupervisorAcceptanceClassified,
+    IdentityReconciliationClassified,
     FrameSeedConfirmed,
     WiringGraphChanged,
     MemberSessionBindingChanged,
@@ -9836,6 +10545,10 @@ pub enum TransitionId {
     ClassifyPendingSupervisorAcceptanceFatalStopped,
     ClassifyPendingSupervisorAcceptanceFatalCompleted,
     ClassifyPendingSupervisorAcceptanceFatalDestroyed,
+    ClassifyIdentityReconciliationRunning,
+    ClassifyIdentityReconciliationStopped,
+    ClassifyIdentityReconciliationCompleted,
+    ClassifyIdentityReconciliationDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,

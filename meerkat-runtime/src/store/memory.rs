@@ -6,6 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
@@ -15,9 +17,13 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, InputStateBatchCasOutcome, MachineLifecycleCommit,
-    MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
-    SessionDelta, prepare_input_state_batch_cas,
+    AuthOAuthFlowSnapshotUpdate, FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome,
+    MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
+    MachineLifecycleObservation, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
+    RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
+    classify_machine_lifecycle_record, decoded_prepared_machine_lifecycle_replacement,
+    execute_runtime_store_write_fence, prepare_input_state_batch_cas,
+    prepare_machine_lifecycle_replacement, validate_machine_lifecycle_replacement,
 };
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -59,8 +65,10 @@ struct Inner {
     /// `clear_session_snapshot_if_current`, cleared whenever a live snapshot is
     /// written for the runtime.
     projection_quarantine: HashSet<String>,
-    /// Persisted machine lifecycle snapshots.
-    runtime_lifecycle: HashMap<String, MachineLifecycleSnapshot>,
+    /// Exact persisted machine-lifecycle bytes. Raw storage is required so
+    /// malformed and unsupported rows remain observable instead of being
+    /// normalized by an eager typed decode.
+    runtime_lifecycle: HashMap<String, Vec<u8>>,
     /// Persisted ops lifecycle snapshots.
     ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
     /// Exact ops epochs retired by atomic unregister finalization. Tombstones
@@ -80,6 +88,10 @@ pub struct InMemoryRuntimeStore {
     input_state_batch_cas_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
     input_state_batch_cas_after_commit: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
+    #[cfg(test)]
+    machine_lifecycle_cas_conflicts_remaining: Arc<AtomicUsize>,
+    #[cfg(test)]
+    machine_lifecycle_observe_errors_remaining: Arc<AtomicUsize>,
 }
 
 impl InMemoryRuntimeStore {
@@ -91,6 +103,10 @@ impl InMemoryRuntimeStore {
             input_state_batch_cas_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             input_state_batch_cas_after_commit: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            machine_lifecycle_cas_conflicts_remaining: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            machine_lifecycle_observe_errors_remaining: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -116,6 +132,31 @@ impl InMemoryRuntimeStore {
             .input_state_batch_cas_after_commit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_machine_lifecycle_raw(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        bytes: Vec<u8>,
+    ) {
+        self.inner
+            .lock()
+            .await
+            .runtime_lifecycle
+            .insert(runtime_id.0.clone(), bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conflict_next_machine_lifecycle_cas(&self) {
+        self.machine_lifecycle_cas_conflicts_remaining
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_machine_lifecycle_observation(&self) {
+        self.machine_lifecycle_observe_errors_remaining
+            .fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -529,6 +570,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeStoreError> {
+        let machine_lifecycle_record = machine_lifecycle.store_record().encode()?;
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
         let incoming_session =
@@ -617,7 +659,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inner.projection_quarantine.remove(&rid);
         inner
             .runtime_lifecycle
-            .insert(rid.clone(), machine_lifecycle.into_snapshot());
+            .insert(rid.clone(), machine_lifecycle_record);
         inner.receipts.insert(key, receipt);
         let states = inner.input_states.entry(rid).or_default();
         for record in input_updates {
@@ -830,16 +872,145 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(state)
     }
 
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
+        #[cfg(test)]
+        if self
+            .machine_lifecycle_observe_errors_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(RuntimeStoreError::ReadFailed(
+                "synthetic machine lifecycle transport failure".to_string(),
+            ));
+        }
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .runtime_lifecycle
+            .get(&runtime_id.0)
+            .map_or(MachineLifecycleObservation::Missing, |bytes| {
+                classify_machine_lifecycle_record(bytes)
+            }))
+    }
+
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: MachineLifecycleExpectedVersion,
+        replacement: MachineLifecycleCommit,
+    ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
+        let replacement = prepare_machine_lifecycle_replacement(replacement)?;
+        let mut inner = self.inner.lock().await;
+        let current_raw = inner.runtime_lifecycle.get(&runtime_id.0).cloned();
+        let current = current_raw.as_deref().map_or(
+            MachineLifecycleObservation::Missing,
+            classify_machine_lifecycle_record,
+        );
+        #[cfg(test)]
+        if self
+            .machine_lifecycle_cas_conflicts_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Ok(MachineLifecycleCasOutcome::Conflict { current });
+        }
+        let matches = match (&expected, &current) {
+            (MachineLifecycleExpectedVersion::Missing, MachineLifecycleObservation::Missing) => {
+                true
+            }
+            (MachineLifecycleExpectedVersion::Version(expected), current) => {
+                current.version().is_some_and(|actual| actual == expected)
+            }
+            _ => false,
+        };
+        if !matches {
+            return Ok(MachineLifecycleCasOutcome::Conflict { current });
+        }
+        let replacement = replacement.preserve_observed_custody(&current)?;
+        validate_machine_lifecycle_replacement(
+            &current,
+            current_raw.as_deref(),
+            &replacement.snapshot,
+        )?;
+        inner
+            .runtime_lifecycle
+            .insert(runtime_id.0.clone(), replacement.bytes);
+        Ok(MachineLifecycleCasOutcome::Applied {
+            version: replacement.version,
+        })
+    }
+
+    async fn compare_and_swap_machine_lifecycle_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: MachineLifecycleExpectedVersion,
+        replacement: MachineLifecycleCommit,
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+        let replacement = prepare_machine_lifecycle_replacement(replacement)?;
+        let mut inner = self.inner.lock().await;
+        let current_raw = inner.runtime_lifecycle.get(&runtime_id.0).cloned();
+        let current = current_raw.as_deref().map_or(
+            MachineLifecycleObservation::Missing,
+            classify_machine_lifecycle_record,
+        );
+        let matches = match (&expected, &current) {
+            (MachineLifecycleExpectedVersion::Missing, MachineLifecycleObservation::Missing) => {
+                true
+            }
+            (MachineLifecycleExpectedVersion::Version(expected), current) => {
+                current.version().is_some_and(|actual| actual == expected)
+            }
+            _ => false,
+        };
+        if !matches {
+            return Ok(FencedMachineLifecycleCasOutcome::Conflict { current });
+        }
+        let replacement = replacement.preserve_observed_custody(&current)?;
+        validate_machine_lifecycle_replacement(
+            &current,
+            current_raw.as_deref(),
+            &replacement.snapshot,
+        )?;
+        let already_exact = current_raw.as_deref() == Some(replacement.bytes.as_slice());
+        let record = decoded_prepared_machine_lifecycle_replacement(&replacement)?;
+        let version = replacement.version.clone();
+        let fence_outcome = execute_runtime_store_write_fence(write_fence.as_ref(), || {
+            if !already_exact {
+                inner
+                    .runtime_lifecycle
+                    .insert(runtime_id.0.clone(), replacement.bytes.clone());
+            }
+            Ok(())
+        })?;
+        match fence_outcome {
+            RuntimeStoreWriteFenceOutcome::Applied if already_exact => {
+                Ok(FencedMachineLifecycleCasOutcome::AlreadyExact { record, version })
+            }
+            RuntimeStoreWriteFenceOutcome::Applied => {
+                Ok(FencedMachineLifecycleCasOutcome::Applied { record, version })
+            }
+            RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                Ok(FencedMachineLifecycleCasOutcome::FenceConflict { reason })
+            }
+            RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                Ok(FencedMachineLifecycleCasOutcome::FenceBackoff { reason })
+            }
+        }
+    }
+
     async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
         let inner = self.inner.lock().await;
-        inner
-            .runtime_lifecycle
-            .get(&runtime_id.0)
-            .map(|snapshot| MachineLifecycleStoreRecord::from_snapshot(snapshot).encode())
-            .transpose()
+        Ok(inner.runtime_lifecycle.get(&runtime_id.0).cloned())
     }
 
     async fn commit_machine_lifecycle(
@@ -848,13 +1019,12 @@ impl RuntimeStore for InMemoryRuntimeStore {
         commit: MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
+        let record = commit.store_record().encode()?;
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
 
         // Single lock acquisition — atomic for in-memory
-        inner
-            .runtime_lifecycle
-            .insert(rid.clone(), commit.into_snapshot());
+        inner.runtime_lifecycle.insert(rid.clone(), record);
         let states = inner.input_states.entry(rid).or_default();
         for record in input_states {
             let bundle = record.as_stored();
@@ -870,13 +1040,16 @@ impl RuntimeStore for InMemoryRuntimeStore {
         finalization: crate::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
         let (snapshot, input_states, retired_ops_epoch) = finalization.into_parts();
+        let lifecycle_record = MachineLifecycleStoreRecord::from_snapshot(&snapshot).encode()?;
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
 
         // One lock acquisition is the in-memory transaction boundary. The
         // finalization token prepared every owned value before this method, so
         // no fallible request preparation remains after the first mutation.
-        inner.runtime_lifecycle.insert(rid.clone(), snapshot);
+        inner
+            .runtime_lifecycle
+            .insert(rid.clone(), lifecycle_record);
         let states = inner.input_states.entry(rid.clone()).or_default();
         for record in input_states {
             let bundle = record.clone_stored();
@@ -982,6 +1155,24 @@ mod tests {
             message_count: 0,
             sequence: seq,
         }
+    }
+
+    fn lifecycle_commit(
+        runtime_id: &LogicalRuntimeId,
+        state: RuntimeState,
+        fence_token: u64,
+        runtime_generation: u64,
+    ) -> MachineLifecycleCommit {
+        MachineLifecycleCommit::new_with_binding(
+            state,
+            MachineLifecycleBindingFacts::new(
+                Some(runtime_id.0.clone()),
+                Some(fence_token),
+                Some(runtime_generation),
+                Some(format!("epoch-{runtime_generation}")),
+            ),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )
     }
 
     fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
@@ -2721,6 +2912,183 @@ mod tests {
         assert!(
             !store.is_runtime_projection_quarantined(&rid).await.unwrap(),
             "a live snapshot write must clear the in-memory quarantine marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_observation_and_missing_or_version_cas_are_target_local() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-lifecycle-cas");
+        let other_runtime_id = LogicalRuntimeId::new("runtime-lifecycle-other");
+        assert_eq!(
+            store.observe_machine_lifecycle(&runtime_id).await.unwrap(),
+            MachineLifecycleObservation::Missing
+        );
+
+        let MachineLifecycleCasOutcome::Applied { version } = store
+            .compare_and_swap_machine_lifecycle(
+                &runtime_id,
+                MachineLifecycleExpectedVersion::Missing,
+                lifecycle_commit(&runtime_id, RuntimeState::Idle, 7, 3),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("missing row must be inserted");
+        };
+        let observed = store.observe_machine_lifecycle(&runtime_id).await.unwrap();
+        let MachineLifecycleObservation::Decoded {
+            record,
+            version: observed_version,
+        } = &observed
+        else {
+            panic!("committed lifecycle row must decode");
+        };
+        assert_eq!(observed_version, &version);
+        assert_eq!(record.runtime_state(), Some(RuntimeState::Idle));
+        assert_eq!(record.binding().fence_token(), Some(7));
+
+        let conflict = store
+            .compare_and_swap_machine_lifecycle(
+                &runtime_id,
+                MachineLifecycleExpectedVersion::Missing,
+                lifecycle_commit(&runtime_id, RuntimeState::Stopped, 8, 4),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            conflict,
+            MachineLifecycleCasOutcome::Conflict {
+                current: observed.clone()
+            }
+        );
+        assert_eq!(
+            store
+                .observe_machine_lifecycle(&other_runtime_id)
+                .await
+                .unwrap(),
+            MachineLifecycleObservation::Missing
+        );
+
+        assert!(matches!(
+            store
+                .compare_and_swap_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Version(version),
+                    lifecycle_commit(&runtime_id, RuntimeState::Stopped, 8, 4),
+                )
+                .await
+                .unwrap(),
+            MachineLifecycleCasOutcome::Applied { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_lifecycle_repair_is_blocked_even_with_apparent_highwater() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-malformed-lifecycle");
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "record_version": crate::store::MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "runtime_state": "idle",
+            "binding": {
+                "agent_runtime_id": runtime_id.0.clone(),
+                "fence_token": 9,
+                "runtime_generation": 5,
+                "runtime_epoch_id": "epoch-5"
+            },
+            "current_run_id": null,
+            "pre_run_phase": null,
+            "unregister_progress": null
+        }))
+        .unwrap();
+        store
+            .inner
+            .lock()
+            .await
+            .runtime_lifecycle
+            .insert(runtime_id.0.clone(), raw.clone());
+
+        let observed = store.observe_machine_lifecycle(&runtime_id).await.unwrap();
+        let MachineLifecycleObservation::Malformed { version, .. } = observed else {
+            panic!("structurally incomplete row must remain malformed evidence");
+        };
+        assert!(matches!(
+            store
+                .compare_and_swap_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Version(version.clone()),
+                    lifecycle_commit(&runtime_id, RuntimeState::Idle, 8, 5),
+                )
+                .await
+                .expect_err("repair must not lower an independently readable fence"),
+            RuntimeStoreError::MachineLifecycleRepairBlocked { .. }
+        ));
+        assert_eq!(
+            store
+                .load_machine_lifecycle_record(&runtime_id)
+                .await
+                .unwrap(),
+            Some(raw.clone())
+        );
+
+        assert!(matches!(
+            store
+                .compare_and_swap_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Version(version),
+                    lifecycle_commit(&runtime_id, RuntimeState::Idle, 10, 6),
+                )
+                .await
+                .expect_err("decodable fragments inside malformed bytes are not repair authority"),
+            RuntimeStoreError::MachineLifecycleRepairBlocked { .. }
+        ));
+        assert_eq!(
+            store
+                .load_machine_lifecycle_record(&runtime_id)
+                .await
+                .unwrap(),
+            Some(raw)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_lifecycle_duplicate_highwater_keys_are_repair_blocked() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-duplicate-lifecycle-fence");
+        let raw = format!(
+            r#"{{"record_version":4,"runtime_state":"idle","binding":{{"agent_runtime_id":"{}","fence_token":99,"fence_token":1,"runtime_generation":3,"runtime_epoch_id":"epoch-3"}},"current_run_id":null,"pre_run_phase":null,"supervisor_authority":{{"kind":"unbound_no_receipt"}},"unregister_progress":null}}"#,
+            runtime_id.0
+        )
+        .into_bytes();
+        store
+            .inner
+            .lock()
+            .await
+            .runtime_lifecycle
+            .insert(runtime_id.0.clone(), raw.clone());
+        let MachineLifecycleObservation::Malformed { version, .. } =
+            store.observe_machine_lifecycle(&runtime_id).await.unwrap()
+        else {
+            panic!("duplicate high-water keys must classify as malformed");
+        };
+
+        assert!(matches!(
+            store
+                .compare_and_swap_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Version(version),
+                    lifecycle_commit(&runtime_id, RuntimeState::Idle, 2, 3),
+                )
+                .await
+                .expect_err("ambiguous duplicate high-water must block repair"),
+            RuntimeStoreError::MachineLifecycleRepairBlocked { .. }
+        ));
+        assert_eq!(
+            store
+                .load_machine_lifecycle_record(&runtime_id)
+                .await
+                .unwrap(),
+            Some(raw)
         );
     }
 }

@@ -98,6 +98,20 @@ fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverErro
     SessionError::Agent(AgentError::InternalError(err.to_string()))
 }
 
+fn store_projection_recovery_ineligible(id: &SessionId) -> SessionError {
+    SessionError::Store(Box::new(SessionStoreError::Corrupted(id.clone())))
+}
+
+fn durable_session_restore_error(
+    id: &SessionId,
+    context: &str,
+    error: impl std::fmt::Display,
+) -> SessionError {
+    SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
+        "{context} for session {id}: {error}"
+    ))))
+}
+
 fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
     match event {
         meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
@@ -749,6 +763,7 @@ struct CheckpointerGate {
 /// after `create_session` which already persists an initial snapshot.
 struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
+    runtime_store: Arc<dyn RuntimeStore>,
     /// Incremental capability of `store`, when it exposes one: checkpoints
     /// then append O(delta) rows + one CAS-guarded head write instead of
     /// rewriting the whole projection row.
@@ -758,6 +773,186 @@ struct StoreCheckpointer {
     projector: Option<Arc<SessionProjector>>,
     gate: Arc<CheckpointerGate>,
     last_saved_revision: std::sync::Mutex<Option<String>>,
+}
+
+/// One fully verified committed checkpoint authority together with the exact
+/// durable bytes that established it.
+///
+/// This is an operation-local carrier, not a cache: every writer obtains it
+/// from RuntimeStore/SessionStore while it owns the surrounding mutation gate.
+struct VerifiedCheckpointAuthority {
+    session: Session,
+    stamp: meerkat_core::SessionCheckpointStamp,
+    serialized: Vec<u8>,
+}
+
+impl VerifiedCheckpointAuthority {
+    fn from_serialized(
+        serialized: Vec<u8>,
+        expected_session_id: &SessionId,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        let session: Session = serde_json::from_slice(&serialized).map_err(|error| {
+            SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
+                "failed to decode {role} for session {expected_session_id}: {error}"
+            ))))
+        })?;
+        Self::from_session_with_serialized(session, serialized, expected_session_id, role)
+    }
+
+    fn from_session(
+        session: Session,
+        expected_session_id: &SessionId,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        let serialized = serde_json::to_vec(&session).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize {role} for session {expected_session_id}: {error}"
+            )))
+        })?;
+        Self::from_session_with_serialized(session, serialized, expected_session_id, role)
+    }
+
+    fn from_session_with_serialized(
+        session: Session,
+        serialized: Vec<u8>,
+        expected_session_id: &SessionId,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        if session.id() != expected_session_id {
+            return Err(session_checkpoint_read_error(
+                meerkat_core::SessionCheckpointError::SessionIdMismatch {
+                    expected: expected_session_id.clone(),
+                    actual: session.id().clone(),
+                },
+            ));
+        }
+        let stamp = match session
+            .try_checkpoint_state()
+            .map_err(session_checkpoint_read_error)?
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                return Err(session_checkpoint_read_error(
+                    meerkat_core::SessionCheckpointError::LegacyCheckpointUnverified,
+                ));
+            }
+        };
+        if stamp.provenance() == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint {
+            return Err(session_checkpoint_authority_conflict(format!(
+                "{role} for session {expected_session_id} is an intra-turn projection, not committed checkpoint authority"
+            )));
+        }
+        Ok(Self {
+            session,
+            stamp,
+            serialized,
+        })
+    }
+}
+
+fn session_checkpoint_read_error(error: meerkat_core::SessionCheckpointError) -> SessionError {
+    SessionError::Store(Box::new(error))
+}
+
+fn session_checkpoint_authority_conflict(detail: impl Into<String>) -> SessionError {
+    session_checkpoint_read_error(meerkat_core::SessionCheckpointError::AuthorityBaseConflict(
+        detail.into(),
+    ))
+}
+
+/// A normalized, stamped session whose exact bytes are sealed for the next
+/// persistence operation. No caller receives a mutable session after the
+/// stamp is installed.
+struct PreparedCheckpointDocument {
+    session: Session,
+    stamp: meerkat_core::SessionCheckpointStamp,
+    serialized: Vec<u8>,
+}
+
+impl PreparedCheckpointDocument {
+    fn root(
+        session: Session,
+        provenance: meerkat_core::SessionCheckpointProvenance,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        let stamp = meerkat_core::SessionCheckpointStamp::root(&session, provenance)
+            .map_err(|error| checkpoint_prepare_error(session.id(), role, error))?;
+        Self::install(session, stamp, role)
+    }
+
+    fn successor(
+        session: Session,
+        authority: &meerkat_core::SessionCheckpointStamp,
+        provenance: meerkat_core::SessionCheckpointProvenance,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        let stamp =
+            meerkat_core::SessionCheckpointStamp::successor(&session, authority, provenance)
+                .map_err(|error| checkpoint_prepare_error(session.id(), role, error))?;
+        Self::install(session, stamp, role)
+    }
+
+    fn install(
+        mut session: Session,
+        stamp: meerkat_core::SessionCheckpointStamp,
+        role: &str,
+    ) -> Result<Self, SessionError> {
+        session
+            .install_checkpoint_stamp(stamp.clone())
+            .map_err(|error| checkpoint_prepare_error(session.id(), role, error))?;
+        let serialized = serde_json::to_vec(&session).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize stamped {role} for session {}: {error}",
+                session.id()
+            )))
+        })?;
+        Ok(Self {
+            session,
+            stamp,
+            serialized,
+        })
+    }
+}
+
+fn checkpoint_prepare_error(
+    session_id: &SessionId,
+    role: &str,
+    error: meerkat_core::SessionCheckpointError,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(format!(
+        "failed to prepare {role} checkpoint stamp for session {session_id}: {error}"
+    )))
+}
+
+fn checkpoint_stamp_is_direct_successor_of(
+    child: &meerkat_core::SessionCheckpointStamp,
+    authority: &meerkat_core::SessionCheckpointStamp,
+) -> bool {
+    matches!(
+        child.authority_base(),
+        meerkat_core::SessionCheckpointAuthorityBase::Typed { anchor }
+            if anchor == &meerkat_core::SessionCheckpointAnchor::from_stamp(authority)
+    )
+}
+
+async fn load_verified_runtime_checkpoint_authority(
+    runtime_store: &dyn RuntimeStore,
+    session_id: &SessionId,
+    role: &str,
+) -> Result<Option<VerifiedCheckpointAuthority>, SessionError> {
+    let Some(serialized) = runtime_store
+        .load_session_snapshot(&LogicalRuntimeId::for_session(session_id))
+        .await
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to load {role} for session {session_id}: {error}"
+            )))
+        })?
+    else {
+        return Ok(None);
+    };
+    VerifiedCheckpointAuthority::from_serialized(serialized, session_id, role).map(Some)
 }
 
 fn session_materialized_at_transcript_revision(
@@ -1145,20 +1340,15 @@ fn incremental_seed_head(
             session.id()
         ))
     })?;
-    let mut metadata = session.metadata().clone();
-    metadata.remove(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
-    Ok(SessionHead {
-        id: session.id().clone(),
-        version: session.version(),
-        strand,
-        head_revision,
-        message_count: rows.len() as u64,
-        rewrite_count: 0,
-        created_at: session.created_at(),
-        updated_at: session.updated_at(),
-        usage: session.total_usage(),
-        metadata,
-    })
+    let mut head = SessionHead::from_session(session, strand, 0).map_err(|error| {
+        incremental_internal_error(format!(
+            "failed to derive incremental seed head for session {}: {error}",
+            session.id()
+        ))
+    })?;
+    head.head_revision = head_revision;
+    head.message_count = rows.len() as u64;
+    Ok(head)
 }
 
 /// Read-only continuity preflight for the incremental projection write:
@@ -2094,10 +2284,21 @@ fn runtime_projection_rollback_authorized(
     session: &Session,
     previous: &Session,
 ) -> Result<bool, SessionStoreError> {
+    let authority_stamp = verified_checkpoint_stamp_for_recovery(
+        session,
+        session.id(),
+        "runtime projection authority",
+    )
+    .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
+    let previous_stamp =
+        verified_checkpoint_stamp_for_recovery(previous, session.id(), "runtime projection row")
+            .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
     let row_continues_authority =
         meerkat_core::session_store::run_boundary_snapshot_save_guard(previous, Some(session))
             .is_ok();
-    let row_is_runtime_checkpoint = previous.has_runtime_checkpoint_provenance();
+    let row_is_runtime_checkpoint = previous_stamp.provenance()
+        == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+        && checkpoint_stamp_names_exact_authority(&previous_stamp, &authority_stamp);
     let mut authority = SessionDocumentMachineAuthority::new();
     let effects = authority
         .resolve_runtime_projection_rollback(
@@ -2133,6 +2334,44 @@ fn runtime_projection_rollback_authorized(
     ))
 }
 
+/// Decode and fully verify one checkpoint stamp before it can influence a
+/// recovery decision.
+///
+/// The pre-typed compatibility boolean is deliberately not projected through
+/// this seam: `LegacyUnverified { true }` proves only that an old writer set a
+/// marker, not that the marker belongs to this exact document or lineage.
+/// Malformed metadata, digest conflicts, missing typed stamps, and legacy rows
+/// therefore terminate before any generated-machine input is emitted.
+fn verified_checkpoint_stamp_for_recovery(
+    session: &Session,
+    expected_session_id: &SessionId,
+    _role: &str,
+) -> Result<meerkat_core::SessionCheckpointStamp, meerkat_core::SessionCheckpointError> {
+    if session.id() != expected_session_id {
+        return Err(meerkat_core::SessionCheckpointError::SessionIdMismatch {
+            expected: expected_session_id.clone(),
+            actual: session.id().clone(),
+        });
+    }
+    match session.try_checkpoint_state()? {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => Ok(stamp),
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+            Err(meerkat_core::SessionCheckpointError::LegacyCheckpointUnverified)
+        }
+    }
+}
+
+fn checkpoint_stamp_names_exact_authority(
+    checkpoint: &meerkat_core::SessionCheckpointStamp,
+    authority: &meerkat_core::SessionCheckpointStamp,
+) -> bool {
+    matches!(
+        checkpoint.authority_base(),
+        meerkat_core::SessionCheckpointAuthorityBase::Typed { anchor }
+            if anchor == &meerkat_core::SessionCheckpointAnchor::from_stamp(authority)
+    )
+}
+
 #[async_trait]
 impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
     async fn checkpoint(&self, session: &Session) {
@@ -2155,12 +2394,6 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
             return;
         }
         let mut persisted = session.clone();
-        // Typed provenance: this row is being written by the intra-turn
-        // best-effort checkpointer ahead of the runtime boundary commit. The
-        // runtime-projection rollback consults this fact so only tails the
-        // system itself checkpointed can be converged back onto committed
-        // truth after a kill between the two commit points.
-        persisted.set_runtime_checkpoint_provenance();
         if let Err(e) = persisted
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
@@ -2180,13 +2413,67 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
                 return;
             }
         }
+        let authority = match load_verified_runtime_checkpoint_authority(
+            self.runtime_store.as_ref(),
+            persisted.id(),
+            "committed runtime checkpoint authority",
+        )
+        .await
+        {
+            Ok(Some(authority)) => authority,
+            Ok(None) => {
+                tracing::warn!(
+                    session_id = %persisted.id(),
+                    "Host-mode checkpoint skipped without committed runtime checkpoint authority"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %persisted.id(),
+                    error = %error,
+                    "Host-mode checkpoint authority verification failed"
+                );
+                return;
+            }
+        };
+        if let Err(error) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
+            &persisted,
+            Some(&authority.session),
+        ) {
+            tracing::warn!(
+                session_id = %persisted.id(),
+                error = %error,
+                "Host-mode checkpoint does not continue committed runtime authority"
+            );
+            return;
+        }
+        // The stamp is the final document mutation. Every intra-turn row is an
+        // exact child of the current committed RuntimeStore authority; a prior
+        // intra-turn projection is never promoted into a new authority base.
+        let prepared = match PreparedCheckpointDocument::successor(
+            persisted,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+            "host-mode intra-turn projection",
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    error = %error,
+                    "Host-mode checkpoint stamping failed"
+                );
+                return;
+            }
+        };
         let projection_result = if let Some(incremental) = self.incremental.as_ref() {
             save_session_projection_incremental(
                 incremental.as_ref(),
                 self.blob_store.as_ref(),
                 self.event_store.as_ref(),
                 self.projector.as_ref(),
-                &persisted,
+                &prepared.session,
                 &[],
             )
             .await
@@ -2196,7 +2483,7 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
                 self.blob_store.as_ref(),
                 self.event_store.as_ref(),
                 self.projector.as_ref(),
-                &persisted,
+                &prepared.session,
             )
             .await
         };
@@ -2934,8 +3221,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     // runtime snapshot is absent) is owned by the canonical
                     // SessionDocumentMachine. The shell extracts only typed
                     // store/runtime observations and mirrors the verdict.
-                    // Fails closed: a machine drive error makes the
-                    // projection ineligible.
+                    // Fails closed: a present but ineligible projection is
+                    // typed corruption, while a machine drive error
+                    // propagates unchanged. Neither is absence.
                     match store_projection {
                         Some(session) => {
                             let runtime_projection_quarantined =
@@ -2947,7 +3235,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 runtime_projection_quarantined,
                             ) {
                                 Ok(true) => Some(session),
-                                Ok(false) | Err(_) => None,
+                                Ok(false) => {
+                                    return Err(store_projection_recovery_ineligible(id));
+                                }
+                                Err(error) => return Err(error),
                             }
                         }
                         None => None,
@@ -3038,9 +3329,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(None);
         };
         meerkat_core::TranscriptHistoryState::from_rewrite_records(records).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to rebuild transcript history for session {id}: {err}"
-            )))
+            durable_session_restore_error(id, "failed to rebuild transcript history", err)
         })
     }
 
@@ -3056,18 +3345,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
-        if self.event_store.is_none() {
-            return Ok(());
-        }
+        session.validate_transcript_history_state().map_err(|err| {
+            durable_session_restore_error(
+                session.id(),
+                "failed to validate transcript history",
+                err,
+            )
+        })?;
         let Some(state) = session.transcript_history_state().map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to read transcript history for session {}: {err}",
-                session.id()
-            )))
+            durable_session_restore_error(session.id(), "failed to read transcript history", err)
         })?
         else {
             return Ok(());
         };
+        if self.event_store.is_none() {
+            return Ok(());
+        }
         if state.commits.is_empty() {
             return Ok(());
         }
@@ -3114,14 +3407,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let current_digest =
             meerkat_core::transcript_messages_digest(session.messages()).map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to digest current transcript for session {id}: {err}"
-                )))
+                durable_session_restore_error(
+                    id,
+                    "failed to digest current transcript during rewrite replay",
+                    err,
+                )
             })?;
         let existing_state = session.transcript_history_state().map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to read transcript history for session {id}: {err}"
-            )))
+            durable_session_restore_error(id, "failed to read transcript history", err)
         })?;
         let current_revision = existing_state
             .as_ref()
@@ -3137,11 +3430,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .any(|body| body.revision == current_revision);
         if let Some(existing_state) = existing_state {
             if replay_contains_current_digest || replay_contains_current {
-                let existing_state_value = serde_json::to_value(&existing_state).map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to serialize existing transcript history for session {id}: {err}"
-                    )))
-                })?;
+                let existing_state_value =
+                    serde_json::to_value(&existing_state).map_err(|err| {
+                        durable_session_restore_error(
+                            id,
+                            "failed to serialize existing transcript history",
+                            err,
+                        )
+                    })?;
                 let replay_covers_existing_commits = existing_state.commits.iter().all(|commit| {
                     replayed_state
                         .commits
@@ -3155,20 +3451,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
                 let materialized_state_value =
                     serde_json::to_value(&materialized_state).map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!(
-                                "failed to serialize replayed transcript history for session {id}: {err}"
-                            ),
-                        ))
+                        durable_session_restore_error(
+                            id,
+                            "failed to serialize replayed transcript history",
+                            err,
+                        )
                     })?;
                 session
                     .apply_transcript_history_state(materialized_state)
                     .map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!(
-                                "failed to materialize transcript history for session {id}: {err}"
-                            ),
-                        ))
+                        durable_session_restore_error(
+                            id,
+                            "failed to materialize transcript history",
+                            err,
+                        )
                     })?;
                 return Ok((
                     Some(session),
@@ -3182,9 +3478,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             session
                 .apply_transcript_history_state(replayed_state)
                 .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to materialize transcript history for session {id}: {err}"
-                    )))
+                    durable_session_restore_error(
+                        id,
+                        "failed to materialize transcript history",
+                        err,
+                    )
                 })?;
             return Ok((Some(session), true));
         }
@@ -3194,9 +3492,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             session
                 .apply_transcript_history_state(materialized_state)
                 .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to materialize transcript history for session {id}: {err}"
-                    )))
+                    durable_session_restore_error(
+                        id,
+                        "failed to materialize transcript history",
+                        err,
+                    )
                 })?;
             return Ok((Some(session), true));
         }
@@ -3209,10 +3509,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<meerkat_core::TranscriptHistoryState>, SessionError> {
         let current_revision = meerkat_core::transcript_messages_digest(session.messages())
             .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to digest current transcript for session {}: {err}",
-                    session.id()
-                )))
+                durable_session_restore_error(
+                    session.id(),
+                    "failed to digest current transcript during rewrite replay",
+                    err,
+                )
             })?;
         if replayed_state
             .revisions
@@ -3237,10 +3538,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             &session.messages()[..replayed_len],
         )
         .map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to digest current transcript prefix for session {}: {err}",
-                session.id()
-            )))
+            durable_session_restore_error(
+                session.id(),
+                "failed to digest current transcript prefix during rewrite replay",
+                err,
+            )
         })?;
         if current_prefix_digest != replayed_state.head {
             return Ok(None);
@@ -3302,9 +3604,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             })?
             .map(|bytes| {
                 serde_json::from_slice::<Session>(&bytes).map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to deserialize runtime session snapshot: {err}"
-                    )))
+                    SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
+                        "failed to deserialize runtime session snapshot for {runtime_id}: {err}"
+                    ))))
                 })
             })
             .transpose()
@@ -3527,33 +3829,90 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         store_head: Option<Session>,
         session_is_live: bool,
     ) -> Result<Session, SessionError> {
-        let store_head_is_runtime_checkpoint = store_head
+        let snapshot_stamp =
+            verified_checkpoint_stamp_for_recovery(&snapshot, id, "runtime session snapshot")
+                .map_err(session_checkpoint_read_error)?;
+        if snapshot_stamp.provenance()
+            == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+        {
+            return Err(session_checkpoint_authority_conflict(format!(
+                "runtime session snapshot for session {id} carries intra-turn checkpoint \
+                 provenance and cannot act as committed read authority"
+            )));
+        }
+
+        let (store_head_is_runtime_checkpoint, store_head_extends_snapshot) = match store_head
             .as_ref()
-            .is_some_and(Session::has_runtime_checkpoint_provenance);
-        let store_head_extends_snapshot = match store_head.as_ref() {
-            None => false,
+        {
+            None => (false, false),
             Some(head) => {
-                let snapshot_len = snapshot.messages().len();
-                if head.messages().len() <= snapshot_len {
-                    false
-                } else {
-                    let snapshot_digest = meerkat_core::session::transcript_messages_digest(
-                        snapshot.messages(),
-                    )
-                    .map_err(|err| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "failed to digest runtime snapshot transcript for session {id}: {err}"
-                        )))
-                    })?;
-                    let head_prefix_digest = meerkat_core::session::transcript_messages_digest(
-                        &head.messages()[..snapshot_len],
-                    )
-                    .map_err(|err| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "failed to digest store head transcript prefix for session {id}: {err}"
-                        )))
-                    })?;
-                    snapshot_digest == head_prefix_digest
+                let head_stamp =
+                    verified_checkpoint_stamp_for_recovery(head, id, "session store head")
+                        .map_err(session_checkpoint_read_error)?;
+                let head_is_runtime_checkpoint = head_stamp.provenance()
+                    == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint;
+                let relation = meerkat_core::session_checkpoint_relation(&snapshot, head)
+                    .map_err(session_checkpoint_read_error)?;
+                match relation {
+                    meerkat_core::SessionCheckpointRelation::RevisionConflict
+                    | meerkat_core::SessionCheckpointRelation::LeftGenerationOlder
+                    | meerkat_core::SessionCheckpointRelation::LeftGenerationNewer
+                    | meerkat_core::SessionCheckpointRelation::DifferentSessionIdentity
+                    | meerkat_core::SessionCheckpointRelation::DifferentLineage
+                    | meerkat_core::SessionCheckpointRelation::BothLegacyUnverified
+                    | meerkat_core::SessionCheckpointRelation::LeftLegacyUnverified
+                    | meerkat_core::SessionCheckpointRelation::RightLegacyUnverified => {
+                        return Err(session_checkpoint_authority_conflict(format!(
+                            "runtime snapshot/store-head checkpoint relation for session \
+                                 {id} is conflicting: {relation:?}"
+                        )));
+                    }
+                    meerkat_core::SessionCheckpointRelation::Exact
+                    | meerkat_core::SessionCheckpointRelation::LeftRevisionNewer => {
+                        (head_is_runtime_checkpoint, false)
+                    }
+                    meerkat_core::SessionCheckpointRelation::LeftRevisionOlder => {
+                        let snapshot_len = snapshot.messages().len();
+                        let transcript_strictly_extends = if head.messages().len() <= snapshot_len {
+                            false
+                        } else {
+                            let snapshot_digest =
+                                meerkat_core::session::transcript_messages_digest(
+                                    snapshot.messages(),
+                                )
+                                .map_err(|error| {
+                                    session_checkpoint_read_error(
+                                        meerkat_core::SessionCheckpointError::Serialization(error),
+                                    )
+                                })?;
+                            let head_prefix_digest =
+                                meerkat_core::session::transcript_messages_digest(
+                                    &head.messages()[..snapshot_len],
+                                )
+                                .map_err(|error| {
+                                    session_checkpoint_read_error(
+                                        meerkat_core::SessionCheckpointError::Serialization(error),
+                                    )
+                                })?;
+                            snapshot_digest == head_prefix_digest
+                        };
+                        if transcript_strictly_extends
+                            && !checkpoint_stamp_names_exact_authority(&head_stamp, &snapshot_stamp)
+                        {
+                            return Err(session_checkpoint_authority_conflict(format!(
+                                "extending store head for session {id} has no proved \
+                                         typed ancestry from the runtime snapshot"
+                            )));
+                        }
+                        (
+                            head_is_runtime_checkpoint,
+                            transcript_strictly_extends
+                                && checkpoint_stamp_names_exact_authority(
+                                    &head_stamp,
+                                    &snapshot_stamp,
+                                ),
+                        )
+                    }
                 }
             }
         };
@@ -3866,15 +4225,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
-        // This is a boundary-following persist: the replay projector — not the
-        // intra-turn checkpointer — is this row's writer, so the checkpoint
-        // provenance fact must not survive (a stamped source row loaded via
-        // the store-recovery fallback would otherwise re-persist the stamp
-        // and inject it into the runtime authority snapshot, falsifying the
-        // "last writer" contract the rollback machine consumes).
-        let mut session = session.clone();
-        session.clear_runtime_checkpoint_provenance();
-        let session = &session;
+        let session = self
+            .normalized_session_for_persistence(session.clone())
+            .await?;
+        let authority = self
+            .load_committed_checkpoint_authority(
+                session.id(),
+                "replayed transcript projection",
+            )
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot persist replayed transcript projection for session {} without committed checkpoint authority",
+                    session.id()
+                )))
+            })?;
+        let prepared = PreparedCheckpointDocument::successor(
+            session,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+            "replayed transcript projection",
+        )?;
+        let session = &prepared.session;
         let expected_current_revision = self
             .store
             .load(session.id())
@@ -3884,11 +4256,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(meerkat_core::session_store::session_projection_cas_token)
             .transpose()
             .map_err(|err| SessionError::Store(Box::new(err)))?;
-        let runtime_session_snapshot = serde_json::to_vec(session).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize replay-recovered session snapshot: {err}"
-            )))
-        })?;
+        let runtime_session_snapshot = prepared.serialized.clone();
         self.runtime_store
             .commit_session_snapshot(
                 &Self::runtime_id_for_session(session.id()),
@@ -4035,7 +4403,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "session {source_session_id} has no canonical session metadata for fork tool authorization"
             ))));
         }
-        let saved = self.save_normalized_session(forked).await?;
+        let saved = self
+            .save_normalized_session_with_root_provenance(
+                forked,
+                meerkat_core::SessionCheckpointProvenance::Forked,
+            )
+            .await?;
         Ok(SessionForkResult {
             source_session_id,
             session_id: saved.id().clone(),
@@ -4077,10 +4450,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if commits.is_empty() {
             return Ok(session);
         }
-        let previous =
-            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, session.id())
-                .await?;
-        {
+        let previous_authority = load_verified_runtime_checkpoint_authority(
+            self.runtime_store.as_ref(),
+            session.id(),
+            "pre-rewrite runtime checkpoint authority",
+        )
+        .await?;
+        let committed_authority = self
+            .load_committed_checkpoint_authority(
+                session.id(),
+                "transcript rewrite snapshot",
+            )
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot persist transcript rewrite for session {} without committed checkpoint authority",
+                    session.id()
+                )))
+            })?;
+        let session = {
             let runtime_store = &self.runtime_store;
             if let Some(incremental) = self.incremental.as_ref() {
                 // Incremental stores replace the fuzzy continuity walks with
@@ -4105,10 +4493,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .fail_closed_runtime_projection_preflight(session.id(), error)
                     .await);
             }
-            let mut last_audited_projection = previous.clone();
-            let mut persisted_revision = previous
+            let mut checkpoint_authority = committed_authority.stamp.clone();
+            let mut last_audited_snapshot = previous_authority
                 .as_ref()
-                .map(meerkat_core::Session::transcript_revision)
+                .map(|authority| authority.serialized.clone());
+            let mut last_audited_projection = previous_authority
+                .as_ref()
+                .map(|authority| authority.session.clone());
+            let mut persisted_revision = previous_authority
+                .as_ref()
+                .map(|authority| authority.session.transcript_revision())
                 .transpose()
                 .map_err(|err| {
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -4121,13 +4515,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         &session,
                         &commit.parent_revision,
                     )?;
-                    let session_snapshot = serde_json::to_vec(&bridge).map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!(
-                                "failed to serialize bridged transcript rewrite snapshot for runtime persistence: {err}"
-                            ),
-                        ))
-                    })?;
+                    let bridge = PreparedCheckpointDocument::successor(
+                        bridge,
+                        &checkpoint_authority,
+                        meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+                        "bridged transcript rewrite snapshot",
+                    )?;
+                    let session_snapshot = bridge.serialized.clone();
                     runtime_store
                         .commit_session_snapshot(
                             &Self::runtime_id_for_session(session.id()),
@@ -4139,14 +4533,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 format!("runtime bridged transcript rewrite snapshot persistence failed: {err}"),
                             ))
                         })?;
+                    checkpoint_authority = bridge.stamp;
                 }
                 let rewritten =
                     session_materialized_at_transcript_revision(&session, &commit.revision)?;
-                let session_snapshot = serde_json::to_vec(&rewritten).map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to serialize rewritten session snapshot for runtime persistence: {err}"
-                    )))
-                })?;
+                let rewritten = PreparedCheckpointDocument::successor(
+                    rewritten,
+                    &checkpoint_authority,
+                    meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+                    "rewritten runtime session snapshot",
+                )?;
+                let session_snapshot = rewritten.serialized.clone();
                 runtime_store
                     .commit_session_transcript_rewrite_snapshot(
                         &Self::runtime_id_for_session(session.id()),
@@ -4180,47 +4577,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     let mut rollback_failure = None;
                     if let Some(rollback_target) = last_audited_projection.as_ref() {
-                        {
-                            match serde_json::to_vec(rollback_target) {
-                                Ok(rollback_snapshot) => {
-                                    match runtime_store
-                                        .replace_session_snapshot_if_current(
-                                            &Self::runtime_id_for_session(rollback_target.id()),
-                                            &session_snapshot,
-                                            rollback_snapshot,
-                                        )
-                                        .await
-                                    {
-                                        Ok(true) => {}
-                                        Ok(false) => {
-                                            tracing::warn!(
-                                                session_id = %rollback_target.id(),
-                                                "runtime snapshot changed before transcript rewrite audit rollback; leaving newer runtime authority intact"
-                                            );
-                                        }
-                                        Err(rollback_error) => {
-                                            tracing::error!(
-                                                session_id = %rollback_target.id(),
-                                                error = %rollback_error,
-                                                "failed to roll back runtime transcript rewrite snapshot after audit append failure"
-                                            );
-                                            rollback_failure = Some(format!(
-                                                "runtime snapshot rollback failed: {rollback_error}"
-                                            ));
-                                        }
-                                    }
+                        if let Some(rollback_snapshot) = last_audited_snapshot.as_ref() {
+                            match runtime_store
+                                .replace_session_snapshot_if_current(
+                                    &Self::runtime_id_for_session(rollback_target.id()),
+                                    &session_snapshot,
+                                    rollback_snapshot.clone(),
+                                )
+                                .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        session_id = %rollback_target.id(),
+                                        "runtime snapshot changed before transcript rewrite audit rollback; leaving newer runtime authority intact"
+                                    );
                                 }
                                 Err(rollback_error) => {
                                     tracing::error!(
                                         session_id = %rollback_target.id(),
                                         error = %rollback_error,
-                                        "failed to serialize previous runtime transcript snapshot for rollback"
+                                        "failed to roll back runtime transcript rewrite snapshot after audit append failure"
                                     );
                                     rollback_failure = Some(format!(
-                                        "runtime rollback snapshot serialization failed: {rollback_error}"
+                                        "runtime snapshot rollback failed: {rollback_error}"
                                     ));
                                 }
                             }
+                        } else {
+                            rollback_failure = Some(
+                                "verified rollback target is missing its exact committed bytes"
+                                    .to_string(),
+                            );
                         }
                         if let Err(rollback_error) = self
                             .store
@@ -4265,7 +4653,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     }
                     return Err(error);
                 }
-                last_audited_projection = Some(rewritten);
+                checkpoint_authority = rewritten.stamp.clone();
+                last_audited_snapshot = Some(rewritten.serialized.clone());
+                last_audited_projection = Some(rewritten.session);
                 persisted_revision = Some(commit.revision.clone());
             }
             let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
@@ -4274,17 +4664,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "failed to digest incoming transcript rewrite snapshot: {err}"
                     )))
                 })?;
-            let latest_session_snapshot = serde_json::to_vec(&session).map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to serialize latest runtime transcript rewrite snapshot: {err}"
-                )))
-            })?;
-            if commits.last().map(|commit| commit.revision.as_str())
-                != Some(incoming_revision.as_str())
+            let (final_session, latest_session_snapshot) = if commits
+                .last()
+                .map(|commit| commit.revision.as_str())
+                == Some(incoming_revision.as_str())
             {
+                let final_session = last_audited_projection.take().ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(
+                        "transcript rewrite completed without an audited checkpoint projection"
+                            .to_string(),
+                    ))
+                })?;
+                let latest_session_snapshot = last_audited_snapshot.take().ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(
+                        "transcript rewrite completed without exact audited checkpoint bytes"
+                            .to_string(),
+                    ))
+                })?;
+                (final_session, latest_session_snapshot)
+            } else {
+                let prepared = PreparedCheckpointDocument::successor(
+                    session,
+                    &checkpoint_authority,
+                    meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+                    "post-rewrite runtime session snapshot",
+                )?;
+                let latest_session_snapshot = prepared.serialized.clone();
                 runtime_store
                     .commit_session_snapshot(
-                        &Self::runtime_id_for_session(session.id()),
+                        &Self::runtime_id_for_session(prepared.session.id()),
                         SessionDelta {
                             session_snapshot: latest_session_snapshot.clone(),
                         },
@@ -4295,7 +4703,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             format!("runtime post-rewrite snapshot persistence failed: {err}"),
                         ))
                     })?;
-            }
+                (prepared.session, latest_session_snapshot)
+            };
             if let Some(incremental) = self.incremental.clone() {
                 // Projection side: per-commit commit_rewrite -> adopt. The
                 // TranscriptRewriteCommitted audit events for `commits` were
@@ -4306,14 +4715,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     self.blob_store.as_ref(),
                     self.event_store.as_ref(),
                     self.projector.as_ref(),
-                    &session,
+                    &final_session,
                     commits,
                 )
                 .await
                 {
                     return Err(self
                         .fail_closed_runtime_projection_update(
-                            session.id(),
+                            final_session.id(),
                             session_error_into_store_error(error),
                             Some(latest_session_snapshot.as_slice()),
                         )
@@ -4323,19 +4732,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 save_audited_authoritative_projection_after_persisted_continuity_guard(
                     self.store.as_ref(),
                     self.blob_store.as_ref(),
-                    &session,
+                    &final_session,
                 )
                 .await
             {
                 return Err(self
                     .fail_closed_runtime_projection_update(
-                        session.id(),
+                        final_session.id(),
                         error,
                         Some(latest_session_snapshot.as_slice()),
                     )
                     .await);
             }
-        }
+            final_session
+        };
         if converge_live {
             self.converge_live_session_after_transcript_rewrite(&session)
                 .await?;
@@ -6290,15 +6700,123 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Resolve the latest verified committed document authority without ever
+    /// treating the legacy Boolean or an intra-turn projection as authority.
+    /// RuntimeStore wins unless SessionStore carries a verified committed
+    /// direct successor (the projection-only lifecycle commit case).
+    async fn load_committed_checkpoint_authority(
+        &self,
+        id: &SessionId,
+        role: &str,
+    ) -> Result<Option<VerifiedCheckpointAuthority>, SessionError> {
+        let runtime = load_verified_runtime_checkpoint_authority(
+            self.runtime_store.as_ref(),
+            id,
+            "committed runtime session snapshot",
+        )
+        .await?;
+        let Some(store_session) = self
+            .store
+            .load(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?
+        else {
+            return Ok(runtime);
+        };
+        let store_stamp = match store_session.try_checkpoint_state().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "session-store checkpoint evidence while preparing {role} for session {id} is invalid: {error}"
+            )))
+        })? {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                if runtime.is_some() {
+                    return Ok(runtime);
+                }
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare {role} for session {id} from a legacy-unverified session-store row"
+                ))));
+            }
+        };
+
+        if store_stamp.provenance()
+            == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+        {
+            let Some(runtime) = runtime else {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare {role} for session {id}: the only durable checkpoint is an intra-turn projection"
+                ))));
+            };
+            if checkpoint_stamp_is_direct_successor_of(&store_stamp, &runtime.stamp) {
+                return Ok(Some(runtime));
+            }
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "cannot prepare {role} for session {id}: the intra-turn projection does not name the current runtime authority"
+            ))));
+        }
+
+        let store = VerifiedCheckpointAuthority::from_session(
+            store_session,
+            id,
+            "committed session-store projection",
+        )?;
+        let Some(runtime) = runtime else {
+            return Ok(Some(store));
+        };
+        if runtime.stamp == store.stamp {
+            return Ok(Some(runtime));
+        }
+        if checkpoint_stamp_is_direct_successor_of(&store.stamp, &runtime.stamp) {
+            return Ok(Some(store));
+        }
+        if checkpoint_stamp_is_direct_successor_of(&runtime.stamp, &store.stamp) {
+            return Ok(Some(runtime));
+        }
+        Err(SessionError::Agent(AgentError::InternalError(format!(
+            "cannot prepare {role} for session {id}: RuntimeStore and SessionStore checkpoint authorities conflict"
+        ))))
+    }
+
+    async fn prepare_committed_checkpoint_document(
+        &self,
+        session: Session,
+        root_provenance: meerkat_core::SessionCheckpointProvenance,
+        successor_provenance: meerkat_core::SessionCheckpointProvenance,
+        role: &str,
+    ) -> Result<PreparedCheckpointDocument, SessionError> {
+        match self
+            .load_committed_checkpoint_authority(session.id(), role)
+            .await?
+        {
+            // Resume/materialization can export a byte-different Session that
+            // is still the exact committed checkpoint document semantically
+            // (for example, runtime-binding metadata is canonicalized away by
+            // the checkpoint digest). Reuse that authority instead of minting
+            // a sibling successor. This matters when SessionStore contains an
+            // ahead IntraTurnCheckpoint child of the runtime authority: the
+            // strict rollback proof names the committed authority exactly and
+            // intentionally rejects sibling stamps.
+            Some(authority)
+                if meerkat_core::session_checkpoint_digest(&session)
+                    .map_err(|error| checkpoint_prepare_error(session.id(), role, error))?
+                    == authority.stamp.digest().clone() =>
+            {
+                PreparedCheckpointDocument::install(session, authority.stamp, role)
+            }
+            Some(authority) => PreparedCheckpointDocument::successor(
+                session,
+                &authority.stamp,
+                successor_provenance,
+                role,
+            ),
+            None => PreparedCheckpointDocument::root(session, root_provenance, role),
+        }
+    }
+
     async fn normalized_session_for_persistence(
         &self,
         mut session: Session,
     ) -> Result<Session, SessionError> {
-        // Boundary-following persists own the row: the intra-turn checkpoint
-        // provenance fact identifies the row's last writer, so every
-        // normalized persist strips it (a session resumed from a
-        // checkpointed row must not re-persist the stamp).
-        session.clear_runtime_checkpoint_provenance();
         session
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
@@ -6325,6 +6843,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     async fn save_normalized_session(&self, session: Session) -> Result<Session, SessionError> {
+        self.save_normalized_session_with_root_provenance(
+            session,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        )
+        .await
+    }
+
+    async fn save_normalized_session_with_root_provenance(
+        &self,
+        session: Session,
+        root_provenance: meerkat_core::SessionCheckpointProvenance,
+    ) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
         let commits = self
             .transcript_rewrite_commit_chain_for_persistence(&session)
@@ -6334,6 +6864,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .persist_normalized_transcript_rewrite_chain(session, &commits, false)
                 .await;
         }
+        let prepared = self
+            .prepare_committed_checkpoint_document(
+                session,
+                root_provenance,
+                meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+                "run-boundary session snapshot",
+            )
+            .await?;
+        let session = &prepared.session;
         {
             let runtime_store = &self.runtime_store;
             // The preflight validates continuity against the durable projection
@@ -6354,7 +6893,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // CAS-guarded write below would reject.
             let expected_current_revision = if let Some(incremental) = self.incremental.as_ref() {
                 if let Err(error) =
-                    verify_incremental_projection_continuity(incremental.as_ref(), &session).await
+                    verify_incremental_projection_continuity(incremental.as_ref(), session).await
                 {
                     return Err(self
                         .fail_closed_runtime_projection_preflight(session.id(), error)
@@ -6365,7 +6904,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 match verify_authoritative_projection_persisted_continuity(
                     self.store.as_ref(),
                     self.blob_store.as_ref(),
-                    &session,
+                    session,
                 )
                 .await
                 {
@@ -6377,11 +6916,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     }
                 }
             };
-            let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to serialize session snapshot for runtime persistence: {err}"
-                )))
-            })?;
+            let session_snapshot = prepared.serialized.clone();
             runtime_store
                 .commit_session_snapshot(
                     &Self::runtime_id_for_session(session.id()),
@@ -6401,7 +6936,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     self.blob_store.as_ref(),
                     self.event_store.as_ref(),
                     self.projector.as_ref(),
-                    &session,
+                    session,
                     &[],
                 )
                 .await
@@ -6417,7 +6952,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             } else if let Err(error) = self
                 .store
                 .save_authoritative_projection_if_current_revision(
-                    &session,
+                    session,
                     expected_current_revision,
                 )
                 .await
@@ -6431,7 +6966,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await);
             }
         }
-        Ok(session)
+        Ok(prepared.session)
     }
 
     /// Write the durable session-document lifecycle commit for an archive.
@@ -6461,27 +6996,67 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: Session,
     ) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
+        let prepared = match self
+            .load_committed_checkpoint_authority(session.id(), "compatibility session projection")
+            .await?
+        {
+            Some(authority)
+                if meerkat_core::session_checkpoint_digest(&session).map_err(|error| {
+                    checkpoint_prepare_error(
+                        session.id(),
+                        "compatibility session projection",
+                        error,
+                    )
+                })? == authority.stamp.digest().clone() =>
+            {
+                PreparedCheckpointDocument::install(
+                    session,
+                    authority.stamp,
+                    "compatibility session projection",
+                )?
+            }
+            Some(authority) => PreparedCheckpointDocument::successor(
+                session,
+                &authority.stamp,
+                meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+                "compatibility session projection",
+            )?,
+            None => PreparedCheckpointDocument::root(
+                session,
+                meerkat_core::SessionCheckpointProvenance::SessionCreated,
+                "compatibility session projection",
+            )?,
+        };
+        self.save_prepared_compatibility_projection_only(prepared)
+            .await
+    }
+
+    async fn save_prepared_compatibility_projection_only(
+        &self,
+        prepared: PreparedCheckpointDocument,
+    ) -> Result<Session, SessionError> {
+        let session = &prepared.session;
         if let Some(incremental) = self.incremental.clone() {
             save_session_projection_incremental(
                 incremental.as_ref(),
                 self.blob_store.as_ref(),
                 self.event_store.as_ref(),
                 self.projector.as_ref(),
-                &session,
+                session,
                 &[],
             )
             .await?;
-            return Ok(session);
+            return Ok(prepared.session);
         }
         save_session_projection_allowing_internal_rewrite(
             self.store.as_ref(),
             self.blob_store.as_ref(),
             self.event_store.as_ref(),
             self.projector.as_ref(),
-            &session,
+            session,
         )
         .await?;
-        Ok(session)
+        Ok(prepared.session)
     }
 
     async fn transcript_rewrite_commit_chain_for_persistence(
@@ -6619,18 +7194,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         session_snapshot: &[u8],
     ) -> Result<(), SessionError> {
-        let session: Session = serde_json::from_slice(session_snapshot).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to deserialize committed runtime session snapshot: {err}"
-            )))
-        })?;
-        if session.id() != id {
-            return Err(SessionError::Agent(
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "committed runtime session snapshot id mismatch: expected {id}, got {}",
-                    session.id()
-                )),
-            ));
+        let committed = VerifiedCheckpointAuthority::from_serialized(
+            session_snapshot.to_vec(),
+            id,
+            "committed runtime session snapshot",
+        )?;
+        let session = committed.session;
+
+        // This boundary is downstream of the RuntimeStore commit, but the
+        // caller's ordering claim is not authority. Re-read the exact durable
+        // bytes unconditionally before publishing events or mutating the
+        // SessionStore projection. Previously this check lived only inside
+        // the pending-context-event branch, so an ordinary stamped but
+        // uncommitted document could be projected as if the runtime machine
+        // had acknowledged it.
+        let durable_snapshot = self
+            .runtime_store
+            .load_session_snapshot(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to verify committed runtime checkpoint for session {id}: {error}"
+                )))
+            })?;
+        if durable_snapshot.as_deref() != Some(session_snapshot) {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
+            ))));
         }
 
         // The runtime calls this seam only after its authoritative atomic
@@ -7155,11 +7745,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Vec<u8>, SessionError> {
         let session = self.export_session_with_labels(id).await?;
         let session = self.normalized_session_for_persistence(session).await?;
-        serde_json::to_vec(&session).map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to serialize normalized live session snapshot: {error}"
-            )))
-        })
+        let authority = self
+            .load_committed_checkpoint_authority(id, "runtime turn-boundary snapshot")
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare runtime turn-boundary snapshot for session {id} without committed checkpoint authority"
+                )))
+            })?;
+        let prepared = PreparedCheckpointDocument::successor(
+            session,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+            "runtime turn-boundary snapshot",
+        )?;
+        Ok(prepared.serialized)
     }
 
     fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
@@ -7273,17 +7873,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let persisted_session = self
             .normalized_session_for_persistence(session.clone())
             .await?;
-        let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize session snapshot for runtime commit: {err}"
-            )))
-        })?;
+        let authority = self
+            .load_committed_checkpoint_authority(id, "runtime output session snapshot")
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot build runtime output for session {id} without committed checkpoint authority"
+                )))
+            })?;
+        let prepared = PreparedCheckpointDocument::successor(
+            persisted_session,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+            "runtime output session snapshot",
+        )?;
+        let session_snapshot = prepared.serialized.clone();
 
         let receipt = Self::build_runtime_receipt(
             run_id,
             boundary,
             contributing_input_ids,
-            &persisted_session,
+            &prepared.session,
         )?;
 
         let output = match terminal {
@@ -7369,17 +7979,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let persisted_session = self
             .normalized_session_for_persistence(session.clone())
             .await?;
-        let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize session snapshot for runtime commit: {err}"
-            )))
-        })?;
+        let authority = self
+            .load_committed_checkpoint_authority(id, "runtime context session snapshot")
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot build runtime context output for session {id} without committed checkpoint authority"
+                )))
+            })?;
+        let prepared = PreparedCheckpointDocument::successor(
+            persisted_session,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+            "runtime context session snapshot",
+        )?;
+        let session_snapshot = prepared.serialized.clone();
 
         let receipt = Self::build_runtime_receipt(
             run_id,
             boundary,
             contributing_input_ids,
-            &persisted_session,
+            &prepared.session,
         )?;
 
         let output = CoreApplyOutput::without_terminal(receipt, Some(session_snapshot));
@@ -7993,11 +8613,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to mark revived session {id} active: {error}"
                 )))
             })?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to serialize revived session {id}: {error}"
-            )))
-        })?;
+        let session = self.normalized_session_for_persistence(session).await?;
+        let authority = self
+            .load_committed_checkpoint_authority(id, "revived runtime session snapshot")
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot persist revived runtime snapshot for session {id} without committed checkpoint authority"
+                )))
+            })?;
+        let prepared = PreparedCheckpointDocument::successor(
+            session,
+            &authority.stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+            "revived runtime session snapshot",
+        )?;
+        let session_snapshot = prepared.serialized.clone();
         self.runtime_store
             .commit_session_snapshot(
                 &Self::runtime_id_for_session(id),
@@ -8009,7 +8640,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to persist revived runtime snapshot for session {id}: {error}"
                 )))
             })?;
-        let active = self.save_compatibility_projection_only(session).await?;
+        let active = self
+            .save_prepared_compatibility_projection_only(prepared)
+            .await?;
         self.synchronize_live_session_after_archived_revival(id, &active)
             .await?;
         if let Some(gate) = self.existing_gate_for_session(id).await {
@@ -8095,6 +8728,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         });
         let checkpointer = Arc::new(StoreCheckpointer {
             store: Arc::clone(&self.store),
+            runtime_store: Arc::clone(&self.runtime_store),
             incremental: self.incremental.clone(),
             blob_store: Arc::clone(&self.blob_store),
             event_store: self.event_store.clone(),
@@ -9800,8 +10434,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///    SessionDocumentMachine recovery-source verdict the full path
     ///    drives, fed with the same typed observations (metadata/build-state
     ///    presence, quarantine marker). Verdict parity with the full path:
-    ///    `Ok(true)` exposes the view; `Ok(false)` and machine drive errors
-    ///    read as absent.
+    ///    `Ok(true)` exposes the view; `Ok(false)` is typed durable corruption,
+    ///    and machine drive errors propagate unchanged.
     ///
     /// This seam skips transcript-rewrite replay and rewrite-audit
     /// verification — sound because it exposes ONLY the two session-authority
@@ -9819,9 +10453,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         use meerkat_core::session::{SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_KEY};
 
         let corrupt_metadata_error = |err: serde_json::Error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "session {id} durable metadata failed typed restore: {err}"
-            )))
+            durable_session_restore_error(id, "durable metadata failed typed restore", err)
         };
 
         // (1) Retired: the durable archived projection row wins.
@@ -9859,10 +10491,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(bytes) = snapshot_bytes {
             let document =
                 meerkat_core::session_metadata_document_from_slice(&bytes).map_err(|err| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "failed to decode runtime session snapshot metadata document for \
-                         session {id}: {err}"
-                    )))
+                    durable_session_restore_error(
+                        id,
+                        "failed to decode runtime session snapshot metadata document",
+                        err,
+                    )
                 })?;
             let store_meta = self
                 .store
@@ -9917,8 +10550,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )
             .map(Some)
             .map_err(corrupt_metadata_error),
-            // Verdict parity with the full path (`Ok(false) | Err(_) => None`).
-            Ok(false) | Err(_) => Ok(None),
+            Ok(false) => Err(store_projection_recovery_ineligible(id)),
+            Err(error) => Err(error),
         }
     }
 
@@ -10018,6 +10651,99 @@ mod tests {
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    fn with_checkpoint_root(
+        mut session: Session,
+    ) -> (Session, meerkat_core::SessionCheckpointStamp) {
+        let stamp = meerkat_core::SessionCheckpointStamp::root(
+            &session,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        )
+        .expect("checkpoint root should be valid");
+        session
+            .install_checkpoint_stamp(stamp.clone())
+            .expect("checkpoint root should install");
+        (session, stamp)
+    }
+
+    fn with_checkpoint_successor(
+        mut session: Session,
+        authority: &meerkat_core::SessionCheckpointStamp,
+        provenance: meerkat_core::SessionCheckpointProvenance,
+    ) -> (Session, meerkat_core::SessionCheckpointStamp) {
+        let stamp =
+            meerkat_core::SessionCheckpointStamp::successor(&session, authority, provenance)
+                .expect("checkpoint successor should be valid");
+        session
+            .install_checkpoint_stamp(stamp.clone())
+            .expect("checkpoint successor should install");
+        (session, stamp)
+    }
+
+    fn verified_checkpoint_stamp(session: &Session) -> meerkat_core::SessionCheckpointStamp {
+        match session
+            .try_checkpoint_state()
+            .expect("checkpoint evidence should decode and verify")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                panic!("expected a typed checkpoint stamp")
+            }
+        }
+    }
+
+    fn without_checkpoint_stamp(session: &Session) -> Session {
+        let mut document = serde_json::to_value(session).expect("session should serialize");
+        document
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .remove(meerkat_core::SESSION_CHECKPOINT_STAMP_KEY);
+        serde_json::from_value(document).expect("legacy session should deserialize")
+    }
+
+    fn with_malformed_checkpoint_stamp(session: &Session) -> Session {
+        let mut document = serde_json::to_value(session).expect("session should serialize");
+        document
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .insert(
+                meerkat_core::SESSION_CHECKPOINT_STAMP_KEY.to_string(),
+                serde_json::json!({"schema_version": 1}),
+            );
+        serde_json::from_value(document).expect("malformed-stamp session should deserialize")
+    }
+
+    async fn seed_runtime_checkpoint_root(
+        runtime_store: &dyn RuntimeStore,
+        session: &Session,
+    ) -> meerkat_core::SessionCheckpointStamp {
+        let (authority, stamp) = with_checkpoint_root(session.clone());
+        let session_snapshot = serde_json::to_vec(&authority)
+            .expect("checkpoint-root runtime snapshot should serialize");
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(session.id()),
+                SessionDelta { session_snapshot },
+            )
+            .await
+            .expect("checkpoint-root runtime snapshot should commit");
+        stamp
+    }
+
+    fn with_legacy_checkpoint_marker(session: &Session, value: bool) -> Session {
+        let mut document = serde_json::to_value(session).expect("session should serialize");
+        document
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .insert(
+                meerkat_core::SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY.to_string(),
+                serde_json::Value::Bool(value),
+            );
+        serde_json::from_value(document).expect("legacy-marker session should deserialize")
     }
 
     #[tokio::test]
@@ -11556,6 +12282,7 @@ mod tests {
     struct GatedSnapshotRuntimeStore {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
+        fail_snapshot_loads: AtomicBool,
         fail_snapshot_commits: AtomicBool,
         snapshot_commit_count: AtomicUsize,
         fail_snapshot_commit_ordinal: AtomicUsize,
@@ -11573,6 +12300,7 @@ mod tests {
             Self {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
+                fail_snapshot_loads: AtomicBool::new(false),
                 fail_snapshot_commits: AtomicBool::new(false),
                 snapshot_commit_count: AtomicUsize::new(0),
                 fail_snapshot_commit_ordinal: AtomicUsize::new(usize::MAX),
@@ -11588,6 +12316,10 @@ mod tests {
 
         fn set_fail_snapshot_commits(&self, fail: bool) {
             self.fail_snapshot_commits.store(fail, Ordering::Release);
+        }
+
+        fn set_fail_snapshot_loads(&self, fail: bool) {
+            self.fail_snapshot_loads.store(fail, Ordering::Release);
         }
 
         fn fail_snapshot_commit_in(&self, commits_from_now: usize) {
@@ -11675,6 +12407,35 @@ mod tests {
     impl RuntimeStore for GatedSnapshotRuntimeStore {
         fn supports_compaction_projection_outbox(&self) -> bool {
             self.inner.supports_compaction_projection_outbox()
+        }
+
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            if self.fail_machine_lifecycle_commits.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic machine lifecycle commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
         }
 
         async fn commit_session_snapshot(
@@ -11790,6 +12551,11 @@ mod tests {
             &self,
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            if self.fail_snapshot_loads.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                    "synthetic runtime snapshot transport failure".to_string(),
+                ));
+            }
             if self.should_hide_session_snapshot_load() {
                 return Ok(None);
             }
@@ -12026,6 +12792,135 @@ mod tests {
             meerkat_runtime::store::RuntimeStoreError,
         > {
             self.inner.load_ops_lifecycle(runtime_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_corruption_remains_typed_serialization() {
+        let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+        let runtime_id = LogicalRuntimeId::for_session(&SessionId::new());
+        gated
+            .override_session_snapshot(runtime_id.clone(), b"{ not a serialized Session".to_vec())
+            .await;
+        let runtime_store: Arc<dyn RuntimeStore> = gated;
+
+        let error = PersistentSessionService::<DummyBuilder>::load_runtime_session_snapshot(
+            &runtime_store,
+            &runtime_id,
+        )
+        .await
+        .expect_err("malformed runtime snapshot bytes must fail decode");
+        match error {
+            SessionError::Store(source) => assert!(
+                matches!(
+                    source.downcast_ref::<SessionStoreError>(),
+                    Some(SessionStoreError::Serialization(_))
+                ),
+                "malformed runtime snapshot bytes must remain a typed serialization error, got {source:?}"
+            ),
+            other => panic!("expected typed SessionError::Store, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_transport_failure_remains_internal_and_distinct() {
+        let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+        gated.set_fail_snapshot_loads(true);
+        let runtime_store: Arc<dyn RuntimeStore> = gated;
+        let runtime_id = LogicalRuntimeId::for_session(&SessionId::new());
+
+        let error = PersistentSessionService::<DummyBuilder>::load_runtime_session_snapshot(
+            &runtime_store,
+            &runtime_id,
+        )
+        .await
+        .expect_err("transport failure must fail runtime snapshot load");
+        assert!(
+            matches!(error, SessionError::Agent(AgentError::InternalError(_))),
+            "RuntimeStore transport failure must remain distinct from persisted serialization corruption, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_read_preserves_typed_checkpoint_schema_error() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let session = Session::new();
+        let id = session.id().clone();
+        let (stamped, _) = with_checkpoint_root(session);
+        let mut document = serde_json::to_value(stamped).expect("serialize stamped session");
+        document["metadata"][meerkat_core::SESSION_CHECKPOINT_STAMP_KEY]["schema_version"] =
+            serde_json::json!(u32::MAX);
+        let unsupported: Session =
+            serde_json::from_value(document).expect("Session keeps checkpoint evidence opaque");
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(&id),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&unsupported)
+                        .expect("serialize unsupported checkpoint fixture"),
+                },
+            )
+            .await
+            .expect("runtime snapshot should commit");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store,
+            memory_blob_store(),
+        );
+
+        let error = service
+            .load_authoritative_session(&id)
+            .await
+            .expect_err("unsupported checkpoint schema must fail authoritative read");
+        match error {
+            SessionError::Store(source) => assert!(
+                matches!(
+                    source.downcast_ref::<meerkat_core::SessionCheckpointError>(),
+                    Some(meerkat_core::SessionCheckpointError::UnsupportedSchemaVersion(version))
+                        if *version == u32::MAX
+                ),
+                "unsupported checkpoint schema must remain typed, got {source:?}"
+            ),
+            other => panic!("expected typed SessionError::Store, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflicting_checkpoint_relation_remains_typed_authority_conflict() {
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "runtime branch".to_string(),
+        )));
+        let (snapshot, _) = with_checkpoint_root(snapshot);
+        let mut store_head = Session::with_id(id.clone());
+        store_head.push(Message::User(UserMessage::text("store branch".to_string())));
+        let (store_head, _) = with_checkpoint_root(store_head);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+
+        let error = service
+            .resolve_runtime_snapshot_read_source(&id, snapshot, Some(store_head), false)
+            .expect_err("conflicting checkpoint branches must fail read arbitration");
+        match error {
+            SessionError::Store(source) => assert!(
+                matches!(
+                    source.downcast_ref::<meerkat_core::SessionCheckpointError>(),
+                    Some(meerkat_core::SessionCheckpointError::AuthorityBaseConflict(
+                        _
+                    ))
+                ),
+                "checkpoint relation conflict must remain typed, got {source:?}"
+            ),
+            other => panic!("expected typed SessionError::Store, got {other:?}"),
         }
     }
 
@@ -16895,11 +17790,13 @@ mod tests {
         use meerkat_core::checkpoint::SessionCheckpointer;
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let gate = Arc::new(super::CheckpointerGate {
             cancelled: tokio::sync::Mutex::new(false),
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            runtime_store: Arc::clone(&runtime_store),
             incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
@@ -16909,6 +17806,7 @@ mod tests {
         };
 
         let mut session = Session::new();
+        seed_runtime_checkpoint_root(runtime_store.as_ref(), &session).await;
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
@@ -16931,11 +17829,13 @@ mod tests {
         use meerkat_core::checkpoint::SessionCheckpointer;
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let gate = Arc::new(super::CheckpointerGate {
             cancelled: tokio::sync::Mutex::new(false),
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            runtime_store: Arc::clone(&runtime_store),
             incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
@@ -16945,6 +17845,7 @@ mod tests {
         };
 
         let mut session = Session::new();
+        seed_runtime_checkpoint_root(runtime_store.as_ref(), &session).await;
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
@@ -16974,11 +17875,13 @@ mod tests {
     #[tokio::test]
     async fn test_store_checkpointer_skips_unchanged_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let gate = Arc::new(super::CheckpointerGate {
             cancelled: tokio::sync::Mutex::new(false),
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            runtime_store: Arc::clone(&runtime_store),
             incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
@@ -16988,6 +17891,7 @@ mod tests {
         };
 
         let mut session = Session::new();
+        seed_runtime_checkpoint_root(runtime_store.as_ref(), &session).await;
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
@@ -17212,16 +18116,23 @@ mod tests {
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await?;
-        let mut previous = store
+        let previous = store
             .load(&created.session_id)
             .await?
             .ok_or_else(|| std::io::Error::other("created session should exist"))?;
+        let committed_authority = verified_checkpoint_stamp(&previous);
+        let mut previous = previous;
         previous.push(Message::User(UserMessage::with_blocks(vec![
             ContentBlock::Text {
                 text: "inline image from legacy checkpoint projection".to_string(),
             },
             inline_image_block("legacy-checkpoint-compaction-parent"),
         ])));
+        let (previous, _) = with_checkpoint_successor(
+            previous,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
         store.save_authoritative_projection(&previous).await?;
 
         let mut normalized_parent = previous.clone();
@@ -17246,6 +18157,11 @@ mod tests {
             )
             .map_err(|err| std::io::Error::other(format!("rewrite should commit: {err}")))?;
         let incoming_revision = incoming.transcript_revision()?;
+        let (incoming, _) = with_checkpoint_successor(
+            incoming,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let snapshot = serde_json::to_vec(&incoming)?;
         let runtime_id =
             PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
@@ -17400,11 +18316,17 @@ mod tests {
             .await
             .expect("load should succeed")
             .expect("created session should exist");
+        let base_authority = verified_checkpoint_stamp(&base);
 
         let mut snapshot_session = base.clone();
         snapshot_session.push(Message::User(UserMessage::text(
             "committed boundary turn".to_string(),
         )));
+        let (snapshot_session, snapshot_authority) = with_checkpoint_successor(
+            snapshot_session,
+            &base_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         store
             .save(&snapshot_session)
             .await
@@ -17427,7 +18349,11 @@ mod tests {
         checkpoint_row.push(Message::User(UserMessage::text(
             "uncommitted intra-turn content".to_string(),
         )));
-        checkpoint_row.set_runtime_checkpoint_provenance();
+        let (checkpoint_row, _) = with_checkpoint_successor(
+            checkpoint_row,
+            &snapshot_authority,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
         store
             .save(&checkpoint_row)
             .await
@@ -17534,7 +18460,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            runtime_store,
+            runtime_store.clone(),
             Arc::clone(&blob_store),
         );
 
@@ -17547,6 +18473,7 @@ mod tests {
             .await
             .expect("load should succeed")
             .expect("created session should exist");
+        let committed_authority = verified_checkpoint_stamp(&previous);
 
         let mut parent = previous.clone();
         parent.set_system_prompt("refreshed runtime system projection".to_string());
@@ -17605,7 +18532,23 @@ mod tests {
             .await
             .expect("runtime snapshot normalization should succeed");
         let incoming_revision = incoming.transcript_revision().expect("incoming revision");
+        let (incoming, _) = with_checkpoint_successor(
+            incoming,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let snapshot = serde_json::to_vec(&incoming).expect("snapshot should serialize");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &created.session_id,
+                ),
+                SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                },
+            )
+            .await
+            .expect("runtime boundary snapshot should commit before projection checkpoint");
 
         service
             .checkpoint_committed_runtime_session_snapshot(&created.session_id, &snapshot)
@@ -17643,12 +18586,18 @@ mod tests {
             .load(&created.session_id)
             .await?
             .ok_or_else(|| std::io::Error::other("created session should exist"))?;
+        let committed_authority = verified_checkpoint_stamp(&baseline);
 
         let mut newer_projection = baseline.clone();
         newer_projection.push(Message::User(UserMessage::text(
             "newer persisted turn that stale runtime snapshots must preserve".to_string(),
         )));
         let newer_revision = newer_projection.transcript_revision()?;
+        let (newer_projection, _) = with_checkpoint_successor(
+            newer_projection,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         store
             .save_authoritative_projection(&newer_projection)
             .await?;
@@ -17698,6 +18647,11 @@ mod tests {
             },
         ));
         let incoming_revision = incoming.transcript_revision()?;
+        let (incoming, _) = with_checkpoint_successor(
+            incoming,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let snapshot = serde_json::to_vec(&incoming)?;
         runtime_store
             .commit_session_snapshot(
@@ -17735,12 +18689,14 @@ mod tests {
                 .is_some(),
             "a SessionStore compatibility-projection rejection must retain RuntimeStore authority"
         );
-        let recovered = service
+        let recovery_error = service
             .load_authoritative_session_base(&created.session_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("runtime authority should remain recoverable"))?;
-        assert_eq!(recovered.transcript_revision()?, incoming_revision);
-        assert_ne!(recovered.transcript_revision()?, newer_revision);
+            .await
+            .expect_err("conflicting committed sibling checkpoints must remain repair-blocked");
+        assert!(
+            recovery_error.to_string().contains("checkpoint relation"),
+            "unexpected recovery conflict: {recovery_error}"
+        );
         Ok(())
     }
 
@@ -17765,12 +18721,18 @@ mod tests {
             .load(&created.session_id)
             .await?
             .ok_or_else(|| std::io::Error::other("created session should exist"))?;
+        let committed_authority = verified_checkpoint_stamp(&baseline);
 
         let mut newer_projection = baseline.clone();
         newer_projection.push(Message::User(UserMessage::text(
             "newer persisted turn that must survive quarantine".to_string(),
         )));
         let newer_revision = newer_projection.transcript_revision()?;
+        let (newer_projection, _) = with_checkpoint_successor(
+            newer_projection,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         store
             .save_authoritative_projection(&newer_projection)
             .await?;
@@ -17780,6 +18742,11 @@ mod tests {
             "stale runtime branch that should be rejected".to_string(),
         )));
         let incoming_revision = incoming.transcript_revision()?;
+        let (incoming, _) = with_checkpoint_successor(
+            incoming,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let snapshot = serde_json::to_vec(&incoming)?;
         let runtime_id =
             PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
@@ -17813,12 +18780,14 @@ mod tests {
                 .is_some(),
             "failed compatibility projection must retain the committed runtime snapshot"
         );
-        let recovered = service
+        let recovery_error = service
             .load_authoritative_session_base(&created.session_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("runtime snapshot should remain recoverable"))?;
-        assert_eq!(recovered.transcript_revision()?, incoming_revision);
-        assert_ne!(recovered.transcript_revision()?, newer_revision);
+            .await
+            .expect_err("conflicting committed sibling checkpoints must remain repair-blocked");
+        assert!(
+            recovery_error.to_string().contains("checkpoint relation"),
+            "unexpected recovery conflict: {recovery_error}"
+        );
         Ok(())
     }
 
@@ -17850,6 +18819,7 @@ mod tests {
             .load(&created.session_id)
             .await?
             .ok_or_else(|| std::io::Error::other("created session should exist"))?;
+        let committed_authority = verified_checkpoint_stamp(&original);
         let parent_revision = original.transcript_revision()?;
 
         let mut incoming = original.clone();
@@ -17867,6 +18837,11 @@ mod tests {
                 Some(parent_revision),
             )
             .map_err(|err| std::io::Error::other(format!("rewrite should commit: {err}")))?;
+        let (incoming, _) = with_checkpoint_successor(
+            incoming,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let snapshot = serde_json::to_vec(&incoming)?;
         let runtime_id =
             PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
@@ -21273,6 +22248,7 @@ mod tests {
 
         let stale_checkpointer = StoreCheckpointer {
             store: Arc::clone(&store),
+            runtime_store: Arc::clone(&runtime_store),
             incremental: None,
             blob_store: Arc::clone(&blob_store),
             event_store: None,
@@ -21822,7 +22798,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            runtime_store,
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -21838,6 +22814,7 @@ mod tests {
             .await
             .expect("raw store load should succeed")
             .expect("create_session should persist a projection");
+        let committed_authority = verified_checkpoint_stamp(&original);
 
         let mut committed = original.clone();
         committed.push(meerkat_core::types::Message::User(
@@ -21845,8 +22822,24 @@ mod tests {
                 "runtime machine committed this turn first".to_string(),
             ),
         ));
+        let (committed, _) = with_checkpoint_successor(
+            committed,
+            &committed_authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         let session_snapshot =
             serde_json::to_vec(&committed).expect("committed snapshot should serialize");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &result.session_id,
+                ),
+                SessionDelta {
+                    session_snapshot: session_snapshot.clone(),
+                },
+            )
+            .await
+            .expect("runtime boundary snapshot should commit before projection checkpoint");
 
         service
             .checkpoint_committed_runtime_session_snapshot(&result.session_id, &session_snapshot)
@@ -21863,6 +22856,61 @@ mod tests {
             original.messages().len() + 1,
             "post-commit runtime checkpoint must make the SessionStore projection current"
         );
+    }
+
+    #[tokio::test]
+    async fn test_stamped_but_uncommitted_runtime_checkpoint_is_rejected() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store,
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let original = store
+            .load(&result.session_id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("create_session should persist a projection");
+        let authority = verified_checkpoint_stamp(&original);
+
+        let mut uncommitted = original.clone();
+        uncommitted.push(Message::User(UserMessage::text(
+            "validly stamped but never committed by RuntimeStore".to_string(),
+        )));
+        let (uncommitted, _) = with_checkpoint_successor(
+            uncommitted,
+            &authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let snapshot = serde_json::to_vec(&uncommitted).expect("snapshot should serialize");
+
+        let error = service
+            .checkpoint_committed_runtime_session_snapshot(&result.session_id, &snapshot)
+            .await
+            .expect_err("a caller cannot claim an uncommitted snapshot is durable");
+        assert!(
+            error
+                .to_string()
+                .contains("do not match RuntimeStore authority"),
+            "unexpected authority error: {error}"
+        );
+        let still_projected = store
+            .load(&result.session_id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("projection should remain present");
+        assert_eq!(still_projected.messages(), original.messages());
     }
 
     #[tokio::test]
@@ -25066,11 +26114,11 @@ mod tests {
         );
     }
 
-    /// The same first-archive guarantee must survive a process boundary: the
-    /// typed observation reads the durable Destroyed terminal and never
-    /// restores it merely because the session document exists.
+    /// A cold Destroyed row describes a dead process, not authority to restore
+    /// that phase. Archive must normalize it to a fresh Idle runtime shell,
+    /// then retire that shell while preserving typed checkpoint custody.
     #[tokio::test]
-    async fn test_machine_authorized_first_archive_accepts_cold_destroyed_runtime() {
+    async fn test_machine_authorized_first_archive_normalizes_cold_destroyed_runtime() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -25080,7 +26128,7 @@ mod tests {
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
         );
-        let session = Session::new();
+        let (session, checkpoint_root) = with_checkpoint_root(Session::new());
         let id = session.id().clone();
         store
             .save(&session)
@@ -25111,7 +26159,7 @@ mod tests {
                 MachineSessionArchiveProtocol::from_machine(&restarted),
             )
             .await
-            .expect("cold first archive over Destroyed must not restore or Retire");
+            .expect("cold first archive must normalize Destroyed and retire the fresh shell");
 
         let archived = store
             .load(&id)
@@ -25119,19 +26167,26 @@ mod tests {
             .expect("load archived document")
             .expect("archived document remains present");
         assert!(session_marks_archived(&archived));
+        assert!(
+            checkpoint_stamp_is_direct_successor_of(
+                &verified_checkpoint_stamp(&archived),
+                &checkpoint_root,
+            ),
+            "archive lifecycle projection must preserve typed checkpoint ancestry"
+        );
         assert!(!restarted.contains_session(&id).await);
         assert_eq!(
             meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
                 .await
-                .expect("read durable Destroyed terminal"),
-            Some(RuntimeState::Destroyed)
+                .expect("read converged archive runtime"),
+            Some(RuntimeState::Retired),
+            "the fresh Idle shell must converge through the ordinary archive retire path"
         );
     }
 
-    /// A mechanically recovered cold terminal is reconstructable cache state,
-    /// not durable authority. Even when a later document write fails, archive
-    /// must release that registration while preserving the Destroyed row for a
-    /// clean retry.
+    /// A document-write failure after cold runtime normalization must leave a
+    /// typed, retryable fresh Idle shell rather than resurrecting Destroyed.
+    /// A later process can re-observe that shell and finish archive convergence.
     #[tokio::test]
     async fn test_machine_authorized_cold_destroyed_cleanup_survives_document_error() {
         let failing_store = Arc::new(FailingArchivedSaveStore::new());
@@ -25144,7 +26199,7 @@ mod tests {
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
         );
-        let session = Session::new();
+        let (session, checkpoint_root) = with_checkpoint_root(Session::new());
         let id = session.id().clone();
         store
             .save(&session)
@@ -25181,15 +26236,15 @@ mod tests {
             .expect_err("injected document failure must fail archive");
         assert!(matches!(error, SessionError::Store(_)));
         assert!(
-            !restarted.contains_session(&id).await,
-            "document failure must not leak the archive-recovered terminal registration"
+            restarted.contains_session(&id).await,
+            "the failed attempt keeps its normalized Idle shell available for retry"
         );
         assert_eq!(
             meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
                 .await
-                .expect("read preserved terminal lifecycle"),
-            Some(RuntimeState::Destroyed),
-            "cleanup must not rewrite durable terminal truth"
+                .expect("read normalized runtime lifecycle"),
+            Some(RuntimeState::Idle),
+            "cold Destroyed must be replaced by a fresh Idle shell before document commit"
         );
         let active = store
             .load(&id)
@@ -25197,12 +26252,45 @@ mod tests {
             .expect("load active document")
             .expect("active document remains present");
         assert!(!session_marks_archived(&active));
+        assert_eq!(
+            verified_checkpoint_stamp(&active),
+            checkpoint_root,
+            "the failed archive must not rewrite checkpoint custody"
+        );
+
+        failing_store
+            .fail_archived_saves
+            .store(false, Ordering::Release);
+        drop(restarted);
+        let retry_process = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&retry_process),
+            )
+            .await
+            .expect("retry after the document store heals must converge archive");
+        assert!(!retry_process.contains_session(&id).await);
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read retried archive runtime"),
+            Some(RuntimeState::Retired)
+        );
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load retried archive document")
+            .expect("archived document remains present");
+        assert!(session_marks_archived(&archived));
     }
 
-    /// Cleanup must also cover failures before archive has classified the
-    /// recovered runtime. A store-load error from stale-live reconciliation is
-    /// deliberately earlier than terminal drain, snapshot export, and the
-    /// document-machine verdict.
+    /// A store-load error before document classification still occurs after
+    /// cold runtime normalization. The fresh Idle shell remains explicit and a
+    /// restarted retry must finish retirement once the store becomes readable.
     #[tokio::test]
     async fn test_machine_authorized_cold_destroyed_cleanup_survives_early_load_error() {
         let failing_store = Arc::new(FailingArchivedSaveStore::new());
@@ -25215,7 +26303,7 @@ mod tests {
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
         );
-        let session = Session::new();
+        let (session, _) = with_checkpoint_root(Session::new());
         let id = session.id().clone();
         store
             .save(&session)
@@ -25250,16 +26338,43 @@ mod tests {
             .expect_err("injected early load failure must fail archive");
         assert!(matches!(error, SessionError::Store(_)));
         assert!(
-            !restarted.contains_session(&id).await,
-            "early failure must not leak the archive-recovered terminal registration"
+            restarted.contains_session(&id).await,
+            "the early failure keeps its normalized Idle shell available for retry"
         );
         assert_eq!(
             meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
                 .await
-                .expect("read preserved terminal lifecycle"),
-            Some(RuntimeState::Destroyed),
-            "early cleanup must not rewrite durable terminal truth"
+                .expect("read normalized runtime lifecycle"),
+            Some(RuntimeState::Idle),
+            "cold Destroyed must normalize before the injected document read failure"
         );
+
+        failing_store.fail_loads.store(false, Ordering::Release);
+        drop(restarted);
+        let retry_process = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&retry_process),
+            )
+            .await
+            .expect("retry after the session store heals must converge archive");
+        assert!(!retry_process.contains_session(&id).await);
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read retried archive runtime"),
+            Some(RuntimeState::Retired)
+        );
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load retried archive document")
+            .expect("archived document remains present");
+        assert!(session_marks_archived(&archived));
     }
 
     /// A restarted process can have a durable live runtime row but no
@@ -25634,12 +26749,11 @@ mod tests {
         );
     }
 
-    /// Destroyed is already a quiescent terminal runtime outcome and has no
-    /// generated Retire transition. A cold re-archive must therefore preserve
-    /// the public idempotent NotFound contract instead of repeatedly restoring
-    /// the destroyed runtime and trying an impossible retire.
+    /// Even beside an already-Archived document, cold Destroyed is dead-process
+    /// observation. Re-archive normalizes it to a fresh Idle shell and retires
+    /// that shell without rewriting the checkpointed document.
     #[tokio::test]
-    async fn test_machine_authorized_rearchive_treats_cold_destroyed_runtime_as_quiescent() {
+    async fn test_machine_authorized_rearchive_normalizes_cold_destroyed_runtime() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -25654,6 +26768,7 @@ mod tests {
         session
             .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
             .expect("mark seeded session archived");
+        let (session, checkpoint_root) = with_checkpoint_root(session);
         store
             .save(&session)
             .await
@@ -25691,23 +26806,32 @@ mod tests {
             "cold Destroyed runtime state must be quiescent for archive"
         );
 
-        let error = service
+        service
             .archive_with_machine_protocol(
                 &id,
                 MachineSessionArchiveProtocol::from_machine(&restarted),
             )
             .await
-            .expect_err("quiescent destroyed re-archive keeps the NotFound contract");
-        assert!(matches!(error, SessionError::NotFound { .. }));
+            .expect("cold re-archive must normalize Destroyed and retire the fresh shell");
         assert!(
             !restarted.contains_session(&id).await,
-            "quiescent re-archive must not restore a destroyed runtime registration"
+            "successful re-archive must remove its reconstructed runtime shell"
         );
         assert_eq!(
             meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
                 .await
-                .expect("destroyed state must remain readable"),
-            Some(meerkat_runtime::RuntimeState::Destroyed)
+                .expect("converged runtime state must remain readable"),
+            Some(meerkat_runtime::RuntimeState::Retired)
+        );
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load archived document after runtime convergence")
+            .expect("archived document remains present");
+        assert_eq!(
+            verified_checkpoint_stamp(&archived),
+            checkpoint_root,
+            "runtime-only convergence must not rewrite checkpoint custody"
         );
     }
 
@@ -25897,6 +27021,52 @@ mod tests {
             matches!(read_error, SessionError::NotFound { ref id } if *id == legacy_id),
             "archived read must reject with the typed archived/NotFound contract: {read_error:?}"
         );
+    }
+
+    struct FailingSessionReadStore {
+        inner: MemoryStore,
+    }
+
+    impl FailingSessionReadStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailingSessionReadStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            self.inner.save(session).await
+        }
+
+        async fn load(&self, _id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            Err(SessionStoreError::Io(std::io::Error::other(
+                "synthetic session-store transport failure",
+            )))
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
     }
 
     fn metadata_seam_service(
@@ -26132,7 +27302,8 @@ mod tests {
 
     /// Store-only rows mirror the canonical recovery-source verdict: a raw
     /// row without session metadata or build state is NOT a recoverable
-    /// projection and must read as absent — exactly like the full path.
+    /// projection and must surface typed durable corruption through both read
+    /// seams. A present row is never laundered into absence.
     #[tokio::test]
     async fn test_metadata_seam_store_only_verdict_parity() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -26144,22 +27315,27 @@ mod tests {
         raw.push(Message::User(UserMessage::text("raw".to_string())));
         let raw_id = raw.id().clone();
         store.save(&raw).await.expect("seed raw store row");
-        assert!(
+        for error in [
             service
                 .load_authoritative_session_metadata(&raw_id)
                 .await
-                .expect("metadata seam load should succeed")
-                .is_none(),
-            "a non-recoverable store-only row must read as absent through the seam"
-        );
-        assert!(
+                .expect_err("metadata seam must reject the present ineligible row"),
             service
                 .load_authoritative_session(&raw_id)
                 .await
-                .expect("full path load should succeed")
-                .is_none(),
-            "verdict parity: the full path reads the same row as absent"
-        );
+                .expect_err("full path must reject the present ineligible row"),
+        ] {
+            match error {
+                SessionError::Store(source) => assert!(
+                    matches!(
+                        source.downcast_ref::<SessionStoreError>(),
+                        Some(SessionStoreError::Corrupted(id)) if id == &raw_id
+                    ),
+                    "present-but-ineligible row must remain typed corruption, got {source:?}"
+                ),
+                other => panic!("expected typed store corruption, got {other:?}"),
+            }
+        }
 
         // Eligible recoverable row: carries session metadata.
         let recoverable = recoverable_store_row();
@@ -26185,6 +27361,146 @@ mod tests {
                 .is_some(),
             "verdict parity: the full path recovers the same row"
         );
+    }
+
+    #[tokio::test]
+    async fn test_authoritative_read_actual_store_absence_is_none() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+        let id = SessionId::new();
+
+        assert!(
+            service
+                .load_authoritative_session(&id)
+                .await
+                .expect("absent full read must succeed")
+                .is_none()
+        );
+        assert!(
+            service
+                .load_authoritative_session_metadata(&id)
+                .await
+                .expect("absent metadata read must succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authoritative_read_preserves_session_store_transport_error() {
+        let store: Arc<dyn SessionStore> = Arc::new(FailingSessionReadStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+        let id = SessionId::new();
+
+        for error in [
+            service
+                .load_authoritative_session(&id)
+                .await
+                .expect_err("full read must preserve store transport failure"),
+            service
+                .load_authoritative_session_metadata(&id)
+                .await
+                .expect_err("metadata read must preserve store transport failure"),
+        ] {
+            match error {
+                SessionError::Store(source) => assert!(
+                    matches!(
+                        source.downcast_ref::<SessionStoreError>(),
+                        Some(SessionStoreError::Io(_))
+                    ),
+                    "transport failure must remain typed SessionStoreError::Io, got {source:?}"
+                ),
+                other => panic!("expected typed store transport failure, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authoritative_read_preserves_malformed_rewrite_history_as_typed_corruption() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let projector_root = tempfile::tempdir().expect("projector tempdir");
+
+        let session = recoverable_store_row();
+        let id = session.id().clone();
+        store.save(&session).await.expect("seed recoverable row");
+
+        let parent_messages = Vec::new();
+        let revision_messages = vec![Message::User(UserMessage::text("rewritten".to_string()))];
+        let parent_revision = meerkat_core::transcript_messages_digest(&parent_messages)
+            .expect("parent transcript digest");
+        let revision = meerkat_core::transcript_messages_digest(&revision_messages)
+            .expect("revision transcript digest");
+        let record = meerkat_core::TranscriptRewriteRecord {
+            commit: meerkat_core::TranscriptRewriteCommit {
+                parent_revision: parent_revision.clone(),
+                revision: revision.clone(),
+                selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                original_span_digest: "forged-original-span".to_string(),
+                replacement_digest: "forged-replacement-span".to_string(),
+                messages_before: 0,
+                messages_after: 1,
+                reason: TranscriptRewriteReason::new("malformed-test"),
+                actor: None,
+                committed_at: meerkat_core::time_compat::SystemTime::now(),
+            },
+            parent_body: meerkat_core::TranscriptRevisionBody {
+                revision: parent_revision.clone(),
+                parent_revision: None,
+                messages: parent_messages,
+                created_at: meerkat_core::time_compat::SystemTime::now(),
+            },
+            revision_body: meerkat_core::TranscriptRevisionBody {
+                revision,
+                parent_revision: Some(parent_revision),
+                messages: revision_messages,
+                created_at: meerkat_core::time_compat::SystemTime::now(),
+            },
+        };
+        event_store
+            .append_envelopes(
+                &id,
+                &[meerkat_core::event::EventEnvelope::new_session(
+                    id.clone(),
+                    1,
+                    None,
+                    AgentEvent::TranscriptRewriteCommitted {
+                        session_id: id.clone(),
+                        record,
+                    },
+                )],
+            )
+            .await
+            .expect("seed malformed durable rewrite record");
+
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(projector_root.path().join(".rkat"))),
+        );
+        let error = service
+            .load_authoritative_session(&id)
+            .await
+            .expect_err("malformed durable rewrite record must fail authoritative read");
+        match error {
+            SessionError::Store(source) => assert!(
+                matches!(
+                    source.downcast_ref::<SessionStoreError>(),
+                    Some(SessionStoreError::Serialization(_))
+                ),
+                "malformed durable rewrite history must remain typed serialization corruption, got {source:?}"
+            ),
+            other => panic!("expected typed store corruption, got {other:?}"),
+        }
     }
 
     /// Corrupt metadata under the reserved key is a read FAULT for the seam
@@ -27076,49 +28392,105 @@ mod tests {
     /// checkpointer's typed provenance stamp. Dropping either observation
     /// must keep the save fail-closed.
     #[test]
+    #[allow(deprecated)]
     fn runtime_projection_rollback_requires_both_continuity_and_provenance() {
         let mut authority = Session::new();
         authority.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
+        let (authority, authority_stamp) = with_checkpoint_root(authority);
 
-        // (1) Stamped + faithful continuation (row = authority + one turn):
-        // rollback authorized.
+        // (1) A verified intra-turn checkpoint that names this exact
+        // committed authority may be rolled back.
         let mut ahead_row = authority.clone();
         ahead_row.push(Message::User(UserMessage::text(
             "checkpointed but uncommitted".to_string(),
         )));
-        ahead_row.set_runtime_checkpoint_provenance();
+        let (ahead_row, _) = with_checkpoint_successor(
+            ahead_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
         assert!(
             runtime_projection_rollback_authorized(&authority, &ahead_row)
                 .expect("rollback resolution should succeed"),
-            "a stamped faithful-continuation row must be rebuilt onto authority"
+            "an exactly anchored intra-turn row must be rebuilt onto authority"
         );
 
-        // (2) Faithful continuation WITHOUT the stamp (out-of-band writer):
-        // fail closed.
-        let mut unstamped_row = authority.clone();
-        unstamped_row.push(Message::User(UserMessage::text(
-            "out-of-band appended".to_string(),
+        // (2) Verified non-checkpoint provenance remains non-destructive even
+        // if a stale compatibility boolean says true.
+        let mut committed_row = authority.clone();
+        committed_row.push(Message::User(UserMessage::text(
+            "committed store-only append".to_string(),
         )));
+        let (mut committed_row, _) = with_checkpoint_successor(
+            committed_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let _ = committed_row.set_runtime_checkpoint_provenance();
         assert!(
-            !runtime_projection_rollback_authorized(&authority, &unstamped_row)
+            !runtime_projection_rollback_authorized(&authority, &committed_row)
                 .expect("rollback resolution should succeed"),
-            "a row without the checkpointer's own stamp must not be rebuilt"
+            "legacy true must not override verified non-checkpoint provenance"
         );
 
-        // (3) Stamped but CONTENT-FORKED row (not a continuation): fail
-        // closed — the stamp alone must never authorize destroying a fork.
-        let mut forked_row = Session::new();
-        forked_row.push(Message::User(UserMessage::text(
-            "a different conversation".to_string(),
+        // (3) A checkpoint anchored to a predecessor of the incoming
+        // authority is verified evidence, but it is not authority for this
+        // rollback.
+        let mut newer_authority = authority.clone();
+        newer_authority.push(Message::User(UserMessage::text(
+            "new committed boundary".to_string(),
         )));
-        forked_row.push(Message::User(UserMessage::text("entirely".to_string())));
-        forked_row.set_runtime_checkpoint_provenance();
+        let (newer_authority, newer_authority_stamp) = with_checkpoint_successor(
+            newer_authority,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let mut stale_anchor_row = newer_authority.clone();
+        stale_anchor_row.push(Message::User(UserMessage::text(
+            "uncommitted content after the newer boundary".to_string(),
+        )));
+        let (stale_anchor_row, _) = with_checkpoint_successor(
+            stale_anchor_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
         assert!(
-            !runtime_projection_rollback_authorized(&authority, &forked_row)
+            !runtime_projection_rollback_authorized(&newer_authority, &stale_anchor_row)
                 .expect("rollback resolution should succeed"),
-            "a stamped row that forks from the authority must not be rebuilt"
+            "a checkpoint must name the exact incoming authority stamp"
+        );
+
+        // (4) The old boolean, whether absent or true, is never typed
+        // authority and must fail before the generated decision is invoked.
+        let mut legacy_row = without_checkpoint_stamp(&authority);
+        legacy_row.push(Message::User(UserMessage::text(
+            "legacy checkpoint tail".to_string(),
+        )));
+        assert!(runtime_projection_rollback_authorized(&authority, &legacy_row).is_err());
+        let _ = legacy_row.set_runtime_checkpoint_provenance();
+        assert!(runtime_projection_rollback_authorized(&authority, &legacy_row).is_err());
+
+        let mut malformed = with_malformed_checkpoint_stamp(&ahead_row);
+        let _ = malformed.set_runtime_checkpoint_provenance();
+        assert!(runtime_projection_rollback_authorized(&authority, &malformed).is_err());
+
+        // (5) A digest-stale typed stamp cannot be rescued by legacy true.
+        let mut digest_stale = ahead_row;
+        digest_stale.push(Message::User(UserMessage::text(
+            "mutation after the typed stamp".to_string(),
+        )));
+        let _ = digest_stale.set_runtime_checkpoint_provenance();
+        assert!(runtime_projection_rollback_authorized(&authority, &digest_stale).is_err());
+
+        // Keep the exact newer stamp used above live in this assertion so the
+        // test also pins that the incoming authority itself is fully verified.
+        assert_eq!(
+            newer_authority
+                .try_checkpoint_state()
+                .expect("newer authority should verify"),
+            meerkat_core::SessionCheckpointState::Verified(newer_authority_stamp)
         );
     }
 
@@ -27139,6 +28511,7 @@ mod tests {
         authority.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
+        let (authority, authority_stamp) = with_checkpoint_root(authority);
 
         // The intra-turn checkpointer wrote ahead of the boundary commit and
         // a host kill froze the row there.
@@ -27146,7 +28519,11 @@ mod tests {
         ahead_row.push(Message::User(UserMessage::text(
             "checkpointed but uncommitted".to_string(),
         )));
-        ahead_row.set_runtime_checkpoint_provenance();
+        let (ahead_row, _) = with_checkpoint_successor(
+            ahead_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
         store
             .save(&ahead_row)
             .await
@@ -27173,9 +28550,91 @@ mod tests {
             authority.messages().len(),
             "the row must be rebuilt onto committed truth (unacknowledged tail discarded)"
         );
-        assert!(
-            !persisted.has_runtime_checkpoint_provenance(),
-            "the converged row is boundary-committed content, not a checkpointer write"
+        assert!(matches!(
+            persisted
+                .try_checkpoint_state()
+                .expect("converged checkpoint state should verify"),
+            meerkat_core::SessionCheckpointState::Verified(stamp)
+                if stamp.provenance()
+                    != meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+        ));
+    }
+
+    /// Service-level regression for the cold materialization ordering that the
+    /// bridge-only test above cannot exercise. Preparing an unchanged runtime
+    /// authority must reuse its exact stamp; minting a sibling successor first
+    /// makes the strict `IntraTurnCheckpoint -> authority` rollback proof
+    /// impossible and permanently wedges the shorter committed transcript.
+    #[tokio::test]
+    async fn unchanged_run_boundary_reuses_authority_before_ahead_projection_rollback() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store_dyn,
+            memory_blob_store(),
+        );
+
+        let mut authority = Session::new();
+        authority.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (authority, authority_stamp) = with_checkpoint_root(authority);
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(authority.id());
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&authority)
+                        .expect("serialize committed runtime authority"),
+                },
+            )
+            .await
+            .expect("commit runtime authority");
+
+        let mut ahead_row = authority.clone();
+        ahead_row.push(Message::User(UserMessage::text(
+            "checkpointed but uncommitted".to_string(),
+        )));
+        let (ahead_row, _) = with_checkpoint_successor(
+            ahead_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store
+            .save(&ahead_row)
+            .await
+            .expect("persist ahead intra-turn row");
+
+        let persisted = service
+            .save_normalized_session(authority.clone())
+            .await
+            .expect("unchanged authority must converge the ahead projection");
+        assert_eq!(verified_checkpoint_stamp(&persisted), authority_stamp);
+        let projection = store
+            .load(authority.id())
+            .await
+            .expect("load converged projection")
+            .expect("projection exists");
+        assert_eq!(projection.messages(), authority.messages());
+        assert_eq!(verified_checkpoint_stamp(&projection), authority_stamp);
+
+        let runtime_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load converged runtime authority")
+            .expect("runtime authority exists");
+        let runtime_session: Session =
+            serde_json::from_slice(&runtime_snapshot).expect("decode converged runtime authority");
+        assert_eq!(runtime_session.messages(), authority.messages());
+        assert_eq!(
+            verified_checkpoint_stamp(&runtime_session),
+            authority_stamp,
+            "an idempotent resume persist must not mint a sibling checkpoint in RuntimeStore"
         );
     }
 
@@ -27191,14 +28650,20 @@ mod tests {
         authority.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
-        let mut unstamped_row = authority.clone();
-        unstamped_row.push(Message::User(UserMessage::text(
-            "out-of-band appended".to_string(),
+        let (authority, authority_stamp) = with_checkpoint_root(authority);
+        let mut committed_row = authority.clone();
+        committed_row.push(Message::User(UserMessage::text(
+            "separately committed append".to_string(),
         )));
+        let (committed_row, _) = with_checkpoint_successor(
+            committed_row,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
         store
-            .save(&unstamped_row)
+            .save(&committed_row)
             .await
-            .expect("persist unstamped ahead row");
+            .expect("persist separately committed ahead row");
 
         let error = save_session_projection_with_storage_normalization_bridge(
             store.as_ref(),
@@ -27206,16 +28671,17 @@ mod tests {
             &authority,
         )
         .await
-        .expect_err("an unstamped ahead row must keep the shrink fail-closed");
+        .expect_err("a non-checkpoint ahead row must keep the shrink fail-closed");
         assert!(
             matches!(error, SessionStoreError::MonotonicityViolation { .. }),
             "expected MonotonicityViolation, got {error:?}"
         );
     }
 
-    /// Pin the strip half of the provenance contract: every
-    /// boundary-following persist erases the intra-turn checkpoint stamp, so
-    /// the stamp is present on a row iff the checkpointer wrote it last.
+    /// Pin the boundary-following half of the typed provenance contract:
+    /// the actual persist replaces an intra-turn stamp with an exact committed
+    /// successor in both durable projections. Provenance therefore identifies
+    /// the last writer without falling back to the legacy Boolean.
     #[tokio::test]
     async fn boundary_following_persists_strip_checkpoint_provenance() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -27229,24 +28695,41 @@ mod tests {
             memory_blob_store(),
         );
 
-        // normalized_session_for_persistence (the shared normalize step of
-        // save_normalized_session and save_compatibility_projection_only)
-        // strips the stamp.
-        let mut stamped = Session::new();
-        stamped.push(Message::User(UserMessage::text("hello".to_string())));
-        stamped.set_runtime_checkpoint_provenance();
-        let normalized = service
-            .normalized_session_for_persistence(stamped.clone())
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
-            .expect("normalize should succeed");
-        assert!(
-            !normalized.has_runtime_checkpoint_provenance(),
-            "normalized persistence must strip the checkpoint provenance stamp"
+            .expect("create_session should succeed");
+        let authority = store
+            .load(&created.session_id)
+            .await
+            .expect("load committed authority")
+            .expect("committed authority should exist");
+        let authority_stamp = verified_checkpoint_stamp(&authority);
+
+        // Simulate the checkpointer's typed ahead row. The committed runtime
+        // snapshot remains at `authority`, so the row's exact anchor proves
+        // that it is eligible for boundary-following convergence.
+        let mut stamped = authority.clone();
+        stamped.push(Message::User(UserMessage::text("hello".to_string())));
+        let (stamped, checkpoint_stamp) = with_checkpoint_successor(
+            stamped,
+            &authority_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store
+            .save(&stamped)
+            .await
+            .expect("save typed intra-turn projection");
+
+        assert_eq!(
+            verified_checkpoint_stamp(&stamped),
+            checkpoint_stamp,
+            "the simulated ahead row must begin as exact typed checkpoint evidence"
         );
 
-        // persist_replayed_transcript_projection_for_mutation (the replay
-        // projector's boundary-following persist) strips the stamp from BOTH
-        // the durable row and the runtime authority snapshot.
+        // The replay projector's boundary-following persist replaces the
+        // IntraTurnCheckpoint stamp in BOTH the durable row and the runtime
+        // authority snapshot with one committed TranscriptRewrite successor.
         service
             .persist_replayed_transcript_projection_for_mutation(&stamped)
             .await
@@ -27256,10 +28739,15 @@ mod tests {
             .await
             .expect("load persisted row")
             .expect("row present");
-        assert!(
-            !row.has_runtime_checkpoint_provenance(),
-            "replay projection persist must not re-persist the stamp on the row"
+        let row_stamp = verified_checkpoint_stamp(&row);
+        assert_eq!(
+            row_stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::TranscriptRewrite
         );
+        assert!(checkpoint_stamp_is_direct_successor_of(
+            &row_stamp,
+            &authority_stamp
+        ));
         let snapshot_bytes = runtime_store
             .load_session_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(
                 stamped.id(),
@@ -27269,10 +28757,8 @@ mod tests {
             .expect("runtime snapshot present");
         let snapshot: Session =
             serde_json::from_slice(&snapshot_bytes).expect("snapshot deserializes");
-        assert!(
-            !snapshot.has_runtime_checkpoint_provenance(),
-            "replay projection persist must not inject the stamp into the runtime snapshot"
-        );
+        assert_eq!(verified_checkpoint_stamp(&snapshot), row_stamp);
+        assert_eq!(snapshot.messages(), row.messages());
     }
 
     // -----------------------------------------------------------------------
@@ -27616,12 +29102,14 @@ mod tests {
     async fn incremental_checkpointer_appends_deltas_and_skips() {
         let memory_store = Arc::new(MemoryStore::new());
         let store: Arc<dyn SessionStore> = memory_store.clone();
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let inc = incremental_handle(&memory_store);
         let gate = Arc::new(CheckpointerGate {
             cancelled: Mutex::new(false),
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            runtime_store: Arc::clone(&runtime_store),
             incremental: Some(Arc::clone(&inc)),
             blob_store: memory_blob_store(),
             event_store: None,
@@ -27631,6 +29119,7 @@ mod tests {
         };
 
         let mut session = Session::new();
+        seed_runtime_checkpoint_root(runtime_store.as_ref(), &session).await;
         session.push(user_message("turn one"));
         checkpointer.checkpoint(&session).await;
         let seeded = memory_store.stats().await;

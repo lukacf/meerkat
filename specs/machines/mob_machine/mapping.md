@@ -495,6 +495,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyPendingSupervisorAcceptanceFatalDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyIdentityReconciliationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyIdentityReconciliationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyIdentityReconciliationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyIdentityReconciliationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4008,6 +4020,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PendingSupervisorAcceptanceClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `IdentityReconciliationClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `FrameSeedConfirmed`

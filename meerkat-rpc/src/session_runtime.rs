@@ -10808,6 +10808,47 @@ mod tests {
             meerkat_runtime::RuntimeStore::supports_compaction_projection_outbox(&self.inner)
         }
 
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            let scheduled_failure = self
+                .fail_lifecycle_after_successes
+                .fetch_update(
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                    |remaining| match remaining {
+                        usize::MAX => None,
+                        0 => Some(usize::MAX),
+                        remaining => Some(remaining - 1),
+                    },
+                )
+                .is_ok_and(|previous| previous == 0);
+            if scheduled_failure || self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic service-turn lifecycle commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
+        }
+
         async fn commit_session_snapshot(
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,

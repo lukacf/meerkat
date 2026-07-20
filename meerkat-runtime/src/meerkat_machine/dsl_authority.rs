@@ -4,10 +4,7 @@
 //! state representation. The DSL validates transition legality; the
 //! runtime shell executes the actual mutations.
 
-use std::collections::BTreeSet;
-
 use super::dsl as mm_dsl;
-use crate::identifiers::LogicalRuntimeId;
 use crate::runtime_state::RuntimeState;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
@@ -173,63 +170,19 @@ pub(crate) fn new_initialized_authority(context: &'static str) -> mm_dsl::Meerka
     authority
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn recover_authority_from_runtime_observation(
+pub(crate) fn new_registered_authority(
     session_id: &SessionId,
-    runtime_phase: RuntimeState,
-    runtime_id: Option<&LogicalRuntimeId>,
-    current_run_id: Option<&RunId>,
-    pre_run_phase: Option<RuntimeState>,
-    silent_intent_overrides: BTreeSet<String>,
-    active_fence_token: Option<u64>,
-    active_runtime_generation: Option<mm_dsl::Generation>,
-    active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
 ) -> Result<mm_dsl::MeerkatMachineAuthority, mm_dsl::MeerkatMachineTransitionError> {
-    recover_authority_from_runtime_observation_id(
-        mm_dsl::SessionId::from_domain(session_id),
-        runtime_phase,
-        runtime_id,
-        current_run_id,
-        pre_run_phase,
-        silent_intent_overrides,
-        active_fence_token,
-        active_runtime_generation,
-        active_runtime_epoch_id,
-    )
+    new_registered_authority_id(mm_dsl::SessionId::from_domain(session_id))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn recover_authority_from_runtime_observation_id(
+pub(crate) fn new_registered_authority_id(
     session_id: mm_dsl::SessionId,
-    runtime_phase: RuntimeState,
-    runtime_id: Option<&LogicalRuntimeId>,
-    current_run_id: Option<&RunId>,
-    pre_run_phase: Option<RuntimeState>,
-    silent_intent_overrides: BTreeSet<String>,
-    active_fence_token: Option<u64>,
-    active_runtime_generation: Option<mm_dsl::Generation>,
-    active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
 ) -> Result<mm_dsl::MeerkatMachineAuthority, mm_dsl::MeerkatMachineTransitionError> {
-    let mut authority = mm_dsl::MeerkatMachineAuthority::new();
-    let agent_runtime_id =
-        if active_runtime_generation.is_some() || active_runtime_epoch_id.is_some() {
-            runtime_id.map(mm_dsl::AgentRuntimeId::from_domain)
-        } else {
-            None
-        };
+    let mut authority = new_initialized_authority("runtime authority must initialize");
     mm_dsl::MeerkatMachineMutator::apply(
         &mut authority,
-        mm_dsl::MeerkatMachineInput::RecoverRuntimeAuthority {
-            session_id,
-            state: observed_runtime_lifecycle_state(runtime_phase),
-            agent_runtime_id,
-            fence_token: active_fence_token.map(mm_dsl::FenceToken::from),
-            runtime_generation: active_runtime_generation,
-            runtime_epoch_id: active_runtime_epoch_id,
-            current_run_id: current_run_id.map(mm_dsl::RunId::from_domain),
-            pre_run_phase: pre_run_phase.and_then(pre_run_phase_from_runtime_state),
-            silent_intent_overrides,
-        },
+        mm_dsl::MeerkatMachineInput::RegisterSession { session_id },
     )?;
     Ok(authority)
 }
@@ -343,6 +296,61 @@ pub(crate) fn recover_supervisor_rotation_terminal_receipt(
     )
 }
 
+/// Recover supervisor custody independently after the runtime lifecycle row
+/// has converged to the clean cold-start fixed point.
+pub(crate) fn recover_supervisor_authority_snapshot(
+    authority: &mut mm_dsl::MeerkatMachineAuthority,
+    snapshot: crate::store::SupervisorAuthoritySnapshot,
+) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
+    let (current, terminal_receipts) = match snapshot {
+        crate::store::SupervisorAuthoritySnapshot::WithRotationHistory {
+            current,
+            terminal_receipts,
+        } => (*current, terminal_receipts),
+        current => (current, std::collections::BTreeMap::new()),
+    };
+    let input = match current {
+        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt => None,
+        crate::store::SupervisorAuthoritySnapshot::Bound(binding) => {
+            Some(mm_dsl::MeerkatMachineInput::RecoverSupervisorBinding {
+                name: binding.name().to_owned(),
+                peer_id: binding.peer_id().to_owned(),
+                address: binding.address().to_owned(),
+                signing_public_key: binding.signing_public_key().to_owned(),
+                epoch: binding.epoch(),
+            })
+        }
+        crate::store::SupervisorAuthoritySnapshot::RevocationPending(pending) => Some(
+            mm_dsl::MeerkatMachineInput::RecoverSupervisorRevocationPending {
+                name: pending.name().to_owned(),
+                peer_id: pending.peer_id().to_owned(),
+                address: pending.address().to_owned(),
+                signing_public_key: pending.signing_public_key().to_owned(),
+                epoch: pending.epoch(),
+            },
+        ),
+        crate::store::SupervisorAuthoritySnapshot::RotationOperation(rotation) => {
+            recover_supervisor_rotation_operation(authority, &rotation)?;
+            None
+        }
+        crate::store::SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => Some(
+            mm_dsl::MeerkatMachineInput::RecoverRevokedSupervisorReceipt {
+                peer_id: receipt.peer_id().to_owned(),
+                signing_public_key: receipt.signing_public_key().to_owned(),
+                epoch: receipt.epoch(),
+            },
+        ),
+        crate::store::SupervisorAuthoritySnapshot::WithRotationHistory { .. } => unreachable!(),
+    };
+    if let Some(input) = input {
+        mm_dsl::MeerkatMachineMutator::apply(authority, input)?;
+    }
+    for rotation in terminal_receipts.into_values() {
+        recover_supervisor_rotation_terminal_receipt(authority, &rotation)?;
+    }
+    Ok(())
+}
+
 /// Map a persisted pre-run phase (as a [`RuntimeState`]) into the typed
 /// [`mm_dsl::PreRunPhase`] carried in the DSL state. Only `Idle`, `Attached`,
 /// and `Retired` are valid pre-run markers — any other [`RuntimeState`]
@@ -365,76 +373,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recover_authority_from_runtime_observation_uses_generated_input() {
+    fn new_registered_authority_builds_a_fresh_idle_shell() {
         let session_id = SessionId::from_uuid(uuid::Uuid::nil());
-        let authority = recover_authority_from_runtime_observation(
-            &session_id,
-            RuntimeState::Attached,
-            None,
-            None,
-            None,
-            BTreeSet::from(["silent".to_string()]),
-            None,
-            None,
-            None,
-        )
-        .expect("generated recovery input should accept attached authority");
+        let authority = new_registered_authority(&session_id)
+            .expect("initialize plus register must create fresh cold authority");
 
         assert_eq!(
             authority.state().lifecycle_phase,
-            mm_dsl::MeerkatPhase::Attached
-        );
-        assert_eq!(
-            authority.state().session_id,
-            Some(mm_dsl::SessionId::from_domain(&session_id))
-        );
-        assert!(authority.state().silent_intent_overrides.contains("silent"));
-    }
-
-    #[test]
-    fn recover_authority_from_runtime_observation_rejects_incoherent_run_binding() {
-        let session_id = SessionId::from_uuid(uuid::Uuid::nil());
-        let run_id = RunId::from_uuid(uuid::Uuid::nil());
-
-        let result = recover_authority_from_runtime_observation(
-            &session_id,
-            RuntimeState::Running,
-            None,
-            Some(&run_id),
-            None,
-            BTreeSet::new(),
-            None,
-            None,
-            None,
-        );
-
-        assert!(matches!(
-            result,
-            Err(mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. })
-        ));
-    }
-
-    #[test]
-    fn recover_authority_from_runtime_observation_normalizes_cold_running_to_idle() {
-        let session_id = SessionId::from_uuid(uuid::Uuid::nil());
-
-        let authority = recover_authority_from_runtime_observation(
-            &session_id,
-            RuntimeState::Running,
-            None,
-            None,
-            None,
-            BTreeSet::from(["silent".to_string()]),
-            None,
-            None,
-            None,
-        )
-        .expect("cold Running authority without a durable run witness must recover");
-
-        assert_eq!(
-            authority.state().lifecycle_phase,
-            mm_dsl::MeerkatPhase::Idle,
-            "a process-local executor cannot survive cold recovery"
+            mm_dsl::MeerkatPhase::Idle
         );
         assert_eq!(
             authority.state().session_id,
@@ -442,36 +388,6 @@ mod tests {
         );
         assert!(authority.state().current_run_id.is_none());
         assert!(authority.state().pre_run_phase.is_none());
-        assert!(authority.state().silent_intent_overrides.contains("silent"));
-    }
-
-    #[test]
-    fn recover_authority_from_runtime_observation_retains_complete_running_witness() {
-        let session_id = SessionId::from_uuid(uuid::Uuid::nil());
-        let run_id = RunId::new();
-
-        let authority = recover_authority_from_runtime_observation(
-            &session_id,
-            RuntimeState::Running,
-            None,
-            Some(&run_id),
-            Some(RuntimeState::Retired),
-            BTreeSet::new(),
-            None,
-            None,
-            None,
-        )
-        .expect("complete live run witness should retain Running authority");
-
-        assert_eq!(
-            authority.state().lifecycle_phase,
-            mm_dsl::MeerkatPhase::Running
-        );
-        assert_eq!(current_run_id_from_authority(&authority), Some(run_id));
-        assert_eq!(
-            pre_run_phase_from_authority(&authority),
-            Some(RuntimeState::Retired)
-        );
     }
 
     #[test]

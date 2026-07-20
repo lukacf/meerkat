@@ -641,6 +641,30 @@ mod tests {
             self.inner.supports_compaction_projection_outbox()
         }
 
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
+        }
+
         fn auth_authority_key(&self) -> Option<String> {
             self.inner.auth_authority_key()
         }

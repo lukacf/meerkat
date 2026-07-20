@@ -5,9 +5,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::SqliteMobStores;
 use crate::store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
-    InMemoryMobSpecStore, InMemoryRealmProfileStore, MobEventStore, MobRunStore,
-    MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore, authority_validating_mob_run_store,
+    InMemoryMobEventStore, InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore,
+    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
+    InMemoryRealmProfileStore, MobEventStore, MobIdentityMemberStore, MobIdentityStatusStore,
+    MobIdentityStore, MobRunStore, MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore,
+    authority_validating_mob_run_store,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -17,6 +19,7 @@ use std::sync::Arc;
 ///
 /// Contains both the mob event store (structural state) and session
 /// store (for meerkat sessions). Each mob has its own isolated storage.
+#[derive(Clone)]
 pub struct MobStorage {
     /// Event store for mob structural events.
     pub(crate) events: Arc<dyn MobEventStore>,
@@ -26,6 +29,14 @@ pub struct MobStorage {
     pub(crate) specs: Arc<dyn MobSpecStore>,
     /// Runtime metadata store for supervisor authority and compatibility projections.
     pub(crate) runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    /// Sole desired-state authority for identity intent, leases, and immutable custody.
+    pub(crate) identity: Arc<dyn MobIdentityStore>,
+    /// Optional built-in-only transaction joining identity authority to the
+    /// structural member and identity-local wiring event targets. Custom store
+    /// compositions cannot provide this implicitly.
+    pub(crate) identity_member: Option<Arc<dyn MobIdentityMemberStore>>,
+    /// Replaceable output-only identity convergence diagnostics.
+    pub(crate) identity_status: Arc<dyn MobIdentityStatusStore>,
     /// Realm-scoped reusable profile store.
     pub(crate) realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
@@ -34,11 +45,20 @@ impl MobStorage {
     /// Create a storage bundle with in-memory stores (for tests and ephemeral mobs).
     pub fn in_memory() -> Self {
         let (runs, specs) = Self::in_memory_flow_stores();
+        let events = InMemoryMobEventStore::new();
+        let identity = InMemoryMobIdentityStore::paired_with_event_store(
+            &events,
+            Arc::new(crate::store::SystemMobIdentityStoreClock),
+        );
+        let identity_member: Arc<dyn MobIdentityMemberStore> = Arc::new(identity.clone());
         Self {
-            events: Arc::new(InMemoryMobEventStore::new()),
+            events: Arc::new(events),
             runs,
             specs,
             runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+            identity: Arc::new(identity),
+            identity_member: Some(identity_member),
+            identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -59,12 +79,16 @@ impl MobStorage {
             runs,
             specs,
             runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+            identity: Arc::new(InMemoryMobIdentityStore::new()),
+            identity_member: None,
+            identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
 
-    /// Build a storage bundle from an event store plus an existing runtime metadata store.
-    pub fn with_events_and_runtime_metadata(
+    /// Test-only convenience with explicitly ephemeral identity authority.
+    #[cfg(test)]
+    pub(crate) fn with_events_and_runtime_metadata(
         events: Arc<dyn MobEventStore>,
         runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     ) -> Self {
@@ -74,6 +98,9 @@ impl MobStorage {
             runs,
             specs,
             runtime_metadata,
+            identity: Arc::new(InMemoryMobIdentityStore::new()),
+            identity_member: None,
+            identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -83,12 +110,16 @@ impl MobStorage {
         events: Arc<dyn MobEventStore>,
         runs: Arc<dyn MobRunStore>,
         specs: Arc<dyn MobSpecStore>,
+        identity: Arc<dyn MobIdentityStore>,
+        identity_status: Arc<dyn MobIdentityStatusStore>,
     ) -> Self {
         Self::custom_with_runtime_metadata(
             events,
             runs,
             specs,
             Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+            identity,
+            identity_status,
         )
     }
 
@@ -98,12 +129,17 @@ impl MobStorage {
         runs: Arc<dyn MobRunStore>,
         specs: Arc<dyn MobSpecStore>,
         runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+        identity: Arc<dyn MobIdentityStore>,
+        identity_status: Arc<dyn MobIdentityStatusStore>,
     ) -> Self {
         Self {
             events,
             runs: authority_validating_mob_run_store(runs),
             specs,
             runtime_metadata,
+            identity,
+            identity_member: None,
+            identity_status,
             realm_profiles: None,
         }
     }
@@ -129,11 +165,16 @@ impl MobStorage {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn persistent(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
         let stores = SqliteMobStores::open(path)?;
+        let identity = stores.identity_store();
+        let identity_member: Arc<dyn MobIdentityMemberStore> = Arc::new(identity.clone());
         Ok(Self {
             events: Arc::new(stores.event_store()),
             runs: authority_validating_mob_run_store(Arc::new(stores.run_store())),
             specs: Arc::new(stores.spec_store()),
             runtime_metadata: Arc::new(stores.runtime_metadata_store()),
+            identity: Arc::new(identity),
+            identity_member: Some(identity_member),
+            identity_status: Arc::new(stores.identity_status_store()),
             realm_profiles: Some(Arc::new(stores.realm_profile_store())),
         })
     }
@@ -146,6 +187,15 @@ impl std::fmt::Debug for MobStorage {
             .field("runs", &"<dyn MobRunStore>")
             .field("specs", &"<dyn MobSpecStore>")
             .field("runtime_metadata", &"<dyn MobRuntimeMetadataStore>")
+            .field("identity", &"<dyn MobIdentityStore>")
+            .field(
+                "identity_member",
+                &self
+                    .identity_member
+                    .as_ref()
+                    .map(|_| "<dyn MobIdentityMemberStore>"),
+            )
+            .field("identity_status", &"<dyn MobIdentityStatusStore>")
             .field(
                 "realm_profiles",
                 &self
@@ -441,6 +491,53 @@ mod tests {
 
         let all = storage.events.replay_all().await.unwrap();
         assert_eq!(all.len(), 1);
+
+        let mob_id = MobId::from("test");
+        let identity = crate::AgentIdentity::from("member-a");
+        assert!(matches!(
+            storage
+                .identity
+                .observe_identity_intent(&mob_id, &identity)
+                .await
+                .unwrap(),
+            crate::IdentityStoredObservation::Missing
+        ));
+        assert!(matches!(
+            storage
+                .identity
+                .claim_or_renew_identity_lease(
+                    &mob_id,
+                    &identity,
+                    "controller",
+                    "incarnation-a",
+                    1_000,
+                )
+                .await
+                .unwrap(),
+            crate::IdentityLeaseClaimOutcome::Acquired(_)
+        ));
+
+        let status = crate::IdentityConvergenceStatus {
+            identity: identity.clone(),
+            intent_revision: None,
+            lease_epoch: Some(1),
+            decision: Some(crate::IdentityReconcileDecision::AcquireLease),
+            observed_at_ms: 1,
+            detail: None,
+        };
+        storage
+            .identity_status
+            .replace_identity_convergence_status(&mob_id, &status)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .identity_status
+                .load_identity_convergence_status(&mob_id, &identity)
+                .await
+                .unwrap(),
+            crate::IdentityStoredObservation::Valid(status)
+        );
     }
 
     #[tokio::test]
@@ -481,6 +578,8 @@ model = "test"
             Arc::new(InMemoryMobEventStore::new()),
             Arc::new(ForgedRunStore::new(Some(forged.clone()))),
             Arc::new(InMemoryMobSpecStore::new()),
+            Arc::new(InMemoryMobIdentityStore::new()),
+            Arc::new(InMemoryMobIdentityStatusStore::new()),
         );
 
         let read_error = storage
@@ -560,5 +659,36 @@ model = "test"
             .await
             .unwrap();
         assert_eq!(revision, 1);
+
+        let identity = crate::AgentIdentity::from("persistent-member");
+        let lease = storage
+            .identity
+            .claim_or_renew_identity_lease(
+                &MobId::from("mob"),
+                &identity,
+                "controller",
+                "incarnation-a",
+                30_000,
+            )
+            .await
+            .unwrap();
+        let expected_epoch = match lease {
+            crate::IdentityLeaseClaimOutcome::Acquired(claim) => claim.epoch,
+            other => panic!("expected initial persistent lease, got {other:?}"),
+        };
+        drop(storage);
+
+        let reopened = MobStorage::persistent(&db_path).unwrap();
+        assert!(matches!(
+            reopened
+                .identity
+                .observe_identity_lease(&MobId::from("mob"), &identity)
+                .await
+                .unwrap(),
+            crate::IdentityStoredObservation::Valid(crate::IdentityLeaseRecord {
+                epoch_highwater,
+                ..
+            }) if epoch_highwater == expected_epoch
+        ));
     }
 }

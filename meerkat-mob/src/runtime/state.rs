@@ -819,6 +819,44 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
+    ApplyIdentityDeclarationManifest {
+        manifest: Box<crate::identity::IdentityDeclarationManifest>,
+        reply_tx: oneshot::Sender<
+            Result<crate::identity::IdentityDeclarationManifestApplyOutcome, crate::MobError>,
+        >,
+    },
+    GetIdentityIntent {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
+                crate::MobError,
+            >,
+        >,
+    },
+    GetIdentityDeclarationReceipt {
+        scope_id: crate::identity::IdentityDeclarationScopeId,
+        operation_id: meerkat_core::ops::OperationId,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::identity::IdentityStoredObservation<
+                    crate::identity::IdentityOperationReceipt,
+                >,
+                crate::MobError,
+            >,
+        >,
+    },
+    GetIdentityConvergenceStatus {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::identity::IdentityStoredObservation<
+                    crate::identity::IdentityConvergenceStatus,
+                >,
+                crate::MobError,
+            >,
+        >,
+    },
     ConcludeObjective {
         agent_identity: crate::ids::AgentIdentity,
         objective_id: meerkat_core::interaction::ObjectiveId,
@@ -1138,6 +1176,10 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
+            Self::ApplyIdentityDeclarationManifest { .. } => "ApplyIdentityDeclarationManifest",
+            Self::GetIdentityIntent { .. } => "GetIdentityIntent",
+            Self::GetIdentityDeclarationReceipt { .. } => "GetIdentityDeclarationReceipt",
+            Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",
             Self::ConcludeObjective { .. } => "ConcludeObjective",
             Self::BindObjectiveOwner { .. } => "BindObjectiveOwner",
             Self::MemberMachineProjection { .. } => "MemberMachineProjection",

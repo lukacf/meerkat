@@ -342,6 +342,11 @@ impl EphemeralRuntimeDriver {
         Arc::clone(&self.dsl.0)
     }
 
+    pub(crate) fn replace_runtime_authority(&mut self, authority: mm_dsl::MeerkatMachineAuthority) {
+        *self.dsl.lock() = authority;
+        self.sync_control_projection_from_dsl_authority();
+    }
+
     pub(crate) fn session_authority_id_for_recovery(&self) -> mm_dsl::SessionId {
         self.with_dsl_state(|state| state.session_id.clone())
             .unwrap_or_else(|| self.contract_session_authority_id())
@@ -637,53 +642,32 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(Self::supervisor_authority_snapshot_from_state)
     }
 
-    // This is the typed recovery boundary for independently persisted runtime
-    // binding facts; keeping those observations explicit avoids hiding a
-    // missing authority fact inside a partially populated compatibility bag.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn recover_runtime_authority_from_binding_observation(
-        &mut self,
-        session_id: mm_dsl::SessionId,
-        runtime_phase: RuntimeState,
-        runtime_id: Option<&LogicalRuntimeId>,
-        active_fence_token: Option<u64>,
-        active_runtime_generation: Option<mm_dsl::Generation>,
-        active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
-        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
-    ) -> Result<(), RuntimeDriverError> {
-        let silent_intent_overrides =
-            self.with_dsl_state(|state| state.silent_intent_overrides.clone());
-        self.recover_runtime_authority_from_binding_observation_with_silent_intents(
-            session_id,
-            runtime_phase,
-            runtime_id,
-            active_fence_token,
-            active_runtime_generation,
-            active_runtime_epoch_id,
-            silent_intent_overrides,
-            supervisor_authority,
-        )
-    }
-
     /// Compile the exact v0.6.34 completed-idle compatibility observation
-    /// through generated recovery authority before minting durable lifecycle
-    /// bytes. The migration caller supplies no binding or supervisor facts;
-    /// the returned record projects only the facts accepted and recovered by
-    /// MeerkatMachine.
+    /// as a fresh registered shell before minting durable lifecycle bytes.
+    /// The legacy row contributes no binding or supervisor authority.
     #[cfg(feature = "sqlite-store")]
     pub(crate) fn recover_v0_6_34_completed_idle_lifecycle_record(
         &mut self,
     ) -> Result<crate::store::MachineLifecycleStoreRecord, RuntimeDriverError> {
-        let session_id = self.session_authority_id_for_recovery();
-        self.recover_runtime_authority_from_binding_observation(
-            session_id,
-            RuntimeState::Idle,
-            None,
-            None,
-            None,
-            None,
-            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-        )?;
+        let session_id =
+            self.runtime_id
+                .session_id()
+                .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "v0.6.34 completed-idle migration runtime '{}' is not session-owned",
+                        self.runtime_id
+                    ),
+                })?;
+        let recovered = crate::meerkat_machine::dsl_authority::new_registered_authority(
+            &session_id,
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                err,
+                "v0.6.34 completed-idle migration registration",
+            ))
+        })?;
+        self.replace_runtime_authority(recovered);
         let durable_state =
             crate::meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
                 crate::traits::RuntimeDriver::runtime_state(self),
@@ -701,135 +685,59 @@ impl EphemeralRuntimeDriver {
         )
     }
 
+    /// Test-only seed helper for existing supervisor/binding recovery tests.
+    /// It constructs state exclusively through normal generated transitions;
+    /// production cold recovery observes and reconciles the lifecycle row.
     #[allow(clippy::too_many_arguments)]
-    fn recover_runtime_authority_from_binding_observation_with_silent_intents(
+    #[cfg(test)]
+    pub(crate) fn install_registered_authority_for_test(
         &mut self,
         session_id: mm_dsl::SessionId,
-        runtime_phase: RuntimeState,
         runtime_id: Option<&LogicalRuntimeId>,
         active_fence_token: Option<u64>,
         active_runtime_generation: Option<mm_dsl::Generation>,
         active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
-        silent_intent_overrides: std::collections::BTreeSet<String>,
         supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
     ) -> Result<(), RuntimeDriverError> {
-        let current_run_id = self.current_run_id();
-        let pre_run_phase = self.pre_run_phase();
         let mut recovered =
-            crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation_id(
-                session_id,
-                runtime_phase,
-                runtime_id,
-                current_run_id.as_ref(),
-                pre_run_phase,
-                silent_intent_overrides,
-                active_fence_token,
-                active_runtime_generation,
-                active_runtime_epoch_id,
-            )
-            .map_err(|err| {
-                RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
-                    err,
-                    "persistent runtime recovery authority",
-                ))
-            })?;
-        let (supervisor_authority, terminal_rotation_receipts) = match supervisor_authority {
-            crate::store::SupervisorAuthoritySnapshot::WithRotationHistory {
-                current,
-                terminal_receipts,
-            } => (*current, terminal_receipts),
-            current => (current, std::collections::BTreeMap::new()),
-        };
-        match supervisor_authority {
-            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt => {}
-            crate::store::SupervisorAuthoritySnapshot::Bound(binding) => {
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut recovered,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverSupervisorBinding {
-                        name: binding.name().to_owned(),
-                        peer_id: binding.peer_id().to_owned(),
-                        address: binding.address().to_owned(),
-                        signing_public_key: binding.signing_public_key().to_owned(),
-                        epoch: binding.epoch(),
-                    },
-                )
+            crate::meerkat_machine::dsl_authority::new_registered_authority_id(session_id.clone())
                 .map_err(|err| {
                     RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
                         err,
-                        "persistent supervisor binding recovery authority",
+                        "test runtime registration",
                     ))
                 })?;
-            }
-            crate::store::SupervisorAuthoritySnapshot::RevocationPending(pending) => {
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut recovered,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverSupervisorRevocationPending {
-                        name: pending.name().to_owned(),
-                        peer_id: pending.peer_id().to_owned(),
-                        address: pending.address().to_owned(),
-                        signing_public_key: pending.signing_public_key().to_owned(),
-                        epoch: pending.epoch(),
-                    },
-                )
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
-                        err,
-                        "persistent supervisor revocation-pending recovery authority",
-                    ))
-                })?;
-            }
-            crate::store::SupervisorAuthoritySnapshot::RotationOperation(rotation) => {
-                crate::meerkat_machine::dsl_authority::recover_supervisor_rotation_operation(
-                    &mut recovered,
-                    &rotation,
-                )
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
-                        err,
-                        "persistent supervisor rotation recovery authority",
-                    ))
-                })?;
-            }
-            crate::store::SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => {
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut recovered,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverRevokedSupervisorReceipt {
-                        peer_id: receipt.peer_id().to_owned(),
-                        signing_public_key: receipt.signing_public_key().to_owned(),
-                        epoch: receipt.epoch(),
-                    },
-                )
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
-                        err,
-                        "persistent revoked supervisor receipt recovery authority",
-                    ))
-                })?;
-            }
-            crate::store::SupervisorAuthoritySnapshot::WithRotationHistory { .. } => {
-                unreachable!("rotation history wrapper was flattened before authority recovery")
-            }
-        }
-        for rotation in terminal_rotation_receipts.into_values() {
-            crate::meerkat_machine::dsl_authority::recover_supervisor_rotation_terminal_receipt(
+        if let (Some(runtime_id), Some(fence_token)) = (runtime_id, active_fence_token) {
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut recovered,
-                &rotation,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        runtime_id,
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from(fence_token),
+                    generation: active_runtime_generation,
+                    runtime_epoch_id: active_runtime_epoch_id,
+                    session_id,
+                },
             )
             .map_err(|err| {
                 RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
                     err,
-                    "persistent supervisor rotation history recovery authority",
+                    "fresh runtime binding",
                 ))
             })?;
         }
-        {
-            let authority = self.shared_dsl_authority();
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *authority = recovered;
-        }
-        self.sync_control_projection_from_dsl_authority();
+        crate::meerkat_machine::dsl_authority::recover_supervisor_authority_snapshot(
+            &mut recovered,
+            supervisor_authority,
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                err,
+                "test supervisor authority recovery",
+            ))
+        })?;
+        self.replace_runtime_authority(recovered);
         Ok(())
     }
 
@@ -1916,7 +1824,10 @@ impl EphemeralRuntimeDriver {
     }
 
     fn contract_session_authority_id(&self) -> mm_dsl::SessionId {
-        mm_dsl::SessionId::from(self.runtime_id.to_string())
+        self.runtime_id
+            .session_id()
+            .map(|session_id| mm_dsl::SessionId::from_domain(&session_id))
+            .unwrap_or_else(|| mm_dsl::SessionId::from(self.runtime_id.to_string()))
     }
 
     pub(crate) fn ensure_contract_session_authority(
@@ -2030,56 +1941,6 @@ impl EphemeralRuntimeDriver {
             )
         };
         self.set_control_projection(phase, current_run_id, pre_run_phase);
-    }
-
-    /// Contract-only authority override for tests that need to seed impossible
-    /// or already-realized runtime phases. Production recovery must replay
-    /// durable lifecycle facts through DSL inputs instead of calling this.
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn contract_force_runtime_authority(
-        &mut self,
-        next_phase: RuntimeState,
-        current_run_id: Option<RunId>,
-        pre_run_phase: Option<RuntimeState>,
-    ) {
-        {
-            let authority = self.shared_dsl_authority();
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let session_id = authority
-                .state()
-                .session_id
-                .as_ref()
-                .and_then(|session_id| {
-                    uuid::Uuid::parse_str(&session_id.0)
-                        .ok()
-                        .map(SessionId::from_uuid)
-                });
-            let silent_intent_overrides = authority.state().silent_intent_overrides.clone();
-            let active_fence_token = authority
-                .state()
-                .active_fence_token
-                .as_ref()
-                .map(|token| token.0);
-            let active_runtime_generation = authority.state().active_runtime_generation;
-            let active_runtime_epoch_id = authority.state().active_runtime_epoch_id.clone();
-            *authority =
-                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id.unwrap_or_default(),
-                    next_phase,
-                    Some(&self.runtime_id),
-                    current_run_id.as_ref(),
-                    pre_run_phase,
-                    silent_intent_overrides,
-                    active_fence_token,
-                    active_runtime_generation,
-                    active_runtime_epoch_id,
-                )
-                .expect("contract runtime authority observation must recover");
-        }
-        self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }
 
     pub(crate) fn apply_runtime_executor_exited_authority(
@@ -4153,9 +4014,8 @@ mod tests {
         );
 
         driver
-            .recover_runtime_authority_from_binding_observation(
+            .install_registered_authority_for_test(
                 mm_dsl::SessionId::from("session-rotation-recovery".to_string()),
-                RuntimeState::Idle,
                 None,
                 None,
                 None,
@@ -4227,9 +4087,8 @@ mod tests {
         };
 
         let error = driver
-            .recover_runtime_authority_from_binding_observation(
+            .install_registered_authority_for_test(
                 mm_dsl::SessionId::from("session-nonterminal-rotation-history".to_string()),
-                RuntimeState::Idle,
                 None,
                 None,
                 None,
@@ -4242,7 +4101,7 @@ mod tests {
             panic!("rotation recovery must retain its typed Internal result: {error:?}");
         };
         assert!(
-            message.contains("persistent supervisor rotation history recovery authority")
+            message.contains("test supervisor authority recovery")
                 && message.contains("guard rejected"),
             "generated rejection must flow through the existing public error mapping: {message}",
         );

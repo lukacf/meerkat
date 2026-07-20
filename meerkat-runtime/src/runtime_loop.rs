@@ -518,10 +518,12 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::Destroyed
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             crate::RuntimeDriverError::ValidationFailed { .. }
-            | crate::RuntimeDriverError::RecoveryCorruption { .. } => Self::Corrupt(detail),
+            | crate::RuntimeDriverError::RecoveryCorruption { .. }
+            | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
             crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             | crate::RuntimeDriverError::UnregisterInProgress { .. }
             | crate::RuntimeDriverError::RuntimeStopInProgress { .. }
+            | crate::RuntimeDriverError::RecoveryBackoff { .. }
             | crate::RuntimeDriverError::Internal(_) => Self::Retryable(detail),
         }
     }

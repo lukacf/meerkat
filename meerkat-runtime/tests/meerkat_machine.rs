@@ -226,6 +226,24 @@ impl RuntimeStore for HarnessRuntimeStore {
         self.inner.supports_compaction_projection_outbox()
     }
 
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<meerkat_runtime::store::MachineLifecycleObservation, RuntimeStoreError> {
+        self.inner.observe_machine_lifecycle(runtime_id).await
+    }
+
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+        replacement: meerkat_runtime::store::MachineLifecycleCommit,
+    ) -> Result<meerkat_runtime::store::MachineLifecycleCasOutcome, RuntimeStoreError> {
+        self.inner
+            .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+            .await
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -1155,7 +1173,7 @@ async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight
 }
 
 #[tokio::test]
-async fn cold_reregister_rejects_destroyed_runtime_and_preserves_durable_state() {
+async fn cold_reregister_replaces_destroyed_process_projection_with_idle_shell() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();
 
@@ -1177,23 +1195,20 @@ async fn cold_reregister_rejects_destroyed_runtime_and_preserves_durable_state()
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    // Destroyed is terminal machine truth: cold re-registration is rejected
-    // by the machine verdict instead of laundering the terminal state into a
-    // successful registration.
-    let err = restarted
+    restarted
         .register_session(sid.clone())
         .await
-        .expect_err("cold re-registration of a destroyed runtime must be rejected");
-    assert!(
-        err.to_string().contains("Runtime destroyed"),
-        "rejection must surface the destroyed terminal verdict, got {err:?}",
+        .expect("destroyed process phase is observation, not cold authority");
+    assert_eq!(
+        restarted.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle
     );
     assert_eq!(
         load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .unwrap(),
-        Some(RuntimeState::Destroyed),
-        "rejected cold re-registration must not rewrite canonical durable destroyed runtime truth",
+        Some(RuntimeState::Idle),
+        "cold re-registration must publish a fresh unbound Idle shell",
     );
 }
 

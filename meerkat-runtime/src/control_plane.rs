@@ -68,10 +68,12 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::Destroyed
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             error @ (RuntimeDriverError::ValidationFailed { .. }
-            | RuntimeDriverError::RecoveryCorruption { .. }) => Self::Corrupt { context, error },
+            | RuntimeDriverError::RecoveryCorruption { .. }
+            | RuntimeDriverError::RecoveryRepairBlocked { .. }) => Self::Corrupt { context, error },
             error @ (RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             | RuntimeDriverError::UnregisterInProgress { .. }
             | RuntimeDriverError::RuntimeStopInProgress { .. }
+            | RuntimeDriverError::RecoveryBackoff { .. }
             | RuntimeDriverError::Internal(_)) => Self::Retryable { context, error },
         }
     }
@@ -1087,6 +1089,39 @@ mod tests {
         )))
     }
 
+    fn seed_attached_authority(
+        driver: &mut EphemeralRuntimeDriver,
+        session_id: &meerkat_core::types::SessionId,
+        runtime_id: &LogicalRuntimeId,
+        fence_token: u64,
+        generation: u64,
+        epoch_id: &str,
+    ) {
+        let mut authority =
+            crate::meerkat_machine::dsl_authority::new_registered_authority(session_id)
+                .expect("test authority must register its session");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from(
+                    runtime_id.to_string(),
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from(fence_token),
+                generation: Some(crate::meerkat_machine::dsl::Generation::from(generation)),
+                runtime_epoch_id: Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                    epoch_id.to_string(),
+                )),
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+            },
+        )
+        .expect("test authority must attach through the normal binding transition");
+        *driver
+            .shared_dsl_authority()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
+        driver.set_control_projection(crate::RuntimeState::Attached, None, None);
+    }
+
     fn runtime_effect(kind: RuntimeEffectKind, reason: &str) -> RuntimeEffect {
         runtime_effect_for_test(kind, reason)
     }
@@ -1191,27 +1226,14 @@ mod tests {
         let runtime_id = LogicalRuntimeId::new("mixed-stop-terminal-publication");
         let session_id = SessionId::new();
         let mut raw_driver = EphemeralRuntimeDriver::new(runtime_id.clone());
-        {
-            let authority = raw_driver.shared_dsl_authority();
-            *authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id,
-                    crate::RuntimeState::Attached,
-                    Some(&runtime_id),
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    Some(7),
-                    Some(crate::meerkat_machine::dsl::Generation::from(3_u64)),
-                    Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
-                        "mixed-stop-epoch".to_string(),
-                    )),
-                )
-                .expect("seed attached runtime authority");
-        }
-        raw_driver.set_control_projection(crate::RuntimeState::Attached, None, None);
+        seed_attached_authority(
+            &mut raw_driver,
+            &session_id,
+            &runtime_id,
+            7,
+            3,
+            "mixed-stop-epoch",
+        );
 
         let directed_uuid = meerkat_core::time_compat::new_uuid_v7();
         let directed = crate::mob_adapter::create_tracked_flow_step_input(
@@ -1400,27 +1422,14 @@ mod tests {
         let runtime_id = LogicalRuntimeId::new("cancel-safe-stop-terminal-publication");
         let session_id = SessionId::new();
         let mut raw_driver = EphemeralRuntimeDriver::new(runtime_id.clone());
-        {
-            let authority = raw_driver.shared_dsl_authority();
-            *authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id,
-                    crate::RuntimeState::Attached,
-                    Some(&runtime_id),
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    Some(17),
-                    Some(crate::meerkat_machine::dsl::Generation::from(9_u64)),
-                    Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
-                        "cancel-safe-stop-epoch".to_string(),
-                    )),
-                )
-                .expect("seed attached runtime authority");
-        }
-        raw_driver.set_control_projection(crate::RuntimeState::Attached, None, None);
+        seed_attached_authority(
+            &mut raw_driver,
+            &session_id,
+            &runtime_id,
+            17,
+            9,
+            "cancel-safe-stop-epoch",
+        );
         let directed_uuid = meerkat_core::time_compat::new_uuid_v7();
         let directed = crate::mob_adapter::create_tracked_flow_step_input(
             "cancel-safe-directed-step",
@@ -1547,27 +1556,14 @@ mod tests {
         let runtime_id = LogicalRuntimeId::new("uncommitted-stop-carrier");
         let session_id = SessionId::new();
         let mut raw_driver = EphemeralRuntimeDriver::new(runtime_id.clone());
-        {
-            let authority = raw_driver.shared_dsl_authority();
-            *authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id,
-                    crate::RuntimeState::Attached,
-                    Some(&runtime_id),
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    Some(13),
-                    Some(crate::meerkat_machine::dsl::Generation::from(5_u64)),
-                    Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
-                        "uncommitted-stop-epoch".to_string(),
-                    )),
-                )
-                .expect("seed attached runtime authority");
-        }
-        raw_driver.set_control_projection(crate::RuntimeState::Attached, None, None);
+        seed_attached_authority(
+            &mut raw_driver,
+            &session_id,
+            &runtime_id,
+            13,
+            5,
+            "uncommitted-stop-epoch",
+        );
         let directed_uuid = meerkat_core::time_compat::new_uuid_v7();
         let directed = crate::mob_adapter::create_tracked_flow_step_input(
             "uncommitted-directed",
@@ -1919,27 +1915,14 @@ mod tests {
         let runtime_id = LogicalRuntimeId::new("multiple-runless-terminal-batches");
         let session_id = SessionId::new();
         let mut raw_driver = EphemeralRuntimeDriver::new(runtime_id.clone());
-        {
-            let authority = raw_driver.shared_dsl_authority();
-            *authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id,
-                    crate::RuntimeState::Attached,
-                    Some(&runtime_id),
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    Some(11),
-                    Some(crate::meerkat_machine::dsl::Generation::from(4_u64)),
-                    Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
-                        "multiple-runless-epoch".to_string(),
-                    )),
-                )
-                .expect("seed attached runtime authority");
-        }
-        raw_driver.set_control_projection(crate::RuntimeState::Attached, None, None);
+        seed_attached_authority(
+            &mut raw_driver,
+            &session_id,
+            &runtime_id,
+            11,
+            4,
+            "multiple-runless-epoch",
+        );
 
         let mut batches = Vec::new();
         for (label, prompt) in [("first", "first sibling"), ("second", "second sibling")] {

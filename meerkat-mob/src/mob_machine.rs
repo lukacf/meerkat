@@ -108,6 +108,19 @@ pub(crate) enum MobMachineCommand {
     MemberStatus {
         agent_identity: AgentIdentity,
     },
+    ApplyIdentityDeclarationManifest {
+        manifest: Box<crate::identity::IdentityDeclarationManifest>,
+    },
+    GetIdentityIntent {
+        agent_identity: AgentIdentity,
+    },
+    GetIdentityDeclarationReceipt {
+        scope_id: crate::identity::IdentityDeclarationScopeId,
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    GetIdentityConvergenceStatus {
+        agent_identity: AgentIdentity,
+    },
     ConcludeObjective {
         agent_identity: AgentIdentity,
         objective_id: meerkat_core::interaction::ObjectiveId,
@@ -227,6 +240,18 @@ pub(crate) enum MobMachineCommandResult {
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
     ListAllMembers(Vec<RosterEntry>),
     MemberStatus(crate::runtime::MobMemberSnapshot),
+    IdentityDeclarationManifestApplied(
+        Box<crate::identity::IdentityDeclarationManifestApplyOutcome>,
+    ),
+    IdentityIntent(
+        Box<crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>>,
+    ),
+    IdentityDeclarationReceipt(
+        Box<crate::identity::IdentityStoredObservation<crate::identity::IdentityOperationReceipt>>,
+    ),
+    IdentityConvergenceStatus(
+        crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
+    ),
     #[allow(dead_code)]
     Bool(bool),
     EventStream(meerkat_core::EventStream),
@@ -313,6 +338,10 @@ impl MobMachineCommandVariant {
     #[must_use]
     pub const fn catalog_input(self) -> Option<MobMachineCatalogInput> {
         match self {
+            Self::ApplyIdentityDeclarationManifest
+            | Self::GetIdentityIntent
+            | Self::GetIdentityDeclarationReceipt
+            | Self::GetIdentityConvergenceStatus => None,
             #[cfg(test)]
             Self::FlowTrackerCounts
             | Self::OrchestratorSnapshot
@@ -377,6 +406,8 @@ pub enum MobMachineShellMechanicReason {
     AdmissionPreflight,
     FilteredRosterProjection,
     ProducerWiringBridge,
+    IdentityDesiredStateStore,
+    IdentityProjection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -685,6 +716,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // runtime-internal observation classification authority, not a surface
         // command.
         input: MobMachineCatalogInput::ClassifyPendingSupervisorAcceptance,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Identity convergence is a pure classification of caller-supplied
+        // fresh facts. The actor consumes one obligation and separately mints
+        // the target-local CAS permit; this input persists no observation
+        // mirror and is never an independent public command.
+        input: MobMachineCatalogInput::ClassifyIdentityReconciliation,
         reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
@@ -1227,6 +1266,18 @@ const fn mob_machine_command_classification(
         MobMachineCommandVariant::ListMembersMatching => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::FilteredRosterProjection,
+            )
+        }
+        MobMachineCommandVariant::ApplyIdentityDeclarationManifest => {
+            MobMachineCommandClassification::ShellMechanic(
+                MobMachineShellMechanicReason::IdentityDesiredStateStore,
+            )
+        }
+        MobMachineCommandVariant::GetIdentityIntent
+        | MobMachineCommandVariant::GetIdentityDeclarationReceipt
+        | MobMachineCommandVariant::GetIdentityConvergenceStatus => {
+            MobMachineCommandClassification::ShellMechanic(
+                MobMachineShellMechanicReason::IdentityProjection,
             )
         }
         MobMachineCommandVariant::Wire => MobMachineCommandClassification::CatalogInputs(&[

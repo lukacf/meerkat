@@ -231,10 +231,7 @@ fn load_session_snapshot_in_txn(
         |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
     )
     .optional()?
-    .map(|bytes| {
-        serde_json::from_slice::<Session>(&bytes)
-            .map_err(|err| StoreError::Internal(err.to_string()))
-    })
+    .map(|bytes| serde_json::from_slice::<Session>(&bytes).map_err(StoreError::Serialization))
     .transpose()
 }
 
@@ -1452,6 +1449,32 @@ mod tests {
         let loaded = store.load(session.id()).await.unwrap().unwrap();
         assert_eq!(loaded.id(), session.id());
         assert_eq!(loaded.messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_surfaces_corrupt_session_blob_as_serialization_error() {
+        let (_dir, store) = temp_store();
+        let session = Session::new();
+        store.save(&session).await.unwrap();
+
+        let conn = open_connection(store.path()).unwrap();
+        conn.execute(
+            "UPDATE sessions SET session_json = ?1 WHERE session_id = ?2",
+            params![
+                b"{ not a serialized Session".as_slice(),
+                session.id().to_string()
+            ],
+        )
+        .unwrap();
+
+        let error = store
+            .load(session.id())
+            .await
+            .expect_err("corrupt persisted Session bytes must fail load");
+        assert!(
+            matches!(error, SessionStoreError::Serialization(_)),
+            "corrupt persisted Session bytes must remain a typed serialization error, got {error:?}"
+        );
     }
 
     #[tokio::test]

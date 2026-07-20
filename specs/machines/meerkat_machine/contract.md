@@ -400,7 +400,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRuntimeCompletionResult`(run_id: Option<RunId>, terminal: RuntimeCompletionTerminalObservation, finalization: RuntimeCompletionFinalizationObservation)
 - `ResolveRuntimeCompletionCleanup`(session_id: SessionId, observation_session_id: SessionId, observation_agent_runtime_id: Option<AgentRuntimeId>, observation_fence_token: Option<FenceToken>, observation_runtime_generation: Option<Generation>, observation_runtime_epoch_id: Option<RuntimeEpochId>, outcome: RuntimeCompletionObservedOutcome, archived_by_authority: Bool, live_session: RuntimeCompletionLiveSessionObservation)
 - `ResolveRuntimeCompletionWaitFailure`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation)
-- `RecoverRuntimeAuthority`(session_id: SessionId, state: RuntimeLifecycleObservedState, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, silent_intent_overrides: Set<String>)
+- `ClassifyRuntimeAuthorityReconciliation`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool)
 - `RecoverSupervisorBinding`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RecoverSupervisorRevocationPending`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RecoverSupervisorRotationOperation`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
@@ -650,6 +650,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeCompletionCleanupResolved`(session_id: SessionId, action: RuntimeCompletionCleanupAction, pre_admission_action: RuntimeCompletionPreAdmissionAction)
 - `RuntimeCompletionWaitFailureResolved`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation, pre_admission_action: RuntimeCompletionPreAdmissionAction, public_error_class: RuntimeCompletionWaitFailurePublicErrorClass, public_reason: RuntimeCompletionWaitFailurePublicReason, resumable: Bool)
 - `RuntimeOpsLifecycleDurabilityResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, action: RuntimeOpsLifecycleDurabilityAction)
+- `RuntimeAuthorityReconciliationClassified`(decision: RuntimeAuthorityReconcileDecision)
 - `UserInterruptPublicResultResolved`(result: UserInterruptPublicResultKind)
 - `ModelRoutingStatusChanged`(topology_epoch: u64)
 - `SwitchTurnDenied`(request_id: String, reason: RoutingDenialReason)
@@ -791,6 +792,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionTerminalOutboxAdoptionAuthorized`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_runtime_generation: Generation, next_runtime_epoch_id: Option<RuntimeEpochId>)
 
 ## Helpers
+- `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`
 - `op_lifecycle_action_status_valid`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
 - `operation_status_terminal`(status: OperationStatus) -> `Bool`
@@ -5749,101 +5751,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
-### `RecoverRuntimeAuthorityInitializing`
+### `ClassifyRuntimeAuthorityReconciliation`
 - From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_initializing`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
+- On: `ClassifyRuntimeAuthorityReconciliation`(observation_kind, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, malformed_reclaim_safe)
+- Emits: `RuntimeAuthorityReconciliationClassified`
 - To: `Initializing`
-
-### `RecoverRuntimeAuthorityIdle`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_idle`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Idle`
-
-### `RecoverRuntimeAuthorityAttached`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_attached`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Attached`
-
-### `RecoverRuntimeAuthorityColdRunning`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_running`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Idle`
-
-### `RecoverRuntimeAuthorityRunning`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_running`
-  - `run_binding_complete`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Running`
-
-### `RecoverRuntimeAuthorityRetired`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_retired`
-  - `run_binding_pair`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Retired`
-
-### `RecoverRuntimeAuthorityStopped`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_stopped`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Stopped`
-
-### `RecoverRuntimeAuthorityDestroyed`
-- From: `Initializing`
-- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
-- Guards:
-  - `observed_destroyed`
-  - `no_run_binding`
-  - `fence_requires_runtime`
-  - `generation_requires_runtime`
-  - `epoch_requires_runtime`
-  - `binding_identity_present_when_runtime_bound`
-- To: `Destroyed`
 
 ### `RecoverSupervisorBindingInitializing`
 - From: `Initializing`

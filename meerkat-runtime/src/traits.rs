@@ -41,6 +41,17 @@ pub enum RuntimeDriverError {
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },
 
+    /// Fresh lifecycle observation or actuation is temporarily unavailable.
+    #[error("Runtime recovery should back off: {reason}")]
+    RecoveryBackoff { reason: String },
+
+    /// The exact durable row cannot be safely normalized automatically.
+    #[error("Runtime recovery is repair-blocked: {reason}")]
+    RecoveryRepairBlocked {
+        evidence_digest: Option<String>,
+        reason: String,
+    },
+
     /// Atomic unregister persistence may already be durable. The live retry
     /// anchor is retained, but no compensating durable rollback may run.
     #[error("Unregister finalization outcome is unknown: {reason}")]

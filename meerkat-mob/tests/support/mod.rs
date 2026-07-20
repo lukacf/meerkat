@@ -3095,6 +3095,8 @@ pub struct ControllingMob {
     pub handle: meerkat_mob::MobHandle,
     pub service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     pub storage_metadata: Arc<dyn meerkat_mob::store::MobRuntimeMetadataStore>,
+    pub storage_identity: Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    pub storage_identity_status: Arc<dyn meerkat_mob::store::MobIdentityStatusStore>,
     /// Flow-run authority retained across fixture restarts. This includes the
     /// replay-complete private remote-turn intents; recreating it while
     /// retaining only public events fabricates a recovery corruption that a
@@ -3225,6 +3227,10 @@ async fn create_controlling_mob_composed(
     let mob_id = meerkat_mob::MobId::from(format!("{label}-{}", uuid::Uuid::new_v4().simple()));
     let metadata: Arc<dyn meerkat_mob::store::MobRuntimeMetadataStore> =
         Arc::new(meerkat_mob::store::InMemoryMobRuntimeMetadataStore::new());
+    let identity: Arc<dyn meerkat_mob::store::MobIdentityStore> =
+        Arc::new(meerkat_mob::store::InMemoryMobIdentityStore::new());
+    let identity_status: Arc<dyn meerkat_mob::store::MobIdentityStatusStore> =
+        Arc::new(meerkat_mob::store::InMemoryMobIdentityStatusStore::new());
     let events_in_memory = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
     let events: Arc<dyn meerkat_mob::store::MobEventStore> = events_in_memory.clone();
     let runs: Arc<dyn meerkat_mob::store::MobRunStore> =
@@ -3236,6 +3242,8 @@ async fn create_controlling_mob_composed(
         Arc::clone(&runs),
         Arc::clone(&specs),
         Arc::clone(&metadata),
+        Arc::clone(&identity),
+        Arc::clone(&identity_status),
     );
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
@@ -3290,6 +3298,8 @@ async fn create_controlling_mob_composed(
         handle,
         service,
         storage_metadata: metadata,
+        storage_identity: identity,
+        storage_identity_status: identity_status,
         storage_runs: runs,
         storage_specs: specs,
         mob_id,
@@ -3434,6 +3444,8 @@ impl ControllingMob {
             handle,
             service,
             storage_metadata,
+            storage_identity,
+            storage_identity_status,
             storage_runs,
             storage_specs,
             mob_id,
@@ -3534,6 +3546,8 @@ impl ControllingMob {
             Arc::clone(&storage_runs),
             Arc::clone(&storage_specs),
             Arc::clone(&storage_metadata),
+            Arc::clone(&storage_identity),
+            Arc::clone(&storage_identity_status),
         );
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
         let runtime_adapter = mob_service
@@ -3602,6 +3616,8 @@ impl ControllingMob {
             handle,
             service,
             storage_metadata,
+            storage_identity,
+            storage_identity_status,
             storage_runs,
             storage_specs,
             mob_id,

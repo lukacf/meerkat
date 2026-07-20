@@ -10,6 +10,7 @@ pub mod sqlite;
 use std::collections::{HashMap, HashSet};
 
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+use sha2::{Digest, Sha256};
 
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -17,7 +18,8 @@ use crate::runtime_state::RuntimeState;
 
 const LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
 const SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
-const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
+const UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
+pub(crate) const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 4;
 
 /// Maximum number of exact input-state rows admitted by one compare-and-swap
 /// boundary. Directed-terminal outbox batches share the same 256-row bound as
@@ -166,6 +168,17 @@ pub enum RuntimeStoreError {
     /// The requested exact input-state batch CAS has an invalid row/key shape.
     #[error("Invalid input-state batch compare-and-swap: {reason}")]
     InvalidInputStateBatchCas { reason: String },
+    /// A lifecycle record was observed exactly, but replacing it would risk
+    /// lowering or fabricating durable runtime fencing authority.
+    ///
+    /// This is a permanent reconciliation result for the observed row, not a
+    /// transport retry. Callers should project RepairBlocked while retaining
+    /// the evidence digest for operator repair.
+    #[error("Machine lifecycle repair is blocked: {detail}")]
+    MachineLifecycleRepairBlocked {
+        evidence_digest: Option<String>,
+        detail: String,
+    },
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -462,11 +475,313 @@ impl MachineLifecycleBindingFacts {
     }
 }
 
+/// Exact content version of one observed machine-lifecycle row.
+///
+/// The version is the domain-prefixed SHA-256 digest of the raw stored bytes,
+/// not a decoded projection. It therefore remains a valid target-local CAS
+/// witness for unsupported and malformed rows as well as current records.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MachineLifecycleObservationVersion(String);
+
+impl MachineLifecycleObservationVersion {
+    /// Derive the exact target-local compare token for opaque stored bytes.
+    ///
+    /// Custom [`RuntimeStore`] implementations use the same constructor for
+    /// both observations and successful CAS receipts; no decoded lifecycle
+    /// shape is allowed to stand in for the physical row version.
+    pub fn from_raw_record(bytes: &[u8]) -> Self {
+        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Independently observed run-binding atoms.
+///
+/// A torn row may contain exactly one side of this pair. The store preserves
+/// that shape; the generated reconciler, not the decoder, decides whether it
+/// can be normalized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineLifecyclePreRunPhase {
+    Idle,
+    Attached,
+    Retired,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineLifecycleRunFacts {
+    current_run_id: Option<RunId>,
+    pre_run_phase: Option<MachineLifecyclePreRunPhase>,
+}
+
+impl MachineLifecycleRunFacts {
+    pub(crate) fn new(
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<MachineLifecyclePreRunPhase>,
+    ) -> Self {
+        Self {
+            current_run_id,
+            pre_run_phase,
+        }
+    }
+
+    #[must_use]
+    pub fn current_run_id(&self) -> Option<&RunId> {
+        self.current_run_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn pre_run_phase(&self) -> Option<MachineLifecyclePreRunPhase> {
+        self.pre_run_phase
+    }
+}
+
+/// Decoded runtime-lifecycle observation.
+///
+/// The lifecycle phase, four binding atoms, and two run atoms remain
+/// independently optional. This type deliberately represents partial tuples
+/// such as `current_run_id = Some` with `pre_run_phase = None` instead of
+/// rejecting them as an impossible transition shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedMachineLifecycleObservation {
+    record_version: u16,
+    runtime_state: Option<RuntimeState>,
+    binding: MachineLifecycleBindingFacts,
+    run: MachineLifecycleRunFacts,
+    supervisor_authority: SupervisorAuthoritySnapshot,
+    unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+}
+
+impl DecodedMachineLifecycleObservation {
+    #[must_use]
+    pub fn record_version(&self) -> u16 {
+        self.record_version
+    }
+
+    #[must_use]
+    pub fn runtime_state(&self) -> Option<RuntimeState> {
+        self.runtime_state
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &MachineLifecycleBindingFacts {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn run(&self) -> &MachineLifecycleRunFacts {
+        &self.run
+    }
+
+    #[must_use]
+    pub fn supervisor_authority(&self) -> &SupervisorAuthoritySnapshot {
+        &self.supervisor_authority
+    }
+
+    #[must_use]
+    pub fn unregister_progress(&self) -> Option<&MachineUnregisterProgressSnapshot> {
+        self.unregister_progress.as_ref()
+    }
+}
+
+/// Lossless classification of one physical machine-lifecycle row.
+///
+/// Transport failures remain [`RuntimeStoreError`] values. Every successfully
+/// read row is classified without collapsing unsupported or corrupt bytes into
+/// absence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineLifecycleObservation {
+    Missing,
+    Decoded {
+        record: DecodedMachineLifecycleObservation,
+        version: MachineLifecycleObservationVersion,
+    },
+    Unsupported {
+        record_version: u64,
+        evidence_digest: String,
+        version: MachineLifecycleObservationVersion,
+    },
+    Malformed {
+        record_version: Option<u64>,
+        evidence_digest: String,
+        version: MachineLifecycleObservationVersion,
+        detail: String,
+    },
+}
+
+impl MachineLifecycleObservation {
+    /// Losslessly classify one successfully read physical lifecycle row.
+    ///
+    /// This is the canonical adapter seam for custom stores. Transport
+    /// failure stays an outer [`RuntimeStoreError`]; every byte sequence read
+    /// successfully becomes Decoded, Unsupported, or Malformed here.
+    #[must_use]
+    pub fn from_raw_record(bytes: &[u8]) -> Self {
+        classify_machine_lifecycle_record(bytes)
+    }
+
+    #[must_use]
+    pub fn version(&self) -> Option<&MachineLifecycleObservationVersion> {
+        match self {
+            Self::Missing => None,
+            Self::Decoded { version, .. }
+            | Self::Unsupported { version, .. }
+            | Self::Malformed { version, .. } => Some(version),
+        }
+    }
+
+    #[must_use]
+    pub fn evidence_digest(&self) -> Option<&str> {
+        match self {
+            Self::Unsupported {
+                evidence_digest, ..
+            }
+            | Self::Malformed {
+                evidence_digest, ..
+            } => Some(evidence_digest),
+            Self::Missing | Self::Decoded { .. } => None,
+        }
+    }
+}
+
+/// Target-local precondition for lifecycle normalization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineLifecycleExpectedVersion {
+    Missing,
+    Version(MachineLifecycleObservationVersion),
+}
+
+impl MachineLifecycleObservation {
+    /// Exact target-local precondition represented by this observation.
+    ///
+    /// Missing is a first-class compare value. Every present row, including
+    /// unsupported and malformed bytes, is compared by its raw-content
+    /// version rather than by a decoded projection.
+    #[must_use]
+    pub fn expected_version(&self) -> MachineLifecycleExpectedVersion {
+        self.version()
+            .map_or(MachineLifecycleExpectedVersion::Missing, |version| {
+                MachineLifecycleExpectedVersion::Version(version.clone())
+            })
+    }
+}
+
+/// Result of executing one synchronous target write under an external fence.
+///
+/// The fence is deliberately runtime-generic. A caller may back it with a
+/// lease, process-incarnation lock, or another authority source without the
+/// runtime store depending on that owner's domain types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeStoreWriteFenceOutcome {
+    /// The fence was current and invoked the supplied operation exactly once.
+    Applied,
+    /// Durable authority was superseded. The operation was not invoked.
+    Conflict { reason: String },
+    /// Authority could not be checked temporarily. The operation was not
+    /// invoked and the caller should retry after re-observation.
+    Backoff { reason: String },
+}
+
+/// Synchronous authority guard for a RuntimeStore target write.
+///
+/// Implementations MUST retain their authority serialization guard for the
+/// full duration of `operation`, invoke it exactly once only when authority is
+/// current, and never invoke it for Conflict or Backoff. The operation is
+/// synchronous by design so built-in stores can call it inside their own lock
+/// or transaction immediately before the target write. Time-bounded authority
+/// must be evaluated using the authority store's own clock while that guard is
+/// held, never a caller-supplied observation timestamp. Once a successful
+/// operation returns, the fence must return Applied without a new fallible
+/// boundary. Implementations must not re-enter the same RuntimeStore from this
+/// callback.
+pub trait RuntimeStoreWriteFence: Send + Sync {
+    fn execute_if_current(
+        &self,
+        operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+    ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError>;
+}
+
+pub(crate) fn execute_runtime_store_write_fence(
+    write_fence: &dyn RuntimeStoreWriteFence,
+    operation: impl FnOnce() -> Result<(), RuntimeStoreError>,
+) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+    let invoked = std::cell::Cell::new(false);
+    let operation_result = std::cell::RefCell::new(None);
+    let checked_operation = || {
+        invoked.set(true);
+        let result = operation();
+        *operation_result.borrow_mut() = Some(result.clone());
+        result
+    };
+    let outcome = write_fence.execute_if_current(Box::new(checked_operation))?;
+    if let Some(Err(error)) = operation_result.borrow_mut().take() {
+        return Err(error);
+    }
+    let shape_is_valid = matches!(
+        (&outcome, invoked.get()),
+        (RuntimeStoreWriteFenceOutcome::Applied, true)
+            | (
+                RuntimeStoreWriteFenceOutcome::Conflict { .. }
+                    | RuntimeStoreWriteFenceOutcome::Backoff { .. },
+                false,
+            )
+    );
+    if !shape_is_valid {
+        return Err(RuntimeStoreError::Internal(
+            "runtime write fence returned an outcome inconsistent with operation execution"
+                .to_string(),
+        ));
+    }
+    Ok(outcome)
+}
+
+/// Result of a target-local lifecycle CAS performed under an external fence.
+///
+/// Applied and AlreadyExact carry the exact decoded row used to construct the
+/// fresh process-local registration. Callers never receive or construct a
+/// MachineLifecycleCommit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FencedMachineLifecycleCasOutcome {
+    Applied {
+        record: DecodedMachineLifecycleObservation,
+        version: MachineLifecycleObservationVersion,
+    },
+    AlreadyExact {
+        record: DecodedMachineLifecycleObservation,
+        version: MachineLifecycleObservationVersion,
+    },
+    Conflict {
+        current: MachineLifecycleObservation,
+    },
+    FenceConflict {
+        reason: String,
+    },
+    FenceBackoff {
+        reason: String,
+    },
+}
+
+/// Result of a target-local lifecycle compare-and-swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineLifecycleCasOutcome {
+    Applied {
+        version: MachineLifecycleObservationVersion,
+    },
+    Conflict {
+        current: MachineLifecycleObservation,
+    },
+}
+
 /// Durable read-back shape for machine-owned lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineLifecycleSnapshot {
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFacts,
+    run: MachineLifecycleRunFacts,
     supervisor_authority: SupervisorAuthoritySnapshot,
     unregister_progress: Option<MachineUnregisterProgressSnapshot>,
 }
@@ -536,9 +851,26 @@ impl MachineLifecycleSnapshot {
         supervisor_authority: SupervisorAuthoritySnapshot,
         unregister_progress: Option<MachineUnregisterProgressSnapshot>,
     ) -> Self {
+        Self::new_with_run_and_unregister_progress(
+            runtime_state,
+            binding,
+            MachineLifecycleRunFacts::default(),
+            supervisor_authority,
+            unregister_progress,
+        )
+    }
+
+    pub(crate) fn new_with_run_and_unregister_progress(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        run: MachineLifecycleRunFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    ) -> Self {
         Self {
             runtime_state,
             binding,
+            run,
             supervisor_authority,
             unregister_progress,
         }
@@ -552,6 +884,11 @@ impl MachineLifecycleSnapshot {
     /// Runtime binding facts selected by the owning MeerkatMachine transition.
     pub fn binding(&self) -> &MachineLifecycleBindingFacts {
         &self.binding
+    }
+
+    /// Independently persisted run-binding atoms.
+    pub fn run(&self) -> &MachineLifecycleRunFacts {
+        &self.run
     }
 
     pub fn supervisor_authority(&self) -> &SupervisorAuthoritySnapshot {
@@ -669,8 +1006,42 @@ struct MachineLifecycleSnapshotStoreWire {
     record_version: u16,
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFactsStoreWire,
+    current_run_id: Option<RunId>,
+    pre_run_phase: Option<MachineLifecyclePreRunPhase>,
     supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
     unregister_progress: Option<MachineUnregisterProgressSnapshotStoreWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleObservationStoreWireV4 {
+    record_version: u16,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing phase from an explicitly absent observed phase"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    runtime_state: Option<Option<RuntimeState>>,
+    binding: MachineLifecycleBindingFactsStoreWire,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing run id from an explicitly absent run id"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    current_run_id: Option<Option<RunId>>,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing pre-run phase from an explicitly absent phase"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pre_run_phase: Option<Option<MachineLifecyclePreRunPhase>>,
+    supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing v4 field from explicit null progress"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    unregister_progress: Option<Option<MachineUnregisterProgressSnapshotStoreWire>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1414,6 +1785,8 @@ impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
             record_version: MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
             runtime_state: snapshot.runtime_state(),
             binding: snapshot.binding().into(),
+            current_run_id: snapshot.run().current_run_id().cloned(),
+            pre_run_phase: snapshot.run().pre_run_phase(),
             supervisor_authority: snapshot.supervisor_authority().into(),
             unregister_progress: snapshot.unregister_progress().map(Into::into),
         }
@@ -1444,7 +1817,7 @@ impl TryFrom<MachineLifecycleSnapshotStoreWireV3> for MachineLifecycleSnapshot {
     type Error = RuntimeStoreError;
 
     fn try_from(record: MachineLifecycleSnapshotStoreWireV3) -> Result<Self, Self::Error> {
-        if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+        if record.record_version != UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
             return Err(RuntimeStoreError::ReadFailed(format!(
                 "unsupported machine lifecycle store record version {}",
                 record.record_version
@@ -1460,6 +1833,48 @@ impl TryFrom<MachineLifecycleSnapshotStoreWireV3> for MachineLifecycleSnapshot {
             record.supervisor_authority.try_into()?,
             unregister_progress,
         ))
+    }
+}
+
+fn decode_machine_lifecycle_observation_v4(
+    bytes: &[u8],
+) -> Result<DecodedMachineLifecycleObservation, RuntimeStoreError> {
+    let record = serde_json::from_slice::<MachineLifecycleObservationStoreWireV4>(bytes)
+        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+    if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+        return Err(RuntimeStoreError::ReadFailed(format!(
+            "unsupported machine lifecycle store record version {}",
+            record.record_version
+        )));
+    }
+    let runtime_state = require_present_nullable(record.runtime_state, "runtime_state")?;
+    let current_run_id = require_present_nullable(record.current_run_id, "current_run_id")?;
+    let pre_run_phase = require_present_nullable(record.pre_run_phase, "pre_run_phase")?;
+    let unregister_progress =
+        require_present_nullable(record.unregister_progress, "unregister_progress")?
+            .map(Into::into);
+    validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+    Ok(DecodedMachineLifecycleObservation {
+        record_version: record.record_version,
+        runtime_state,
+        binding: record.binding.try_into()?,
+        run: MachineLifecycleRunFacts::new(current_run_id, pre_run_phase),
+        supervisor_authority: record.supervisor_authority.try_into()?,
+        unregister_progress,
+    })
+}
+
+fn decoded_machine_lifecycle_from_snapshot(
+    record_version: u16,
+    snapshot: MachineLifecycleSnapshot,
+) -> DecodedMachineLifecycleObservation {
+    DecodedMachineLifecycleObservation {
+        record_version,
+        runtime_state: Some(snapshot.runtime_state),
+        binding: snapshot.binding,
+        run: snapshot.run,
+        supervisor_authority: snapshot.supervisor_authority,
+        unregister_progress: snapshot.unregister_progress,
     }
 }
 
@@ -1499,13 +1914,184 @@ fn decode_machine_lifecycle_store_record(
                 record.supervisor_authority.try_into()?,
             ))
         }
-        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+        UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
             let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWireV3>(bytes)
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
             MachineLifecycleSnapshot::try_from(record)
         }
+        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+            let record = decode_machine_lifecycle_observation_v4(bytes)?;
+            let runtime_state = record.runtime_state.ok_or_else(|| {
+                RuntimeStoreError::ReadFailed(
+                    "machine lifecycle runtime_state cannot be null for strict recovery".into(),
+                )
+            })?;
+            Ok(
+                MachineLifecycleSnapshot::new_with_run_and_unregister_progress(
+                    runtime_state,
+                    record.binding,
+                    record.run,
+                    record.supervisor_authority,
+                    record.unregister_progress,
+                ),
+            )
+        }
         unsupported => Err(RuntimeStoreError::ReadFailed(format!(
             "unsupported machine lifecycle store record version {unsupported}"
+        ))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MachineLifecycleRawVersionProbe {
+    record_version: u64,
+}
+
+fn machine_lifecycle_record_version(bytes: &[u8]) -> Result<u64, String> {
+    serde_json::from_slice::<MachineLifecycleRawVersionProbe>(bytes)
+        .map(|probe| probe.record_version)
+        .map_err(|error| {
+            format!("machine lifecycle record_version is not uniquely readable: {error}")
+        })
+}
+
+fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservation {
+    let version = MachineLifecycleObservationVersion::from_raw_record(bytes);
+    let evidence_digest = version.as_str().to_owned();
+    let record_version = match machine_lifecycle_record_version(bytes) {
+        Ok(record_version) => record_version,
+        Err(detail) => {
+            return MachineLifecycleObservation::Malformed {
+                record_version: None,
+                evidence_digest,
+                version,
+                detail,
+            };
+        }
+    };
+
+    let supported = [
+        u64::from(LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+        u64::from(SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+        u64::from(UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+        u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+    ];
+    if !supported.contains(&record_version) {
+        return MachineLifecycleObservation::Unsupported {
+            record_version,
+            evidence_digest,
+            version,
+        };
+    }
+
+    let decoded = if record_version == u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION) {
+        decode_machine_lifecycle_observation_v4(bytes)
+    } else {
+        decode_machine_lifecycle_store_record(bytes).map(|snapshot| {
+            decoded_machine_lifecycle_from_snapshot(record_version as u16, snapshot)
+        })
+    };
+    match decoded {
+        Ok(record) => MachineLifecycleObservation::Decoded { record, version },
+        Err(error) => MachineLifecycleObservation::Malformed {
+            record_version: Some(record_version),
+            evidence_digest,
+            version,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn replacement_repair_blocked(
+    evidence_digest: Option<String>,
+    detail: impl Into<String>,
+) -> RuntimeStoreError {
+    RuntimeStoreError::MachineLifecycleRepairBlocked {
+        evidence_digest,
+        detail: detail.into(),
+    }
+}
+
+/// Validate whether an exact lifecycle observation may be normalized.
+///
+/// Binding, fence, generation, and run atoms describe the dead process that
+/// authored the observed row; they are not a durable high-water authority and
+/// may be cleared by an exact-version cold-normalization CAS. Unsupported and
+/// malformed rows remain fail-closed because this slice cannot prove their
+/// custody fields safe to preserve.
+fn validate_machine_lifecycle_replacement(
+    current: &MachineLifecycleObservation,
+    _current_raw: Option<&[u8]>,
+    _replacement: &MachineLifecycleSnapshot,
+) -> Result<(), RuntimeStoreError> {
+    match current {
+        MachineLifecycleObservation::Missing | MachineLifecycleObservation::Decoded { .. } => {
+            Ok(())
+        }
+        MachineLifecycleObservation::Unsupported {
+            evidence_digest,
+            record_version,
+            ..
+        } => Err(replacement_repair_blocked(
+            Some(evidence_digest.clone()),
+            format!(
+                "unsupported lifecycle record version {record_version} cannot prove fencing semantics"
+            ),
+        )),
+        MachineLifecycleObservation::Malformed {
+            evidence_digest,
+            detail,
+            ..
+        } => Err(replacement_repair_blocked(
+            Some(evidence_digest.clone()),
+            format!("malformed lifecycle evidence is not reclaimable: {detail}"),
+        )),
+    }
+}
+
+struct PreparedMachineLifecycleReplacement {
+    snapshot: MachineLifecycleSnapshot,
+    bytes: Vec<u8>,
+    version: MachineLifecycleObservationVersion,
+}
+
+impl PreparedMachineLifecycleReplacement {
+    /// A runtime-authority normalization owns only lifecycle, binding, and run
+    /// atoms. Preserve independent supervisor and unregister custody from the
+    /// exact decoded row rather than copying it through the reconciler.
+    fn preserve_observed_custody(
+        mut self,
+        current: &MachineLifecycleObservation,
+    ) -> Result<Self, RuntimeStoreError> {
+        if let MachineLifecycleObservation::Decoded { record, .. } = current {
+            self.snapshot.supervisor_authority = record.supervisor_authority().clone();
+            self.snapshot.unregister_progress = record.unregister_progress().cloned();
+            self.bytes = MachineLifecycleStoreRecord::from_snapshot(&self.snapshot).encode()?;
+            self.version = MachineLifecycleObservationVersion::from_raw_record(&self.bytes);
+        }
+        Ok(self)
+    }
+}
+
+fn prepare_machine_lifecycle_replacement(
+    commit: MachineLifecycleCommit,
+) -> Result<PreparedMachineLifecycleReplacement, RuntimeStoreError> {
+    let bytes = commit.store_record().encode()?;
+    let version = MachineLifecycleObservationVersion::from_raw_record(&bytes);
+    Ok(PreparedMachineLifecycleReplacement {
+        snapshot: commit.into_snapshot(),
+        bytes,
+        version,
+    })
+}
+
+fn decoded_prepared_machine_lifecycle_replacement(
+    replacement: &PreparedMachineLifecycleReplacement,
+) -> Result<DecodedMachineLifecycleObservation, RuntimeStoreError> {
+    match classify_machine_lifecycle_record(&replacement.bytes) {
+        MachineLifecycleObservation::Decoded { record, .. } => Ok(record),
+        other => Err(RuntimeStoreError::Internal(format!(
+            "machine-authorized lifecycle replacement did not decode: {other:?}"
         ))),
     }
 }
@@ -1595,10 +2181,27 @@ impl MachineLifecycleCommit {
         supervisor_authority: SupervisorAuthoritySnapshot,
         unregister_progress: Option<MachineUnregisterProgressSnapshot>,
     ) -> Self {
+        Self::new_with_binding_run_and_unregister_progress(
+            runtime_state,
+            binding,
+            MachineLifecycleRunFacts::default(),
+            supervisor_authority,
+            unregister_progress,
+        )
+    }
+
+    pub(crate) fn new_with_binding_run_and_unregister_progress(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        run: MachineLifecycleRunFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    ) -> Self {
         Self {
-            snapshot: MachineLifecycleSnapshot::new_with_unregister_progress(
+            snapshot: MachineLifecycleSnapshot::new_with_run_and_unregister_progress(
                 runtime_state,
                 binding,
+                run,
                 supervisor_authority,
                 unregister_progress,
             ),
@@ -1989,6 +2592,66 @@ pub trait RuntimeStore: Send + Sync {
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeStoreError>;
 
+    /// Observe one physical machine-lifecycle row without collapsing corrupt
+    /// or future-version bytes into absence.
+    ///
+    /// This is the recovery/reconciliation read surface. Custom stores must
+    /// implement it explicitly; the default is capability-unavailable rather
+    /// than inferring a total observation from the older strict decoder.
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "observe_machine_lifecycle".to_string(),
+        ))
+    }
+
+    /// Replace exactly one machine-lifecycle row when it is absent or still
+    /// has the observed raw-content version.
+    ///
+    /// Built-in stores atomically compare the raw-content version and publish
+    /// the machine-authorized replacement. Binding, generation, fence, and
+    /// run atoms belong to the dead process that wrote the observed row; they
+    /// are not durable high-waters and may be cleared by an exact-version
+    /// cold-normalization CAS. The caller retains the prior raw digest for
+    /// output-only diagnostics. Conflicts are ordinary level-triggered
+    /// re-observation; unsupported or malformed bytes return
+    /// [`RuntimeStoreError::MachineLifecycleRepairBlocked`].
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: MachineLifecycleExpectedVersion,
+        replacement: MachineLifecycleCommit,
+    ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
+        let _ = (runtime_id, expected, replacement);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_machine_lifecycle".to_string(),
+        ))
+    }
+
+    /// Replace exactly one lifecycle row while an external authority fence is
+    /// held across the target write.
+    ///
+    /// This is the conditional-registration store seam. Built-in stores call
+    /// `write_fence` inside the row lock/transaction after the exact raw-row
+    /// comparison and immediately before publication. Custom stores must opt
+    /// in explicitly; the default is capability-unavailable rather than an
+    /// unfenced fallback to compare_and_swap_machine_lifecycle.
+    async fn compare_and_swap_machine_lifecycle_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: MachineLifecycleExpectedVersion,
+        replacement: MachineLifecycleCommit,
+        write_fence: std::sync::Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+        let _ = (runtime_id, expected, replacement, write_fence);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_machine_lifecycle_with_fence".to_string(),
+        ))
+    }
+
     /// Load the last persisted machine lifecycle record bytes, if any.
     ///
     /// Implementations return only the opaque bytes previously obtained from
@@ -2371,6 +3034,14 @@ mod lifecycle_record_compatibility_tests {
                 .remove(field);
             assert_decode_fails(partial);
         }
+        for field in ["current_run_id", "pre_run_phase"] {
+            let mut partial = encoded.clone();
+            partial
+                .as_object_mut()
+                .expect("lifecycle record object")
+                .remove(field);
+            assert_decode_fails(partial);
+        }
 
         let completed = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
             operation_id(101),
@@ -2386,6 +3057,84 @@ mod lifecycle_record_compatibility_tests {
             .expect("rotation object")
             .remove("rejection");
         assert_decode_fails(missing_rejection);
+    }
+
+    #[test]
+    fn lossless_observation_preserves_partial_run_pair_and_nullable_lifecycle() {
+        let mut value = encoded_value(&snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt));
+        let run_id = RunId::new();
+        value["runtime_state"] = serde_json::Value::Null;
+        value["current_run_id"] = serde_json::to_value(&run_id).expect("serialize run id");
+        value["pre_run_phase"] = serde_json::Value::Null;
+        let bytes = serde_json::to_vec(&value).expect("serialize partial lifecycle row");
+
+        let MachineLifecycleObservation::Decoded { record, version } =
+            classify_machine_lifecycle_record(&bytes)
+        else {
+            panic!("explicitly nullable partial runtime tuple must remain decoded");
+        };
+        assert_eq!(
+            record.record_version(),
+            MACHINE_LIFECYCLE_STORE_RECORD_VERSION
+        );
+        assert_eq!(record.runtime_state(), None);
+        assert_eq!(record.run().current_run_id(), Some(&run_id));
+        assert_eq!(record.run().pre_run_phase(), None);
+        assert_eq!(
+            version.as_str(),
+            format!("sha256:{:x}", Sha256::digest(&bytes))
+        );
+        assert!(decode_machine_lifecycle_store_record(&bytes).is_err());
+    }
+
+    #[test]
+    fn lifecycle_observation_distinguishes_unsupported_and_malformed_raw_rows() {
+        let unsupported = br#"{"record_version":99,"opaque":"future"}"#;
+        assert!(matches!(
+            classify_machine_lifecycle_record(unsupported),
+            MachineLifecycleObservation::Unsupported {
+                record_version: 99,
+                ..
+            }
+        ));
+
+        let malformed = br#"{"record_version":4,"binding":"torn"}"#;
+        assert!(matches!(
+            classify_machine_lifecycle_record(malformed),
+            MachineLifecycleObservation::Malformed {
+                record_version: Some(4),
+                ..
+            }
+        ));
+
+        let undecodable = b"not-json";
+        assert!(matches!(
+            classify_machine_lifecycle_record(undecodable),
+            MachineLifecycleObservation::Malformed {
+                record_version: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn version_three_unregister_record_migrates_without_run_binding() {
+        let expected = snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt);
+        let mut value = encoded_value(&expected);
+        value["record_version"] =
+            serde_json::json!(UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION);
+        value
+            .as_object_mut()
+            .expect("lifecycle record object")
+            .remove("current_run_id");
+        value
+            .as_object_mut()
+            .expect("lifecycle record object")
+            .remove("pre_run_phase");
+        let bytes = serde_json::to_vec(&value).expect("serialize v3 row");
+        let decoded = decode_machine_lifecycle_store_record(&bytes).expect("decode v3 row");
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.run(), &MachineLifecycleRunFacts::default());
     }
 
     #[test]

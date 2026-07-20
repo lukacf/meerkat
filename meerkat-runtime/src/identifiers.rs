@@ -48,6 +48,14 @@ impl LogicalRuntimeId {
     pub fn legacy_session_uuid_alias(session_id: &SessionId) -> Self {
         Self(session_id.to_string())
     }
+
+    pub(crate) fn session_id(&self) -> Option<SessionId> {
+        let raw = self
+            .0
+            .strip_prefix(Self::SESSION_RUNTIME_PREFIX)
+            .unwrap_or(self.0.as_str());
+        SessionId::parse(raw).ok()
+    }
 }
 
 impl std::fmt::Display for LogicalRuntimeId {

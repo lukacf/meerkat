@@ -2472,6 +2472,31 @@ pub enum RuntimeLifecycleObservedState {
     Destroyed,
 }
 
+/// Physical observation class for the durable runtime-authority projection.
+/// Missing, unsupported, malformed, and unavailable rows remain first-class
+/// inputs to the generated level-triggered classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeAuthorityObservationKind {
+    #[default]
+    Missing,
+    Decoded,
+    Unsupported,
+    Malformed,
+    Unavailable,
+}
+
+/// Output-only next obligation selected by the generated runtime-authority
+/// classifier. This enum grants no write authority by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeAuthorityReconcileDecision {
+    #[default]
+    RepairBlocked,
+    Converged,
+    NormalizeOrReplace,
+    Quarantine,
+    Backoff,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeLifecycleTerminality {
     #[default]

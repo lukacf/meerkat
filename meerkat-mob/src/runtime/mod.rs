@@ -72,7 +72,16 @@ mod events;
 mod flow;
 pub mod flow_frame_engine;
 mod handle;
+mod identity_local_services;
+#[cfg(any(test, feature = "test-support"))]
+mod identity_recovery_test_support;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;
+#[cfg(any(test, feature = "test-support"))]
+pub use identity_recovery_test_support::{
+    IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
+};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub mod host_actor;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -178,6 +187,10 @@ pub use handle::{
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use host_schedule::HostObservationScheduleMobHost;
+pub use identity_local_services::{
+    IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
+    IdentityLocalMaterializationKey,
+};
 pub use member_history_proxy::MemberHistoryPageDomain;
 pub use member_live_proxy::MemberLiveStatusDomain;
 #[cfg(feature = "runtime-adapter")]

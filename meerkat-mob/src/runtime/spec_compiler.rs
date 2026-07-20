@@ -25,6 +25,9 @@ use meerkat_contracts::wire::{
 
 use crate::definition::{MobDefinition, SkillSource};
 use crate::error::MobError;
+use crate::identity::{
+    DesiredExecution, DesiredMemberMaterial, DesiredMemberOverlay, IdentityProfileMemberDeclaration,
+};
 use crate::ids::{AgentIdentity, MobId, ProfileName};
 use crate::portable_profile::{project_portable_profile, wire_runtime_mode};
 use crate::profile::Profile;
@@ -135,12 +138,349 @@ pub(crate) struct CompileMemberSpecParams<'a> {
     pub non_portable_disabled: Vec<WireNonPortableResourceKind>,
 }
 
+/// Inputs for compiling the sole durable, authority-free member material.
+///
+/// `resolved_profile` is present only when the declaration names a canonical
+/// definition/realm profile. A declaration carrying `profile_override`
+/// already supplies the exact portable profile and therefore must not also
+/// carry a second mutable profile copy.
+pub(crate) struct CompileDesiredMemberMaterialParams<'a> {
+    pub agent_identity: &'a AgentIdentity,
+    pub declaration: &'a IdentityProfileMemberDeclaration,
+    pub resolved_profile: Option<&'a Profile>,
+    pub definition: &'a MobDefinition,
+    pub base_prompt: Option<&'a dyn SpawnBasePromptSource>,
+    pub non_portable_disabled: Vec<WireNonPortableResourceKind>,
+}
+
 /// Canonical wire ordering for an unordered tool-name set: the digest-covered
 /// spec must hash identically for identical policies.
 fn sorted_tool_names(names: &meerkat_core::types::ToolNameSet) -> Vec<String> {
     let mut sorted: Vec<String> = names.iter().map(|name| name.as_str().to_string()).collect();
     sorted.sort();
     sorted
+}
+
+/// Compile the exact authority-free desired material sealed by identity
+/// intent. This function never receives a mob id, continuity target, operator
+/// authority, callback dispatcher, or secret value.
+pub(crate) async fn compile_desired_member_material(
+    params: CompileDesiredMemberMaterialParams<'_>,
+) -> Result<DesiredMemberMaterial, MobError> {
+    let CompileDesiredMemberMaterialParams {
+        agent_identity,
+        declaration,
+        resolved_profile,
+        definition,
+        base_prompt,
+        non_portable_disabled,
+    } = params;
+
+    declaration.validate().map_err(|error| {
+        MobError::WiringError(format!(
+            "identity declaration for '{agent_identity}' is invalid: {error}"
+        ))
+    })?;
+
+    let declared_runtime_mode =
+        if matches!(declaration.execution, DesiredExecution::External { .. }) {
+            Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven)
+        } else {
+            declaration.runtime_mode
+        };
+    let mut portable_profile = match (&declaration.profile_override, resolved_profile) {
+        (Some(portable), None) => {
+            let mut portable = portable.clone();
+            if let Some(model) = &declaration.model_override {
+                portable.model.clone_from(model);
+            }
+            if let Some(external_addressable) = declaration.external_addressable_override {
+                portable.external_addressable = external_addressable;
+            }
+            portable
+        }
+        (None, Some(profile)) => {
+            let mut profile = profile.clone();
+            if let Some(model) = &declaration.model_override {
+                profile.model.clone_from(model);
+            }
+            if let Some(external_addressable) = declaration.external_addressable_override {
+                profile.external_addressable = external_addressable;
+            }
+            let runtime_mode = declared_runtime_mode
+                .map(domain_runtime_mode)
+                .unwrap_or(profile.runtime_mode);
+            project_portable_profile(
+                &profile,
+                runtime_mode,
+                &definition.models,
+                agent_identity.as_str(),
+                declaration.profile_name.as_str(),
+                non_portable_disabled,
+            )
+            .map_err(MobError::WiringError)?
+        }
+        (Some(_), Some(_)) => {
+            return Err(MobError::Internal(format!(
+                "identity declaration compiler received both portable and resolved profiles for '{agent_identity}'"
+            )));
+        }
+        (None, None) => {
+            return Err(MobError::Internal(format!(
+                "identity declaration compiler received no resolved profile for '{agent_identity}'"
+            )));
+        }
+    };
+
+    let runtime_mode = declared_runtime_mode.unwrap_or(portable_profile.runtime_mode);
+    portable_profile.runtime_mode = runtime_mode;
+    let skills = compile_inline_skills(
+        definition,
+        &portable_profile.skills,
+        &declaration.profile_name,
+    )
+    .await?;
+    let system_prompt = resolve_portable_system_prompt(
+        agent_identity,
+        &declaration.profile_name,
+        &portable_profile.skills,
+        &skills,
+        declaration.system_prompt_override.as_ref(),
+        base_prompt,
+    )
+    .await?;
+
+    let mut profile_names = definition
+        .profiles
+        .keys()
+        .map(|profile| profile.as_str().to_string())
+        .collect::<Vec<_>>();
+    if profile_names
+        .binary_search_by(|name| name.as_str().cmp(declaration.profile_name.as_str()))
+        .is_err()
+    {
+        profile_names.push(declaration.profile_name.as_str().to_string());
+        profile_names.sort();
+    }
+    let mut required_local_callback_tools = declaration.required_local_callback_tools.clone();
+    required_local_callback_tools.sort_by(|left, right| left.name.cmp(&right.name));
+    let material = DesiredMemberMaterial {
+        profile_name: declaration.profile_name.clone(),
+        profile: portable_profile,
+        definition_extract: PortableDefinitionExtract {
+            models: definition.models.clone(),
+            image_generation_provider: definition.image_generation_provider,
+            skills,
+            profile_names,
+        },
+        overlay: DesiredMemberOverlay {
+            context: declaration.context.clone(),
+            labels: declaration.labels.clone(),
+            additional_instructions: declaration.additional_instructions.clone(),
+            system_prompt,
+            tool_access_policy: declaration.tool_access_policy.clone(),
+            auth_binding: declaration.auth_binding.clone(),
+            budget_limits: declaration.budget_limits.clone(),
+            runtime_mode,
+        },
+        required_env_keys: declaration.required_env_keys.clone(),
+        required_local_callback_tools,
+        execution: declaration.execution.clone(),
+    };
+    material.validate().map_err(|error| {
+        MobError::WiringError(format!(
+            "compiled identity material for '{agent_identity}' is invalid: {error}"
+        ))
+    })?;
+    Ok(material)
+}
+
+/// Lower one already sealed authority-free desired member into the existing
+/// local resume mechanic. This path never recompiles caller material and
+/// never carries the one-shot initial delivery; the identity reconciler owns
+/// that effect separately by stable `InputId`.
+pub(crate) fn spawn_spec_from_desired_member(
+    identity: &AgentIdentity,
+    session: &crate::identity::DesiredSessionTarget,
+    member: &crate::identity::DesiredMemberSpec,
+) -> Result<super::handle::SpawnMemberSpec, MobError> {
+    use meerkat_contracts::wire::{PortableSystemPrompt, WireResolvedToolAccessPolicy};
+
+    member.validate().map_err(|error| {
+        MobError::WiringError(format!(
+            "sealed desired member for '{identity}' is invalid: {error}"
+        ))
+    })?;
+    let material = &member.material;
+    let profile = crate::portable_profile::rehydrate_portable_profile(&material.profile).map_err(
+        |error| {
+            MobError::WiringError(format!(
+                "sealed desired profile for '{identity}' cannot be materialized: {error}"
+            ))
+        },
+    )?;
+    let mut spec =
+        super::handle::SpawnMemberSpec::new(material.profile_name.clone(), identity.clone());
+    spec.initial_message = None;
+    spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
+        bridge_session_id: session.session_id.clone(),
+    };
+    spec.runtime_mode = Some(domain_runtime_mode(material.overlay.runtime_mode));
+    spec.context = material
+        .overlay
+        .context
+        .as_ref()
+        .map(|value| value.to_value())
+        .transpose()
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "sealed desired context for '{identity}' is malformed: {error}"
+            ))
+        })?;
+    spec.labels = material.overlay.labels.clone();
+    spec.additional_instructions = material.overlay.additional_instructions.clone();
+    spec.tool_access_policy =
+        material
+            .overlay
+            .tool_access_policy
+            .as_ref()
+            .map(|policy| match policy {
+                WireResolvedToolAccessPolicy::AllowList(names) => {
+                    meerkat_core::ops::ToolAccessPolicy::AllowList(names.iter().cloned().collect())
+                }
+                WireResolvedToolAccessPolicy::DenyList(names) => {
+                    meerkat_core::ops::ToolAccessPolicy::DenyList(names.iter().cloned().collect())
+                }
+            });
+    spec.auth_binding = material.overlay.auth_binding.clone().map(Into::into);
+    spec.budget_limits = material.overlay.budget_limits.clone();
+    spec.system_prompt_override = Some(match &material.overlay.system_prompt {
+        PortableSystemPrompt::Set { text } => {
+            super::handle::SpawnSystemPromptOverride::Replace(text.clone())
+        }
+        PortableSystemPrompt::Disable => super::handle::SpawnSystemPromptOverride::Disable,
+    });
+    spec.override_profile = Some(profile);
+    spec.continuity_intent = super::handle::SpawnContinuityIntent::DurableIdentity {
+        continuity_key: identity.as_str().to_string(),
+    };
+    match &material.execution {
+        DesiredExecution::ControllingSession => {
+            spec.binding = Some(crate::RuntimeBinding::Session);
+        }
+        DesiredExecution::PlacedSession { .. } => {
+            return Err(MobError::WiringError(format!(
+                "identity '{identity}' placed-session recovery is not available in the local convergence slice"
+            )));
+        }
+        DesiredExecution::AnyBoundHostSession => {
+            return Err(MobError::WiringError(format!(
+                "identity '{identity}' requires a fresh bound-host observation before materialization"
+            )));
+        }
+        DesiredExecution::External { .. } => {
+            return Err(MobError::WiringError(format!(
+                "identity '{identity}' requires fresh external ceremony/trust before materialization"
+            )));
+        }
+    }
+    Ok(spec)
+}
+
+fn domain_runtime_mode(mode: meerkat_contracts::wire::WireMobRuntimeMode) -> crate::MobRuntimeMode {
+    match mode {
+        meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost => {
+            crate::MobRuntimeMode::AutonomousHost
+        }
+        meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven => {
+            crate::MobRuntimeMode::TurnDriven
+        }
+    }
+}
+
+async fn compile_inline_skills(
+    definition: &MobDefinition,
+    skill_names: &[String],
+    profile_name: &ProfileName,
+) -> Result<BTreeMap<String, PortableSkillSource>, MobError> {
+    let mut skills = BTreeMap::new();
+    for skill_name in skill_names {
+        let source = definition.skills.get(skill_name).ok_or_else(|| {
+            MobError::WiringError(format!(
+                "profile '{profile_name}' references skill '{skill_name}' that is not defined in the mob definition"
+            ))
+        })?;
+        let inline = match source {
+            SkillSource::Inline { content } => PortableSkillSource::Inline {
+                content: content.clone(),
+            },
+            SkillSource::Path { path } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
+                        MobError::WiringError(format!(
+                            "failed to read skill file '{path}' for skill '{skill_name}' while compiling portable member material: {error}"
+                        ))
+                    })?;
+                    PortableSkillSource::Inline { content }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(MobError::WiringError(format!(
+                        "file-based skill path '{path}' cannot be compiled into portable member material on wasm32"
+                    )));
+                }
+            }
+        };
+        skills.insert(skill_name.clone(), inline);
+    }
+    Ok(skills)
+}
+
+async fn resolve_portable_system_prompt(
+    agent_identity: &AgentIdentity,
+    profile_name: &ProfileName,
+    skill_names: &[String],
+    skills: &BTreeMap<String, PortableSkillSource>,
+    override_value: Option<&PortableSystemPrompt>,
+    base_prompt: Option<&dyn SpawnBasePromptSource>,
+) -> Result<PortableSystemPrompt, MobError> {
+    if let Some(override_value) = override_value {
+        return Ok(override_value.clone());
+    }
+    let assembled = assemble_inline_skill_prompt(skill_names, skills);
+    if !assembled.is_empty() {
+        return Ok(PortableSystemPrompt::Set { text: assembled });
+    }
+    let Some(base_prompt) = base_prompt else {
+        return Err(MobError::WiringError(format!(
+            "member material for '{agent_identity}' needs the controlling host's base system prompt (profile '{profile_name}' has no skills and no prompt override) but no SpawnBasePromptSource is wired; inject one via MobBuilder::with_spawn_base_prompt_source (never a silent Inherit)"
+        )));
+    };
+    let base = base_prompt.resolve_base_system_prompt().await?;
+    if base.is_empty() {
+        Ok(PortableSystemPrompt::Disable)
+    } else {
+        Ok(PortableSystemPrompt::Set { text: base })
+    }
+}
+
+fn resolved_tool_access_policy(
+    policy: Option<&meerkat_core::ops::ToolAccessPolicy>,
+    agent_identity: &AgentIdentity,
+) -> Result<Option<WireResolvedToolAccessPolicy>, MobError> {
+    match policy {
+        None => Ok(None),
+        Some(meerkat_core::ops::ToolAccessPolicy::AllowList(names)) => Ok(Some(
+            WireResolvedToolAccessPolicy::AllowList(sorted_tool_names(names)),
+        )),
+        Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names)) => Ok(Some(
+            WireResolvedToolAccessPolicy::DenyList(sorted_tool_names(names)),
+        )),
+        Some(meerkat_core::ops::ToolAccessPolicy::Inherit) => Err(MobError::WiringError(format!(
+            "tool access policy for member '{agent_identity}' is still Inherit at material compile; callers must resolve it before the actor seals desired material"
+        ))),
+    }
 }
 
 /// Output of the compiler: the digest-covered spec, its canonical digest
@@ -179,92 +519,42 @@ pub(crate) async fn compile_portable_member_spec(
         non_portable_disabled,
     } = params;
 
-    let portable_profile = project_portable_profile(
-        profile,
-        runtime_mode,
-        &definition.models,
-        agent_identity.as_str(),
-        profile_name.as_str(),
+    let system_prompt_override =
+        system_prompt_override.map(|override_value| match override_value {
+            super::handle::SpawnSystemPromptOverride::Replace(prompt) => {
+                PortableSystemPrompt::Set {
+                    text: prompt.clone(),
+                }
+            }
+            super::handle::SpawnSystemPromptOverride::Disable => PortableSystemPrompt::Disable,
+        });
+    let tool_access_policy = resolved_tool_access_policy(tool_access_policy, agent_identity)?;
+    let declaration = IdentityProfileMemberDeclaration {
+        profile_name: profile_name.clone(),
+        profile_override: None,
+        model_override: None,
+        external_addressable_override: None,
+        context: context.map(WireOpaqueJson::from_value),
+        labels: labels.cloned(),
+        additional_instructions: additional_instructions.cloned(),
+        system_prompt_override,
+        tool_access_policy,
+        auth_binding: auth_binding.cloned().map(Into::into),
+        budget_limits: budget_limits.cloned(),
+        runtime_mode: Some(wire_runtime_mode(runtime_mode)),
+        required_env_keys: Vec::new(),
+        required_local_callback_tools: Vec::new(),
+        execution: DesiredExecution::ControllingSession,
+    };
+    let material = compile_desired_member_material(CompileDesiredMemberMaterialParams {
+        agent_identity,
+        declaration: &declaration,
+        resolved_profile: Some(profile),
+        definition,
+        base_prompt,
         non_portable_disabled,
-    )
-    .map_err(MobError::WiringError)?;
-
-    // Skills: Path → Inline read fail-closed (A1); missing name → typed.
-    let mut skills = BTreeMap::new();
-    for skill_name in &profile.skills {
-        let source = definition.skills.get(skill_name).ok_or_else(|| {
-            MobError::WiringError(format!(
-                "profile '{profile_name}' references skill '{skill_name}' that is not defined in the mob definition"
-            ))
-        })?;
-        let inline = match source {
-            SkillSource::Inline { content } => PortableSkillSource::Inline {
-                content: content.clone(),
-            },
-            SkillSource::Path { path } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
-                        MobError::WiringError(format!(
-                            "failed to read skill file '{path}' for skill '{skill_name}' while compiling portable member spec: {error}"
-                        ))
-                    })?;
-                    PortableSkillSource::Inline { content }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    return Err(MobError::WiringError(format!(
-                        "file-based skill path '{path}' cannot be compiled into a portable member spec on wasm32"
-                    )));
-                }
-            }
-        };
-        skills.insert(skill_name.clone(), inline);
-    }
-
-    // R3 never-Inherit prompt tree (build.rs:209-217 twin, with the case-3
-    // seam replacing the local factory `Inherit` resolution).
-    let assembled = assemble_inline_skill_prompt(profile, &skills);
-    let system_prompt = match system_prompt_override {
-        Some(super::handle::SpawnSystemPromptOverride::Replace(prompt)) => {
-            PortableSystemPrompt::Set {
-                text: prompt.clone(),
-            }
-        }
-        None if !assembled.is_empty() => PortableSystemPrompt::Set { text: assembled },
-        None => {
-            let Some(base_prompt) = base_prompt else {
-                return Err(MobError::WiringError(format!(
-                    "remote spawn of '{agent_identity}' needs the controlling host's base system prompt (profile '{profile_name}' has no skills and no prompt override) but no SpawnBasePromptSource is wired; inject one via MobBuilder::with_spawn_base_prompt_source (ADJ-2: never a silent Inherit)"
-                )));
-            };
-            let base = base_prompt.resolve_base_system_prompt().await?;
-            if base.is_empty() {
-                PortableSystemPrompt::Disable
-            } else {
-                PortableSystemPrompt::Set { text: base }
-            }
-        }
-    };
-
-    // O3/DEC-P3F-3: resolved policy only. The build.rs Inherit→None fold is
-    // NEVER replicated here — residual Inherit is a typed compile failure.
-    let tool_access_policy = match tool_access_policy {
-        None => None,
-        // The core set is unordered; the digest-covered wire carrier is a
-        // SORTED name list so identical policies always hash identically.
-        Some(meerkat_core::ops::ToolAccessPolicy::AllowList(names)) => Some(
-            WireResolvedToolAccessPolicy::AllowList(sorted_tool_names(names)),
-        ),
-        Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names)) => Some(
-            WireResolvedToolAccessPolicy::DenyList(sorted_tool_names(names)),
-        ),
-        Some(meerkat_core::ops::ToolAccessPolicy::Inherit) => {
-            return Err(MobError::WiringError(format!(
-                "tool access policy for remote spawn of '{agent_identity}' is still Inherit at spec-mint; agent-facing surfaces must resolve Inherit to the parent's effective policy before the spec reaches the actor (O3)"
-            )));
-        }
-    };
+    })
+    .await?;
 
     // Operator authority: mint via the build.rs:249-273 path, then PROJECT
     // to the wire (visibility composition only; dispatch authority is
@@ -316,36 +606,43 @@ pub(crate) async fn compile_portable_member_spec(
         .as_ref()
         .map(project_mob_tool_authority_context)
         .transpose()?;
+    let DesiredMemberMaterial {
+        profile: portable_profile,
+        definition_extract,
+        overlay,
+        required_env_keys,
+        ..
+    } = material;
+    let DesiredMemberOverlay {
+        context,
+        labels,
+        additional_instructions,
+        system_prompt,
+        tool_access_policy,
+        auth_binding,
+        budget_limits,
+        runtime_mode,
+    } = overlay;
 
     let spec = PortableMemberSpec {
         mob_id: mob_id.as_str().to_string(),
         profile_name: profile_name.as_str().to_string(),
         agent_identity: agent_identity.as_str().to_string(),
         profile: portable_profile,
-        definition_extract: PortableDefinitionExtract {
-            models: definition.models.clone(),
-            image_generation_provider: definition.image_generation_provider,
-            skills,
-            profile_names: definition
-                .profiles
-                .keys()
-                .map(|profile| profile.as_str().to_string())
-                .collect(),
-        },
+        definition_extract,
         overlay: PortableSpawnOverlay {
-            context: context.map(WireOpaqueJson::from_value),
-            labels: labels.cloned(),
-            additional_instructions: additional_instructions.cloned(),
+            context,
+            labels,
+            additional_instructions,
             system_prompt,
             tool_access_policy,
             mob_tool_authority_context,
-            auth_binding: auth_binding.cloned().map(Into::into),
-            budget_limits: budget_limits.cloned(),
-            runtime_mode: wire_runtime_mode(runtime_mode),
+            auth_binding,
+            budget_limits,
+            runtime_mode,
             continuity_intent: wire_continuity_intent(continuity_intent),
         },
-        // v1: names-only future vocabulary (no producer yet).
-        required_env_keys: Vec::new(),
+        required_env_keys,
     };
 
     let digest = portable_member_spec_digest(&spec).map_err(|error| {
@@ -365,11 +662,11 @@ pub(crate) async fn compile_portable_member_spec(
 /// `build::assemble_system_prompt` output for the same profile (the member
 /// host re-derives it from `definition_extract.skills`).
 fn assemble_inline_skill_prompt(
-    profile: &Profile,
+    skill_names: &[String],
     skills: &BTreeMap<String, PortableSkillSource>,
 ) -> String {
     let mut sections = Vec::new();
-    for skill_name in &profile.skills {
+    for skill_name in skill_names {
         if let Some(PortableSkillSource::Inline { content }) = skills.get(skill_name) {
             sections.push(content.as_str());
         }
@@ -508,6 +805,89 @@ mod tests {
             first.digest,
             portable_member_spec_digest(&first.spec).expect("recompute"),
         );
+    }
+
+    #[tokio::test]
+    async fn desired_material_compiler_seals_overrides_and_canonical_callback_tools() {
+        let identity = AgentIdentity::from("worker-a");
+        let profile = worker_profile();
+        let definition = definition();
+        let declaration = IdentityProfileMemberDeclaration {
+            profile_name: ProfileName::from("worker"),
+            profile_override: None,
+            model_override: Some("claude-opus-4-8".to_string()),
+            external_addressable_override: Some(false),
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt_override: Some(PortableSystemPrompt::Disable),
+            tool_access_policy: None,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+            required_env_keys: Vec::new(),
+            required_local_callback_tools: vec![
+                crate::identity::DesiredLocalCallbackTool::new(
+                    "zeta",
+                    "Tool zeta",
+                    serde_json::json!({}),
+                )
+                .unwrap(),
+                crate::identity::DesiredLocalCallbackTool::new(
+                    "alpha",
+                    "Tool alpha",
+                    serde_json::json!({}),
+                )
+                .unwrap(),
+            ],
+            execution: DesiredExecution::ControllingSession,
+        };
+        let material = compile_desired_member_material(CompileDesiredMemberMaterialParams {
+            agent_identity: &identity,
+            declaration: &declaration,
+            resolved_profile: Some(&profile),
+            definition: &definition,
+            base_prompt: None,
+            non_portable_disabled: Vec::new(),
+        })
+        .await
+        .expect("compile desired material");
+
+        assert_eq!(material.profile.model, "claude-opus-4-8");
+        assert!(!material.profile.external_addressable);
+        assert_eq!(
+            material
+                .required_local_callback_tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        material.validate().expect("sealed material is canonical");
+
+        let session_id = meerkat_core::SessionId::new();
+        let session = crate::identity::DesiredSessionTarget {
+            session_id: session_id.clone(),
+            lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::CreateIfAbsent,
+        };
+        let intent_for = |material| crate::identity::IdentityIntent::Present {
+            identity: identity.clone(),
+            session: session.clone(),
+            member: Box::new(crate::identity::DesiredMemberSpec {
+                material,
+                initial_delivery: None,
+            }),
+            owned_wiring: Default::default(),
+        };
+        let original_digest = intent_for(material.clone()).digest().unwrap();
+        let mut changed = material;
+        changed.required_local_callback_tools[0]
+            .description
+            .push_str(" changed");
+        changed.validate().unwrap();
+        assert_ne!(original_digest, intent_for(changed).digest().unwrap());
     }
 
     /// U3(iii): base source absent on a case-3 spawn is a typed failure.

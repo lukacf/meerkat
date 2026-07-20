@@ -1424,28 +1424,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityInitializing`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityIdle`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityAttached`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityColdRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `RecoverRuntimeAuthorityDestroyed`
+- `ClassifyRuntimeAuthorityReconciliation`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverSupervisorBindingInitializing`
@@ -5936,6 +5915,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeOpsLifecycleDurabilityResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeAuthorityReconciliationClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `UserInterruptPublicResultResolved`

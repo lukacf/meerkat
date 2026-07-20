@@ -355,8 +355,8 @@ impl JsonlStore {
         let mut contents = String::new();
         file.read_to_string(&mut contents).await?;
 
-        let session = serde_json::from_str::<Session>(&contents)
-            .map_err(|err| StoreError::Internal(err.to_string()))?;
+        let session =
+            serde_json::from_str::<Session>(&contents).map_err(StoreError::Serialization)?;
 
         Ok(Some(session))
     }
@@ -541,6 +541,32 @@ mod tests {
         let id = SessionId::new();
         let result = store.load(&id).await?;
         assert!(result.is_none(), "Non-existent session should return None");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_surfaces_corrupt_session_file_as_serialization_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = JsonlStore::new(temp_dir.path().to_path_buf());
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await?;
+
+        fs::write(
+            store.session_path(&id),
+            b"{ not a serialized Session".as_slice(),
+        )
+        .await?;
+
+        let error = store
+            .load(&id)
+            .await
+            .expect_err("corrupt persisted Session bytes must fail load");
+        assert!(
+            matches!(error, SessionStoreError::Serialization(_)),
+            "corrupt persisted Session bytes must remain a typed serialization error, got {error:?}"
+        );
         Ok(())
     }
 

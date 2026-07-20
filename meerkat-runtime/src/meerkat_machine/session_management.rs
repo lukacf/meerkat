@@ -538,17 +538,6 @@ mod machine_managed_executor_forwarding_tests {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RuntimeLifecycleRecoveryObservation {
-    runtime_state: RuntimeState,
-    agent_runtime_id: Option<LogicalRuntimeId>,
-    fence_token: Option<u64>,
-    runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
-    runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
-    unregister_progress: Option<crate::store::MachineUnregisterProgressSnapshot>,
-    recovered_from_snapshot: bool,
-}
-
 /// Mechanical result of publishing a runtime session entry. The generated
 /// registration phase remains authoritative; this only tells the command
 /// shell whether the entry it just inserted was reconstructed at the durable
@@ -573,48 +562,6 @@ impl RegisterSessionInnerOutcome {
         } else {
             Self::Existing
         }
-    }
-}
-
-impl RuntimeLifecycleRecoveryObservation {
-    fn from_snapshot(snapshot: Option<crate::store::MachineLifecycleSnapshot>) -> Self {
-        let Some(snapshot) = snapshot else {
-            return Self {
-                runtime_state: RuntimeState::Idle,
-                agent_runtime_id: None,
-                fence_token: None,
-                runtime_generation: None,
-                runtime_epoch_id: None,
-                unregister_progress: None,
-                recovered_from_snapshot: false,
-            };
-        };
-        let binding = snapshot.binding();
-        Self {
-            runtime_state: snapshot.runtime_state(),
-            agent_runtime_id: binding
-                .agent_runtime_id()
-                .map(|value| LogicalRuntimeId::new(value.to_owned())),
-            fence_token: binding.fence_token(),
-            runtime_generation: binding
-                .runtime_generation()
-                .map(crate::meerkat_machine::dsl::Generation::from),
-            runtime_epoch_id: binding
-                .runtime_epoch_id()
-                .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
-            unregister_progress: snapshot.unregister_progress().cloned(),
-            recovered_from_snapshot: true,
-        }
-    }
-
-    fn requires_observed_recovery(&self) -> bool {
-        self.recovered_from_snapshot
-            && (self.runtime_state != RuntimeState::Idle
-                || self.agent_runtime_id.is_some()
-                || self.fence_token.is_some()
-                || self.runtime_generation.is_some()
-                || self.runtime_epoch_id.is_some()
-                || self.unregister_progress.is_some())
     }
 }
 
@@ -643,12 +590,24 @@ pub(super) fn replay_durable_unregister_progress(
     session_id: &SessionId,
     progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
 ) -> Result<(), RuntimeDriverError> {
+    replay_durable_unregister_progress_id(
+        authority,
+        &crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        progress,
+    )
+}
+
+pub(super) fn replay_durable_unregister_progress_id(
+    authority: &mut crate::meerkat_machine::dsl::MeerkatMachineAuthority,
+    session_id: &crate::meerkat_machine::dsl::SessionId,
+    progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+) -> Result<(), RuntimeDriverError> {
     let Some(progress) = progress else {
         return Ok(());
     };
     let state = authority.state();
     let begin = crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
-        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        session_id: session_id.clone(),
         agent_runtime_id: state.active_runtime_id.clone(),
         fence_token: state.active_fence_token,
         generation: state.active_runtime_generation,
@@ -657,7 +616,8 @@ pub(super) fn replay_durable_unregister_progress(
     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(authority, begin).map_err(
         |error| RuntimeDriverError::RecoveryCorruption {
             reason: format!(
-                "failed to replay durable unregister drain for session {session_id}: {error}"
+                "failed to replay durable unregister drain for session {}: {error}",
+                session_id.0
             ),
         },
     )?;
@@ -666,7 +626,7 @@ pub(super) fn replay_durable_unregister_progress(
     if !progress.runtime_loop_drain_pending() {
         feedback.push(
             crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
-                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                session_id: session_id.clone(),
                 forced_abort: progress.runtime_loop_forced_abort(),
             },
         );
@@ -674,7 +634,7 @@ pub(super) fn replay_durable_unregister_progress(
     if !progress.comms_drain_exit_pending() {
         feedback.push(
             crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
-                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                session_id: session_id.clone(),
                 forced_abort: progress.comms_drain_forced_abort(),
             },
         );
@@ -682,7 +642,7 @@ pub(super) fn replay_durable_unregister_progress(
     if !progress.completion_waiter_drain_pending() {
         feedback.push(
             crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
-                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                session_id: session_id.clone(),
             },
         );
     }
@@ -690,7 +650,8 @@ pub(super) fn replay_durable_unregister_progress(
         crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(authority, input).map_err(
             |error| RuntimeDriverError::RecoveryCorruption {
                 reason: format!(
-                    "failed to replay durable unregister feedback for session {session_id}: {error}"
+                    "failed to replay durable unregister feedback for session {}: {error}",
+                    session_id.0
                 ),
             },
         )?;
@@ -991,16 +952,332 @@ impl MeerkatMachine {
         }
     }
 
-    async fn durable_lifecycle_for_registration(
+    async fn runtime_authority_for_registration(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<crate::store::MachineLifecycleSnapshot>, RuntimeDriverError> {
+        session_id: &SessionId,
+    ) -> Result<super::driver::ReconciledRuntimeAuthority, RuntimeDriverError> {
         let Some(store) = self.store.as_ref() else {
-            return Ok(None);
+            return Ok(super::driver::ReconciledRuntimeAuthority {
+                authority: super::dsl_authority::new_registered_authority(session_id).map_err(
+                    |error| {
+                        RuntimeDriverError::Internal(super::dsl_authority::map_error(
+                            error,
+                            "fresh session registration",
+                        ))
+                    },
+                )?,
+                unregister_progress: None,
+            });
         };
-        crate::store::load_machine_lifecycle(store.as_ref(), runtime_id)
+        super::driver::reconcile_runtime_authority_for_cold_recovery(
+            store.as_ref(),
+            runtime_id,
+            session_id,
+        )
+        .await
+    }
+
+    /// Observe the exact durable cold lifecycle row for one session.
+    ///
+    /// Successfully read bytes are classified totally as Missing, Decoded,
+    /// Unsupported, or Malformed. Transport/capability failure remains a
+    /// RuntimeStoreError. The returned wrapper binds the raw-content version
+    /// to this exact session/runtime target.
+    pub async fn observe_cold_runtime_lifecycle(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<RuntimeSessionLifecycleObservation, crate::store::RuntimeStoreError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            crate::store::RuntimeStoreError::Unsupported(
+                "observe_cold_runtime_lifecycle requires a persistent RuntimeStore".to_string(),
+            )
+        })?;
+        let runtime_id = Self::logical_runtime_id(session_id);
+        let lifecycle = store.observe_machine_lifecycle(&runtime_id).await?;
+        Ok(RuntimeSessionLifecycleObservation::new(
+            session_id.clone(),
+            runtime_id,
+            lifecycle,
+        ))
+    }
+
+    /// Register a fresh process-local runtime shell only while both the exact
+    /// durable lifecycle observation and an external write fence are current.
+    ///
+    /// The external fence is generic and never participates in lifecycle-row
+    /// content. The RuntimeStore retains it across the exact target CAS/commit;
+    /// this method obtains a fresh guarded admission around the later live-map
+    /// publication. Conflict never spins internally: callers re-observe and
+    /// requeue one level-triggered pass.
+    pub async fn register_session_if_runtime_lifecycle_current(
+        &self,
+        observed: RuntimeSessionLifecycleObservation,
+        write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
+    ) -> RuntimeSessionRegistrationOutcome {
+        let RuntimeSessionLifecycleObservation {
+            session_id,
+            runtime_id,
+            lifecycle: expected_lifecycle,
+        } = observed;
+        let expected_runtime_id = Self::logical_runtime_id(&session_id);
+        if runtime_id != expected_runtime_id {
+            return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                evidence_digest: expected_lifecycle.evidence_digest().map(ToOwned::to_owned),
+                reason: format!(
+                    "runtime observation target {runtime_id} does not belong to session {session_id}"
+                ),
+            };
+        }
+
+        let _registration_transaction_guard = self
+            .lock_session_registration_transaction(&session_id)
+            .await;
+        let Some(store) = self.store.as_ref() else {
+            return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                evidence_digest: expected_lifecycle.evidence_digest().map(ToOwned::to_owned),
+                reason: "conditional runtime registration requires a persistent RuntimeStore"
+                    .to_string(),
+            };
+        };
+
+        if self.sessions.read().await.contains_key(&session_id) {
+            return match store.observe_machine_lifecycle(&runtime_id).await {
+                Ok(current) => RuntimeSessionRegistrationOutcome::Conflict {
+                    current: RuntimeSessionLifecycleObservation::new(
+                        session_id, runtime_id, current,
+                    ),
+                    reason: "a live runtime registration already occupies this session".to_string(),
+                },
+                Err(error) => RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: format!(
+                        "failed to re-observe an already-live runtime registration: {error}"
+                    ),
+                },
+            };
+        }
+
+        match super::driver::runtime_authority_reconcile_decision_for_observation(
+            &expected_lifecycle,
+        ) {
+            Ok(
+                crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Converged
+                | crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::NormalizeOrReplace,
+            ) => {}
+            Ok(
+                crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::RepairBlocked
+                | crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Quarantine,
+            ) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest: expected_lifecycle.evidence_digest().map(ToOwned::to_owned),
+                    reason: "generated runtime lifecycle classifier blocked automatic repair"
+                        .to_string(),
+                };
+            }
+            Ok(crate::meerkat_machine::dsl::RuntimeAuthorityReconcileDecision::Backoff) => {
+                return RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: "generated runtime lifecycle classifier requested backoff".to_string(),
+                };
+            }
+            Err(error) => {
+                return RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: error.to_string(),
+                };
+            }
+        }
+
+        let expected = expected_lifecycle.expected_version();
+        let replacement =
+            crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                RuntimeState::Idle,
+                crate::store::MachineLifecycleBindingFacts::default(),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                None,
+            );
+        let durable_outcome = match store
+            .compare_and_swap_machine_lifecycle_with_fence(
+                &runtime_id,
+                expected,
+                replacement,
+                Arc::clone(&write_fence),
+            )
             .await
-            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))
+        {
+            Ok(outcome) => outcome,
+            Err(crate::store::RuntimeStoreError::MachineLifecycleRepairBlocked {
+                evidence_digest,
+                detail,
+            }) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest,
+                    reason: detail,
+                };
+            }
+            Err(crate::store::RuntimeStoreError::Unsupported(reason)) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest: expected_lifecycle.evidence_digest().map(ToOwned::to_owned),
+                    reason: format!(
+                        "runtime store lacks conditional lifecycle registration capability: {reason}"
+                    ),
+                };
+            }
+            Err(error) => {
+                return RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: error.to_string(),
+                };
+            }
+        };
+
+        enum DurableWrite {
+            Applied,
+            AlreadyExact,
+        }
+        let (durable_write, record, version) = match durable_outcome {
+            crate::store::FencedMachineLifecycleCasOutcome::Applied { record, version } => {
+                (DurableWrite::Applied, record, version)
+            }
+            crate::store::FencedMachineLifecycleCasOutcome::AlreadyExact { record, version } => {
+                (DurableWrite::AlreadyExact, record, version)
+            }
+            crate::store::FencedMachineLifecycleCasOutcome::Conflict { current } => {
+                return RuntimeSessionRegistrationOutcome::Conflict {
+                    current: RuntimeSessionLifecycleObservation::new(
+                        session_id, runtime_id, current,
+                    ),
+                    reason: "runtime lifecycle observation changed before conditional registration"
+                        .to_string(),
+                };
+            }
+            crate::store::FencedMachineLifecycleCasOutcome::FenceConflict { reason } => {
+                return RuntimeSessionRegistrationOutcome::Conflict {
+                    current: RuntimeSessionLifecycleObservation::new(
+                        session_id,
+                        runtime_id,
+                        expected_lifecycle,
+                    ),
+                    reason,
+                };
+            }
+            crate::store::FencedMachineLifecycleCasOutcome::FenceBackoff { reason } => {
+                return RuntimeSessionRegistrationOutcome::Backoff { reason };
+            }
+        };
+
+        let committed_lifecycle = RuntimeSessionLifecycleObservation::new(
+            session_id.clone(),
+            runtime_id.clone(),
+            crate::store::MachineLifecycleObservation::Decoded {
+                record: record.clone(),
+                version,
+            },
+        );
+        let recovery = match super::driver::registered_runtime_authority_from_converged_record(
+            &session_id,
+            &record,
+        ) {
+            Ok(recovery) => recovery,
+            Err(RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest,
+                reason,
+            }) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest,
+                    reason,
+                };
+            }
+            Err(RuntimeDriverError::RecoveryCorruption { reason }) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest: committed_lifecycle
+                        .lifecycle()
+                        .evidence_digest()
+                        .map(ToOwned::to_owned),
+                    reason,
+                };
+            }
+            Err(error) => {
+                return RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: error.to_string(),
+                };
+            }
+        };
+        let (session_entry, _) = match self
+            .prepare_registered_session_entry(&session_id, &runtime_id, recovery, None)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest,
+                reason,
+            }) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest,
+                    reason,
+                };
+            }
+            Err(RuntimeDriverError::RecoveryCorruption { reason }) => {
+                return RuntimeSessionRegistrationOutcome::RepairBlocked {
+                    evidence_digest: committed_lifecycle
+                        .lifecycle()
+                        .evidence_digest()
+                        .map(ToOwned::to_owned),
+                    reason,
+                };
+            }
+            Err(RuntimeDriverError::StaleAuthority { reason }) => {
+                return RuntimeSessionRegistrationOutcome::Conflict {
+                    current: committed_lifecycle,
+                    reason,
+                };
+            }
+            Err(error) => {
+                return RuntimeSessionRegistrationOutcome::Backoff {
+                    reason: error.to_string(),
+                };
+            }
+        };
+
+        let registration = RuntimeSessionRegistrationWitness::new(
+            Arc::downgrade(&self.shared),
+            session_id.clone(),
+            session_entry.epoch_id.clone(),
+            Arc::downgrade(&session_entry.mutation_gate),
+        );
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(&session_id) {
+            return RuntimeSessionRegistrationOutcome::Conflict {
+                current: committed_lifecycle,
+                reason: "a live runtime registration appeared before publication".to_string(),
+            };
+        }
+        let publication =
+            crate::store::execute_runtime_store_write_fence(write_fence.as_ref(), || {
+                sessions.insert(session_id, session_entry);
+                Ok(())
+            });
+        match publication {
+            Ok(crate::store::RuntimeStoreWriteFenceOutcome::Applied) => match durable_write {
+                DurableWrite::Applied => RuntimeSessionRegistrationOutcome::Applied {
+                    registration,
+                    lifecycle: committed_lifecycle,
+                },
+                DurableWrite::AlreadyExact => RuntimeSessionRegistrationOutcome::AlreadyExact {
+                    registration,
+                    lifecycle: committed_lifecycle,
+                },
+            },
+            Ok(crate::store::RuntimeStoreWriteFenceOutcome::Conflict { reason }) => {
+                RuntimeSessionRegistrationOutcome::Conflict {
+                    current: committed_lifecycle,
+                    reason,
+                }
+            }
+            Ok(crate::store::RuntimeStoreWriteFenceOutcome::Backoff { reason }) => {
+                RuntimeSessionRegistrationOutcome::Backoff { reason }
+            }
+            Err(error) => RuntimeSessionRegistrationOutcome::Backoff {
+                reason: error.to_string(),
+            },
+        }
     }
 
     pub(super) async fn register_session_inner(
@@ -1451,89 +1728,30 @@ impl MeerkatMachine {
         }
     }
 
-    async fn register_session_inner_impl(
+    async fn prepare_registered_session_entry(
         &self,
-        session_id: SessionId,
+        session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        mut recovery: super::driver::ReconciledRuntimeAuthority,
         materialization_claim_state: Option<
             Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
         >,
-    ) -> Result<RegisterSessionInnerOutcome, RuntimeDriverError> {
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(existing) = sessions.get_mut(&session_id) {
-                tracing::debug!(
-                    %session_id,
-                    "MeerkatMachine::register_session_inner found existing session"
-                );
-                if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
-                    return Err(error);
-                }
-                if existing.clear_dead_attachment() {
-                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
-                        RuntimeDriverError::Internal(format!(
-                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
-                        ))
-                    })?;
-                }
-                return Ok(RegisterSessionInnerOutcome::Existing);
-            }
-        }
-
-        let runtime_id = Self::logical_runtime_id(&session_id);
-        tracing::debug!(
-            %session_id,
-            %runtime_id,
-            "MeerkatMachine::register_session_inner loading durable lifecycle"
-        );
-        let recovery_observation = RuntimeLifecycleRecoveryObservation::from_snapshot(
-            self.durable_lifecycle_for_registration(&runtime_id).await?,
-        );
+    ) -> Result<(RuntimeSessionEntry, bool), RuntimeDriverError> {
+        let recovered_unregister_progress = recovery.unregister_progress.take();
         let recovered_teardown_observations = Arc::new(
             UnregisterTeardownMechanicalObservations::from_durable_process_recovery(
-                recovery_observation.unregister_progress.as_ref(),
+                recovered_unregister_progress.as_ref(),
             ),
         );
-        tracing::debug!(
-            %session_id,
-            %runtime_id,
-            "MeerkatMachine::register_session_inner loaded durable lifecycle"
-        );
-        let recovered_unregister_retry = recovery_observation.recovered_from_snapshot
-            && recovery_observation.unregister_progress.is_some();
-        let observed_runtime_state = recovery_observation.runtime_state;
-        let requires_observed_recovery = recovery_observation.requires_observed_recovery();
-        let mut recovered_authority = if requires_observed_recovery {
-            super::dsl_authority::recover_authority_from_runtime_observation(
-                &session_id,
-                observed_runtime_state,
-                recovery_observation.agent_runtime_id.as_ref(),
-                None,
-                None,
-                std::collections::BTreeSet::new(),
-                recovery_observation.fence_token,
-                recovery_observation.runtime_generation,
-                recovery_observation.runtime_epoch_id,
-            )
-            .map_err(|err| {
-                RuntimeDriverError::Internal(super::dsl_authority::map_error(
-                    err,
-                    "session registration DSL recovery",
-                ))
-            })?
-        } else {
-            fresh_registered_runtime_authority(&session_id, "fresh session registration")?
-        };
+        let recovered_unregister_retry = recovered_unregister_progress.is_some();
         replay_durable_unregister_progress(
-            &mut recovered_authority,
-            &session_id,
-            recovery_observation.unregister_progress.as_ref(),
+            &mut recovery.authority,
+            session_id,
+            recovered_unregister_progress.as_ref(),
         )?;
-        // Seed the driver's initial phase from the recovered DSL authority
-        // uniformly (same as the storeless paths): the authority is the owner;
-        // the driver control projection mirrors it, never the raw observation.
         let initial_runtime_state =
-            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
-        let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
+            super::dsl_authority::runtime_phase_from_authority(&recovery.authority);
+        let dsl_authority = Arc::new(std::sync::Mutex::new(recovery.authority));
         tracing::debug!(
             %session_id,
             %runtime_id,
@@ -1550,7 +1768,17 @@ impl MeerkatMachine {
             %runtime_id,
             "MeerkatMachine::register_session_inner recovering driver"
         );
-        if let Err(err) = entry.as_driver_mut().recover().await {
+        let recover_result = match &mut entry {
+            super::driver::DriverEntry::Ephemeral(driver) => {
+                crate::traits::RuntimeDriver::recover(driver).await
+            }
+            super::driver::DriverEntry::Persistent(driver) => {
+                driver
+                    .recover_inputs_after_runtime_authority(recovered_unregister_progress.as_ref())
+                    .await
+            }
+        };
+        if let Err(err) = recover_result {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return Err(err);
         }
@@ -1573,10 +1801,8 @@ impl MeerkatMachine {
             %runtime_id,
             "MeerkatMachine::register_session_inner recovering ops state"
         );
-        let (ops_lifecycle, epoch_id, cursor_state) = if self.store.is_some()
-            || (requires_observed_recovery && initial_runtime_state != RuntimeState::Idle)
-        {
-            self.recover_or_create_ops_state(&session_id, &runtime_id)
+        let (ops_lifecycle, epoch_id, cursor_state) = if self.store.is_some() {
+            self.recover_or_create_ops_state(session_id, runtime_id)
                 .await?
         } else {
             Self::fresh_ops_state()
@@ -1589,9 +1815,6 @@ impl MeerkatMachine {
         );
 
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
-        // Bind the DSL authority into the visibility owner so its staging
-        // trait calls route through the canonical DSL counter
-        // `next_staged_visibility_revision` (dogma round 4, wave 2b #12).
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let session_entry = RuntimeSessionEntry {
@@ -1632,6 +1855,59 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
         };
+        Ok((session_entry, cold_recovered_generated_draining))
+    }
+
+    async fn register_session_inner_impl(
+        &self,
+        session_id: SessionId,
+        materialization_claim_state: Option<
+            Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
+        >,
+    ) -> Result<RegisterSessionInnerOutcome, RuntimeDriverError> {
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                tracing::debug!(
+                    %session_id,
+                    "MeerkatMachine::register_session_inner found existing session"
+                );
+                if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                    return Err(error);
+                }
+                if existing.clear_dead_attachment() {
+                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                        RuntimeDriverError::Internal(format!(
+                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                        ))
+                    })?;
+                }
+                return Ok(RegisterSessionInnerOutcome::Existing);
+            }
+        }
+
+        let runtime_id = Self::logical_runtime_id(&session_id);
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner loading durable lifecycle"
+        );
+        let recovery = self
+            .runtime_authority_for_registration(&runtime_id, &session_id)
+            .await?;
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner loaded durable lifecycle"
+        );
+        let (session_entry, cold_recovered_generated_draining) = self
+            .prepare_registered_session_entry(
+                &session_id,
+                &runtime_id,
+                recovery,
+                materialization_claim_state,
+            )
+            .await?;
         tracing::debug!(
             %session_id,
             %runtime_id,
@@ -2910,69 +3186,54 @@ impl MeerkatMachine {
             }
 
             let runtime_id = Self::logical_runtime_id(&session_id);
-            let recovery_observation =
-                match self.durable_lifecycle_for_registration(&runtime_id).await {
-                    Ok(snapshot) => RuntimeLifecycleRecoveryObservation::from_snapshot(snapshot),
-                    Err(err) => {
-                        tracing::error!(
-                            %session_id,
-                            error = %err,
-                            "failed to load durable runtime state during executor registration"
-                        );
-                        return Err(err);
-                    }
-                };
+            let mut recovery = match self
+                .runtime_authority_for_registration(&runtime_id, &session_id)
+                .await
+            {
+                Ok(recovery) => recovery,
+                Err(err) => {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to load durable runtime state during executor registration"
+                    );
+                    return Err(err);
+                }
+            };
             let recovered_teardown_observations = Arc::new(
                 UnregisterTeardownMechanicalObservations::from_durable_process_recovery(
-                    recovery_observation.unregister_progress.as_ref(),
+                    recovery.unregister_progress.as_ref(),
                 ),
             );
-            let observed_runtime_state = recovery_observation.runtime_state;
-            let requires_observed_recovery = recovery_observation.requires_observed_recovery();
-            let mut recovered_authority = if requires_observed_recovery {
-                match super::dsl_authority::recover_authority_from_runtime_observation(
-                    &session_id,
-                    observed_runtime_state,
-                    recovery_observation.agent_runtime_id.as_ref(),
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    recovery_observation.fence_token,
-                    recovery_observation.runtime_generation,
-                    recovery_observation.runtime_epoch_id,
-                ) {
-                    Ok(authority) => authority,
-                    Err(err) => {
-                        let mapped =
-                            super::dsl_authority::map_error(err, "session recovery DSL recovery");
-                        tracing::error!(
-                            %session_id,
-                            error = %mapped,
-                            "failed to recover generated runtime authority during executor registration"
-                        );
-                        return Err(RuntimeDriverError::Internal(mapped));
-                    }
-                }
-            } else {
-                fresh_registered_runtime_authority(&session_id, "fresh executor registration")?
-            };
             replay_durable_unregister_progress(
-                &mut recovered_authority,
+                &mut recovery.authority,
                 &session_id,
-                recovery_observation.unregister_progress.as_ref(),
+                recovery.unregister_progress.as_ref(),
             )?;
             // Seed the driver's initial phase from the recovered DSL authority
             // uniformly: the authority is the owner; the driver control
             // projection mirrors it, never the raw observation.
             let initial_runtime_state =
-                super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
-            let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
+                super::dsl_authority::runtime_phase_from_authority(&recovery.authority);
+            let dsl_authority = Arc::new(std::sync::Mutex::new(recovery.authority));
             let mut recovered_entry = self.make_driver(
                 runtime_id.clone(),
                 Arc::clone(&dsl_authority),
                 initial_runtime_state,
             );
-            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+            let recover_result = match &mut recovered_entry {
+                super::driver::DriverEntry::Ephemeral(driver) => {
+                    crate::traits::RuntimeDriver::recover(driver).await
+                }
+                super::driver::DriverEntry::Persistent(driver) => {
+                    driver
+                        .recover_inputs_after_runtime_authority(
+                            recovery.unregister_progress.as_ref(),
+                        )
+                        .await
+                }
+            };
+            if let Err(err) = recover_result {
                 tracing::error!(
                     %session_id,
                     error = %err,
@@ -2982,9 +3243,7 @@ impl MeerkatMachine {
             }
             // Recover ops state OUTSIDE the sessions lock to avoid blocking
             // other adapter operations behind potentially slow disk I/O.
-            let (recovered_ops, recovered_epoch, recovered_cursors) = if self.store.is_some()
-                || (requires_observed_recovery && initial_runtime_state != RuntimeState::Idle)
-            {
+            let (recovered_ops, recovered_epoch, recovered_cursors) = if self.store.is_some() {
                 match self
                     .recover_or_create_ops_state(&session_id, &runtime_id)
                     .await

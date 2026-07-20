@@ -55,6 +55,7 @@ pub mod error;
 pub mod event;
 #[doc(hidden)]
 pub mod generated;
+pub mod identity;
 pub mod ids;
 pub mod launch;
 #[doc(hidden)]
@@ -91,6 +92,27 @@ pub use error::{
     RuntimeEffectKind,
 };
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
+pub use identity::{
+    DesiredExecution, DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery,
+    DesiredLocalCallbackTool, DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec,
+    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IdentityActuationPermit,
+    IdentityActuatorTarget, IdentityAuthorityCondition, IdentityConvergenceCondition,
+    IdentityConvergenceStatus, IdentityDeclarationApplyPlan, IdentityDeclarationManifest,
+    IdentityDeclarationManifestApplyDisposition, IdentityDeclarationManifestApplyOutcome,
+    IdentityDeclarationMemberPlan, IdentityDeclarationScopeHead, IdentityDeclarationScopeId,
+    IdentityDeclarationScopePrecondition, IdentityExternalCeremonyCondition,
+    IdentityExternalTrustCondition, IdentityInitialDeliveryCondition, IdentityIntent,
+    IdentityIntentApplyDisposition, IdentityIntentApplyOutcome, IdentityIntentError,
+    IdentityIntentRecord, IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseCondition,
+    IdentityLeaseRecord, IdentityLegacyImport, IdentityMemberDeclaration,
+    IdentityMemberMaterialDeclaration, IdentityOperationKind, IdentityOperationReceipt,
+    IdentityOperationReceiptInsertOutcome, IdentityOperationReceiptPayload, IdentityOperationSlot,
+    IdentityOperationSubject, IdentityProfileMemberDeclaration, IdentityReceiptCondition,
+    IdentityReconcileDecision, IdentityReconcileFacts, IdentityResourceCondition,
+    IdentityResourceObservation, IdentityRetirementPlan, IdentitySessionCondition,
+    IdentitySessionObservation, IdentityStoredObservation, IdentityTargetObservationVersion,
+    VerifiedIdentitySessionCheckpoint, classify_identity_reconciliation,
+};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
@@ -173,24 +195,29 @@ pub use runtime::{
     AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
     AdaptiveStopReasonView, ControllingAcceptorConfig, CurrentMobAdmission,
     ExternalPeerBindingSpec, HelperOptions, HelperResult, HostBindReport, HostBindRequest,
-    HostCapabilityReport, HostRevokeReport, InitializeAdaptiveRunRequest, MemberDeliveryReceipt,
-    MemberHandle, MemberHistoryPageDomain, MemberLiveStatusDomain, MemberRespawnReceipt,
-    MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobBuilder, MobDestroyError,
-    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
-    MobEventsSubscriptionConfig, MobHandle, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobSpawnManyFailure, MobState,
-    MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
-    PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberAdmission, SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec,
-    SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    HostCapabilityReport, HostRevokeReport, IdentityLocalExternalToolsError,
+    IdentityLocalExternalToolsProvider, IdentityLocalMaterializationKey,
+    InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain,
+    MemberLiveStatusDomain, MemberRespawnReceipt, MemberTurnEventSender, MemberTurnHandle,
+    MemberTurnOptions, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
+    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
+    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy,
+    SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride, SpawnToolAdmission,
+    SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire,
+    stored_realm_profile_to_wire,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
     TimeoutDisposition,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use runtime::{IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 pub use runtime_mode::MobRuntimeMode;
@@ -198,13 +225,14 @@ pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
-    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
-    InMemoryRealmProfileStore, MobEventReceiver, MobEventStore, MobHostAuthorityDeletionAuthority,
+    InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore, InMemoryMobRunStore,
+    InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    MobEventReceiver, MobEventStore, MobHostAuthorityDeletionAuthority,
     MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobHostBindPhaseRecord,
-    MobHostCapabilityRecord, MobOperatorGrantDeletionAuthority,
-    MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord, MobRunStore,
-    MobRuntimeMetadataStore, MobSpecStore, MobStoreError, RealmProfileStore, StoredRealmProfile,
-    SupervisorAuthorityRecord,
+    MobHostCapabilityRecord, MobIdentityStatusStore, MobIdentityStore, MobIdentityStoreClock,
+    MobOperatorGrantDeletionAuthority, MobOperatorGrantPersistenceAuthority,
+    MobOperatorGrantRecord, MobRunStore, MobRuntimeMetadataStore, MobSpecStore, MobStoreError,
+    RealmProfileStore, StoredRealmProfile, SupervisorAuthorityRecord, SystemMobIdentityStoreClock,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{

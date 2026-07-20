@@ -485,6 +485,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         },
         surface_only_inputs: vec![],
         runtime_internal_inputs: vec![],
+        tlc_representative_inputs: vec![],
         signals: EnumSchema {
             name: "Signal".into(),
             variants: vec![],

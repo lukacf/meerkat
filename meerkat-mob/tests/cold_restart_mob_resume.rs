@@ -1013,6 +1013,30 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         meerkat_runtime::RuntimeStore::supports_compaction_projection_outbox(&self.inner)
     }
 
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        meerkat_runtime::store::MachineLifecycleObservation,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.observe_machine_lifecycle(runtime_id).await
+    }
+
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+        replacement: meerkat_runtime::store::MachineLifecycleCommit,
+    ) -> Result<
+        meerkat_runtime::store::MachineLifecycleCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+            .await
+    }
+
     fn auth_authority_key(&self) -> Option<String> {
         meerkat_runtime::RuntimeStore::auth_authority_key(&self.inner)
     }
@@ -1212,6 +1236,31 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         // Input admission (durable-before-ack) still lands under the cut so
         // the turn is admitted and runs into the boundary-commit window.
         self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn persist_input_states_atomically(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        // Batch input custody is the same durable-before-ack class as the
+        // single-row operation above; it must still land in this surgical
+        // boundary-commit cut harness.
+        self.inner
+            .persist_input_states_atomically(runtime_id, states)
+            .await
+    }
+
+    async fn compare_and_swap_input_states_atomically(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected: &[meerkat_runtime::input_state::StoredInputState],
+        replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+    ) -> Result<meerkat_runtime::store::InputStateBatchCasOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+            .await
     }
 
     async fn load_input_state(
@@ -1441,6 +1490,8 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         stale_snapshot.contains("PRE_CUT_W1_TURN"),
         "runtime snapshot must still carry turn A: {stale_snapshot}"
     );
+    let stale_snapshot_session: meerkat_core::Session =
+        serde_json::from_str(&stale_snapshot).expect("decode frozen runtime snapshot");
 
     // Synchronize on the kill window actually having happened: the boundary
     // commit for turn B must have been rejected BEFORE power is restored,
@@ -1465,8 +1516,37 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         .expect("load durable row before restart")
         .expect("durable row present before restart");
     assert!(
-        stamped_row.has_runtime_checkpoint_provenance(),
+        stamped_row
+            .try_has_runtime_checkpoint_provenance()
+            .expect("typed checkpoint provenance must decode"),
         "the ahead-of-authority row must carry the checkpointer's provenance stamp"
+    );
+    let stale_snapshot_checkpoint = match stale_snapshot_session
+        .try_checkpoint_state()
+        .expect("decode frozen runtime checkpoint")
+    {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+        other => panic!("frozen runtime snapshot lacks typed authority: {other:?}"),
+    };
+    let stamped_row_checkpoint = match stamped_row
+        .try_checkpoint_state()
+        .expect("decode ahead-row checkpoint")
+    {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+        other => panic!("ahead row lacks typed checkpoint authority: {other:?}"),
+    };
+    assert_eq!(
+        stamped_row_checkpoint.authority_base(),
+        &meerkat_core::SessionCheckpointAuthorityBase::Typed {
+            anchor: meerkat_core::SessionCheckpointAnchor::from_stamp(&stale_snapshot_checkpoint,),
+        },
+        "the ahead intra-turn row must name the exact frozen runtime authority"
+    );
+    assert_eq!(
+        meerkat_core::session_checkpoint_relation(&stale_snapshot_session, &stamped_row)
+            .expect("classify frozen/ahead checkpoint relation"),
+        meerkat_core::SessionCheckpointRelation::LeftRevisionOlder,
+        "the durable row must be an exact typed successor of the frozen runtime snapshot"
     );
 
     // The process is dead: drop everything without graceful shutdown.

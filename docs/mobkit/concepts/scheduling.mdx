@@ -1,0 +1,92 @@
+---
+title: "Scheduling"
+description: "Cron-based schedule evaluation with timezone support, jitter, and MCP-backed dispatch."
+icon: "clock"
+---
+
+Scheduling lets MobKit trigger actions on a recurring basis. Define schedules with cron-like intervals, and MobKit evaluates them at each tick to determine which are due.
+
+## Schedule definitions
+
+A schedule is defined by a `ScheduleDefinition`:
+
+```rust
+ScheduleDefinition {
+    schedule_id: "daily-report",
+    interval: "0 9 * * *",         // cron expression: every day at 09:00
+    timezone: "Europe/Stockholm",
+    jitter_ms: 5000,               // up to 5s of random jitter
+    enabled: true,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schedule_id` | `String` | Unique identifier (canonicalized: trimmed, lowercased) |
+| `interval` | `String` | Cron expression defining the recurrence |
+| `timezone` | `String` | IANA timezone for schedule evaluation |
+| `jitter_ms` | `u64` | Maximum random jitter in milliseconds to spread load |
+| `enabled` | `bool` | Whether the schedule is active |
+
+## Evaluation
+
+Schedules are evaluated at discrete ticks using `evaluate_schedules_at_tick`:
+
+```rust
+let evaluation = evaluate_schedules_at_tick(&schedules, tick_ms)?;
+
+for trigger in &evaluation.due_triggers {
+    println!("Schedule {} is due at {}", trigger.schedule_id, trigger.due_tick_ms);
+}
+```
+
+The evaluation returns a `ScheduleEvaluation` containing the tick timestamp and a sorted vector of `ScheduleTrigger` entries for every schedule that is due at that tick.
+
+### Trigger ordering
+
+Due triggers are sorted by:
+1. `due_tick_ms` (ascending)
+2. `schedule_id` (alphabetical)
+3. `interval` (alphabetical)
+4. `timezone` (alphabetical)
+
+This ensures deterministic dispatch ordering when multiple schedules fire at the same tick.
+
+## Dispatch
+
+When a schedule fires, the runtime dispatches it through the scheduling module via MCP tool call. The dispatch report includes:
+
+```rust
+ScheduleDispatchReport {
+    schedule_id: "daily-report",
+    dispatched_at_ms: 1709500000000,
+    trigger: ScheduleTrigger { ... },
+}
+```
+
+## Validation
+
+Schedule definitions are validated before evaluation:
+
+- Schedule IDs must be non-empty and unique (after canonicalization)
+- Intervals must be valid cron expressions
+- Timezones must be valid IANA timezone names
+
+Invalid definitions produce typed `ScheduleValidationError` variants:
+
+| Error | Cause |
+|-------|-------|
+| `EmptyScheduleId` | Schedule ID is empty or whitespace-only |
+| `DuplicateScheduleId` | Two schedules resolve to the same canonical ID |
+| `InvalidInterval` | Cron expression cannot be parsed |
+| `InvalidTimezone` | Timezone name not recognized |
+
+## Limits
+
+The RPC API enforces a maximum of 256 schedules per request (`MAX_SCHEDULES_PER_REQUEST`). This prevents unbounded evaluation cost.
+
+## See also
+
+- [Delivery](/mobkit/concepts/delivery) -- scheduled deliveries
+- [RPC API](/mobkit/api/rpc) -- `scheduling.*` methods
+- [Configuration](/mobkit/reference/configuration) -- schedule-related settings

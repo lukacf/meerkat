@@ -1,0 +1,91 @@
+---
+title: "Delivery"
+description: "Message delivery with sink adapters, idempotency keys, rate limiting, and trusted routing resolution."
+icon: "paper-plane"
+---
+
+Delivery is MobKit's message dispatch subsystem. When an agent needs to send a message to an external system -- email, webhook, notification service, or another mob member -- delivery handles routing resolution, rate limiting, idempotency, and dispatch through sink adapters.
+
+## Delivery flow
+
+<Steps>
+  <Step title="Routing resolution">
+    The runtime resolves a route for the delivery target. Routes map logical destinations to physical sink adapters. Resolution produces a `RoutingResolution` that is stored as a trusted reference.
+  </Step>
+  <Step title="Send request">
+    A `DeliverySendRequest` includes the resolved route, payload, and an idempotency key:
+
+    ```rust
+    DeliverySendRequest {
+        resolution: routing_resolution,
+        payload: json!({ "subject": "Update", "body": "..." }),
+        idempotency_key: "msg-001",
+    }
+    ```
+  </Step>
+  <Step title="Validation">
+    The runtime validates that the provided resolution matches the trusted stored resolution. Forged or unknown resolutions are rejected with `DeliverySendError::ForgedResolution`.
+  </Step>
+  <Step title="Dispatch">
+    The delivery module dispatches the message through the resolved sink adapter via MCP tool call.
+  </Step>
+</Steps>
+
+## Idempotency
+
+Every delivery request carries an `idempotency_key`. The key is scoped to the route ID, producing a composite key: `{route_id}:{idempotency_key}`. If a request with the same scoped key has already been delivered, the runtime replays the previous delivery record instead of dispatching again.
+
+This makes retries safe -- the same message is never sent twice to the same destination.
+
+## Rate limiting
+
+Delivery is rate-limited per route using a sliding window:
+
+- Window size: `DELIVERY_RATE_WINDOW_MS` (configurable)
+- Windows retained: `DELIVERY_RATE_WINDOWS_RETAINED`
+- Per-window counters track send volume
+
+When the rate limit is exceeded, the delivery request is rejected. Old window counters are pruned automatically.
+
+## Routing
+
+Routes are the mapping layer between logical destinations and physical sink adapters:
+
+```rust
+RuntimeRoute {
+    route_id: "mob.member.lead-1.notification",
+    channel: "notification",
+    sink_adapter: "mob_member",
+    target_module: "delivery",
+}
+```
+
+Routes can be added, listed, and deleted through the RPC API. The unified runtime automatically registers routes for mob members using the pattern `mob.member.{member_id}.{channel}`.
+
+## Sink adapters
+
+Sink adapters are the physical delivery backends. The adapter is resolved from the routing resolution and invoked by the delivery module:
+
+| Adapter | Target |
+|---------|--------|
+| `mob_member` | Deliver to a Meerkat mob member |
+| `webhook` | HTTP POST to an external URL |
+| `email` | Email delivery (via configured SMTP) |
+
+<Note>
+v0.1 ships with the `mob_member` sink adapter. Webhook and email adapters are planned for future releases.
+</Note>
+
+## Delivery records
+
+Every successful delivery produces a `DeliveryRecord` with a monotonic sequence number, timestamp, and the resolved adapter. Records are available for replay (idempotency) and audit (via the delivery history RPC method).
+
+## Clock monotonicity
+
+Delivery timestamps use a monotonic clock that is at least as recent as the latest merged event timestamp. This ensures causal ordering: a delivery that follows an event always has a timestamp >= that event.
+
+## See also
+
+- [Gating](/mobkit/concepts/gating) -- risk assessment before delivery
+- [Scheduling](/mobkit/concepts/scheduling) -- triggered deliveries on a cron schedule
+- [RPC API](/mobkit/api/rpc) -- `routing.*` and `delivery.*` methods

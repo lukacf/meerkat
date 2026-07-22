@@ -1,0 +1,278 @@
+---
+title: "Rust SDK"
+description: "Use MobKit as a Rust library: bootstrap runtimes, route module calls, and manage operational subsystems programmatically."
+icon: "code"
+---
+
+The Rust crate `meerkat-mobkit` is the primary interface for MobKit. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
+
+## Installation
+
+```toml Cargo.toml
+[dependencies]
+meerkat-mobkit = "0.8.1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+## Quick start
+
+```rust
+use meerkat_mobkit::{
+    start_mobkit_runtime, MobKitConfig, ModuleConfig,
+    DiscoverySpec, RestartPolicy,
+};
+use std::time::Duration;
+
+let config = MobKitConfig {
+    modules: vec![
+        ModuleConfig {
+            id: "router".into(),
+            command: "meerkat-router".into(),
+            args: vec![],
+            restart_policy: RestartPolicy::OnFailure,
+        },
+    ],
+    discovery: DiscoverySpec {
+        namespace: "my-app".into(),
+        modules: vec!["router".into()],
+    },
+    pre_spawn: vec![],
+};
+
+let runtime = start_mobkit_runtime(config, vec![], Duration::from_secs(30))?;
+```
+
+## Core types
+
+### MobKitConfig
+
+Top-level configuration for the module runtime.
+
+```rust
+struct MobKitConfig {
+    modules: Vec<ModuleConfig>,
+    discovery: DiscoverySpec,
+    pre_spawn: Vec<PreSpawnData>,
+}
+```
+
+### ModuleConfig
+
+Configuration for a single module.
+
+```rust
+struct ModuleConfig {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    restart_policy: RestartPolicy,
+}
+```
+
+### EventEnvelope
+
+Timestamped event wrapper.
+
+```rust
+struct EventEnvelope<T> {
+    event_id: String,
+    source: String,
+    timestamp_ms: u64,
+    event: T,
+}
+```
+
+### UnifiedEvent
+
+Agent or module event discriminator.
+
+```rust
+enum UnifiedEvent {
+    Agent { agent_id: String, event_type: String },
+    Module(ModuleEvent),
+}
+
+struct ModuleEvent {
+    module: String,
+    event_type: String,
+    payload: Value,
+}
+```
+
+## Runtime functions
+
+### `start_mobkit_runtime`
+
+Bootstrap a module-only runtime:
+
+```rust
+fn start_mobkit_runtime(
+    config: MobKitConfig,
+    agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+    timeout: Duration,
+) -> Result<MobkitRuntimeHandle, MobkitRuntimeError>
+```
+
+### `start_mobkit_runtime_with_options`
+
+Bootstrap with additional options:
+
+```rust
+fn start_mobkit_runtime_with_options(
+    config: MobKitConfig,
+    agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+    timeout: Duration,
+    options: RuntimeOptions,
+) -> Result<MobkitRuntimeHandle, MobkitRuntimeError>
+```
+
+### `UnifiedRuntime::builder`
+
+Builder for the combined mob + module runtime:
+
+```rust
+UnifiedRuntime::builder()
+    .mob_spec(spec)
+    .module_config(config)
+    .timeout(duration)
+    .build()
+    .await?
+```
+
+For identity-first runtimes with a roster provider, the Rust builder can enable
+identity-scoped agent memory injection. Use the bundled markdown store with
+`persistent_state`:
+
+```rust
+use meerkat_mobkit::{AgentMemoryConfig, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .persistent_state(".mobkit/state")
+    .roster_provider(roster_provider)
+    .persistent_agent_memory(AgentMemoryConfig::default())
+    .build()
+    .await?;
+```
+
+The bundled provider stores records under
+`<persistent_state>/agent-memory/<realm>/<identity>.md`, recalls contextually by
+default, injects matching records into the next identity-first send, and also
+injects during materialize/resume/respawn/reset. To supply your own storage or
+retrieval authority, pass an `Arc<dyn AgentMemoryProvider>` with
+`.agent_memory(provider, config)`.
+
+Rust callers can write, read, and delete durable records through the unified
+runtime:
+
+```rust
+use meerkat_mobkit::{AgentMemoryRecallRequest, AgentMemorySelection, NewAgentMemory};
+
+let record = runtime
+    .remember_agent_memory(
+        "default",
+        &identity,
+        NewAgentMemory {
+            title: "Deployment preference".into(),
+            body: "Use the staging realm before production deploys.".into(),
+            tags: vec!["deploy".into()],
+        },
+    )
+    .await?;
+
+let records = runtime
+    .recall_agent_memory(AgentMemoryRecallRequest {
+        identity: identity.clone(),
+        realm: "default".into(),
+        selection: AgentMemorySelection::Contextual,
+        query_text: Some("What should I check before deploying?".into()),
+        query_terms: vec!["deploy".into()],
+        max_entries: 4,
+    })
+    .await?;
+
+if let Some(record) = records.first() {
+    runtime
+        .forget_agent_memory("default", &identity, &record.memory_id)
+        .await?;
+}
+```
+
+## Module routing
+
+### `route_module_call`
+
+Route a call to a module:
+
+```rust
+fn route_module_call(
+    handle: &MobkitRuntimeHandle,
+    request: ModuleRouteRequest,
+) -> Result<ModuleRouteResponse, ModuleRouteError>
+```
+
+### `route_module_call_rpc_json`
+
+Route via JSON-RPC:
+
+```rust
+fn route_module_call_rpc_json(
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse, RpcRouteError>
+```
+
+## Operational subsystem functions
+
+### Scheduling
+
+```rust
+fn evaluate_schedules_at_tick(
+    schedules: &[ScheduleDefinition],
+    tick_ms: u64,
+) -> Result<ScheduleEvaluation, ScheduleValidationError>
+```
+
+### Decisions
+
+```rust
+fn validate_bigquery_naming(naming: &BigQueryNaming) -> Result<(), DecisionPolicyError>
+fn load_trusted_mobkit_modules_from_toml(toml: &str) -> Result<Vec<ModuleConfig>, DecisionPolicyError>
+fn enforce_console_route_access(auth: &AuthPolicy, console: &ConsolePolicy, req: &ConsoleAccessRequest) -> Result<(), DecisionPolicyError>
+fn validate_runtime_ops_policy(policy: &RuntimeOpsPolicy) -> Result<(), DecisionPolicyError>
+```
+
+### Authentication
+
+```rust
+fn inspect_jwt_header(token: &str) -> Result<JwtHeaderView, JwtValidationError>
+fn validate_jwt_locally(token: &str, config: &JwtValidationConfig) -> Result<ValidatedJwt, JwtValidationError>
+fn parse_oidc_discovery_json(json: &str) -> Result<OidcDiscoveryDocument, OidcContractError>
+fn parse_jwks_json(json: &str) -> Result<JwksDocument, OidcContractError>
+```
+
+### Governance
+
+```rust
+fn validate_governance_state(state: &str) -> Result<(), GovernanceValidationError>
+fn validate_traceability_statuses(statuses: &[&str]) -> Result<(), GovernanceValidationError>
+```
+
+## HTTP routers
+
+Build Axum routers for serving the console and interactions:
+
+```rust
+// Console frontend (HTML + JS + CSS)
+let frontend: Router = console_frontend_router();
+
+// Console JSON API, JSON-RPC, timeline SSE, multipart upload/send, and blobs
+let json_api: Router = console_json_router(decisions);
+let json_api: Router = console_json_router_with_runtime(decisions, mob_runtime);
+```
+
+## See also
+
+- [Quickstart](/mobkit/quickstart) -- getting started
+- [Architecture](/mobkit/reference/architecture) -- crate structure and design
+- [TypeScript SDK](/mobkit/sdks/typescript) -- TypeScript equivalent
+- [Python SDK](/mobkit/sdks/python) -- Python equivalent

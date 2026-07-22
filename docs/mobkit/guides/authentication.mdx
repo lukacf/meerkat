@@ -1,0 +1,148 @@
+---
+title: "Authentication"
+description: "JWT validation, OIDC discovery, provider configuration, and email allowlist enforcement."
+icon: "lock"
+---
+
+MobKit authenticates console access and API requests using JWT tokens validated against OIDC providers. The auth system supports multiple identity providers with email-based access control.
+
+## Auth providers
+
+| Provider | Description |
+|----------|-------------|
+| `GoogleOAuth` | Google OAuth 2.0 (default) |
+| `GitHubOAuth` | GitHub OAuth |
+| `GenericOidc` | Any OIDC-compliant identity provider |
+| `ServiceIdentity` | Machine-to-machine service accounts (prefix: `svc:`) |
+| `TestProvider` | Testing only -- rejected in production |
+
+## Auth policy
+
+Authentication is configured through an `AuthPolicy`:
+
+```rust
+AuthPolicy {
+    default_provider: AuthProvider::GoogleOAuth,
+    email_allowlist: vec![
+        "admin@example.com".to_string(),
+        "svc:ci-pipeline".to_string(),
+    ],
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_provider` | `AuthProvider` | `GoogleOAuth` | Which OIDC provider to expect |
+| `email_allowlist` | `Vec<String>` | `[]` | Allowed email addresses or service identities |
+
+## JWT validation
+
+MobKit validates JWT tokens locally without calling the identity provider at request time:
+
+<Steps>
+  <Step title="Header inspection">
+    Parse the JWT header to extract the signing algorithm (`alg`) and key ID (`kid`):
+
+    ```rust
+    let header: JwtHeaderView = inspect_jwt_header(&token)?;
+    ```
+
+    Supported algorithms: `HS256` (HMAC-SHA256) and `RS256` (RSA-SHA256).
+  </Step>
+  <Step title="Key selection">
+    For RS256 tokens, select the matching key from the JWKS document:
+
+    ```rust
+    let jwk: &Jwk = select_jwk_for_token(&jwks_document, &header)?;
+    ```
+  </Step>
+  <Step title="Signature verification">
+    Verify the token signature against the selected key:
+
+    ```rust
+    let validated: ValidatedJwt = validate_jwt_locally(&token, &validation_config)?;
+    ```
+
+    The validated JWT contains the claims (subject, email, issuer, expiration).
+  </Step>
+</Steps>
+
+### OIDC discovery
+
+For RS256 providers, MobKit fetches the OIDC discovery document and JWKS keys:
+
+```rust
+let discovery: OidcDiscoveryDocument = parse_oidc_discovery_json(&json_text)?;
+let jwks: JwksDocument = parse_jwks_json(&jwks_json_text)?;
+```
+
+The discovery document provides the JWKS URI, issuer, and supported algorithms. Keys are cached and refreshed when a token references an unknown `kid`.
+
+### HS256 shared secrets
+
+For HMAC-based validation (testing, internal services):
+
+```rust
+let secret: Vec<u8> = extract_hs256_shared_secret(&config)?;
+```
+
+<Warning>
+HS256 is appropriate for internal service-to-service communication where both parties share the secret. Use RS256 with OIDC for user-facing authentication.
+</Warning>
+
+## Console access enforcement
+
+Console routes are protected by `enforce_console_route_access`:
+
+```rust
+enforce_console_route_access(
+    &auth_policy,
+    &console_policy,
+    &ConsoleAccessRequest {
+        provider: AuthProvider::GoogleOAuth,
+        email: "admin@example.com".to_string(),
+    },
+)?;
+```
+
+### Enforcement rules
+
+1. If `console_policy.require_app_auth` is `false`, all requests are allowed
+2. The request provider must match `auth_policy.default_provider`
+3. `TestProvider` is always rejected (even if it matches)
+4. The email must appear in `auth_policy.email_allowlist`
+
+Console HTTP routes are designed for explicit bearer-token authentication. If a
+deployment puts cookie-based auth in front of the console, the deployment must
+also enforce CSRF/origin checks for mutation routes.
+
+### Service identity
+
+Service accounts use the `ServiceIdentity` provider with emails prefixed by `svc:`:
+
+```rust
+ConsoleAccessRequest {
+    provider: AuthProvider::ServiceIdentity,
+    email: "svc:ci-pipeline".to_string(),
+}
+```
+
+Service identities are validated separately:
+- The email must start with `svc:` and have content after the prefix
+- The full `svc:` identity must appear in the allowlist
+
+## Validation errors
+
+| Error | Cause |
+|-------|-------|
+| `AuthProviderMismatch` | Request provider differs from configured default |
+| `AuthProviderNotSupported` | TestProvider used in production |
+| `EmailNotAllowlisted` | Email not in the allowlist |
+| `InvalidServiceIdentity` | Service identity missing `svc:` prefix or empty |
+| `ServiceIdentityNotAllowlisted` | Service identity not in the allowlist |
+
+## See also
+
+- [Console](/mobkit/guides/console) -- how auth protects console access
+- [Decisions](/mobkit/reference/decisions) -- policy enforcement
+- [Configuration](/mobkit/reference/configuration) -- auth policy settings

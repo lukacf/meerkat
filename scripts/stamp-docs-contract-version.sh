@@ -90,6 +90,12 @@ for path in sorted(root.joinpath("docs").rglob("*.mdx")) + sorted(
     root.joinpath("docs").rglob("*.md")
 ):
     rel = path.relative_to(root).as_posix()
+    # MobKit is an independently released product. Its generated documentation
+    # is pinned to the public MobKit release recorded in docs/mobkit/_source.json
+    # and validated by docs-check, so Meerkat release stamping must not rewrite
+    # MobKit package or protocol versions.
+    if rel.startswith("docs/mobkit/"):
+        continue
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     rewritten = []

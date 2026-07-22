@@ -1,0 +1,503 @@
+---
+title: "Configuration"
+description: "Configuration reference for MobKit: module definitions, runtime options, auth policies, and session stores."
+icon: "gear"
+---
+
+MobKit is configured through Rust types passed at startup. This page documents every configuration surface.
+
+## MobKitConfig
+
+Top-level configuration for the module runtime.
+
+```rust
+MobKitConfig {
+    modules: Vec<ModuleConfig>,
+    discovery: DiscoverySpec,
+    pre_spawn: Vec<PreSpawnData>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `modules` | `Vec<ModuleConfig>` | Module definitions to load |
+| `discovery` | `DiscoverySpec` | Namespace and expected module list |
+| `pre_spawn` | `Vec<PreSpawnData>` | Environment variables to inject before spawning |
+
+---
+
+## ModuleConfig
+
+```rust
+ModuleConfig {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    restart_policy: RestartPolicy,
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `String` | -- | Unique module identifier |
+| `command` | `String` | -- | Executable path or name |
+| `args` | `Vec<String>` | `[]` | Command-line arguments |
+| `restart_policy` | `RestartPolicy` | `OnFailure` | Process restart behavior |
+
+### RestartPolicy
+
+```rust
+enum RestartPolicy {
+    Never,
+    OnFailure,
+    Always,
+}
+```
+
+---
+
+## DiscoverySpec
+
+```rust
+DiscoverySpec {
+    namespace: String,
+    modules: Vec<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `namespace` | `String` | Logical namespace for module grouping |
+| `modules` | `Vec<String>` | Module IDs expected in this namespace |
+
+---
+
+## PreSpawnData
+
+```rust
+PreSpawnData {
+    module_id: String,
+    env: Vec<(String, String)>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `module_id` | `String` | Target module ID |
+| `env` | `Vec<(String, String)>` | Environment variable key-value pairs |
+
+---
+
+## SDK/Gateway runtime options
+
+The stock SDK gateway consumes the `runtime_options` object sent by Python and TypeScript builders during `mobkit/init`.
+
+| Field | Type | Gateway behavior |
+|-------|------|------------------|
+| `memory_config` | Object | Supports `{ "backend": "local_json" }` with optional `health_check_endpoint`, deriving `state_path` as `<persistent_state>/memory-ledger-state.json` (an existing legacy state file is adopted automatically). The legacy `{ "backend": "elephant", "endpoint": "..." }` shape still works but is deprecated and logs a warning; it keeps `<persistent_state>/elephant-memory-state.json`. |
+| `identity_bootstrap_mode` | Object | Controls roster materialization for identity-first gateways. Omitted preserves the classic gateway when no roster is configured; with a roster, omission selects synchronous eager startup. Any explicit value declares identity-first intent and requires a roster provider, including `{ "mode": "eager_materialize" }`. `{ "mode": "lazy_materialize" }` registers metadata and materializes on use. `{ "mode": "lazy_with_background_warm", "concurrency": 2 }` returns after metadata registration and warms in a tracked background task; concurrency must be `1..=16`. |
+| `agent_memory` | Boolean or object | Enables identity-first agent memory injection for roster-backed agents. `true` uses contextual recall defaults with the bundled per-realm SQLite store under `<persistent_state>/agent-memory`; an object may set `realm`, `selection` (`"always"` or `"contextual"`), `max_entries`, `recall_timeout_ms`, `recall_failure_policy` (`"skip"` or `"fail"`), `instruction_header`, `per_turn_injection` (`"off"` — the default — or `"budgeted"`; `"budgeted"` requires `store: "sqlite"`, whose wiring hosts the compaction budget reset), `defang_inbound` (`true` by default: reserved memory-envelope markers in inbound non-steer sends are neutralized before delivery so peers and echoed web content cannot forge remembered context; set `false` to disable), `store` (`"sqlite"` — the default — or `"markdown"`; existing markdown files are imported into SQLite on first open and renamed `<file>.imported`), `llm_writes` (`"observed"` — the default — or `"quarantined"`: every first-pass LLM-authored write — agent and distiller — lands quarantined pending review; steward staged output is the review that posture defers to, so quarantine releases and operator-approved promotions commit normally), `recorder_tool` (`true` by default: registers the member-facing `memory` tool), `content_trust` (object with `trusted_mcp_servers`, `untrusted_tools`, `trusted_tools` feeding the session taint tracker), `selector` (`"off"` — the default — `"default"`, or `"profile:<path>"`: the LLM recall-selector stage; overrides the `MOBKIT_AGENT_MEMORY_SELECTOR` environment variable, which remains a fallback when the option is unset), `distiller` (boolean or `{enabled, runs_per_hour, min_interactions, model}`: off-turn extraction over completed interactions, compaction discards, and session rotations; default off), `steward` (boolean or `{enabled, cadence, model, per_mob, runs_per_day, min_signals}`: scheduled consolidation dreams over the realm's store; default off; `per_mob` requests per-mob dream granularity, and on the current single-mob gateway host it coincides with the default realm-level dream — setting it has no observable effect until multi-mob scope partitioning is implemented), `operator_scope` (`"off"` — the default — or `"provisional"`: activates the realm-confined operator memory scope under the PROVISIONAL console-auth-principal keying, which may change when the `OperatorId` open question settles; recall composition additionally requires an operator resolver, which only a library embedder can install — no shipped gateway installs one, so stock-gateway/SDK deployments get steward routing of operator-scope proposals only and the gateway logs a startup warning that operator-scope recall composition is inert), and `hygienist` (boolean or `{enabled, runs_per_day, model}`: LLM transcript curation applied through meerkat's audited, restorable transcript revisions at compaction boundaries and on demand — prunes dead tool-result payloads and collapses repeated scaffolding, never decisions; requires persistent sessions; default off, 2 runs/day). `llm_writes`, `content_trust`, a non-off `selector`, `per_turn_injection: "budgeted"`, `distiller`, `steward`, `operator_scope`, and `hygienist` require `store: "sqlite"`. |
+| `routing_config_path` | String | Loads JSON or TOML route config (`routes = [...]` / `[[routes]]`) and installs the routes into the unified runtime before serving RPCs. |
+| `scheduling_files` | String array | Loads JSON or TOML schedule definitions and uses them as the default schedules for `mobkit/scheduling/evaluate` and `mobkit/scheduling/dispatch` when the RPC request omits `schedules`. |
+| `gating_config_path` | String | Loads JSON or TOML action policies from an `actions` object and supplies a configured `risk_tier` for `mobkit/gating/evaluate` requests that omit `risk_tier`. |
+| `auth_config` | Object | Supports JWT shared-secret auth (`provider = "jwt"` / `shared_secret`) and wires the reference HTTP console/SSE routes to the configured trusted issuer, audience, and email allowlist. |
+| `console_config_path` | String | Loads a TOML `ConsoleUiConfig` and projects it through `/console/experience` as `console_config`. |
+| `console_require_app_auth` | Boolean | Overrides `ConsolePolicy.require_app_auth` for explicit gateway builds, commonly `false` for local demos. |
+| `console_read_only` | Boolean | Sets `ConsolePolicy.read_only` for SDK `rpc_gateway` launches; mutating console RPCs are denied and omitted from capabilities while read/stream routes stay available. |
+| `console_fetch_timeout_ms` | Positive integer | Sets `RuntimeDecisionState.console.fetch_timeout_ms`, which the bundled console uses for JSON fetches after the initial 60s default. |
+| `event_log` | Object | Supports the built-in memory event log with `storage = "memory"`, `batch_size`, and `flush_interval_ms`; `mobkit/query_events` returns the configured store instead of `no_event_log_configured`. |
+
+Unsupported nested fields fail initialization with `-32602` instead of being silently ignored.
+
+### Identity bootstrap
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    use meerkat_mobkit::{IdentityBootstrapMode, UnifiedRuntime};
+
+    let runtime = UnifiedRuntime::builder()
+        .definition(definition)
+        .continuity_store(continuity_store)
+        .lease_provider(lease_provider)
+        .scratch_dir("state/identity-scratch")
+        .roster_provider(roster_provider)
+        .identity_bootstrap_mode(
+            IdentityBootstrapMode::LazyWithBackgroundWarm { concurrency: 2 },
+        )
+        .build()
+        .await?;
+
+    let status = runtime
+        .identity_runtime()
+        .expect("identity-first runtime")
+        .identity_bootstrap_status();
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from meerkat_mobkit import IdentityBootstrapMode, MobKit
+
+    runtime = await (
+        MobKit.builder()
+        .gateway("./target/debug/rpc_gateway")
+        .mob("config/mob.toml")
+        .persistent_state("state/mobkit")
+        .roster(roster_provider)
+        .identity_bootstrap_mode(
+            IdentityBootstrapMode.lazy_with_background_warm(concurrency=2)
+        )
+        .build()
+    )
+
+    status = await runtime.wait_identity_bootstrap(
+        target="startup_ready",
+        timeout=120,
+    )
+    if not status.ready or status.startup_ready is not True:
+        raise RuntimeError(status)
+    ```
+  </Tab>
+</Tabs>
+
+Calling a Rust or Python `identity_bootstrap_mode` setter is an explicit
+identity-first configuration and therefore requires a roster provider for all
+three modes. Leave the setter unused to retain a classic non-identity gateway;
+a configured roster with no mode continues to use eager materialization.
+
+`mobkit/status_identity_bootstrap` returns a non-blocking typed snapshot.
+`mobkit/wait_identity_bootstrap` accepts `target = "materialized"` or
+`"startup_ready"`; terminal broken identities return with `ready = false`
+rather than leaving the barrier pending indefinitely. Provider or restore
+failures that apply to the whole pass are reported in the snapshot's optional
+`error` field.
+
+The stock persistent gateway also advertises a private shutdown handshake and
+its bounded `stdio_shutdown_horizon_ms` in the `mobkit/init` result. SDK hosts
+keep stdin and provider callbacks open until that handshake completes, then
+close the process. The current 335-second horizon covers an already-admitted
+provider callback, runtime event and mob drains, the final lease-release
+callback, and bounded response-delivery/reaping margin. Provider operations
+must resolve or reject within their public 120-second contract. The Python host
+allows 125 seconds for event-loop completion before cancelling that callback;
+the TypeScript host exposes the same cancellation as an optional
+`ProviderCallbackContext` and suppresses late callback responses; the gateway
+enforces a final 130-second hard wire deadline. Provider rejection,
+timeout, or cancellation is pre-commit: an implementation must not commit a
+replacement grant or other external authority after cancellation is observed.
+Older and custom gateways that do not advertise the handshake retain the EOF
+shutdown protocol.
+If the gateway exhausts its runtime deadline, it reports incomplete cleanup;
+the SDK still reaps the bounded child process and then surfaces the failure.
+
+Rust hosts that dispatch JSON-RPC from an `Arc<UnifiedRuntime>` should call
+`handle_unified_rpc_json_arc` (or the corresponding `with_live_arc` entrypoint).
+That transfers runtime ownership to supervised identity mutations, so a
+disconnected request cannot cancel a cross-mob operation between its commit
+and rollback points. The borrowed dispatcher fails identity-owned cross-mob
+mutations closed because it cannot provide that ownership guarantee.
+
+## ConsoleUiConfig
+
+View-level configuration for the stock console. `mobkit_gateway` discovers `config/console.toml` in the conventional workspace layout; `rpc_gateway` accepts the same file via `runtime_options.console_config_path`, and the TypeScript builder exposes `.consoleConfig("config/console.toml")`.
+
+The config is normalized and projected through `GET /console/experience` as `console_config`.
+
+```toml
+title = "OB3"
+
+[brand]
+label = "Open Brain"
+logo_url = "/assets/ob3.svg"
+logo_alt = "OB3"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "prod"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+initial_agent = "identity:ops-lead"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "critical"
+empty_text = "No meaningful signals yet."
+
+[[rail.filter_presets]]
+id = "critical"
+label = "Critical"
+watched_only = true
+alert_levels = ["critical"]
+
+[sidebar]
+visible_controls = ["topology", "roster", "logs", "health"]
+hidden_controls = []
+
+[[sidebar.buttons]]
+id = "ob3-board"
+label = "OB3 Board"
+href = "https://example.test/ob3"
+target = "_blank"
+icon_name = "external-link"
+
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.realm"]
+section_order = ["Personal", "Initiatives", "Internal"]
+fallback_group = "Agents"
+fallback_subgroup = "Other"
+default_pinned_agent_ids = ["identity:ops-lead"]
+collapse_single_subgroup = true
+
+[[agent_list.badges]]
+id = "org"
+label = "Org"
+field = "labels.org"
+tone = "info"
+
+[[agent_list.sections]]
+name = "Initiatives"
+collapsed = false
+empty_title = "No initiatives"
+empty_text = "Create one in Linear."
+
+[actions]
+inspect_label = "Profile"
+chat_label = "Open chat"
+send_label = "Send to agent"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset"
+show_reset = false
+
+[realms.ob3]
+title = "OB3"
+
+[realms.ob3.agent_list]
+subgroup_by = ["labels.org"]
+```
+
+| Section | Description |
+|---------|-------------|
+| `brand` | Label and logo metadata. |
+| `appearance` | Default theme and variant. |
+| `environment` | Short environment label shown in the topbar. |
+| `layout` | Initial preset/control/agent and sidebar collapsed default. |
+| `rail` | Signals rail visibility, collapsed state, empty text, and filter presets. |
+| `sidebar` | Stock control visibility and custom buttons. |
+| `agent_list` | Grouping selectors, section order, default pins, badges, and empty states. |
+| `actions` | Operator-facing action labels and visibility toggles. |
+| `realms.<id>` | Partial overlay applied when the gateway is launched for a realm. |
+
+Agent grouping selectors and badge fields support `labels.<key>`, `label:<key>`, raw label keys, and direct fields such as `group`, `subgroup`, `role`, `kind`, `identity`, `member_id`, and `agent_id`.
+
+<Note>
+`ConsoleUiConfig` is intentionally view-level. It controls presentation, ordering, labels, default pins, and links; it does not decide runtime authorization, routing, or whether an agent exists.
+</Note>
+
+## AuthPolicy
+
+```rust
+AuthPolicy {
+    default_provider: AuthProvider,
+    email_allowlist: Vec<String>,
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_provider` | `AuthProvider` | `GoogleOAuth` | Expected identity provider |
+| `email_allowlist` | `Vec<String>` | `[]` | Allowed email addresses and service identities |
+
+### AuthProvider
+
+```rust
+enum AuthProvider {
+    GoogleOAuth,
+    GitHubOAuth,
+    GenericOidc,
+    ServiceIdentity,
+    TestProvider,
+}
+```
+
+---
+
+## ConsolePolicy
+
+```rust
+ConsolePolicy {
+    require_app_auth: bool,
+    read_only: bool,
+    fetch_timeout_ms: Option<u64>,
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `require_app_auth` | `bool` | `true` | Whether console routes require JWT authentication |
+| `read_only` | `bool` | `false` | Whether the console is view-only; when enabled, send/upload/lifecycle/gating-write RPCs return a read-only error |
+| `fetch_timeout_ms` | `Option<u64>` | `None` | Optional bundled-console JSON fetch timeout override, projected through `/console/experience` |
+
+For standalone `mobkit_gateway` launches, pass `console_read_only: true` in the
+`mobkit/init` params or set `MOBKIT_CONSOLE_READ_ONLY=true`. This setting is
+part of the gateway resume fingerprint, so toggling it creates or resumes the
+matching runtime instead of reusing a runtime launched with the opposite policy.
+
+---
+
+## RuntimeOpsPolicy
+
+```rust
+RuntimeOpsPolicy {
+    replica_count: u16,
+    metrics: MetricsPolicy,
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `replica_count` | `u16` | `1` | Number of runtime replicas (must be 1 in v0.1) |
+| `metrics` | `MetricsPolicy` | `{ enforce_slo_targets: false }` | Metrics enforcement settings |
+
+<Warning>
+v0.1 enforces single-replica deployments. Setting `replica_count` to any value other than `1` produces `DecisionPolicyError::ReplicaCountMustBeOne`.
+</Warning>
+
+---
+
+## LocalJsonMemoryBackendConfig
+
+```rust
+LocalJsonMemoryBackendConfig {
+    state_path: String,
+    health_check_endpoint: Option<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state_path` | `String` | Local JSON state file persisting the operational assertion ledger |
+| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL health-gated at bootstrap (`GET /v1/health`); no ledger data is ever sent to it |
+
+For SDK builds that boot through `rpc_gateway`, `state_path` is derived from `.persistent_state(path)` as `<path>/memory-ledger-state.json`; callers provide only `backend: "local_json"` (and optionally `health_check_endpoint`). The legacy `ElephantMemoryBackendConfig` / `backend: "elephant"` shape is deprecated: it was always local JSON persistence plus a health check — no data ever reached Elephant — and it converts to this config on load. Real Elephant integration is the wire-boundary provider described in `docs/design/memory-hub-roadmap.md`.
+
+## Agent memory injection
+
+`agent_memory` is separate from `mobkit/memory/*`. It is hot identity-scoped memory plus prompt injection: during create/resume/materialize (and, when explicitly enabled, ordinary identity-first turns), MobKit asks an `AgentMemoryProvider` for memories keyed by `AgentIdentity` and injects a bounded, quoted observation summary. The bundled gateway provider defaults to one SQLite database per realm under `<persistent_state>/agent-memory` (`store: "sqlite"`); `store: "markdown"` keeps the earlier inspectable per-identity markdown files, and any existing markdown files are imported into SQLite on first open (originals renamed `<file>.imported`, never deleted). The path is server-owned and cannot be overridden from SDK init input. Elephant remains an optional deeper knowledge backend for graph/document/truth/provenance use cases and is not required for this hot path.
+
+With the SQLite store, build-time injection also composes a metadata index (record ids, kinds, titles, descriptions, human-phrased age) over the identity's readable scopes, budgeted at ~8 KiB, ahead of the selected record bodies; markdown deployments keep the bodies-only build injection. Every injected record is logged to an injection ledger inside the realm database and counted in per-record usage statistics; explicit `mobkit/agent_memory/recall` reads are counted separately from ambient injection.
+
+Inbound anti-spoofing is on by default (`defang_inbound: true`): every non-steer identity-first send is scanned for reserved memory-envelope markers (the injection header pattern, `<mobkit_memory_observation>` tags, `[mem-token:` prefixes) and matches are visibly neutralized before delivery, so a peer message or echoed web content cannot impersonate remembered context. A warning with a hit count is logged whenever defanging fires. Steer sends bypass injection and defanging entirely.
+
+Rust builders can use `.persistent_agent_memory(AgentMemoryConfig::default())` with `.persistent_state(path)` and `.roster_provider(...)` to use the bundled markdown store. Callers that need a different authority can use `.agent_memory(provider, config)` instead.
+
+Gateway callers can write records with `mobkit/agent_memory/remember`, read them with `mobkit/agent_memory/recall`, and delete individual records with `mobkit/agent_memory/forget`. TypeScript callers can use `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and `handle.forgetAgentMemory(identity, memoryId, { realm })`; Python callers can use `handle.remember_agent_memory(identity, title=..., body=..., tags=..., realm=...)`, `handle.recall_agent_memory(identity, realm=..., selection=..., query_text=..., query_terms=..., max_entries=...)`, and `handle.forget_agent_memory(identity, memory_id, realm=...)`. Writes and deletes are identity-scoped, require the identity to be registered in the identity runtime, and writes become turn context on the next identity-first send, plus build context on materialization/resume/respawn/reset for that identity. A successful write means the configured hot provider accepted the record; it does not mean optional Elephant extraction/enrichment has completed. Bundled markdown writes cap titles at 200 bytes, bodies at 64 KiB, and tags at 32 entries of 64 bytes each; each identity file is retained to at most 512 records and 8 MiB of rendered markdown, keeping the newest records when compacting.
+
+When `selection = "always"`, the latest memories for the identity are injected. When `selection = "contextual"` (the default), build-time injection sends synthesized identity/profile/label query text and deterministic terms; per-turn injection sends the raw current identity-first message plus normalized terms. Common stopwords are ignored by the bundled markdown provider and records below the relevance threshold are not injected. MobKit does not send app context or customizer-added instructions to the memory provider. Semantic/vector retrieval remains a provider concern rather than a MobKit runtime authority.
+
+Per-turn injection is governed by `per_turn_injection` (default `"off"`). The default is deliberate: per-turn injection prepends the memory block into the delivered user message, which persists in the session transcript and is re-indexed into Meerkat's session semantic memory at compaction — so ambient push stays off until an indexing-excluded delivery class exists, and memory reaches the model through build-time instructions and explicit `recall` instead (both echo-safe surfaces). Setting `per_turn_injection = "budgeted"` opts back into ambient per-turn push, bounded by an injection budget ladder: at most ~4 KiB rendered per record, 20 KiB per assembly, and 60 KiB cumulative per delivered session, with records injected at most once per session (cross-turn dedup). Build-time injection always applies the per-record and per-assembly caps.
+
+Automatic build/turn injection uses `recall_timeout_ms` (default `500`, max `30000`) and `recall_failure_policy` (default `"skip"`, or `"fail"`). With the default skip policy, provider errors and timeouts omit the memory block and allow delivery to continue. Explicit `mobkit/agent_memory/recall` requests still return provider errors.
+
+Agent memory is identity-scoped and is not automatically cleared by session respawn or identity reset. Apps that require privacy reset semantics can call `mobkit/agent_memory/forget` for specific records or use an `AgentMemoryProvider` whose lifecycle policy clears memory alongside the app's identity lifecycle. `forget` removes records from future recall and injection; it does not erase text already delivered into an active model context, so reset or respawn the identity after deletion when immediate context revocation matters.
+
+---
+
+## BigQueryNaming
+
+```rust
+BigQueryNaming {
+    dataset: String,
+    table: String,
+}
+```
+
+| Field | Type | Validation |
+|-------|------|------------|
+| `dataset` | `String` | Non-empty, alphanumeric + underscore + hyphen only |
+| `table` | `String` | Non-empty, alphanumeric + underscore + hyphen only |
+
+---
+
+## ScheduleDefinition
+
+```rust
+ScheduleDefinition {
+    schedule_id: String,
+    interval: String,
+    timezone: String,
+    jitter_ms: u64,
+    enabled: bool,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schedule_id` | `String` | Unique ID (canonicalized: trimmed, lowercased) |
+| `interval` | `String` | Cron expression |
+| `timezone` | `String` | IANA timezone name |
+| `jitter_ms` | `u64` | Maximum random jitter in milliseconds |
+| `enabled` | `bool` | Whether the schedule is active |
+
+---
+
+## ReleaseMetadata
+
+```rust
+ReleaseMetadata {
+    targets: Vec<String>,
+    support_matrix: String,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `targets` | `Vec<String>` | Release targets (must include: `crates.io`, `npm`, `pypi`, `github-releases`) |
+| `support_matrix` | `String` | Must be `"same-as-meerkat"` |
+
+---
+
+## Trust manifest (mobkit.toml)
+
+```toml
+[[modules]]
+id = "router"
+command = "meerkat-router"
+args = ["--port", "9001"]
+restart_policy = "on_failure"
+
+[[modules]]
+id = "delivery"
+command = "meerkat-delivery"
+```
+
+| Field | Type | Required | Default |
+|-------|------|----------|---------|
+| `id` | `string` | yes | -- |
+| `command` | `string` | yes | -- |
+| `args` | `string[]` | no | `[]` |
+| `restart_policy` | `string` | no | `"on_failure"` |
+
+## Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MOBKIT_CONTRACT_VERSION` | `"0.4.0"` | JSON-RPC contract version |
+| `MAX_SCHEDULES_PER_REQUEST` | `256` | Maximum schedules per evaluation |
+| `DEFAULT_KEEP_ALIVE_INTERVAL` | `15s` | SSE keep-alive interval |
+| `GATING_AUDIT_MAX_RETAINED` | implementation-defined | Max gating audit entries |
+| `GATING_PENDING_MAX_RETAINED` | implementation-defined | Max pending gating entries |
+
+## See also
+
+- [Modules](/mobkit/concepts/modules) -- module configuration in context
+- [Authentication](/mobkit/guides/authentication) -- auth policy usage
+- [Sessions](/mobkit/concepts/sessions) -- session store configuration

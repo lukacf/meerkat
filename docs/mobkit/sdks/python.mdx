@@ -1,0 +1,468 @@
+---
+title: "Python SDK"
+description: "MobKit Python SDK — typed builder API, async runtime, and streaming events."
+icon: "python"
+---
+
+The MobKit Python SDK provides a typed builder API for starting and managing
+MobKit runtimes. Apps own policy (who exists, who's wired, what tools they
+have). MobKit owns mechanism (spawn, wire, route, reconcile, persist, serve).
+
+## Installation
+
+```bash
+pip install meerkat-mobkit
+```
+
+## Quick start
+
+```python
+import asyncio
+from meerkat_mobkit import MobKit
+
+async def main():
+    async with await MobKit.builder().mob("config/mob.toml").gateway("./mobkit-rpc").build() as rt:
+        handle = rt.mob_handle()
+
+        # Send a message (comms)
+        await handle.send("agent-1", "Hello")
+
+        # Watch what happens (observation)
+        async for event in handle.subscribe_agent("agent-1"):
+            print(event.event_type, event.data)
+
+asyncio.run(main())
+```
+
+## Identity-First API
+
+For household-style apps (HomeCore), the identity-first API provides durable lifecycle management.
+Agents are addressed by stable identities (`identity:luka`, `triage:main`), not member IDs.
+
+```python
+from meerkat_mobkit import MobKit
+from meerkat_mobkit.identity_first_models import DispatchInput, DurableAgentSpec, ManagedPeerEdge
+
+# Boot with roster provider
+rt = await (
+    MobKit.builder()
+    .mob_inline(MOB_TOML)                 # or .mob("mob.toml")
+    .persistent_state(state_dir)
+    .agent_memory()                       # optional: durable per-agent memory
+    .roster(my_roster)                    # provides DurableAgentSpec list
+    .topology_provider(my_topology)       # optional: managed edges
+    .agent_customizer(my_customizer)      # optional: per-identity prompts
+    .gateway("./rpc_gateway")
+    .build()
+)
+
+# Identity-scoped agent handles
+triage = rt.agent("triage:main")
+luka = rt.agent("identity:luka")
+
+# Delivery
+await luka.send("Hello")                                          # Addressable only
+await triage.dispatch_text("School closed", origin="connector")   # Any identity
+
+# Observation (no mob_handle, no member IDs needed)
+inspection = await triage.inspect()   # output_preview, peer_reachable_count
+output = await triage.wait_for_output(timeout=90)
+await rt.wait_until_ready(["triage:main", "identity:luka"])
+
+# Status
+status = await luka.status()          # state, session_id, generation, labels
+
+# Lifecycle
+await luka.reset()                    # Destructive: new generation, new session
+await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.reconcile()                  # In-process roster reconciliation
+```
+
+### DispatchInput convenience constructors
+
+```python
+DispatchInput.system("text")
+DispatchInput.connector("event from slack", correlation_id="msg-1")
+DispatchInput.scheduler("nightly sync")
+```
+
+## Mob-Level API
+
+For direct mob-member operations (discovery-based), the mob handle API is still available.
+
+The app-facing surface has three categories. Each is a distinct concern — no method crosses categories.
+
+### Comms — deliver work to agents
+
+```python
+result = await handle.send("agent-1", "Review PR #42")
+print(result.accepted, result.member_id, result.session_id)
+```
+
+Returns a `SendMessageResult` with `accepted`, `member_id`, and `session_id` fields.
+The message enters the agent's inbox and is processed by the host loop.
+
+### Observation — watch what's happening
+
+```python
+# Stream one agent's events
+async for event in handle.subscribe_agent("agent-1"):
+    print(event.event_type, event.data)
+
+# Stream mob-wide events (all agents)
+async for event in handle.subscribe_mob():
+    print(event.source, event.data)
+```
+
+Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
+
+### Structural mob events — durable observability
+
+`MobHandle.query_mob_events()` and `subscribe_mob_events()` project
+every meerkat `MobEventKind` (25 variants) into a typed envelope
+preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
+full payload.
+
+```python
+from meerkat_mobkit import EventQuery, MobEventsStaleError
+
+# Latest 256 matching events
+events = await handle.query_mob_events(EventQuery(
+    event_types=["flow_started", "flow_completed"],
+    mob_id="home",
+))
+for e in events:
+    print(e.cursor, e.kind, e.run_id, e.data)
+
+# Resume from a checkpointed cursor
+try:
+    new_events = await handle.query_mob_events(EventQuery(
+        after_seq=last_seen_cursor,
+    ))
+except MobEventsStaleError as exc:
+    # Cursor is past the current frontier — rewind.
+    new_events = await handle.query_mob_events(EventQuery(
+        after_seq=exc.latest_cursor,
+    ))
+```
+
+`MobStructuralEvent.cursor` is the **meerkat ledger cursor** —
+durable across mobkit gateway restarts when the runtime is built
+with `.persistent_state(path)`. Checkpoint a cursor and resume by
+passing it as `after_seq` on the next call.
+
+### Flow runs
+
+```python
+# All runs across all flows
+runs = await handle.list_runs()
+
+# Filter to one flow
+runs = await handle.list_runs(flow_id="onboarding")
+
+for run in runs:
+    print(run.run_id, run.status, len(run.step_ledger))
+```
+
+Returns `MobRun` carrying the full meerkat ledger projection
+(`step_ledger`, `failure_ledger`, `frames` keyed by frame id, `loops`
+keyed by loop id, `loop_iteration_ledger`, `flow_state`,
+`activation_params`, `schema_version`, etc.).
+
+### Control plane — manage the runtime
+
+```python
+# Inspect runtime state
+status = await handle.status()
+print(status.running, status.loaded_modules)
+
+# Ensure an EPHEMERAL worker exists (spawn if missing). Durable members
+# (per-user agents, coordinators) belong on the identity plane instead —
+# see "new user first contact" below.
+snapshot = await handle.ensure_member("scratch-worker-7", role="worker")
+print(snapshot.meerkat_id, snapshot.state)
+
+# Find members by label
+members = await handle.find_members("owner", "user-123")
+
+# Re-run discovery and reconcile the roster
+result = await handle.reconcile(["routing", "delivery"])
+
+# Call an MCP tool on a loaded module
+result = await handle.call_tool("gmail", "gmail_search", {"query": "is:unread"})
+
+# Or bind a module for repeated calls
+gmail = handle.tool_caller("google-workspace")
+messages = await gmail("gmail_search", query="is:unread")
+```
+
+`ensure_member()` and `find_members()` both return typed `MemberSnapshot` objects
+(single and `list[MemberSnapshot]` respectively).
+
+### Roster — inspect and manage members
+
+```python
+# List the full roster
+members = await handle.list_members()
+for m in members:
+    print(f"{m.meerkat_id}: {m.state} ({m.profile})")
+
+# Inspect a specific member
+snapshot = await handle.get_member("agent-1")
+
+# Member lifecycle
+await handle.retire_member("agent-1")
+await handle.respawn_member("agent-1")
+```
+
+| Method | Return type | Description |
+|--------|-------------|-------------|
+| `list_members()` | `list[MemberSnapshot]` | List all members in the roster |
+| `get_member(member_id)` | `MemberSnapshot` | Get a single member by ID |
+| `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
+| `respawn_member(member_id)` | `None` | Respawn a previously retired member |
+
+Member state is exposed via constants `MEMBER_STATE_ACTIVE` and `MEMBER_STATE_RETIRING`,
+importable from the top-level package.
+
+### Common pattern: new user first contact
+
+Per-user agents are **durable** members, so stand them up on the identity
+plane — declare them through your roster provider and reconcile — rather
+than `ensure_member`-ing them into the mob roster. Identity-plane members
+get continuity records and resume across restarts; mob-plane members do not.
+
+```python
+# Slack DM from a new user — add the identity to your roster source,
+# reconcile, then deliver by identity.
+my_roster.add_identity(f"personal:{user_id}", profile="personal",
+                       labels={"owner": user_id})
+await runtime.reconcile()
+result = await runtime.send(f"personal:{user_id}", slack_message)
+async for event in runtime.subscribe_agent(f"personal:{user_id}"):
+    forward_to_slack(event)
+```
+
+Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
+and an idle-retire label reaps) — the worker plane. See the
+[identity-first doctrine](https://github.com/lukacf/meerkat-mobkit/blob/main/docs/design/identity-first-doctrine.md).
+
+## Builder pattern
+
+```python
+from meerkat_mobkit import MobKit
+
+rt = await (
+    MobKit.builder()
+    .mob("config/mob.toml")
+    .session_service(my_builder, my_store)
+    .discovery(discover_fn)
+    .gateway("./mobkit-rpc")
+    .build()
+)
+```
+
+### Builder methods
+
+| Method | Description |
+|--------|-------------|
+| `.mob(path)` | Path to mob TOML config |
+| `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
+| `.persistent_state(path)` | Enable persistent state at path |
+| `.continuity_store(provider)` | External identity continuity store |
+| `.lease_provider(provider)` | External identity lease provider |
+| `.scratch_dir(path)` | Required scratch path for external identity providers |
+| `.roster(provider)` | Identity-first roster provider |
+| `.topology_provider(provider)` | Identity-first topology provider |
+| `.agent_customizer(customizer)` | Identity-first agent customizer |
+| `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
+| `.session_service(builder, store)` | Session agent builder and optional store |
+| `.discovery(callback)` | Discovery callback (mob-level) |
+| `.pre_spawn(callback)` | Pre-spawn callback |
+| `.gating(path)` | Gating config path |
+| `.routing(path)` | Routing config path |
+| `.scheduling(*files)` | Schedule config files |
+| `.memory(config)` | Memory configuration |
+| `.agent_memory(config=True, **options)` | Durable identity-scoped agent memory |
+| `.auth(config)` | Auth configuration |
+| `.gateway(bin_path)` | Path to rpc_gateway binary |
+| `.modules(specs)` | Module specifications |
+| `.build()` | Build and connect the runtime |
+
+External identity providers follow the Rust gateway's authoritative path: set
+`.continuity_store(provider)`, `.lease_provider(provider)`, and
+`.scratch_dir(path)` together. The Python callback dispatcher speaks the Rust
+wire contract for leases (`result` tags and `ttl`) and continuity deletes.
+`LeaseProviderProtocol.renew_leases(...)` is atomic from the caller's
+perspective: raising means no input grant was changed, while every returned
+`renewed` or `lost` result is already committed for that identity. Providers
+must not commit a replacement grant and then raise.
+For continuity stores, `checkpoint_version` is monotonic per identity and
+continuity generation. A live session rebind changes `session_id` without
+resetting the version; only destructive reset advances `generation` and starts
+the version stream over.
+
+Every explicit `.identity_bootstrap_mode(...)` call declares identity-first
+intent and requires `.roster(...)`, including explicit eager mode. Omitting the
+setter keeps a gateway without a roster on the classic path; a configured
+roster with no explicit mode retains eager materialization.
+
+Gateway memory config accepts `{backend: "local_json"}` with an optional
+`health_check_endpoint` (`memory.local_json(...)`); the legacy Elephant
+`{backend, endpoint}` shape still works but emits a `DeprecationWarning`.
+`memory(stores=...)` is intentionally rejected because the Rust gateway does not
+accept store lists in `mobkit/init`. JWT auth is the gateway-supported auth mode;
+Google/OIDC helpers are not accepted by gateway init today.
+
+Agent memory is configured with `.agent_memory()` and requires
+`.persistent_state(path)` plus an identity roster when using the bundled gateway
+store. Options include `realm`, `selection`, `max_entries`,
+`recall_timeout_ms`, `recall_failure_policy`, and `instruction_header`; the SDK
+serializes them to the gateway wire contract. Automatic injection defaults to a
+500 ms timeout and skips the memory block if recall fails.
+
+## Runtime lifecycle
+
+```python
+# Context manager (recommended)
+async with await MobKit.builder().mob("mob.toml").gateway("./mobkit-rpc").build() as rt:
+    handle = rt.mob_handle()
+    # ...
+
+# Explicit lifecycle
+rt = await MobKit.builder().mob("mob.toml").gateway("./mobkit-rpc").build()
+try:
+    handle = rt.mob_handle()
+    # ...
+finally:
+    await rt.shutdown()
+```
+
+## Session agent builder
+
+Define how agents are built during session creation:
+
+```python
+from meerkat_mobkit import SessionAgentBuilder, SessionBuildOptions
+
+class MyBuilder(SessionAgentBuilder):
+    async def build_agent(self, options: SessionBuildOptions) -> None:
+        options.profile_name = "assistant"
+        options.register_tool("search", my_search_handler)
+        options.register_tool("calculator", my_calc_handler)
+```
+
+## Error hierarchy
+
+All SDK errors inherit from `MobKitError`:
+
+```python
+from meerkat_mobkit.errors import (
+    MobKitError,           # Base exception
+    TransportError,        # Transport layer failures
+    RpcError,              # JSON-RPC error responses
+    NotConnectedError,     # No active runtime connection
+    CapabilityUnavailableError,  # Requested capability unavailable
+    ContractMismatchError,       # SDK/runtime version mismatch
+)
+```
+
+## Advanced API
+
+These methods are available for power users and module-system internals.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+
+| Method | Return type | Description |
+|--------|-------------|-------------|
+| `spawn(spec: DiscoverySpec)` | `SpawnResult` | Spawn a member from a discovery spec |
+| `spawn_member(module_id)` | `SpawnResult` | Spawn a member by module ID |
+| `capabilities()` | `CapabilitiesResult` | List available RPC methods |
+| `subscribe_events(scope, ...)` | `SubscribeResult` | Low-level event subscription |
+| `resolve_routing(recipient)` | `RoutingResolution` | Resolve delivery routing |
+| `send_delivery(...)` | `DeliveryResult` | Send via delivery module |
+| `list_routes()` | `list[RuntimeRouteResult]` | List all registered routes |
+| `add_route(...)` | `RuntimeRouteResult` | Register a new route |
+| `delete_route(route_key)` | `RuntimeRouteResult` | Remove a route by key |
+| `delivery_history(...)` | `DeliveryHistoryResult` | Query past delivery records |
+| `gating_evaluate(...)` | `GatingEvaluateResult` | Evaluate a gating rule |
+| `gating_pending()` | `list[GatingPendingEntry]` | List pending gating decisions |
+| `gating_decide(...)` | `GatingDecisionResult` | Submit a gating decision |
+| `gating_audit(limit)` | `list[GatingAuditEntry]` | Retrieve gating audit log |
+| `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
+| `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |
+| `recall_agent_memory(identity, ...)` | `list[AgentMemoryRecord]` | Recall identity-scoped durable memory |
+| `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Delete identity-scoped durable memory |
+| `memory_stores()` | `list[MemoryStoreInfo]` | List available memory stores |
+| `memory_index(...)` | `MemoryIndexResult` | Index an operational memory assertion |
+
+## Mobpack authoring
+
+`MobHandle` wraps the full Flow Editor authoring surface (`mobkit/mobpacks/*`) with snake_case typed methods — `mobpack_templates`, `mobpack_catalogs`, `mobpack_validate`, `mobpack_source`, `mobpack_export`, `mobpack_import`, `mobpack_list`, `mobpack_get`, `mobpack_create`, `mobpack_save`, `mobpack_delete`, `mobpack_undo`, `mobpack_redo`, `mobpack_apply_operation`, `mobpack_deploy_command`, and `mobpack_deploy`. The same wrappers exist on the SDK's typed JSON-RPC clients.
+
+```python
+import base64
+
+# Create a draft from the blank template, validate, export
+draft = await handle.mobpack_create(template="blank", name="support-bot")
+document = draft.row.document
+
+validation = await handle.mobpack_validate(document)
+print(validation.ok, len(validation.display_rows))
+
+pack = await handle.mobpack_export(document)
+archive = base64.b64decode(pack.content_base64)  # pack.filename, pack.media_type
+```
+
+`mobpack_deploy(document, execute=True)` writes the archive and runs `rkat mob run` on the host — gated by the surface's advertised `authoring_capabilities` and, on ABAC-enforced runtimes, the caller's `mobpack.deploy` grant. See the [Flow Editor guide](/mobkit/guides/flow-editor).
+
+## Public surface exports
+
+Everything below is importable directly from `meerkat_mobkit`:
+
+```python
+from meerkat_mobkit import (
+    # Builder + Runtime
+    MobKit, MobKitBuilder, MobKitRuntime,
+    # Data models
+    DiscoverySpec, PreSpawnData, SessionBuildOptions, SessionQuery,
+    # Agent builder
+    SessionAgentBuilder,
+    # Errors
+    MobKitError, TransportError, RpcError,
+    MobEventsStaleError, MOB_EVENTS_STALE_CURSOR_CODE,
+    NotConnectedError, CapabilityUnavailableError, ContractMismatchError,
+    # Typed results
+    StatusResult, CapabilitiesResult, ReconcileResult,
+    SpawnResult, SpawnMemberResult,
+    SendMessageResult, SubscribeResult,
+    KeepAliveConfig, EventEnvelope,
+    RoutingResolution, DeliveryResult,
+    # Roster
+    MemberSnapshot, MEMBER_STATE_ACTIVE, MEMBER_STATE_RETIRING,
+    # Routing & delivery
+    RuntimeRouteResult, DeliveryHistoryResult,
+    # Gating
+    GatingEvaluateResult, GatingDecisionResult,
+    GatingAuditEntry, GatingPendingEntry,
+    # Memory
+    MemoryQueryResult, MemoryStoreInfo, MemoryIndexResult,
+    AgentMemoryRecord, AgentMemoryRecallResult, AgentMemoryForgetResult,
+    # Events
+    MobEvent, AgentEvent, EventStream,
+    # Structural mob events + flow runs
+    MobStructuralEvent, MobRun, MobRunStatus,
+    StepRecord, FailureRecord, FrameRecord, LoopRecord, LoopIterationRecord,
+    # Config modules
+    auth, memory, session_store,
+)
+```
+
+Module authoring helpers (`ModuleSpec`, `define_module`, etc.) live in `meerkat_mobkit.helpers` — not top-level.
+
+## See also
+
+- [JSON-RPC API](/mobkit/api/rpc) — full method reference
+- [SSE API](/mobkit/api/sse) — event streaming protocol
+- [Modules](/mobkit/concepts/modules) — module configuration and lifecycle
+- [Rust SDK](/mobkit/sdks/rust) — primary Rust interface
+- [TypeScript SDK](/mobkit/sdks/typescript) — TypeScript equivalent

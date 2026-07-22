@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -17,7 +18,7 @@ DOCS_JSON = DOCS / "docs.json"
 FRONTMATTER_REQUIRED = {"title", "description", "icon"}
 FORBIDDEN_PUBLIC_SUFFIXES = {".html"}
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]+)"|'([^']+)')""")
+LINK_ATTR_RE = re.compile(r"""(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 
 
 def fail(message: str) -> None:
@@ -33,7 +34,7 @@ def flatten_pages(value: object) -> Iterable[str]:
             yield from flatten_pages(item)
         return
     if isinstance(value, dict):
-        for key in ("pages", "groups", "tabs"):
+        for key in ("pages", "groups", "tabs", "products"):
             if key in value:
                 yield from flatten_pages(value[key])
 
@@ -155,8 +156,20 @@ def extract_links(path: Path) -> Iterable[str]:
     text = strip_code_fences(path.read_text(encoding="utf-8"))
     for match in MARKDOWN_LINK_RE.finditer(text):
         yield match.group(1)
-    for match in HREF_RE.finditer(text):
+    for match in LINK_ATTR_RE.finditer(text):
         yield match.group(1) or match.group(2)
+
+
+def tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        if path.name == "_source.json":
+            continue
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -188,6 +201,33 @@ def main() -> int:
             errors.append(f"public docs file is not in docs.json navigation: {public_path(path)}")
 
     slug_cache = {path: heading_slugs(path) for path in public_files}
+
+    mobkit_root = DOCS / "mobkit"
+    mobkit_manifest_path = mobkit_root / "_source.json"
+    if mobkit_root.exists():
+        if not mobkit_manifest_path.is_file():
+            errors.append("generated MobKit docs are missing docs/mobkit/_source.json")
+        else:
+            manifest = json.loads(mobkit_manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("generated") is not True:
+                errors.append("docs/mobkit/_source.json does not identify a generated snapshot")
+            if manifest.get("source_docs_dirty") is not False:
+                errors.append("generated MobKit docs must come from a clean release checkout")
+            source_version = manifest.get("source_version")
+            if manifest.get("source_ref") != f"v{source_version}":
+                errors.append("generated MobKit docs source ref does not match its version")
+            source_commit = manifest.get("source_commit")
+            if not isinstance(source_commit, str) or not re.fullmatch(
+                r"[0-9a-f]{40}", source_commit
+            ):
+                errors.append("generated MobKit docs source commit is not a full Git SHA")
+            expected_digest = manifest.get("content_sha256")
+            actual_digest = tree_digest(mobkit_root)
+            if expected_digest != actual_digest:
+                errors.append(
+                    "generated MobKit docs were edited outside the sync workflow "
+                    f"(expected {expected_digest}, got {actual_digest})"
+                )
 
     for page, path in sorted(pages.items()):
         frontmatter = parse_frontmatter(path)

@@ -1,0 +1,95 @@
+---
+title: "Sessions"
+description: "How MobKit's session-store adapters relate to Meerkat's canonical runtime-backed session lifecycle."
+icon: "database"
+---
+
+Meerkat owns the canonical session and runtime lifecycle: input acceptance, turn execution, deduplication, retire/reset semantics, and durable recovery. MobKit adds session-store adapters that support MobKit's operational workflows, console views, and integration surfaces.
+
+<Note>
+This page describes MobKit-specific storage adapters. It does not replace Meerkat's own runtime-backed session durability model.
+</Note>
+
+## MobKit storage backends
+
+| Backend | Use case | Description |
+|---------|----------|-------------|
+| `JsonFileSessionStore` | Local development | JSON files on disk with lock-based concurrency |
+| `BigQuerySessionStoreAdapter` | Production | Cloud persistence via BigQuery |
+
+### JSON file store
+
+The default adapter writes session state snapshots as JSON files to a local directory. Each session gets its own file, and concurrent access is managed through lock files.
+
+```rust
+JsonFileSessionStore {
+    base_dir: "/var/mobkit/sessions",
+}
+```
+
+**Lock-based concurrency.** Before writing, the store acquires a lock file (`{session_id}.lock`). The lock contains a `JsonStoreLockRecord` with the process ID and acquisition timestamp.
+
+**Stale lock recovery.** If a process crashes while holding a lock, the lock becomes stale. On the next access attempt, the store checks whether the PID in the lock record is still alive. Dead PIDs trigger automatic lock recovery -- the stale lock is removed and a new one is acquired.
+
+### BigQuery adapter
+
+For production-oriented deployments, the BigQuery adapter writes session rows to a configured dataset and table:
+
+```rust
+BigQuerySessionStoreAdapter {
+    dataset: "mobkit_sessions",
+    table: "session_rows",
+}
+```
+
+BigQuery naming is validated:
+- Dataset and table names must be non-empty
+- Only alphanumeric characters, underscores, and hyphens are allowed
+
+<Warning>
+BigQuery naming validation rejects special characters to prevent injection. Names like `my.dataset` or `table;DROP` are rejected.
+</Warning>
+
+## Session persistence rows
+
+Session state is serialized as `SessionPersistenceRow` records:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | `String` | Unique session identifier |
+| `turn_number` | `u64` | Current turn count |
+| `state` | `Value` | Serialized session state (messages, tool results, context) |
+| `created_at_ms` | `u64` | Creation timestamp |
+| `updated_at_ms` | `u64` | Last update timestamp |
+
+## Session store contracts
+
+The `SessionStoreContract` defines the operations every backend must implement:
+
+| Operation | Description |
+|-----------|-------------|
+| `write` | Persist a session row (create or update) |
+| `read` | Load a session row by ID |
+| `list` | List all session IDs |
+| `delete` | Remove a session row |
+
+Contracts are verified by integration tests that run the same test suite against every backend implementation.
+
+## Materialization
+
+MobKit provides two materialization functions for session inspection:
+
+- **`materialize_latest_session_rows`** -- returns the most recent row per session
+- **`materialize_live_session_rows`** -- returns rows for currently active sessions
+
+These power MobKit's operational session inspection features and adapter-specific APIs.
+
+## Runtime correlation
+
+When MobKit accepts a `mobkit/send_message` request, the response includes the Meerkat `session_id` that accepted the message. Treat that value as the canonical correlation handle for follow-up inspection, debugging, and resume-aware flows.
+
+## See also
+
+- [Configuration](/mobkit/reference/configuration) -- session store settings
+- [RPC API](/mobkit/api/rpc) -- `session_store.*` methods
+- [BigQuery naming](/mobkit/reference/decisions) -- naming validation rules

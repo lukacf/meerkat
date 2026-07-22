@@ -30,8 +30,8 @@ meerkat-runtime/src/meerkat_machine/dsl.rs (machine-check-drift enforces parity)
      (self.session_id == Some(session_id)), not_draining (registration_phase !=
      Draining). update: registration_phase=Queuing; runtime_stop_deferred=false.
      PRESERVES session_id, active_runtime_id/fence/generation/epoch, hydrated LLM
-     identity/capability surface. to Idle. emit RuntimeNotice{Recover, "stopped
-     session re-admitted for resume"}. Semantics: a stopped executor is a fact about
+     identity/capability surface. to Idle. emit a `RuntimeNotice` with kind `Recover`
+     and detail "stopped session re-admitted for resume". Semantics: a stopped executor is a fact about
      the previous epoch; a re-registered session with no executor is Idle.
    - RegisterSessionNewBindingFromStopped: guards new_session_binding + not_draining;
      update = RegisterSession's full LLM-state reset block AND clear binding fields
@@ -39,7 +39,7 @@ meerkat-runtime/src/meerkat_machine/dsl.rs (machine-check-drift enforces parity)
      tenant's binding facts must not leak; verifier amendment). to Idle.
 2. EnsureSessionWithExecutorStopped (~9357): empty self-loop → revival mirroring the
    Idle arm: not_draining guard; update registration_phase=Active,
-   runtime_stop_deferred=false; to Attached; emit RuntimeNotice{Recover,...}.
+   runtime_stop_deferred=false; to Attached; emit a `RuntimeNotice` with kind `Recover`.
    (Fixes schedule delivery + mob re-dispatch with NO shell change — the executor
    claim at mod.rs:1101-1122 then grants.)
 3. DELETE PrepareBindingsStopped (~7546); remove Stopped from PrepareBindingsIdempotent

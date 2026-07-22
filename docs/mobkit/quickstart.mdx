@@ -1,0 +1,179 @@
+---
+title: "Quickstart"
+description: "Bootstrap a MobKit runtime with modules and a Meerkat mob. Single binary, operational from the first call."
+icon: "rocket"
+---
+
+## Install
+
+<Tabs>
+  <Tab title="Rust crate">
+    ```toml Cargo.toml
+    [dependencies]
+    meerkat-mobkit = "0.8.1"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```bash
+    npm install @rkat/mobkit-sdk
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```bash
+    pip install meerkat-mobkit
+    ```
+  </Tab>
+</Tabs>
+
+## Bootstrap a runtime
+
+The fastest way to get a running system is `start_mobkit_runtime`. It takes a module configuration, agent event stream, and a startup timeout.
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    use meerkat_mobkit::{
+        start_mobkit_runtime, MobKitConfig, ModuleConfig, DiscoverySpec,
+        RestartPolicy, EventEnvelope, UnifiedEvent,
+    };
+    use std::time::Duration;
+
+    let config = MobKitConfig {
+        modules: vec![
+            ModuleConfig {
+                id: "router".to_string(),
+                command: "meerkat-router".to_string(),
+                args: vec![],
+                restart_policy: RestartPolicy::OnFailure,
+            },
+            ModuleConfig {
+                id: "delivery".to_string(),
+                command: "meerkat-delivery".to_string(),
+                args: vec![],
+                restart_policy: RestartPolicy::OnFailure,
+            },
+        ],
+        discovery: DiscoverySpec {
+            namespace: "my-app".to_string(),
+            modules: vec!["router".to_string(), "delivery".to_string()],
+        },
+        pre_spawn: vec![],
+    };
+
+    let agent_events: Vec<EventEnvelope<UnifiedEvent>> = vec![];
+    let timeout = Duration::from_secs(30);
+
+    let mut runtime = start_mobkit_runtime(config, agent_events, timeout)?;
+    println!("Loaded modules: {:?}", runtime.loaded_modules());
+
+    for event in &runtime.merged_events {
+        println!("{} [{}] {:?}", event.event_id, event.source, event.event);
+    }
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    import { MobKit } from "@rkat/mobkit-sdk";
+
+    const rt = await MobKit.builder()
+      .mob("config/mob.toml")
+      .persistentState(".mobkit/state")
+      .gateway("./target/debug/rpc_gateway")
+      .build();
+
+    const status = await rt.mobHandle().status();
+    console.log("Runtime status:", status.running);
+    await rt.shutdown();
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from meerkat_mobkit import MobKit
+
+    async with await MobKit.builder().gateway("./mobkit-rpc").build() as rt:
+        handle = rt.mob_handle()
+        status = await handle.status()
+        print("Running:", status.running)
+        print("Modules:", status.loaded_modules)
+    ```
+  </Tab>
+</Tabs>
+
+## Use the unified runtime
+
+For production deployments that combine a Meerkat mob with MobKit modules, use the `UnifiedRuntime` builder:
+
+```rust
+use meerkat_mobkit::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .mob_spec(mob_spec)
+    .module_config(module_config)
+    .timeout(Duration::from_secs(30))
+    .build()
+    .await?;
+```
+
+The unified runtime bootstraps both systems, merges their event streams, and manages the combined lifecycle. See the [unified runtime guide](/mobkit/guides/unified-runtime) for details.
+
+## Open the console
+
+Once the runtime is serving HTTP, open the admin console at:
+
+```
+http://localhost:8080/console
+```
+
+The console shows the agent sidebar, conversation workspace, signals rail, topology, logs, and health overview. The bundled app seeds from REST, sends through JSON-RPC, and tails replayable timeline frames over SSE.
+
+## Identity-first (household apps)
+
+For apps with durable agent identities (like HomeCore), use the identity-first API:
+
+```python
+from meerkat_mobkit import MobKit
+from meerkat_mobkit.identity_first_models import DurableAgentSpec, ManagedPeerEdge
+
+# Define your household roster
+class MyRoster:
+    async def roster(self, context):
+        return [
+            DurableAgentSpec(identity="identity:luka", profile="personal", addressability="addressable"),
+            DurableAgentSpec(identity="triage:main", profile="triage", addressability="internal_only"),
+        ]
+
+class MyTopology:
+    async def compute_edges(self, target_identities, context):
+        return [ManagedPeerEdge(a="identity:luka", b="triage:main")]
+
+# Boot the runtime
+rt = await (
+    MobKit.builder()
+    .mob_inline(MOB_TOML)
+    .persistent_state("./state")
+    .roster(MyRoster())
+    .topology_provider(MyTopology())
+    .gateway("./rpc_gateway")
+    .build()
+)
+
+# Use identity-scoped handles
+triage = rt.agent("triage:main")
+luka = rt.agent("identity:luka")
+
+await triage.dispatch_text("New event from connector", origin="connector")
+output = await triage.wait_for_output(timeout=60)
+
+await luka.send("What's happening today?")
+await luka.wait_for_output(timeout=60)
+```
+
+Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.
+
+## What's next
+
+- [Modules](/mobkit/concepts/modules) -- how the module system works
+- [Events](/mobkit/concepts/events) -- the unified event model
+- [Operational subsystems](/mobkit/concepts/gating) -- gating, delivery, scheduling, memory
+- [Architecture](/mobkit/reference/architecture) -- internal design and crate structure

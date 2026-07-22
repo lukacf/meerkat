@@ -1,0 +1,120 @@
+---
+title: "Modules"
+description: "MCP-based subprocess modules with supervision, restart policies, and discovery."
+icon: "puzzle-piece"
+---
+
+Modules are the building blocks of MobKit's operational layer. Each module is an MCP server or subprocess executable that provides a specific capability -- routing, delivery, scheduling, gating, or memory. MobKit supervises their lifecycle and routes calls to them.
+
+## Module configuration
+
+A module is defined by a `ModuleConfig`:
+
+```rust
+ModuleConfig {
+    id: "router",
+    command: "meerkat-router",
+    args: vec!["--port", "9001"],
+    restart_policy: RestartPolicy::OnFailure,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `String` | Unique module identifier |
+| `command` | `String` | Executable to spawn |
+| `args` | `Vec<String>` | Command-line arguments |
+| `restart_policy` | `RestartPolicy` | How to handle process exits |
+
+### Restart policies
+
+| Policy | Behavior |
+|--------|----------|
+| `Never` | Module runs once; no restart on exit |
+| `OnFailure` | Restart only on non-zero exit (default) |
+| `Always` | Restart unconditionally on any exit |
+
+## Discovery
+
+Modules are discovered through a `DiscoverySpec` that declares a namespace and the modules expected in that namespace:
+
+```rust
+DiscoverySpec {
+    namespace: "production",
+    modules: vec!["router", "delivery", "scheduling", "gating", "memory"],
+}
+```
+
+At bootstrap, MobKit verifies that every declared module is present in the configuration. Missing modules cause a startup error.
+
+## Pre-spawn environment
+
+Modules can receive environment variables before spawning:
+
+```rust
+PreSpawnData {
+    module_id: "memory",
+    env: vec![
+        ("ELEPHANT_ENDPOINT".to_string(), "http://localhost:3000".to_string()),
+    ],
+}
+```
+
+This is useful for injecting secrets or connection strings without hardcoding them in the module command.
+
+## Core modules
+
+MobKit ships with five core module types, each backed by an MCP server:
+
+| Module | Purpose | Key MCP tools |
+|--------|---------|---------------|
+| **router** | Routing resolution and dispatch | `routing.resolve`, `routing.routes` |
+| **delivery** | Message delivery with sink adapters | `delivery.send` |
+| **scheduling** | Cron-based schedule evaluation | `scheduling.dispatch` |
+| **gating** | Risk-based approval workflows | `gating.evaluate`, `gating.decide` |
+| **memory** | Elephant integration for semantic memory | `memory.index`, `memory.query` |
+
+Each core module communicates with the runtime over MCP tool calls. Non-MCP modules use the JSON-line subprocess protocol.
+
+## Module health
+
+Modules go through health state transitions tracked by the supervisor:
+
+| State | Meaning |
+|-------|---------|
+| `Starting` | Process spawned, waiting for readiness |
+| `Healthy` | Module responding to health checks |
+| `Unhealthy` | Health check failed or process exited |
+| `Restarting` | Supervisor is restarting the module per its restart policy |
+
+Health transitions are emitted as module events in the unified event stream.
+
+## Trusted modules
+
+For production deployments, modules can be declared in a `mobkit.toml` trust manifest:
+
+```toml
+[[modules]]
+id = "router"
+command = "meerkat-router"
+args = ["--port", "9001"]
+restart_policy = "on_failure"
+
+[[modules]]
+id = "delivery"
+command = "meerkat-delivery"
+```
+
+Load trusted modules with:
+
+```rust
+let modules = load_trusted_mobkit_modules_from_toml(&toml_text)?;
+```
+
+Only modules declared in the trust manifest are accepted. This prevents untrusted code from being loaded as a module.
+
+## See also
+
+- [Events](/mobkit/concepts/events) -- module events in the unified stream
+- [Module system guide](/mobkit/guides/module-system) -- deep dive into routing and boundaries
+- [Architecture](/mobkit/reference/architecture) -- how modules fit into the runtime

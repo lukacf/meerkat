@@ -1,0 +1,179 @@
+---
+title: "Flow Editor"
+description: "Embedded visual mobpack authoring studio with Basic and Graph editing modes, server-authoritative drafts, rkat-backed validation, and gated host deploys."
+icon: "sitemap"
+---
+
+MobKit ships a web-based Flow Editor for authoring mobpacks — flows, member definitions, tools, skills, and structured-output schemas — embedded directly in the Rust binaries via `include_str!`. The editor is a thin client: every edit round-trips through the mobpack-authoring JSON-RPC surface, and the server-rendered document is what you see.
+
+## Accessing the editor
+
+The editor has three hosting modes.
+
+### On a running runtime
+
+Every host that serves the reference app router — `mobkit_gateway`, `rpc_gateway`, and any embedding that calls `UnifiedRuntime::build_reference_app_router` — mounts the Flow Editor on the same port as the console:
+
+```
+http://localhost:8080/flow-editor
+```
+
+In this mode the authoring catalogs are runtime-backed: tools, skills, agent definitions, and flow registries reflect the live mob definition and loaded modules, and `mobkit/capabilities` reports `runtime_backed_catalogs: true`.
+
+### Standalone binary
+
+For authoring without a runtime, run the dedicated binary:
+
+```bash
+./scripts/repo-cargo run -p meerkat-mobkit --bin mobkit_flow_editor
+# mobkit flow editor listening on http://127.0.0.1:4191/flow-editor
+```
+
+| Option | Purpose |
+|--------|---------|
+| `--listen HOST:PORT` | Bind address (default `127.0.0.1:4191`; also `MOBKIT_FLOW_EDITOR_LISTEN_ADDR`) |
+| `--allow-host-deploy` | Opt in to executing `rkat mob run` on the host (also `MOBKIT_FLOW_EDITOR_ALLOW_HOST_DEPLOY=1`) |
+
+Without `--allow-host-deploy`, the standalone server refuses `mobkit/mobpacks/deploy` with `execute: true` and points you at deploy planning or running `rkat mob run` manually.
+
+### Library routers
+
+Embedders compose the same surfaces from `meerkat_mobkit` exports:
+
+```rust
+use meerkat_mobkit::flow_editor_router;
+
+let app = axum::Router::new().merge(flow_editor_router());
+```
+
+- `flow_editor_router()` — frontend + RPC, deploy execution disabled
+- `flow_editor_router_with_host_deploy()` — same, with host deploy enabled
+- `flow_editor_frontend_router()` / `flow_editor_rpc_router()` / `flow_editor_rpc_router_allowing_host_deploy()` — compose the shell and the RPC plane separately
+
+## Runtime contract
+
+The Flow Editor route plane deliberately serves only the editor shell and the mobpack-authoring methods; console runtime methods stay on the console RPC plane.
+
+| Route | Method | Response |
+|-------|--------|----------|
+| `/flow-editor` | GET | HTML page |
+| `/flow-editor/assets/react-globals.js` | GET | Vendored React bundle |
+| `/flow-editor/assets/flow-editor.js` | GET | Editor bundle (JavaScript) |
+| `/flow-editor/assets/flow-editor.css` | GET | Stylesheet (CSS) |
+| `/flow-editor/rpc` | POST | JSON-RPC 2.0 endpoint |
+
+`mobkit/capabilities` describes the surface: the method list, the auth mode, and `authoring_capabilities` with `host_mutation_allowed`, `deploy_execute_allowed`, and `runtime_backed_catalogs`. The editor reads these to decide which deploy affordances to render.
+
+The mobpack-authoring methods:
+
+| Method | Purpose |
+|--------|---------|
+| `mobkit/mobpacks/schema` | Authoring contract: editor view labels, mob/deploy settings defaults |
+| `mobkit/mobpacks/catalogs` | Aggregate catalogs and sample mobpacks |
+| `mobkit/tools/catalog` | Tool catalog |
+| `mobkit/skills/catalog` | Skill catalog |
+| `mobkit/agent_definitions/list` | Reusable agent definitions |
+| `mobkit/mobpacks/templates` | Starter templates |
+| `mobkit/mobpacks/list` / `get` / `create` / `save` / `delete` | Draft registry CRUD |
+| `mobkit/mobpacks/undo` / `redo` | Step the MobKit-owned draft history (bounded snapshots the store records on save; Cmd+Z / Cmd+Shift+Z in the editor) |
+| `mobkit/mobpacks/apply_operation` | Apply one authoring operation to a document |
+| `mobkit/mobpacks/graph_projection` | Project a flow into graph nodes/edges |
+| `mobkit/mobpacks/graph_to_flow` | Sync graph edits back into the flow document |
+| `mobkit/mobpacks/validate` | Structural (and optional `rkat`) validation |
+| `mobkit/mobpacks/source` | Rendered source files (`mobkit/mob.toml`, …) without archive payload |
+| `mobkit/mobpacks/export` | `.mobpack` archive as base64 download |
+| `mobkit/mobpacks/import` | Import `.mobpack` / JSON / TOML |
+| `mobkit/mobpacks/deploy_command` | Preview the exact `rkat mob run` command |
+| `mobkit/mobpacks/deploy` | Deploy plan, or host execution when `execute: true` |
+
+### SDK access
+
+The same JSON-RPC surface is exposed as typed wrappers in both gateway SDKs: `mobpackCreate` / `mobpackValidate` / `mobpackDeploy` and friends on the TypeScript `MobHandle`, and snake_case equivalents (`mobpack_create`, `mobpack_validate`, `mobpack_deploy`, …) in Python. That makes the full authoring loop — create, edit via `apply_operation`, validate, export, deploy — scriptable without the editor UI, under the same capabilities and access-control gates. See [TypeScript SDK](/mobkit/sdks/typescript) and [Python SDK](/mobkit/sdks/python).
+
+## Authoring model
+
+The top rail switches between **FLOWS** and **AGENTS** views and carries the IMPORT, VALIDATE, PUBLISH, DEPLOY PLAN, DEPLOY, and `⚙ SETTINGS` actions.
+
+- **Basic mode** — a vertical step builder for the current flow.
+- **Graph mode** — an advanced canvas; node and edge edits sync through `graph_projection` / `graph_to_flow`.
+- **Agents view** — member definitions (identity, prompt, model, tools, schema references), skills, and a visual field-by-field schema editor for structured outputs.
+- **Validation sheet** — opened by VALIDATE; shows passed/warning/blocking rows and hosts the deploy-plan and deploy-run buttons.
+- **Source preview** — renders the generated `mob.toml` and sibling source files via `mobkit/mobpacks/source`, without exporting an archive.
+- **Export / import** — PUBLISH exports the document and downloads it as a `.mobpack` archive; IMPORT accepts `.mobpack`, `.json`, and `.toml`.
+- **`⚙ SETTINGS`** — editor tweaks plus mob settings (orchestrator wiring, backend, topology) and deploy settings (command, surface, trust policy, model, limits).
+
+Authoring is server-authoritative: the client never mutates the document locally. Every edit is sent as `mobkit/mobpacks/apply_operation`, and the editor re-renders from the document the server returns.
+
+Drafts autosave through `mobkit/mobpacks/save` into a host JSON store with optimistic revision guards (`expected_revision` / `draft_etag`). A guard conflict means a concurrent autosave already bumped the revision; the editor drops the stale save and re-persists the current draft. The store path resolves in order:
+
+1. `store_path` request parameter
+2. `MOBKIT_FLOW_EDITOR_DRAFT_STORE` environment variable
+3. `$XDG_STATE_HOME/meerkat-mobkit/meerkat-mobkit-flow-editor-drafts.json`
+4. `~/.local/state/meerkat-mobkit/meerkat-mobkit-flow-editor-drafts.json`
+
+## Validation and deploy
+
+`mobkit/mobpacks/validate` always runs MobKit structural validation (`meerkat_mob::validate_definition` + `SpecValidator`). When the request sets `rkat_validate: true` and structural validation passes, the document is exported as an archive and checked with `rkat mob validate`. If `rkat` is not on `PATH`, validation degrades to a warning row ("rkat mob validate skipped") instead of failing — embedding hosts do not always ship `rkat`.
+
+Deploys are plans by default. `mobkit/mobpacks/deploy` without `execute` returns the `rkat mob run …` argv plus a `plan_trace` the editor replays step by step; `mobkit/mobpacks/deploy_command` previews the exact shell command. Only with `execute: true` — and only when the surface allows it — does the server write the archive and run `rkat mob run` on the host. The run validates the input params, provisions the flow's members, blocks until the run is terminal, and prints the result envelope on stdout; the server parses that envelope and surfaces the flow's run output (status, run id, and the result payload) as deploy display rows, so the editor shows what the flow actually produced. The deploy `prompt` setting becomes the `--prompt` run input:
+
+- **Standalone binary** — requires `--allow-host-deploy` (or the env flag); otherwise the call fails with a pointer to manual deploy.
+- **Runtime-mounted editor** — requires the caller's `mobpack.deploy` grant when access control is enforced; open otherwise.
+
+## Access control
+
+On ABAC-enabled runtimes the Flow Editor RPC plane enforces the mobpack actions from the [access control](/mobkit/concepts/access-control) layer: every mobpack-authoring method requires `mobpack.author`, and `mobkit/mobpacks/deploy` with `execute: true` requires `mobpack.deploy` instead. `mobkit/capabilities` stays open — it only describes the method surface — but its `authoring_capabilities` advertisement intersects with the caller's grants, so `deploy_execute_allowed` and `host_mutation_allowed` are `false` for callers without `mobpack.deploy` and the editor never renders deploy affordances they cannot use. Per-call enforcement remains authoritative; denials surface as JSON-RPC error `-32030` with `data.kind = "access_denied"`.
+
+The standalone binary is a token-less local tool: it binds `127.0.0.1` by default, there is no principal to evaluate, and `--allow-host-deploy` is the only deploy gate.
+
+## Embedding
+
+Hosts drive the editor with deep-link query parameters and listen for lifecycle events.
+
+| Query parameter | Effect |
+|-----------------|--------|
+| `?open=<id>` | Open that library row (draft or runtime projection) straight into the FLOW section; an unknown id lands in the library with the standard failure sheet |
+| `?intent=new` | Land in the library with the NEW MOB modal open |
+| `?intent=new&template=<id>` | Same, with that template preselected (unknown ids fall back to Blank) |
+| `?embedded=1` | Hide the brand block and theme toggle — the host owns the chrome |
+
+After every successful create, registry save (autosave round-trips included), and execute deploy, the editor dispatches a window `CustomEvent` (named by `type`, payload in `detail`) and — when framed — a `window.parent.postMessage` with the same payload:
+
+```json
+{ "type": "mobkit-flow-editor:created", "id": "f_review_mob", "stage": "draft", "ok": true }
+```
+
+`type` is `mobkit-flow-editor:created` / `:saved` / `:deployed`; `ok` is `false` only on a `deployed` event whose execute round-trip did not deploy. The iframe-drawer pattern for hosts like the MobKit console: "Add flow mob" opens an iframe at `/flow-editor?intent=new&embedded=1`, the host listens for `created` / `deployed` messages, then closes the drawer and refreshes its own registry view.
+
+## Development
+
+The editor frontend is split across three workspaces:
+
+- `flow-editor/` — the shell: the `src/app.tsx` entry, boot data, CSS, the esbuild pipeline (`build.cjs`), and the test lanes.
+- `packages/flow-editor-core/` — the headless controller plane (`@flow-editor-core`): framework-free projection/transition logic plus `createMobKitFlowController`, which assembles the `window.MobKitFlowController` facade the views call.
+- `packages/flow-editor-components/` — the React views (`@flow-editor-components`).
+
+`build.cjs` resolves the `@flow-editor-core` / `@flow-editor-components` aliases to the package sources and bundles `app.tsx` into a single `flow-editor.js` IIFE (React stays external, provided by `react-globals.js` as window globals). `npm run build` regenerates both `flow-editor/dist` and `meerkat-mobkit/flow-editor-dist`, which the Rust crate embeds via `include_str!`; `node build.cjs --check` fails when the embedded dist is stale.
+
+```bash
+cd flow-editor
+npm run build   # rebuild dist + the embedded flow-editor-dist
+npm run dev     # static dev server at http://127.0.0.1:4190/flow-editor
+```
+
+The dev server serves `flow-editor/dist` and re-reads files on every request — rebuild after editing the shell or packages and refresh. Set `MOBKIT_FLOW_EDITOR_RPC_URL` to a real `/flow-editor/rpc` endpoint to proxy RPC calls; without it, RPC requests return an explanatory error.
+
+```bash
+make test-flow-editor              # dist freshness, typecheck, source/boundary contracts, facade key parity, projection suite, visual + browser contracts
+make test-flow-editor-rkat         # live export/import checks against rkat mob inspect/validate
+make test-flow-editor-rkat-deploy  # live checks including rkat mob run
+```
+
+`npm run typecheck` covers both packages and the shell; `test/package-boundaries.test.cjs` keeps `@flow-editor-core` window/React/DOM-free and `@flow-editor-components` network-free; `test/controller-export-keys.test.cjs` pins the facade's 384-key manifest.
+
+## See also
+
+- [Access control](/mobkit/concepts/access-control) — the `mobpack.author` / `mobpack.deploy` actions
+- [Console](/mobkit/guides/console) — the runtime console served alongside the editor
+- [Unified runtime](/mobkit/guides/unified-runtime) — how the reference app router is composed
+- [JSON-RPC API](/mobkit/api/rpc) — protocol details

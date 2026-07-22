@@ -1,0 +1,598 @@
+---
+title: "JSON-RPC"
+description: "JSON-RPC 2.0 protocol for MobKit runtime operations: gating, memory, routing, delivery, scheduling, sessions, and subscriptions."
+icon: "plug"
+---
+
+MobKit exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for the console-specific subset and runtime passthrough.
+
+## Protocol
+
+- **SDK transport:** JSON lines over stdio (one JSON object per line)
+- **Console transport:** HTTP `POST /console/rpc`
+- **Version:** JSON-RPC 2.0
+- **Contract version:** `0.4.0`
+
+### Capabilities handshake
+
+The first line from the MobKit process is a capabilities declaration:
+
+```json
+{"contract_version": "0.4.0"}
+```
+
+Clients must validate the contract version before sending requests.
+
+### Request format
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "mobkit/gating/evaluate",
+  "params": { ... }
+}
+```
+
+### Response format
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": { ... }
+}
+```
+
+### Error format
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32602,
+    "message": "Invalid params",
+    "data": { ... }
+  }
+}
+```
+
+The optional `data` field carries structured context for typed
+errors. SDKs surface it on `RpcError.data`.
+
+### Mobkit-specific error codes
+
+| Code | Meaning | `data` shape |
+|------|---------|--------------|
+| `-32010` | `mob_events/{query,subscribe}` `after_seq` past `latest_cursor` (stale cursor) | `{after_cursor, latest_cursor, error: "event_query_stale"}` |
+| `-32012` | `memory/{index,query}` backend unavailable | none |
+| `-32013` | `mobkit/console/query_timeline` cursor cannot be replayed from the console timeline | `{error: "replay_unavailable"}` |
+
+The `-32010` constant is exported from both SDKs as
+`MOB_EVENTS_STALE_CURSOR_CODE`. The Python and TypeScript SDKs auto-
+reify `-32010` errors into `MobEventsStaleError` (a typed subclass of
+`RpcError`) carrying `after_cursor` and `latest_cursor`.
+Console timeline replay failures use `CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE`
+so they are not mistaken for mob-events ledger cursor errors.
+
+---
+
+## Topology control
+
+Topology mutation is an optional MobKit control plane. It is disabled by
+default; a host must explicitly configure `TopologyControlPolicy` as
+`read_only` or `editable`. The stock console only shows its **Connections**
+view when the runtime advertises topology management, and it never invents a
+`connect all` operation.
+
+Every mutation is evaluated against both endpoint identities. With access
+control enabled, callers need `agent.view` plus `topology.view` to inspect an
+endpoint, and the action-specific `topology.connect`,
+`topology.disconnect`, or `topology.reconnect` grant on **both** endpoints.
+Planning requires the same action-specific endpoint grants as applying; it is
+side-effect free, not an authorization oracle. Durable mutation history and
+actor/principal attribution require the separate `topology.audit` grant on
+every endpoint in the returned record.
+Requests containing multiple explicit operations additionally require
+`topology.bulk` and remain bounded by the policy's finite `max_batch_size`.
+
+### `mobkit/topology/query`
+
+Return the logical roster, observed/declared/operator topology, durable
+suppression tombstones, current revision, and caller-specific per-endpoint
+affordances. A disconnected declared edge remains in the response with
+`suppressed: true`; this is how operator intent survives reconciliation and
+restart.
+
+### `mobkit/topology/plan`
+
+Validate a side-effect-free, revision-pinned set of explicit operations.
+
+```json
+{
+  "expected_revision": 7,
+  "operations": [{
+    "action": "disconnect",
+    "edge": {
+      "a": {"identity": "incident-commander"},
+      "b": {"identity": "payments-sre"}
+    }
+  }]
+}
+```
+
+### `mobkit/topology/apply`
+
+Apply a previously valid shape of request. `expected_revision` provides
+compare-and-swap protection and `idempotency_key` is mandatory. Exact replay
+is durable only across the configured retention horizon: `receipt_limit`
+keeps full operation receipts, then `idempotency_history_limit` keeps bounded
+key fingerprints that reject ambiguous reuse after a receipt ages out.
+Replaying a retained key whose receipt is unavailable returns `-32009` with
+`data.kind = "topology_idempotency_receipt_expired"`; replaying a key whose
+fingerprint is still in the compacted ring returns `-32009` with
+`data.kind = "topology_idempotency_history_compacted"`. Once both bounded
+horizons have expired, that key is contractually new and normal revision and
+policy validation applies—clients must not assume keys are reserved forever.
+`connect`, `disconnect`, and `reconnect` are distinct policy actions:
+reconnect removes a suppression and repairs an absent or one-sided desired
+edge, while disconnect records a tombstone before removing physical wiring.
+
+```json
+{
+  "expected_revision": 7,
+  "idempotency_key": "console:disconnect:incident-commander:payments-sre:7",
+  "operations": [{
+    "action": "disconnect",
+    "edge": {
+      "a": {"identity": "incident-commander"},
+      "b": {"identity": "payments-sre"}
+    }
+  }]
+}
+```
+
+### `mobkit/topology/operation/get`
+
+Look up a durable operation receipt by `operation_id`. The endpoint is useful
+after a client reconnect or an ambiguous transport failure; clients should
+not infer success from a dropped HTTP response. The `actor` field is omitted
+unless the caller has `topology.audit` on every endpoint in the receipt. This
+lookup is also bounded by `receipt_limit`; persist the original request and
+idempotency key so an ambiguous response can be replayed while its exact
+receipt remains retained.
+
+### `mobkit/topology/audit/query`
+
+Read the durable, versioned mutation-attempt ledger. This includes denied,
+invalid, interrupted, recovered, applied, and rolled-back attempts, so it is
+more sensitive than graph inspection and is advertised only to callers with a
+`topology.audit` grant. Returned records additionally require `agent.view`,
+`topology.view`, and `topology.audit` on every endpoint in that record.
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `after_seq` | `u64` | no | Resume strictly after this forward-only cursor. `0` always starts at the first retained record. |
+| `limit` | `usize` | no | Maximum visible records to return (default `100`, bounded to `1..=1024`). |
+
+Persist `next_after_seq` after every response, including an empty one. If a
+non-zero cursor is older than `oldest_available_seq - 1`, MobKit returns
+`-32009` with `data.kind = "topology_audit_cursor_expired"`, `after_seq`, and
+`oldest_available_seq`; restart from `after_seq: 0` only when replaying from
+the retained frontier is acceptable. A cursor equal to
+`oldest_available_seq - 1` remains valid.
+
+ABAC filtering advances the cursor across records the caller cannot see. This
+can leave gaps in visible `seq` values and reveals only that retained topology
+activity existed at those sequence positions—not its endpoints, actor,
+principal, operations, or result. That aggregate activity-volume metadata is
+an intentional trade-off for a stable, non-duplicating forward cursor.
+
+Cross-authority JSON-RPC mutation currently fails closed. Same-process hosts
+that control both runtimes can use MobKit's bilateral host API, which checks
+both runtime policies and endpoint grants before changing either side.
+
+---
+
+## Mob events
+
+### `mob_events/query`
+
+Scan the meerkat structural-event ledger and return matches.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `after_seq` | `u64` | no | Resume after this cursor (exclusive). Without it, returns the **latest N** matching events. |
+| `limit` | `usize` | no | Cap on returned events (default 256). |
+| `mob_id` / `run_id` / `step_id` | `string` | no | Filter by id |
+| `identity` / `member_id` | `string` | no | Filter by agent identity |
+| `event_types` | `string[]` | no | E.g. `["flow_started", "step_completed"]` |
+| `since_ms` / `until_ms` | `u64` | no | Inclusive / exclusive timestamp filters |
+</Accordion>
+
+The response always carries a numeric `next_after_seq` — even when
+the filter matches nothing — so polling SDKs keep a valid resume
+anchor (caller's `after_seq` or the current `latest_cursor`).
+
+### `mob_events/subscribe`
+
+JSON-RPC handshake that returns a snapshot plus a `subscribe_url`
+pointing to the [`/mobkit/mob_events/stream`](/mobkit/api/sse) SSE route.
+The URL carries `after_seq` (`next_after_seq` ∨ caller's `after_seq` ∨
+`latest_cursor`) and the original filters so the SSE handler picks
+up gaplessly with the same predicate.
+
+---
+
+## Console timeline
+
+Console-specific RPC methods are handled by the HTTP console dispatcher and are also listed in the console contract `v0.5.0`.
+
+**Surface split:** `mobkit/console/*` methods are served ONLY by the HTTP
+console dispatcher (`POST /console/rpc`). The stdio JSON-RPC surface
+(`rpc_gateway` stdin) neither dispatches nor advertises them — embedders
+needing console data over stdio should use the `http_base_url` from the
+init handshake and call the HTTP surface. The advertised-methods list on
+each surface reflects exactly what that surface dispatches.
+
+### `mobkit/console/list_identities`
+
+List identities known to the console aggregator.
+
+### `mobkit/console/inspect_identity`
+
+Inspect one console identity and return status, affordances, output preview, and reachability metadata. Older servers may only support the legacy `mobkit/inspect_identity`; the headless console controller keeps that as a compatibility fallback.
+
+### `mobkit/console/query_timeline`
+
+Query the console log store for timeline frames. The method backs the bundled console chat and activity panes.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | no | Restrict results to one console identity. |
+| `conversation_id` | `string` | no | Restrict results to one conversation. |
+| `mode` | `"since"` or `"recent"` | no | `since` returns visible frames after `after`; `recent` returns the latest visible frames in display order. |
+| `after` | `console:<seq>` | no | Exclusive lower cursor bound. |
+| `before` | `console:<seq>` | no | Exclusive upper cursor bound for older-history paging. |
+| `limit` | `usize` | no | Visible frame limit, clamped by the server. |
+</Accordion>
+
+Response:
+
+```json
+{
+  "frames": [],
+  "next_cursor": "console:240",
+  "latest_cursor": "console:240",
+  "exhausted": false
+}
+```
+
+`next_cursor` never advances past visible frames omitted due to `limit`, so clients can page with `mode: "since"` without gaps. `latest_cursor` is the live-continuation cursor for `mode: "recent"` seed queries.
+
+**Backfill frames are not fresh completions.** Session-history backfill
+re-emits past turns as frames whose `source.kind` is `"session_history"`,
+with `session_id` set and `interaction_id` null (the underlying transcript
+does not persist interaction ids — upstream ask 15). Identity queries can
+trigger backfill on demand, so any consumer correlating completions MUST
+exclude `source.kind == "session_history"` frames (correlating by
+`session_id` alone will treat old history as fresh `interaction_complete`
+events).
+
+### `mobkit/console/send`
+
+Submit an identity-addressed console interaction through the console aggregator.
+
+```json
+{
+  "identity": "identity:luka",
+  "content": "What is on my calendar tomorrow?",
+  "origin": "console:panel-1",
+  "idempotency_key": "panel-1:turn-1",
+  "handling_mode": "queue"
+}
+```
+
+The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
+
+### `mobkit/blob/upload`
+
+Upload a single blob/image through `POST /console/rpc/multipart`. The response includes a `blob_id` that can be rendered through `GET /blobs/{blob_id}`.
+
+### `mobkit/list_runs`
+
+List flow runs for this mob.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `flow_id` | `string` | no | When given, only return runs for this flow. |
+</Accordion>
+
+Returns `{runs: MobRun[]}` carrying the full meerkat ledger projection:
+`step_ledger`, `failure_ledger`, `frames` (map keyed by frame id),
+`loops` (map keyed by loop id), `loop_iteration_ledger`,
+`flow_state`, `activation_params`, `schema_version`,
+`root_step_outputs`, `loop_iteration_outputs`.
+
+---
+
+## Gating methods
+
+### `mobkit/gating/evaluate`
+
+Evaluate the risk tier for a proposed action.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `action_id` | `string` | yes | Unique action identifier |
+| `actor_id` | `string` | yes | Agent or user performing the action |
+| `action_type` | `string` | yes | Action category (e.g. `"delivery.send"`) |
+| `context` | `object` | no | Additional context for risk assessment |
+</Accordion>
+
+<Accordion title="Response">
+```json
+{
+  "risk_tier": "safe_dispatch",
+  "explanation": "Low-risk internal delivery",
+  "recommended_handling": "auto_approve"
+}
+```
+</Accordion>
+
+### `mobkit/gating/decide`
+
+Approve or deny a pending gated action.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pending_id` | `string` | yes | ID of the pending entry |
+| `decision` | `string` | yes | `"approve"` or `"deny"` |
+| `decided_by` | `string` | yes | Who made the decision |
+</Accordion>
+
+### `mobkit/gating/pending`
+
+List all pending gated actions awaiting approval.
+
+### `mobkit/gating/audit`
+
+Return the gating audit log (most recent entries, bounded by retention limit).
+
+---
+
+## Memory methods
+
+### `mobkit/memory/index`
+
+Record an operational memory assertion or conflict signal. This surface is the
+MobKit assertion ledger used by routing/gating flows; it is not semantic/vector
+document search. The ledger persists to local JSON (optionally health-gated by
+an external endpoint); the stock RPC contract stores and filters canonical
+assertions.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `entity` | `string` | yes | Entity the assertion is about |
+| `topic` | `string` | yes | Topic or slot within that entity |
+| `store` | `string` | no | One of `knowledge_graph`, `vector`, `timeline`, `todo`, or `top_of_mind` |
+| `fact` | `string` | yes unless `conflict=true` | Assertion text |
+| `metadata` | `object` | no | JSON metadata stored with the assertion |
+| `conflict` | `boolean` | no | Marks the write as a conflict signal instead of a normal assertion |
+| `conflict_reason` | `string` | no | Explanation for a conflict signal |
+</Accordion>
+
+### `mobkit/memory/query`
+
+Query stored assertions and conflict signals by exact filters.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `entity` | `string` | no | Return only assertions/conflicts for this entity |
+| `topic` | `string` | no | Return only assertions/conflicts for this topic |
+| `store` | `string` | no | One of `knowledge_graph`, `vector`, `timeline`, `todo`, or `top_of_mind` |
+</Accordion>
+
+### `mobkit/memory/stores`
+
+Return information about configured memory backends.
+
+Agent-memory methods are available over the SDK JSON-RPC gateway and over
+console `POST /console/rpc` when the identity runtime has an agent-memory
+provider configured. Console callers can recall only identities they may view;
+`remember` and `forget` also require mutating console access plus
+`agent.memory.write` and `agent.memory.delete` respectively.
+
+### `mobkit/agent_memory/remember`
+
+Write an identity-scoped agent memory record for later per-turn and build-context injection. This is separate from `mobkit/memory/*`, which is the operational assertion ledger. A successful write means the configured hot identity-memory provider accepted the record; optional Elephant enrichment or extraction, when supplied by a custom provider, is out of band.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `title` | `string` | yes | Short record title, max 200 bytes |
+| `body` | `string` | yes | Memory body to inject later as a quoted observation, max 64 KiB |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tags` | `string[]` | no | Optional labels for provider-side retrieval, max 32 entries and 64 bytes each |
+</Accordion>
+
+### `mobkit/agent_memory/recall`
+
+Read identity-scoped agent memory records from the configured agent memory provider. This exposes the same durable record set used for per-turn and build-context injection. Unlike automatic injection, explicit recall reports provider errors to the caller.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `selection` | `"always" \| "contextual"` | no | Retrieval mode, default `"contextual"` |
+| `query_text` | `string` | no | Raw query text for contextual providers, max 16 KiB |
+| `query_terms` | `string[]` | no | Additional deterministic terms for contextual providers |
+| `max_entries` | `integer` | no | Maximum records, default `8`, max `64` |
+</Accordion>
+
+### `mobkit/agent_memory/forget`
+
+Delete one identity-scoped agent memory record from the configured provider. Providers that do not support deletes do not advertise this method in `mobkit/capabilities`. `forget` prevents future provider recall and future automatic injection; it cannot remove text that has already been delivered into an active model context.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `memory_id` | `string` | yes | Durable memory record id returned by `remember` or `recall` |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `memory_id` | `string` | Requested memory id |
+| `deleted` | `boolean` | `true` when a record was removed, `false` when it was already absent |
+</Accordion>
+
+---
+
+## Routing methods
+
+### `mobkit/routing/resolve`
+
+Resolve a logical destination to a physical route.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `destination` | `string` | yes | Logical destination identifier |
+| `channel` | `string` | no | Delivery channel (default: `"notification"`) |
+</Accordion>
+
+<Accordion title="Response">
+```json
+{
+  "route_id": "mob.member.lead-1.notification",
+  "channel": "notification",
+  "sink_adapter": "mob_member",
+  "target_module": "delivery"
+}
+```
+</Accordion>
+
+### `mobkit/routing/routes/list`
+
+List all registered routes.
+
+### `mobkit/routing/routes/add`
+
+Register a new route.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `route_id` | `string` | yes | Unique route identifier |
+| `channel` | `string` | yes | Delivery channel |
+| `sink_adapter` | `string` | yes | Physical delivery backend |
+| `target_module` | `string` | yes | Module that handles delivery |
+</Accordion>
+
+### `mobkit/routing/routes/delete`
+
+Remove a registered route.
+
+---
+
+## Delivery methods
+
+### `mobkit/delivery/send`
+
+Send a message through a resolved route.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `resolution` | `object` | yes | Routing resolution from `routing.resolve` |
+| `payload` | `object` | yes | Message payload |
+| `idempotency_key` | `string` | yes | Key for idempotent delivery |
+</Accordion>
+
+### `mobkit/delivery/history`
+
+Return delivery records for audit and inspection.
+
+---
+
+## Scheduling methods
+
+### `mobkit/scheduling/evaluate`
+
+Evaluate schedules at a given tick and return due triggers.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schedules` | `array` | yes | Array of `ScheduleDefinition` objects |
+| `tick_ms` | `integer` | yes | Evaluation timestamp in milliseconds |
+</Accordion>
+
+<Accordion title="Response">
+```json
+{
+  "tick_ms": 1709500000000,
+  "due_triggers": [
+    {
+      "schedule_id": "daily-report",
+      "interval": "0 9 * * *",
+      "timezone": "Europe/Stockholm",
+      "due_tick_ms": 1709500000000
+    }
+  ]
+}
+```
+</Accordion>
+
+<Note>
+Maximum 256 schedules per request.
+</Note>
+
+---
+
+## Session store methods
+
+### `mobkit/session_store/bigquery`
+
+Execute BigQuery-specific session store operations.
+
+---
+
+## Subscribe methods
+
+### `mobkit/events/subscribe`
+
+Subscribe to runtime events with scope filtering.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `scope` | `string` | yes | Event scope: `"all"`, `"agent"`, or `"module"` |
+| `cursor` | `string` | no | Resume from a previous event cursor |
+</Accordion>
+
+---
+
+## Console ingress
+
+The older `console.route` style is not the stock console contract. Use `GET /console/experience`, `GET /console/timeline`, and `POST /console/rpc` instead.
+
+## See also
+
+- [REST API](/mobkit/api/rest) -- HTTP endpoints
+- [SSE API](/mobkit/api/sse) -- event streaming
+- [Gating](/mobkit/concepts/gating) -- risk-based approval details
+- [Delivery](/mobkit/concepts/delivery) -- message dispatch details

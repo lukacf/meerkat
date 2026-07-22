@@ -1,0 +1,113 @@
+---
+title: "Gating"
+description: "Risk-based approval gates for agent actions. Evaluate risk tiers, queue pending approvals, and audit decisions."
+icon: "shield-check"
+---
+
+Gating is MobKit's risk-based approval system. Before an agent takes a high-risk action -- sending an external message, modifying production data, spending money -- the action can be routed through a gate that evaluates the risk and either approves, queues for human review, or denies.
+
+## Risk tiers
+
+Every gated action is classified into a risk tier:
+
+| Tier | Meaning | Typical handling |
+|------|---------|-----------------|
+| `SafeDraft` | Low risk, no external effect | Auto-approve |
+| `SafeDispatch` | External but reversible | Auto-approve with audit |
+| `ReviewRequired` | Significant impact, needs human approval | Queue as pending |
+| `Blocked` | Policy violation, cannot proceed | Deny |
+
+Risk tier classification is performed by the gating module via MCP tool call.
+
+## Evaluation flow
+
+<Steps>
+  <Step title="Request evaluation">
+    The runtime sends a `GatingEvaluateRequest` to the gating module with the action details:
+
+    ```rust
+    GatingEvaluateRequest {
+        action_id: "send-email-001",
+        actor_id: "agent-lead",
+        action_type: "delivery.send",
+        context: json!({ "recipient": "customer@example.com" }),
+    }
+    ```
+  </Step>
+  <Step title="Risk assessment">
+    The gating module evaluates the action and returns a `GatingEvaluateResult` with a risk tier, explanation, and recommended handling.
+  </Step>
+  <Step title="Decision">
+    Based on the risk tier:
+    - **SafeDraft / SafeDispatch**: Auto-approved, recorded in audit log
+    - **ReviewRequired**: Queued as a `GatingPendingEntry` with a timeout deadline
+    - **Blocked**: Denied immediately
+  </Step>
+  <Step title="Resolution">
+    Pending entries are resolved by a human approver calling `gating.decide`, or by timeout fallback to `SafeDraft`.
+  </Step>
+</Steps>
+
+## Pending entries
+
+When an action requires review, it enters the pending queue:
+
+```rust
+GatingPendingEntry {
+    pending_id: "pending-000012",
+    action_id: "send-email-001",
+    actor_id: "agent-lead",
+    risk_tier: GatingRiskTier::ReviewRequired,
+    deadline_at_ms: 1709500000000,  // timeout deadline
+    context: json!({ ... }),
+}
+```
+
+Pending entries have a configurable timeout. When the deadline passes without a decision, the action falls back to `SafeDraft` and an audit entry is recorded with `event_type: "timeout_fallback"`.
+
+## Deciding on pending actions
+
+Resolve a pending action with a `GatingDecideRequest`:
+
+```rust
+GatingDecideRequest {
+    pending_id: "pending-000012",
+    decision: GatingDecision::Approve,
+    decided_by: "human-reviewer",
+}
+```
+
+| Decision | Effect |
+|----------|--------|
+| `Approve` | Action proceeds, audit entry recorded |
+| `Deny` | Action blocked, audit entry recorded |
+
+## Audit log
+
+Every gating interaction is recorded in the audit log:
+
+```rust
+GatingAuditEntry {
+    audit_id: "gate-audit-000042",
+    timestamp_ms: 1709500000000,
+    event_type: "evaluate",      // or "decide", "timeout_fallback"
+    action_id: "send-email-001",
+    pending_id: None,
+    actor_id: "agent-lead",
+    risk_tier: GatingRiskTier::SafeDispatch,
+    outcome: GatingOutcome::SafeDraft,
+    detail: json!({ ... }),
+}
+```
+
+The audit log retains the most recent entries (bounded by `GATING_AUDIT_MAX_RETAINED`) for inspection via the RPC API.
+
+## Memory conflict integration
+
+Gating integrates with the memory subsystem to detect conflicts. Before approving a delivery, the gate can check for conflicting assertions in Elephant's truth maintenance system via the `memory.conflict_read` MCP tool.
+
+## See also
+
+- [Delivery](/mobkit/concepts/delivery) -- actions commonly gated before dispatch
+- [RPC API](/mobkit/api/rpc) -- `gating.*` methods
+- [Decisions](/mobkit/reference/decisions) -- policy enforcement

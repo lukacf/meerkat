@@ -6936,13 +6936,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
 
-        let (source, write_runtime_snapshot) = match disposition {
+        let (source, write_runtime_snapshot, disposition_label) = match disposition {
             LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot => {
-                (runtime_snapshot, true)
+                (runtime_snapshot, true, "migrate_canonical_snapshot")
             }
-            LegacyCheckpointMigrationDisposition::AdoptProjectionExtension => (store_row, true),
-            LegacyCheckpointMigrationDisposition::MigrateStoreProjection => (store_row, false),
+            LegacyCheckpointMigrationDisposition::AdoptProjectionExtension => {
+                (store_row, true, "adopt_projection_extension")
+            }
+            LegacyCheckpointMigrationDisposition::MigrateStoreProjection => {
+                (store_row, false, "migrate_store_projection")
+            }
             LegacyCheckpointMigrationDisposition::RefuseDivergent => {
+                tracing::warn!(
+                    session_id = %id,
+                    role,
+                    "legacy checkpoint copies are divergent; one-time recovery migration \
+                     refused fail-closed and requires the explicit operator migration tool"
+                );
                 return Err(SessionError::Agent(AgentError::InternalError(format!(
                     "cannot prepare {role} for session {id}: legacy checkpoint copies are \
                      divergent (the committed runtime snapshot and the session-store \
@@ -6963,14 +6973,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "failed to serialize legacy migration source for session {id}: {error}"
             )))
         })?;
-        let stamp = meerkat_core::SessionCheckpointStamp::recovery_migration(
-            &source,
+        // INITIAL cursors match the shipped v0.6.34 migrator and are correct
+        // for lineages that never minted authority. Fleets whose continuity
+        // rows record a nonzero generation floor adopt through the exported
+        // `adopt_legacy_session` helper with the observed cursor instead.
+        let adopted = meerkat_core::adopt_legacy_session(
             &source_blob,
             meerkat_core::SessionGeneration::INITIAL,
             meerkat_core::SessionCheckpointRevision::INITIAL,
         )
         .map_err(|error| checkpoint_prepare_error(id, role, error))?;
-        let prepared = PreparedCheckpointDocument::install(source, stamp, role)?;
+        let prepared = PreparedCheckpointDocument {
+            session: adopted.session,
+            stamp: adopted.stamp,
+            serialized: adopted.serialized,
+        };
 
         if write_runtime_snapshot {
             self.runtime_store
@@ -7006,6 +7023,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .map_err(|error| SessionError::Store(Box::new(error)))?;
         }
+        // Migration cost lands inside ordinary resume/certification windows;
+        // operators expect it to be observable, not inferred from latency.
+        tracing::info!(
+            session_id = %id,
+            role,
+            disposition = disposition_label,
+            source_bytes = source_blob.len(),
+            wrote_runtime_snapshot = write_runtime_snapshot,
+            "one-time legacy checkpoint recovery migration stamped a pre-typed session document"
+        );
         VerifiedCheckpointAuthority::from_session_with_serialized(
             prepared.session,
             prepared.serialized,

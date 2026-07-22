@@ -1138,6 +1138,63 @@ pub fn legacy_session_transcript_relation(
     )
 }
 
+/// One adopted legacy session: the typed migration stamp bound to the exact
+/// source bytes, the stamped document, and its serialized durable form.
+pub struct AdoptedLegacySession {
+    pub session: Session,
+    pub stamp: SessionCheckpointStamp,
+    pub serialized: Vec<u8>,
+}
+
+/// Adopt one pre-typed (legacy-unverified) session BLOB into typed checkpoint
+/// authority via a one-time recovery migration.
+///
+/// This is the shared stamping seam for every backend that holds pre-typed
+/// documents — the disk resolver, remote store implementations, and
+/// continuity-snapshot adoption — so the ordering subtleties live in exactly
+/// one place. Contract for callers:
+///
+/// - `source_blob` must be the FINAL bytes: perform any metadata repair
+///   (for example comms-name rewrites at restore) before calling, because
+///   the stamp's `Legacy` authority base takes byte custody of exactly these
+///   bytes.
+/// - `observed_generation` / `observed_checkpoint_revision` must come from
+///   the externally observed continuity cursor when one exists. `INITIAL`
+///   cursors are correct only for lineages that never minted authority
+///   (pre-typed fleets with no continuity generation floor); stamping a
+///   lower generation than the continuity row records makes the mismatch
+///   sticky, because the document then verifies and no longer re-migrates.
+/// - The blob must decode as a legacy-unverified document; typed documents
+///   are refused with a typed error, never re-stamped.
+pub fn adopt_legacy_session(
+    source_blob: &[u8],
+    observed_generation: SessionGeneration,
+    observed_checkpoint_revision: SessionCheckpointRevision,
+) -> Result<AdoptedLegacySession, SessionCheckpointError> {
+    let mut session: Session = serde_json::from_slice(source_blob)?;
+    let stamp = SessionCheckpointStamp::recovery_migration(
+        &session,
+        source_blob,
+        observed_generation,
+        observed_checkpoint_revision,
+    )?;
+    session.install_checkpoint_stamp(stamp.clone())?;
+    let serialized = serde_json::to_vec(&session)?;
+    match session.try_checkpoint_state()? {
+        SessionCheckpointState::Verified(verified) if verified == stamp => {}
+        _ => {
+            return Err(SessionCheckpointError::AuthorityBaseConflict(
+                "adopted legacy session failed post-install verification".to_string(),
+            ));
+        }
+    }
+    Ok(AdoptedLegacySession {
+        session,
+        stamp,
+        serialized,
+    })
+}
+
 /// Periodic session persistence hook.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -1742,6 +1799,42 @@ mod tests {
             legacy_session_transcript_relation(&snapshot, &divergent).expect("divergent relation"),
             LegacySessionTranscriptRelation::Divergent
         );
+    }
+
+    #[test]
+    fn adopt_legacy_session_stamps_blob_and_refuses_typed_documents() {
+        let legacy = session_with_text("legacy blob");
+        let blob = serde_json::to_vec(&legacy).expect("legacy session should serialize");
+        let adopted = adopt_legacy_session(
+            &blob,
+            SessionGeneration::INITIAL,
+            SessionCheckpointRevision::INITIAL,
+        )
+        .expect("legacy blob should adopt");
+        assert_eq!(
+            adopted.stamp.provenance(),
+            SessionCheckpointProvenance::RecoveryMigration
+        );
+        assert_eq!(adopted.stamp.generation(), SessionGeneration::INITIAL);
+        let reloaded: Session =
+            serde_json::from_slice(&adopted.serialized).expect("adopted bytes should decode");
+        assert!(matches!(
+            reloaded
+                .try_checkpoint_state()
+                .expect("adopted checkpoint state should decode"),
+            SessionCheckpointState::Verified(stamp) if stamp == adopted.stamp
+        ));
+
+        let typed_blob =
+            serde_json::to_vec(&stamped_root(&legacy)).expect("typed session should serialize");
+        assert!(matches!(
+            adopt_legacy_session(
+                &typed_blob,
+                SessionGeneration::INITIAL,
+                SessionCheckpointRevision::INITIAL,
+            ),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
     }
 
     #[test]

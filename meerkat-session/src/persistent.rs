@@ -59,9 +59,9 @@ use meerkat_core::service::{
     StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
-    LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
-    SessionArchiveRuntimeObservation, SessionDocumentEffect, SessionDocumentKey,
-    SessionDocumentMachineAuthority, TranscriptEditKind,
+    LiveSessionAuthorityKind, LiveSessionAuthorityReason, RuntimeCheckpointProjectionDisposition,
+    SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
+    SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::session_store::{
     IncrementalSessionStore, SessionHead, SessionHeadCas, TranscriptStrandId,
@@ -7279,6 +7279,43 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.publish_runtime_context_events_after_commit(id, session_snapshot)
             .await?;
 
+        // Archive is an absorbing session-document terminal. A runtime-loop
+        // teardown can legitimately arrive here after archive with the exact
+        // committed pre-archive RuntimeStore bytes: archive cancelled and
+        // retired the old checkpointer, but unregister must briefly release B
+        // so teardown recovery can finish. Recreating a fresh checkpointer
+        // gate in that window used to project the retained Active snapshot
+        // over Archived (or invoke a downstream writer whose fence had already
+        // advanced).
+        //
+        // Read the canonical durable document while B + R are held, restore
+        // its lifecycle fact into SessionDocumentMachine, and mirror only the
+        // machine-emitted projection disposition. Do this before gate creation
+        // or any SessionStore writer invocation; adapter-side stale-write
+        // suppression would hide a real split-brain writer.
+        let durable_projection_meta = self
+            .store
+            .load_meta(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let durable_terminal = durable_projection_meta
+            .as_ref()
+            .map(|meta| meerkat_core::session::try_lifecycle_terminal_from_map(&meta.metadata))
+            .transpose()
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to decode durable lifecycle terminal for runtime-checkpoint projection of session {id}: {error}"
+                )))
+            })?
+            .flatten();
+        if self
+            .resolve_runtime_checkpoint_projection_disposition(id, durable_terminal)
+            .await?
+            == RuntimeCheckpointProjectionDisposition::IgnoreArchived
+        {
+            return Ok(());
+        }
+
         let gate = self.gate_for_session(id).await;
         let guard = gate.cancelled.lock().await;
         if *guard {
@@ -7359,6 +7396,55 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             };
         }
         Ok(())
+    }
+
+    async fn resolve_runtime_checkpoint_projection_disposition(
+        &self,
+        id: &SessionId,
+        durable_terminal: Option<SessionLifecycleTerminal>,
+    ) -> Result<RuntimeCheckpointProjectionDisposition, SessionError> {
+        let lifecycle_seed = match durable_terminal {
+            // An explicit durable document terminal is canonical. Active +
+            // Retired can be the machine-owned midpoint of explicit revival,
+            // so runtime compatibility evidence must not override it.
+            Some(terminal) => terminal,
+            None if self
+                .session_archived_by_authority_with_terminal(id, None)
+                .await? =>
+            {
+                SessionLifecycleTerminal::Archived
+            }
+            None => SessionLifecycleTerminal::Active,
+        };
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let document_key = SessionDocumentKey::new(id.to_string());
+        authority
+            .recover_session_lifecycle_terminal(document_key.clone(), lifecycle_seed.into())
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected runtime-checkpoint lifecycle recovery for session {id}: {error}"
+                )))
+            })?;
+        let effects = authority
+            .resolve_runtime_checkpoint_projection(document_key)
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected runtime-checkpoint projection resolution for session {id}: {error}"
+                )))
+            })?;
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::RuntimeCheckpointProjectionResolved { disposition } => {
+                    Some(*disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no runtime-checkpoint projection disposition for session {id}"
+                )))
+            })
     }
 
     pub async fn prepare_live_system_context_boundary(
@@ -22385,6 +22471,212 @@ mod tests {
                 .delete_if_current_revision(id, expected_current_revision)
                 .await
         }
+    }
+
+    /// Downstream projection store whose writes carry a fixed owner fence.
+    /// Rotating `current_fence` models explicit identity deletion while a
+    /// retained runtime finalizer still presents its original token.
+    struct FencedArchiveProjectionStore {
+        inner: MemoryStore,
+        presented_fence: AtomicUsize,
+        current_fence: AtomicUsize,
+        projection_attempts: AtomicUsize,
+        stale_projection_attempts: AtomicUsize,
+    }
+
+    impl FencedArchiveProjectionStore {
+        fn new(fence: usize) -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                presented_fence: AtomicUsize::new(fence),
+                current_fence: AtomicUsize::new(fence),
+                projection_attempts: AtomicUsize::new(0),
+                stale_projection_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn rotate_fence(&self, fence: usize) {
+            self.current_fence.store(fence, Ordering::SeqCst);
+        }
+
+        fn projection_attempts(&self) -> usize {
+            self.projection_attempts.load(Ordering::SeqCst)
+        }
+
+        fn stale_projection_attempts(&self) -> usize {
+            self.stale_projection_attempts.load(Ordering::SeqCst)
+        }
+
+        fn authorize_projection(&self) -> Result<(), SessionStoreError> {
+            self.projection_attempts.fetch_add(1, Ordering::SeqCst);
+            let presented = self.presented_fence.load(Ordering::SeqCst);
+            let current = self.current_fence.load(Ordering::SeqCst);
+            if presented == current {
+                return Ok(());
+            }
+            self.stale_projection_attempts
+                .fetch_add(1, Ordering::SeqCst);
+            Err(SessionStoreError::Internal(format!(
+                "stale fencing token: presented {presented}, current {current}"
+            )))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FencedArchiveProjectionStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            self.authorize_projection()?;
+            self.inner.save(session).await
+        }
+
+        async fn save_transcript_rewrite(
+            &self,
+            session: &Session,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), SessionStoreError> {
+            self.authorize_projection()?;
+            self.inner.save_transcript_rewrite(session, commit).await
+        }
+
+        async fn save_authoritative_projection(
+            &self,
+            session: &Session,
+        ) -> Result<(), SessionStoreError> {
+            self.authorize_projection()?;
+            self.inner.save_authoritative_projection(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), SessionStoreError> {
+            self.authorize_projection()?;
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
+    }
+
+    /// A delayed runtime-loop finalizer may still own exact committed Active
+    /// bytes after archive has made the session document terminal. Rotating a
+    /// downstream fence at that boundary must not expose an old-fence write,
+    /// recreate a checkpointer gate, or resurrect Archived as Active.
+    #[tokio::test]
+    async fn test_archived_runtime_checkpoint_is_machine_authorized_noop_after_fence_rotation() {
+        let fenced_store = Arc::new(FencedArchiveProjectionStore::new(1));
+        let store: Arc<dyn SessionStore> = fenced_store.clone();
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+        let active = store
+            .load(&id)
+            .await
+            .expect("active projection load should succeed")
+            .expect("created session should have an active projection");
+        let retained_runtime_snapshot =
+            serde_json::to_vec(&active).expect("active runtime snapshot should serialize");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: retained_runtime_snapshot.clone(),
+                },
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("archive should commit the absorbing document terminal");
+        let archived = store
+            .load(&id)
+            .await
+            .expect("archived projection load should succeed")
+            .expect("archived projection should remain present");
+        assert!(
+            session_marks_archived(&archived),
+            "archive must commit the durable lifecycle terminal"
+        );
+        assert!(
+            service.existing_gate_for_session(&id).await.is_none(),
+            "successful archive should retire the old checkpointer gate"
+        );
+
+        let attempts_after_archive = fenced_store.projection_attempts();
+        fenced_store.rotate_fence(2);
+        service
+            .checkpoint_committed_runtime_session_snapshot(&id, &retained_runtime_snapshot)
+            .await
+            .expect("archived checkpoint disposition should be a valid no-op");
+
+        assert_eq!(
+            fenced_store.projection_attempts(),
+            attempts_after_archive,
+            "Archived must suppress the retained runtime projection before invoking SessionStore"
+        );
+        assert_eq!(
+            fenced_store.stale_projection_attempts(),
+            0,
+            "no old-fence writer may reach the downstream SessionStore after archive"
+        );
+        assert!(
+            service.existing_gate_for_session(&id).await.is_none(),
+            "the archived no-op must not recreate a checkpointer gate"
+        );
+        let still_archived = store
+            .load(&id)
+            .await
+            .expect("post-finalizer projection load should succeed")
+            .expect("archived projection should remain present");
+        assert!(
+            session_marks_archived(&still_archived),
+            "retained Active runtime bytes must not resurrect Archived"
+        );
     }
 
     /// Divergence-window regression (LUC-524 R004): a failed durable

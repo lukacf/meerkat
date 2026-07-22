@@ -218,6 +218,13 @@ pub enum RuntimeProjectionRollbackDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCheckpointProjectionDisposition {
+    #[default]
+    IgnoreArchived,
+    Project,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionDocumentLifecycle {
     #[default]
     Active,
@@ -447,6 +454,9 @@ pub enum SessionDocumentInput {
         row_continues_authority: bool,
         row_is_runtime_checkpoint: bool,
     },
+    ResolveRuntimeCheckpointProjection {
+        session_id: SessionDocumentKey,
+    },
     ResolveRuntimeSnapshotReadSource {
         session_id: SessionDocumentKey,
         store_head_extends_snapshot: bool,
@@ -573,6 +583,9 @@ pub enum SessionDocumentEffect {
     },
     RuntimeProjectionRollbackResolved {
         disposition: RuntimeProjectionRollbackDisposition,
+    },
+    RuntimeCheckpointProjectionResolved {
+        disposition: RuntimeCheckpointProjectionDisposition,
     },
     RuntimeSnapshotReadSourceResolved {
         read_from_store_head: bool,
@@ -734,6 +747,8 @@ enum SessionDocumentTransition {
     ResolveRuntimeSnapshotReadSourceSnapshot,
     ResolveRuntimeProjectionRollbackRebuild,
     ResolveRuntimeProjectionRollbackReject,
+    ResolveRuntimeCheckpointProjectionActive,
+    ResolveRuntimeCheckpointProjectionArchived,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -3211,6 +3226,48 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Active)
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRuntimeCheckpointProjectionActive);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Archived)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRuntimeCheckpointProjectionArchived,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRuntimeCheckpointProjection")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRuntimeCheckpointProjectionActive => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeCheckpointProjectionResolved {
+                                disposition: RuntimeCheckpointProjectionDisposition::Project,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeCheckpointProjectionArchived => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeCheckpointProjectionResolved {
+                                disposition: RuntimeCheckpointProjectionDisposition::IgnoreArchived,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRuntimeCheckpointProjection_transition",
+                    }),
+                }
+            }
             SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
                 session_id,
                 store_head_extends_snapshot,
@@ -3959,6 +4016,13 @@ impl SessionDocumentMachineAuthority {
             row_continues_authority,
             row_is_runtime_checkpoint,
         })
+    }
+
+    pub fn resolve_runtime_checkpoint_projection(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id })
     }
 
     pub fn resolve_runtime_snapshot_read_source(

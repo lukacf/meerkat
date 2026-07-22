@@ -5856,6 +5856,25 @@ impl MobHandle {
     }
 
     /// Retire a member, archiving its session and removing trust.
+    ///
+    /// A successful return is the terminal lifecycle barrier for work owned by
+    /// this mob incarnation. New member work has been fenced, any Mob-owned
+    /// session archive/checkpoint has completed, the exact runtime attachment
+    /// has finished unregister teardown, and the roster anchor has been
+    /// removed. A conforming persistent session service therefore performs no
+    /// later `SessionStore::save` or runtime-checkpoint projection write for
+    /// this member after `Ok(())`. This is not a drain guarantee for separate
+    /// event-log projection tasks. A host-owned adopted session is released
+    /// and unregistered without archiving the host's durable document.
+    ///
+    /// Retirement can still perform terminal persistence before it returns.
+    /// External owners must keep any write fence accepted by the configured
+    /// session store valid until this future succeeds. Once retirement has
+    /// durably admitted the member, a cleanup error retains that retirement
+    /// anchor for retry and does not grant authority to revoke the fence;
+    /// admission or start-marker failures can return before such an anchor
+    /// exists. This guarantee does not cover callers that hold and invoke the
+    /// session store independently of the mob/session runtime.
     pub async fn retire(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Retire {

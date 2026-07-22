@@ -424,6 +424,10 @@ pub enum MobMachineRuntimeInternalReason {
     SessionIngressDetachRequest,
     StartupKickoffLifecycle,
     TeardownPendingSpawnDrain,
+    /// Whole-Mob shutdown supplies raw lifecycle/residue observations for an
+    /// exact autonomous-member incarnation; MobMachine alone decides whether
+    /// shutdown must interrupt it or may skip a terminal retry anchor.
+    ShutdownLifecycleAuthority,
     RetireIdempotencyAuthority,
     SupervisorAuthority,
     TrustHandoffAuthority,
@@ -745,6 +749,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RetireAbsent,
         reason: MobMachineRuntimeInternalReason::RetireIdempotencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveAutonomousShutdownMemberAction,
+        reason: MobMachineRuntimeInternalReason::ShutdownLifecycleAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RequestPendingSessionIngressDetachForMobDestroy,

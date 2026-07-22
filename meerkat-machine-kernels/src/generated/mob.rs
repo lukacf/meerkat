@@ -569,6 +569,58 @@ impl std::fmt::Display for AgentRuntimeId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AutonomousShutdownMemberActionKind {
+    #[default]
+    #[serde(rename = "Interrupt")]
+    Interrupt,
+    #[serde(rename = "SkipTerminalRetirementAnchor")]
+    SkipTerminalRetirementAnchor,
+}
+impl AutonomousShutdownMemberActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Interrupt => "Interrupt",
+            Self::SkipTerminalRetirementAnchor => "SkipTerminalRetirementAnchor",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AutonomousShutdownMemberActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Interrupt" => Ok(Self::Interrupt),
+            "SkipTerminalRetirementAnchor" => Ok(Self::SkipTerminalRetirementAnchor),
+            other => Err(format!(
+                "invalid AutonomousShutdownMemberActionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AutonomousShutdownMemberActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AutonomousShutdownMemberActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -7485,6 +7537,18 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Shutdown {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAutonomousShutdownMemberAction {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+        pub session_has_live_actor: bool,
+        pub session_projection_visible: bool,
+        pub runtime_residue_present: bool,
+        pub archive_authority_known: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForceCancel {
         pub agent_identity: AgentIdentity,
     }
@@ -7956,6 +8020,7 @@ pub enum Input {
     SetSpawnPolicy(inputs::SetSpawnPolicy),
     ResolveSpawnPolicy(inputs::ResolveSpawnPolicy),
     Shutdown(inputs::Shutdown),
+    ResolveAutonomousShutdownMemberAction(inputs::ResolveAutonomousShutdownMemberAction),
     ForceCancel(inputs::ForceCancel),
     KickoffMarkPending(inputs::KickoffMarkPending),
     BindObjectiveOwner(inputs::BindObjectiveOwner),
@@ -8218,6 +8283,9 @@ impl Input {
             Self::SetSpawnPolicy(_) => InputKind::SetSpawnPolicy,
             Self::ResolveSpawnPolicy(_) => InputKind::ResolveSpawnPolicy,
             Self::Shutdown(_) => InputKind::Shutdown,
+            Self::ResolveAutonomousShutdownMemberAction(_) => {
+                InputKind::ResolveAutonomousShutdownMemberAction
+            }
             Self::ForceCancel(_) => InputKind::ForceCancel,
             Self::KickoffMarkPending(_) => InputKind::KickoffMarkPending,
             Self::BindObjectiveOwner(_) => InputKind::BindObjectiveOwner,
@@ -8433,6 +8501,7 @@ pub enum InputKind {
     SetSpawnPolicy,
     ResolveSpawnPolicy,
     Shutdown,
+    ResolveAutonomousShutdownMemberAction,
     ForceCancel,
     KickoffMarkPending,
     BindObjectiveOwner,
@@ -9417,6 +9486,15 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AutonomousShutdownMemberActionResolved {
+        pub action: AutonomousShutdownMemberActionKind,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnPolicyResolutionRecorded {
         pub agent_identity: AgentIdentity,
         pub revision: u64,
@@ -10015,6 +10093,7 @@ pub enum Effect {
     MemberSpawnRequired(effects::MemberSpawnRequired),
     MemberRetainRequired(effects::MemberRetainRequired),
     MemberRetireRequired(effects::MemberRetireRequired),
+    AutonomousShutdownMemberActionResolved(effects::AutonomousShutdownMemberActionResolved),
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     OwnerBridgeSessionBound(effects::OwnerBridgeSessionBound),
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
@@ -10162,6 +10241,7 @@ pub enum EffectKind {
     MemberSpawnRequired,
     MemberRetainRequired,
     MemberRetireRequired,
+    AutonomousShutdownMemberActionResolved,
     SpawnPolicyResolutionRecorded,
     OwnerBridgeSessionBound,
     RespawnTopologyRestoreResolved,
@@ -10423,6 +10503,12 @@ pub enum TransitionId {
     ClassifyMemberWaitMissingRuntimeMaterialStopped,
     ClassifyMemberWaitMissingRuntimeMaterialCompleted,
     ClassifyMemberWaitMissingRuntimeMaterialDestroyed,
+    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorRunning,
+    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorStopped,
+    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorCompleted,
+    ResolveAutonomousShutdownMemberActionInterruptRunning,
+    ResolveAutonomousShutdownMemberActionInterruptStopped,
+    ResolveAutonomousShutdownMemberActionInterruptCompleted,
     ResolveFlowDelegationEdgeAdmissionAllowedRunning,
     ResolveFlowDelegationEdgeAdmissionAllowedStopped,
     ResolveFlowDelegationEdgeAdmissionAllowedCompleted,

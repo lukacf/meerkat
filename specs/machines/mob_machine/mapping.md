@@ -129,13 +129,31 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorRunning`
+- `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorRunning`
   - anchors: `mob_actor_authority`
   - scenarios: (unclaimed)
-- `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorStopped`
+- `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorStopped`
   - anchors: `mob_actor_authority`
   - scenarios: (unclaimed)
-- `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorCompleted`
+- `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: (unclaimed)
 - `ResolveAutonomousShutdownMemberActionInterruptRunning`

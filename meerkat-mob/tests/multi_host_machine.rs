@@ -21,14 +21,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_mob::machines::mob_machine::{
-    AgentIdentity, AgentRuntimeId, ControlScope, FenceToken, FlowStepDispatchKind, Generation,
-    HostBindPhase, HostId, InputId, LiveWsEndpointUrl, MemberOperatorRejectKind,
-    MemberPeerEndpoint, MemberSessionDisposal, MobId, MobLifecycleJournalKind, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState,
-    MobPhase, MobSpawnMemberAdmissionKind, PeerAddress, PeerId, PeerName, PeerSigningKey,
-    PlacedCompletionLifecycleIntentKind, PlacedSpawnId, PrincipalId, RemoteTurnObligation,
-    RouteInstallObligation, RouteObligationKind, RunId, SessionId, SpawnExecPhase,
-    SpawnPolicyRuntimeMode, StepId, WiringEdge,
+    AgentIdentity, AgentRuntimeId, AutonomousShutdownMemberActionKind, ControlScope, FenceToken,
+    FlowStepDispatchKind, Generation, HostBindPhase, HostId, InputId, LiveWsEndpointUrl,
+    MemberOperatorRejectKind, MemberPeerEndpoint, MemberSessionDisposal, MobId,
+    MobLifecycleJournalKind, MobMachineAuthority, MobMachineEffect, MobMachineInput,
+    MobMachineMutator, MobMachineSignal, MobMachineState, MobPhase, MobSpawnMemberAdmissionKind,
+    PeerAddress, PeerId, PeerName, PeerSigningKey, PlacedCompletionLifecycleIntentKind,
+    PlacedSpawnId, PrincipalId, RemoteTurnObligation, RouteInstallObligation, RouteObligationKind,
+    RunId, SessionId, SpawnExecPhase, SpawnPolicyRuntimeMode, StepId, WiringEdge,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -3885,6 +3885,69 @@ fn remote_retire_emits_host_addressed_release_and_destroy_clears_placement() {
             .contains_key(&identity("remote"))
     );
     check_multi_host_invariants(state);
+}
+
+#[test]
+fn placed_shutdown_requires_exact_release_terminal_before_skipping_interrupt() {
+    let mut authority = MobMachineAuthority::new();
+    let host = host_id("host-placed-shutdown");
+    bind_owner_bridge(&mut authority);
+    bind_host(&mut authority, &host, 1, HostCaps::FULL);
+    let member_session = seed_remote_member(
+        &mut authority,
+        "placed-autonomous",
+        0,
+        &host,
+        SpawnPolicyRuntimeMode::AutonomousHost,
+    );
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_runtime_id: runtime_id("placed-autonomous", 0),
+            agent_identity: identity("placed-autonomous"),
+            generation: Generation(0),
+            releasing: Some(member_session.clone()),
+            session_id: Some(member_session.clone()),
+        },
+    )
+    .expect("placed retirement admitted");
+
+    let classify = |authority: &mut MobMachineAuthority, placed_release_confirmed| {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ResolveAutonomousShutdownMemberAction {
+                agent_identity: identity("placed-autonomous"),
+                agent_runtime_id: runtime_id("placed-autonomous", 0),
+                fence_token: FenceToken(1),
+                generation: Generation(0),
+                session_id: Some(member_session.clone()),
+                session_has_live_actor: false,
+                session_projection_visible: false,
+                runtime_residue_present: false,
+                archive_authority_known: false,
+                placed_release_confirmed,
+            },
+        )
+        .expect("placed shutdown action must classify")
+    };
+    let unresolved = classify(&mut authority, false);
+    assert!(unresolved.effects().iter().any(|effect| matches!(
+        effect,
+        MobMachineEffect::AutonomousShutdownMemberActionResolved {
+            action: AutonomousShutdownMemberActionKind::Interrupt,
+            ..
+        }
+    )));
+
+    let released = classify(&mut authority, true);
+    assert!(released.effects().iter().any(|effect| matches!(
+        effect,
+        MobMachineEffect::AutonomousShutdownMemberActionResolved {
+            action: AutonomousShutdownMemberActionKind::SkipTerminalRetirementAnchor,
+            ..
+        }
+    )));
 }
 
 #[test]

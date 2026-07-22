@@ -436,7 +436,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
-- `ResolveAutonomousShutdownMemberAction`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, session_has_live_actor: Bool, session_projection_visible: Bool, runtime_residue_present: Bool, archive_authority_known: Bool)
+- `ResolveAutonomousShutdownMemberAction`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, session_has_live_actor: Bool, session_projection_visible: Bool, runtime_residue_present: Bool, archive_authority_known: Bool, placed_release_confirmed: Bool)
 - `KickoffMarkPending`(member_id: AgentIdentity, objective_id: String)
 - `BindObjectiveOwner`(owner_id: AgentIdentity, objective_id: String)
 - `KickoffMarkStarting`(member_id: AgentIdentity)
@@ -1183,9 +1183,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `MemberWaitClassified`
 - To: `Destroyed`
 
-### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorRunning`
+### `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorRunning`
 - From: `Running`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
@@ -1202,9 +1202,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Running`
 
-### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorStopped`
+### `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorStopped`
 - From: `Stopped`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
@@ -1221,9 +1221,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Stopped`
 
-### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorCompleted`
+### `ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorCompleted`
 - From: `Completed`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
@@ -1240,39 +1240,141 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Completed`
 
-### `ResolveAutonomousShutdownMemberActionInterruptRunning`
+### `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorRunning`
 - From: `Running`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
   - `exact_fence`
   - `autonomous_member`
-  - `not_terminal_retry_anchor`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `sessionless_peer_only_shape`
+  - `remote_retirement_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Running`
+
+### `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorStopped`
+- From: `Stopped`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `sessionless_peer_only_shape`
+  - `remote_retirement_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Stopped`
+
+### `ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorCompleted`
+- From: `Completed`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `sessionless_peer_only_shape`
+  - `remote_retirement_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Completed`
+
+### `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorRunning`
+- From: `Running`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `placed_session_shape`
+  - `placed_release_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Running`
+
+### `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorStopped`
+- From: `Stopped`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `placed_session_shape`
+  - `placed_release_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Stopped`
+
+### `ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorCompleted`
+- From: `Completed`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `member_retiring`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `placed_session_shape`
+  - `placed_release_terminal`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Completed`
+
+### `ResolveAutonomousShutdownMemberActionInterruptRunning`
+- From: `Running`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `not_local_terminal_retry_anchor`
+  - `not_peer_only_terminal_retry_anchor`
+  - `not_placed_terminal_retry_anchor`
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Running`
 
 ### `ResolveAutonomousShutdownMemberActionInterruptStopped`
 - From: `Stopped`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
   - `exact_fence`
   - `autonomous_member`
-  - `not_terminal_retry_anchor`
+  - `not_local_terminal_retry_anchor`
+  - `not_peer_only_terminal_retry_anchor`
+  - `not_placed_terminal_retry_anchor`
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Stopped`
 
 ### `ResolveAutonomousShutdownMemberActionInterruptCompleted`
 - From: `Completed`
-- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known, placed_release_confirmed)
 - Guards:
   - `exact_runtime`
   - `exact_generation`
   - `exact_fence`
   - `autonomous_member`
-  - `not_terminal_retry_anchor`
+  - `not_local_terminal_retry_anchor`
+  - `not_peer_only_terminal_retry_anchor`
+  - `not_placed_terminal_retry_anchor`
 - Emits: `AutonomousShutdownMemberActionResolved`
 - To: `Completed`
 

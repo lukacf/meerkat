@@ -552,12 +552,19 @@ fn collect_rs_files_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>)
             let skip = rel.components().any(|component| {
                 matches!(
                     component.as_os_str().to_str(),
-                    Some("target" | ".git" | ".claude" | "node_modules" | "test-fixtures")
+                    Some("target" | "node_modules" | "test-fixtures")
                 )
             }) || path
                 .file_name()
                 .and_then(OsStr::to_str)
-                .is_some_and(|name| matches!(name, "tests" | "examples" | "benches"));
+                .is_some_and(|name| {
+                    // Hidden directories hold tool state (.git, .claude,
+                    // .codex, ...), never audited workspace source.
+                    name.starts_with('.') || matches!(name, "tests" | "examples" | "benches")
+                })
+                // A nested git checkout (agent/codex worktree parked inside
+                // the repo) is another repository's source, not ours.
+                || path.join(".git").exists();
             if !skip {
                 collect_rs_files_recursive(root, &path, files)?;
             }
@@ -3103,6 +3110,37 @@ mod tests {
         assert!(
             clean.is_empty(),
             "doc/import mentions must not flag: {clean:#?}"
+        );
+    }
+
+    #[test]
+    fn repo_walker_skips_hidden_dirs_and_nested_checkouts() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let write = |rel: &str| {
+            let path = root.path().join(rel);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+            fs::write(&path, "fn f() {}\n").expect("write source");
+        };
+        write("meerkat-core/src/agent.rs");
+        write(".codex/worktrees/stale/meerkat-core/src/agent.rs");
+        write(".claude/worktrees/agent/src/lib.rs");
+        write("wt/parked/src/lib.rs");
+        fs::create_dir_all(root.path().join("wt/parked/.git")).expect("create nested .git");
+
+        let files = collect_repo_rs_files(root.path()).expect("walk temp repo");
+        let rels = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root.path())
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rels,
+            vec!["meerkat-core/src/agent.rs".to_string()],
+            "hidden dirs and nested git checkouts must be excluded"
         );
     }
 }

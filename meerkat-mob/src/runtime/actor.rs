@@ -11069,6 +11069,7 @@ impl MobActor {
             // `MobHandle` returned from `MobBuilder`. Tools built from the
             // actor do not dial realtime endpoints.
             realtime_session_factory: None,
+            flow_target_provisioner: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 

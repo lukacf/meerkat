@@ -133,8 +133,19 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    // A batch executes as one turn, so it cannot honor multiple per-input
+    // handling modes. The machine has already admitted and ordered every
+    // input before this fold; use that admission order as the deterministic
+    // resolution rule (earliest explicit mode wins) instead of rejecting the
+    // whole batch after dequeue. Other scalar overrides remain conflict-
+    // refusing because they affect the actual LLM/tool configuration.
+    let mut batch_handling_mode = None;
     for ((_, input), semantics) in inputs.iter().zip(semantics.iter()) {
         let mut meta = for_input(input, *semantics);
+        if batch_handling_mode.is_none() {
+            batch_handling_mode = meta.handling_mode;
+        }
+        meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity);
         // Identity consensus needs a sticky conflict state across the whole
         // batch. Feeding the lossy empty result of a pairwise conflict into a
@@ -148,6 +159,7 @@ pub(crate) fn merge_batch_turn_metadata(
         }
     }
     if let Some(metadata) = acc.as_mut() {
+        metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
@@ -6990,6 +7002,51 @@ mod tests {
         assert_eq!(
             metadata.transcript_identity.objective_id,
             Some(objective_id)
+        );
+    }
+
+    #[test]
+    fn merged_turn_metadata_resolves_handling_mode_by_admission_order() {
+        let prompt = |text, handling_mode| {
+            Input::Prompt(crate::input::PromptInput::new(
+                text,
+                Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(handling_mode),
+                        ..Default::default()
+                    },
+                ),
+            ))
+        };
+        let inputs = vec![
+            (
+                InputId::new(),
+                prompt("first", meerkat_core::types::HandlingMode::Queue),
+            ),
+            (
+                InputId::new(),
+                prompt("second", meerkat_core::types::HandlingMode::Steer),
+            ),
+        ];
+        let semantics = vec![
+            crate::ingress_types::RuntimeInputSemantics {
+                boundary: RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                execution_handling_mode: None,
+                peer_response_terminal_apply_intent: None,
+                live_interrupt_required: false,
+            };
+            2
+        ];
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .expect("handling-mode disagreement must not reject an admitted batch")
+            .expect("batch carries runtime metadata");
+
+        assert_eq!(
+            metadata.handling_mode,
+            Some(meerkat_core::types::HandlingMode::Queue),
+            "the earliest admitted explicit mode deterministically owns the batch turn"
         );
     }
 

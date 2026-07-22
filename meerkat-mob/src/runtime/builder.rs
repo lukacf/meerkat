@@ -7800,6 +7800,7 @@ impl MobBuilder {
                 reachability_observations,
                 phase_watch_rx: preview_phase_rx,
                 realtime_session_factory: realtime_session_factory.clone(),
+                flow_target_provisioner: Arc::new(std::sync::RwLock::new(None)),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -9534,6 +9535,7 @@ impl MobBuilder {
                 reachability_observations: Arc::clone(&reachability_observations),
                 phase_watch_rx,
                 realtime_session_factory,
+                flow_target_provisioner: Arc::new(std::sync::RwLock::new(None)),
             };
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the

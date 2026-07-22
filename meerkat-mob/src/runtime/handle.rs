@@ -39,6 +39,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -2316,6 +2318,14 @@ impl From<AgentIdentity> for PeerTarget {
 // MobHandle
 // ---------------------------------------------------------------------------
 
+/// Embedder-owned barrier run before concrete flow target selection.
+///
+/// Identity layers use this to finish lazy member materialization before the
+/// mob actor snapshots runnable targets. The callback is late-bound because
+/// those layers attach after the base mob has started.
+pub type FlowTargetProvisioner =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), MobError>> + Send>> + Send + Sync>;
+
 /// Clone-cheap, thread-safe handle for interacting with a running mob.
 ///
 /// All mutation commands are sent through an mpsc channel to the actor.
@@ -2366,9 +2376,18 @@ pub struct MobHandle {
     /// provided (production mob paths typically wire the factory at the
     /// surface layer directly).
     pub(super) realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
+    pub(super) flow_target_provisioner: Arc<StdRwLock<Option<FlowTargetProvisioner>>>,
 }
 
 impl MobHandle {
+    /// Install or replace the embedder's pre-flow target-provisioning barrier.
+    pub fn install_flow_target_provisioner(&self, provisioner: FlowTargetProvisioner) {
+        *self
+            .flow_target_provisioner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provisioner);
+    }
+
     /// Rebind a clone of this handle onto `authority` (phase 5, ADJ-P5-10).
     ///
     /// This is the PRODUCTION principal-binding seam: local single-user
@@ -5339,6 +5358,14 @@ impl MobHandle {
     ) -> Result<RunId, MobError> {
         self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
             .await?;
+        let provisioner = self
+            .flow_target_provisioner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(provisioner) = provisioner {
+            provisioner().await?;
+        }
         self.ensure_flow_targets_provisioned(&flow_id).await?;
         match self
             .execute_machine_command(MobMachineCommand::RunFlow {

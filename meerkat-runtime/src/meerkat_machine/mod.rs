@@ -1827,6 +1827,13 @@ pub enum EnsureRuntimeExecutorAttachment {
 static MACHINE_CLEANUP_RUNTIME: OnceLock<StdMutex<Option<crate::tokio::runtime::Runtime>>> =
     OnceLock::new();
 
+// Machine cleanup can restore and reduce the same generated DSL state as the
+// host runtime. Keep its worker on the repository-wide runtime stack budget;
+// Tokio's platform default (2 MiB on the affected hosts) is not sufficient
+// for large fleet-restore authorities.
+#[cfg(not(target_arch = "wasm32"))]
+const MACHINE_CLEANUP_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// Cloneable proof that cancellation-safe machine cleanup can be dispatched.
 ///
 /// Every RAII owner with asynchronous cleanup acquires and stores this before
@@ -1887,6 +1894,7 @@ impl MachineCleanupTaskSpawner {
         let candidate = crate::tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("meerkat-machine-cleanup")
+            .thread_stack_size(MACHINE_CLEANUP_THREAD_STACK_SIZE)
             .enable_all()
             .build()
             .map_err(|error| {

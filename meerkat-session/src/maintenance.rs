@@ -8,12 +8,12 @@
 //! any code path that would materialize an agent under the maintenance
 //! fence is a bug and surfaces as one.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::mpsc;
 use async_trait::async_trait;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::RunResult;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::mpsc;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 

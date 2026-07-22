@@ -139,10 +139,7 @@ pub fn open_with(
 /// WITHOUT consulting the busy handler while concurrent creators race the
 /// conversion. Once a file is WAL the pragma is a lock-free no-op, so the
 /// retry only ever spins during the first-create race.
-fn set_wal_journal_mode(
-    conn: &Connection,
-    busy_timeout: Duration,
-) -> Result<(), SqliteStoreError> {
+fn set_wal_journal_mode(conn: &Connection, busy_timeout: Duration) -> Result<(), SqliteStoreError> {
     // Bound the retry by the connection's busy policy (with a small floor so
     // zero-timeout profiles still tolerate the momentary create race).
     let deadline = std::time::Instant::now() + busy_timeout.max(Duration::from_millis(250));

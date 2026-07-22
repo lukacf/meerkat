@@ -66,6 +66,7 @@ rust_library(
         "//meerkat-mcp:meerkat_mcp",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -118,6 +119,7 @@ rust_library(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -164,6 +166,7 @@ rust_library(
         "//meerkat:meerkat_mcp_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_skills_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -210,6 +213,7 @@ rust_library(
         "//meerkat:meerkat_mcp_agent_factory_build_test_support",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_skills_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -272,6 +276,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -337,6 +342,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -403,6 +409,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -466,6 +473,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -535,6 +543,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -600,6 +609,7 @@ rust_test(
         "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",

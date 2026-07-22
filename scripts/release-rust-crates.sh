@@ -3,6 +3,7 @@
 set -euo pipefail
 
 printf '%s\n' \
+  meerkat-sqlite \
   meerkat-machine-derive \
   meerkat-machine-dsl-core \
   meerkat-agent-build-authority \

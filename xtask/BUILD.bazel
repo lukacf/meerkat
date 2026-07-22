@@ -595,6 +595,7 @@ rust_test(
         "//meerkat-session:cargo_manifest",
         "//meerkat-session:package_runfiles",
         "//meerkat-skills:package_runfiles",
+        "//meerkat-sqlite:package_runfiles",
         "//meerkat-store:package_runfiles",
         "//meerkat-tools:package_runfiles",
         "//meerkat-web-runtime:package_runfiles",

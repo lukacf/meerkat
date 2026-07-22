@@ -21,8 +21,6 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 60_000;
-
 /// Per-store SQLite contention policy. The default tolerates the long WAL
 /// writer holds produced by large durable snapshot commits while keeping the
 /// wait bounded. Runtime/session stores may override it per instance.
@@ -35,7 +33,7 @@ pub struct SqliteConnectionOptions {
 impl Default for SqliteConnectionOptions {
     fn default() -> Self {
         Self {
-            busy_timeout: Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS),
+            busy_timeout: meerkat_sqlite::SHARED_BUSY_TIMEOUT,
         }
     }
 }
@@ -122,22 +120,60 @@ fn parse_session_id(raw: String) -> Result<SessionId, StoreError> {
     Ok(SessionId(uuid))
 }
 
+/// Open a connection under the shared Primary profile (WAL,
+/// `synchronous=FULL`, the shared busy timeout).
+///
+/// DDL-free since the storage unification: opening a connection no longer
+/// plants the session tables, so co-tenant stores (schedule, runtime) stop
+/// materializing empty session tables in their files. Callers apply their
+/// own schema domain after opening (the session store's is
+/// [`SESSION_STORE_DOMAIN`]).
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     open_connection_with_options(path, SqliteConnectionOptions::default())
 }
 
+/// [`open_connection`] with a per-store contention policy override.
 pub fn open_connection_with_options(
     path: &Path,
     options: SqliteConnectionOptions,
 ) -> Result<Connection, StoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(options.busy_timeout)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    ensure_schema(&conn)?;
+    meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            busy_timeout: Some(options.busy_timeout),
+        },
+    )
+    .map_err(StoreError::from)
+}
+
+fn migration_0001_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SESSIONS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSIONS_UPDATED_INDEX_SQL)?;
+    tx.execute_batch(CREATE_SESSION_STRAND_MESSAGES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_REWRITES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_HEADS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_HEADS_UPDATED_INDEX_SQL)?;
+    Ok(())
+}
+
+/// The session store's schema domain in the per-file migration ledger.
+pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "session-store",
+    migrations: &[meerkat_sqlite::Migration {
+        version: 1,
+        name: "base-schema",
+        apply: migration_0001_session_schema,
+    }],
+};
+
+/// Open a connection and bring the session-store schema domain up to date.
+fn open_session_connection(
+    path: &Path,
+    options: SqliteConnectionOptions,
+) -> Result<Connection, StoreError> {
+    let mut conn = open_connection_with_options(path, options)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)?;
     Ok(conn)
 }
 
@@ -692,7 +728,8 @@ impl SqliteSessionStore {
         options: SqliteConnectionOptions,
     ) -> Result<Self, StoreError> {
         let path = path.into();
-        let conn = open_connection_with_options(&path, options)?;
+        let _guard = meerkat_sqlite::OperationGuard::for_database(&path)?;
+        let conn = open_session_connection(&path, options)?;
         drop(conn);
         Ok(Self { path, options })
     }
@@ -711,8 +748,11 @@ impl SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
             let mut conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+                open_session_connection(&path, options).map_err(into_session_store_error)?;
             let tx = begin_immediate_transaction_with_options(&mut conn, options)
                 .map_err(into_session_store_error)?;
             let value = op(&tx)?;
@@ -735,8 +775,11 @@ impl SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
             let mut conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+                open_session_connection(&path, options).map_err(into_session_store_error)?;
             let tx = conn
                 .transaction()
                 .map_err(StoreError::from)
@@ -897,8 +940,10 @@ impl SessionStore for SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<Vec<SessionMeta>, SessionStoreError> {
-            let conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
             let created_after = filter.created_after.map(system_time_millis);
             let updated_after = filter.updated_after.map(system_time_millis);
 
@@ -976,8 +1021,10 @@ impl SessionStore for SqliteSessionStore {
         let options = self.options;
         let session_id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<SessionMeta>, SessionStoreError> {
-            let conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
             let mut meta = conn
                 .query_row(
                     r"

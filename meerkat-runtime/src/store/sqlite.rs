@@ -7,15 +7,12 @@ mod inner {
     use std::sync::Arc;
     #[cfg(test)]
     use std::sync::atomic::{AtomicU8, Ordering};
-    use std::time::Duration;
 
     use chrono::{DateTime, Utc};
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
     use meerkat_store::sqlite_store::{begin_immediate_transaction, open_connection};
-    use rusqlite::{
-        Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-    };
+    use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
     use serde::{Deserialize, Serialize};
 
     use crate::identifiers::LogicalRuntimeId;
@@ -92,16 +89,74 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
     receipt_json BLOB NOT NULL
 )";
 
-    fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
-        conn.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+    fn migration_0001_runtime_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
     }
 
-    fn open_runtime_connection(path: &Path) -> Result<Connection, RuntimeStoreError> {
-        let conn =
+    /// The runtime store's schema domain in the per-file migration ledger.
+    /// (Co-tenants the sessions file in the sqlite realm backend.)
+    pub const RUNTIME_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+        name: "runtime-store",
+        migrations: &[meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_runtime_schema,
+        }],
+    };
+
+    fn map_shared_sqlite_error(err: meerkat_sqlite::SqliteStoreError) -> RuntimeStoreError {
+        match err {
+            meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            } => RuntimeStoreError::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            },
+            meerkat_sqlite::SqliteStoreError::MaintenanceFenceHeld { path } => {
+                RuntimeStoreError::MaintenanceFenceHeld {
+                    path: path.display().to_string(),
+                }
+            }
+            other => RuntimeStoreError::WriteFailed(other.to_string()),
+        }
+    }
+
+    /// Per-operation connection: fence guard lives exactly as long as the
+    /// connection it admits.
+    struct RuntimeConn {
+        conn: Connection,
+        _guard: meerkat_sqlite::OperationGuard,
+    }
+
+    impl std::ops::Deref for RuntimeConn {
+        type Target = Connection;
+        fn deref(&self) -> &Connection {
+            &self.conn
+        }
+    }
+
+    impl std::ops::DerefMut for RuntimeConn {
+        fn deref_mut(&mut self) -> &mut Connection {
+            &mut self.conn
+        }
+    }
+
+    fn open_runtime_connection(path: &Path) -> Result<RuntimeConn, RuntimeStoreError> {
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let mut conn =
             open_connection(path).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-        ensure_runtime_schema(&conn)?;
-        Ok(conn)
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(RuntimeConn {
+            conn,
+            _guard: guard,
+        })
     }
 
     fn begin_runtime_transaction(
@@ -686,27 +741,19 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         path: &Path,
         apply: bool,
     ) -> Result<Connection, RuntimeStoreError> {
-        if !path.is_file() {
-            return Err(RuntimeStoreError::ReadFailed(format!(
-                "runtime database does not exist: {}",
-                path.display()
-            )));
-        }
-        let flags = if apply {
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-        } else {
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-        };
-        let conn = Connection::open_with_flags(path, flags).map_err(|error| {
+        // Maintenance profile: fail-fast zero busy timeout in both modes,
+        // never creates, never mutates pragmas on the legacy file.
+        meerkat_sqlite::open(
+            path,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: apply },
+        )
+        .map_err(|error| {
             if apply {
                 RuntimeStoreError::WriteFailed(error.to_string())
             } else {
                 RuntimeStoreError::ReadFailed(error.to_string())
             }
-        })?;
-        conn.busy_timeout(Duration::ZERO)
-            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-        Ok(conn)
+        })
     }
 
     fn apply_legacy_v0_6_34(

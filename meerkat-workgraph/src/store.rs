@@ -2,8 +2,6 @@ use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,8 +19,6 @@ use crate::types::{
 use crate::{WorkAttentionMachine, WorkGraphMachine};
 
 #[cfg(not(target_arch = "wasm32"))]
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5000;
-
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -997,7 +993,8 @@ pub struct SqliteWorkGraphStore {
 impl SqliteWorkGraphStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, WorkGraphError> {
         let store = Self { path: path.into() };
-        store.with_connection(migrate_sqlite_attention_query_columns)?;
+        // Probe open: `with_connection` brings the schema domain up to date.
+        store.with_connection(|_| Ok(()))?;
         Ok(store)
     }
 
@@ -1047,19 +1044,14 @@ impl SqliteWorkGraphStore {
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T, WorkGraphError>,
     ) -> Result<T, WorkGraphError> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        }
-        let mut conn =
-            Connection::open(&self.path).map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+        // Per-operation fence guard: lives exactly as long as the connection
+        // it admits.
+        let _guard = meerkat_sqlite::OperationGuard::for_database(&self.path)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
+        let mut conn = meerkat_sqlite::open(&self.path, meerkat_sqlite::ConnectionProfile::PRIMARY)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        conn.pragma_update(None, "synchronous", "FULL")
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        init_sqlite_schema(&conn)?;
         f(&mut conn)
     }
 }
@@ -1490,8 +1482,32 @@ impl WorkGraphStore for SqliteWorkGraphStore {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn init_sqlite_schema(conn: &Connection) -> Result<(), WorkGraphError> {
-    conn.execute_batch(
+/// The workgraph store's schema domain in the per-file migration ledger.
+///
+/// Migration 0001 is the base DDL; 0002 lifts the historical attention
+/// query-column upgrade (previously re-run on every open, idempotent only
+/// via "duplicate column name" error matching) into a once-per-file,
+/// transaction-wrapped migration with a `table_info` guard.
+#[cfg(not(target_arch = "wasm32"))]
+pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "workgraph",
+    migrations: &[
+        meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_workgraph_schema,
+        },
+        meerkat_sqlite::Migration {
+            version: 2,
+            name: "attention-query-columns",
+            apply: migration_0002_attention_query_columns,
+        },
+    ],
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+fn migration_0001_workgraph_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
         r"
         CREATE TABLE IF NOT EXISTS workgraph_items (
             realm_id TEXT NOT NULL,
@@ -1540,7 +1556,6 @@ fn init_sqlite_schema(conn: &Connection) -> Result<(), WorkGraphError> {
             ON workgraph_events (realm_id, namespace, seq);
         ",
     )
-    .map_err(|err| WorkGraphError::Store(err.to_string()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1712,51 +1727,48 @@ fn update_attention_tx(
     .map_err(|err| WorkGraphError::Store(err.to_string()))
 }
 
-/// One-time, idempotent migration adding the indexed `status` / `target_key`
-/// query columns to `workgraph_attention` (SQL filter pushdown + the
+/// One-time migration adding the indexed `status` / `target_key` query
+/// columns to `workgraph_attention` (SQL filter pushdown + the
 /// active-binding-per-target occupancy guard) and backfilling existing rows.
-/// Rows written by OLDER binaries after this migration carry NULL columns:
-/// every reader of these columns is NULL-tolerant and falls back to decoding
-/// `attention_json`, so mixed-version shared stores stay correct.
+/// Runs once per file under the schema ledger; the `table_info` probe keeps
+/// it convergent on files of any vintage (fresh files get the columns via
+/// this migration too — the 0001 DDL deliberately stays at its historical
+/// shape). Rows written by OLDER binaries after this migration carry NULL
+/// columns: every reader of these columns is NULL-tolerant and falls back to
+/// decoding `attention_json`, so mixed-version shared stores stay correct.
 #[cfg(not(target_arch = "wasm32"))]
-fn migrate_sqlite_attention_query_columns(conn: &mut Connection) -> Result<(), WorkGraphError> {
-    for alter in [
-        "ALTER TABLE workgraph_attention ADD COLUMN status TEXT",
-        "ALTER TABLE workgraph_attention ADD COLUMN target_key TEXT",
-    ] {
-        if let Err(err) = conn.execute(alter, []) {
-            let message = err.to_string();
-            if !message.contains("duplicate column name") {
-                return Err(WorkGraphError::Store(message));
-            }
-        }
+fn migration_0002_attention_query_columns(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let existing: Vec<String> = tx
+        .prepare("PRAGMA table_info(workgraph_attention)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?;
+    if !existing.iter().any(|name| name == "status") {
+        tx.execute("ALTER TABLE workgraph_attention ADD COLUMN status TEXT", [])?;
+    }
+    if !existing.iter().any(|name| name == "target_key") {
+        tx.execute(
+            "ALTER TABLE workgraph_attention ADD COLUMN target_key TEXT",
+            [],
+        )?;
     }
     let backfill: Vec<(String, String, String, WorkAttentionBinding)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT realm_id, namespace, binding_id, attention_json
-                   FROM workgraph_attention
-                  WHERE status IS NULL OR target_key IS NULL",
-            )
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row_json::<WorkAttentionBinding>(row, 3)?,
-                ))
-            })
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        let mut backfill = Vec::new();
-        for row in rows {
-            backfill.push(row.map_err(|err| WorkGraphError::Store(err.to_string()))?);
-        }
-        backfill
+        let mut stmt = tx.prepare(
+            "SELECT realm_id, namespace, binding_id, attention_json
+               FROM workgraph_attention
+              WHERE status IS NULL OR target_key IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row_json::<WorkAttentionBinding>(row, 3)?,
+            ))
+        })?;
+        rows.collect::<Result<_, _>>()?
     };
     for (realm_id, namespace, binding_id, binding) in backfill {
-        conn.execute(
+        tx.execute(
             "UPDATE workgraph_attention
                 SET status = ?4, target_key = ?5
               WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3",
@@ -1767,15 +1779,13 @@ fn migrate_sqlite_attention_query_columns(conn: &mut Connection) -> Result<(), W
                 binding.status.status_key(),
                 binding.target.target_key(),
             ],
-        )
-        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        )?;
     }
-    conn.execute(
+    tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_workgraph_attention_scope_status
              ON workgraph_attention (realm_id, namespace, status, target_key)",
         [],
-    )
-    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    )?;
     Ok(())
 }
 

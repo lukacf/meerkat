@@ -29,48 +29,40 @@ filegroup(
 
 
 rust_library(
-    name = "meerkat_memory",
-    aliases = aliases(package_name = "meerkat-memory"),
-    crate_name = "meerkat_memory",
+    name = "meerkat_sqlite",
+    aliases = aliases(package_name = "meerkat-sqlite"),
+    crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "skills/memory-retrieval/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.3",
-        "CARGO_MANIFEST_DIR": "./meerkat-memory",
+        "CARGO_MANIFEST_DIR": "./meerkat-sqlite",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "meerkat-sqlite",
         proc_macro = True,
     ),
-    deps = [
-        "//meerkat-capabilities:meerkat_capabilities",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
-        "//meerkat-skills:meerkat_skills",
-        "//meerkat-sqlite:meerkat_sqlite",
-    ] + all_crate_deps(
-        package_name = "meerkat-memory",
+    deps = all_crate_deps(
+        package_name = "meerkat-sqlite",
         normal = True,
     ),
 )
 
 rust_library(
-    name = "meerkat_memory_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-memory"),
-    crate_name = "meerkat_memory",
+    name = "meerkat_sqlite_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-sqlite"),
+    crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "skills/memory-retrieval/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -78,46 +70,39 @@ rust_library(
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.3",
-        "CARGO_MANIFEST_DIR": "./meerkat-memory",
+        "CARGO_MANIFEST_DIR": "./meerkat-sqlite",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "meerkat-sqlite",
         proc_macro = True,
     ),
-    deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_skills_agent_factory_build",
-        "//meerkat:meerkat_sqlite_agent_factory_build",
-    ] + all_crate_deps(
-        package_name = "meerkat-memory",
+    deps = all_crate_deps(
+        package_name = "meerkat-sqlite",
         normal = True,
     ),
 )
 
 rust_test(
-    name = "meerkat_memory_unit_test",
+    name = "meerkat_sqlite_unit_test",
     aliases = aliases(
-        package_name = "meerkat-memory",
+        package_name = "meerkat-sqlite",
         normal = True,
         normal_dev = True,
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "meerkat_memory",
+    crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "skills/memory-retrieval/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.3",
-        "CARGO_MANIFEST_DIR": "./meerkat-memory",
+        "CARGO_MANIFEST_DIR": "./meerkat-sqlite",
     },
     tags = [
         "fast",
@@ -131,18 +116,12 @@ rust_test(
         "RUST_MIN_STACK": "16777216",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "meerkat-sqlite",
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    deps = [
-        "//meerkat-capabilities:meerkat_capabilities",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
-        "//meerkat-skills:meerkat_skills",
-        "//meerkat-sqlite:meerkat_sqlite",
-    ] + all_crate_deps(
-        package_name = "meerkat-memory",
+    deps = all_crate_deps(
+        package_name = "meerkat-sqlite",
         normal = True,
         normal_dev = True,
     ),
@@ -151,6 +130,6 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
-        ":meerkat_memory_unit_test",
+        ":meerkat_sqlite_unit_test",
     ],
 )

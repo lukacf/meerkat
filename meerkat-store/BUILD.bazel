@@ -55,6 +55,7 @@ rust_library(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-store",
         normal = True,
@@ -90,6 +91,7 @@ rust_library(
     deps = [
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-store",
         normal = True,
@@ -141,6 +143,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-store",
         normal = True,
@@ -193,6 +196,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -246,6 +250,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -299,6 +304,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -352,6 +358,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -405,6 +412,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -458,6 +466,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -511,6 +520,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",

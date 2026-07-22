@@ -29,6 +29,7 @@ async-trait = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 meerkat-machine-derive = { workspace = true }
 rusqlite = { workspace = true, optional = true }
+meerkat-sqlite = { workspace = true, optional = true }
 tracing = { workspace = true }
 meerkat-store = { workspace = true, optional = true }
 
@@ -42,7 +43,7 @@ tokio_with_wasm = { workspace = true }
 [features]
 default = []
 live = ["dep:meerkat-live"]
-sqlite-store = ["dep:rusqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
+sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
 test-support = []
 
 [dev-dependencies]

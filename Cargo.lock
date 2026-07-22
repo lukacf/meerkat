@@ -3355,6 +3355,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
+ "meerkat-sqlite",
  "rusqlite",
  "schemars 1.2.1",
  "serde",
@@ -3389,6 +3390,7 @@ dependencies = [
  "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",
+ "meerkat-sqlite",
  "meerkat-store",
  "notify",
  "reqwest 0.12.28",
@@ -3606,6 +3608,7 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
+ "meerkat-sqlite",
  "meerkat-store",
  "rusqlite",
  "serde",
@@ -3692,6 +3695,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-sqlite"
+version = "0.8.3"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "meerkat-store"
 version = "0.8.3"
 dependencies = [
@@ -3701,6 +3713,7 @@ dependencies = [
  "fs4 0.12.0",
  "meerkat-core",
  "meerkat-schedule",
+ "meerkat-sqlite",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3735,6 +3748,7 @@ dependencies = [
  "meerkat-mcp",
  "meerkat-runtime",
  "meerkat-skills",
+ "meerkat-sqlite",
  "nix 0.29.0",
  "parking_lot",
  "rusqlite",
@@ -3801,6 +3815,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-machine-schema",
  "meerkat-skills",
+ "meerkat-sqlite",
  "rusqlite",
  "schemars 1.2.1",
  "serde",

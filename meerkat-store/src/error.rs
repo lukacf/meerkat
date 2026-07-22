@@ -70,6 +70,50 @@ pub enum StoreError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("invalid realm id slug in persisted manifest: '{0}'")]
     InvalidRealmSlug(String),
+
+    /// The file's schema ledger records a version newer than this binary
+    /// supports: a newer binary migrated the file and this one must refuse
+    /// it (typed, health-visible refusal — never a crash loop).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "schema for domain '{domain}' is from the future: file has version {found}, \
+         this binary supports up to {supported}"
+    )]
+    SchemaFromTheFuture {
+        domain: String,
+        found: i64,
+        supported: i64,
+    },
+
+    /// The exclusive maintenance fence is held for this database; storage is
+    /// under offline maintenance.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("maintenance fence is held for '{path}'; storage is under offline maintenance")]
+    MaintenanceFenceHeld { path: std::path::PathBuf },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
+    fn from(err: meerkat_sqlite::SqliteStoreError) -> Self {
+        use meerkat_sqlite::SqliteStoreError as E;
+        match err {
+            E::Io(io) => StoreError::Io(io),
+            E::Sqlite(sql) => StoreError::Sqlite(sql),
+            E::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            } => StoreError::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            },
+            E::MaintenanceFenceHeld { path } => StoreError::MaintenanceFenceHeld { path },
+            other @ (E::MigrationFailed { .. }
+            | E::InvalidMigrationList { .. }
+            | E::OpenRefused { .. }) => StoreError::Internal(other.to_string()),
+        }
+    }
 }
 
 impl StoreError {

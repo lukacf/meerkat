@@ -11576,6 +11576,30 @@ async fn test_mob_shutdown() {
 }
 
 #[tokio::test]
+async fn test_mob_shutdown_interrupts_active_autonomous_member() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("w-active-autonomous-shutdown");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn active autonomous member");
+    let baseline_interrupts = service.interrupt_call_count();
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown must classify the active autonomous member as interruptible");
+
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert!(
+        service.interrupt_call_count() > baseline_interrupts,
+        "shutdown must realize the MobMachine Interrupt action for an active autonomous member"
+    );
+}
+
+#[tokio::test]
 async fn test_lifecycle_state_machine_enforcement() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     assert_eq!(handle.status().await.unwrap(), MobState::Running);
@@ -34046,6 +34070,205 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
 }
 
 #[cfg(feature = "runtime-adapter")]
+struct FencedRetirementSessionStore {
+    inner: Arc<MemoryStore>,
+    presented_fence: AtomicU64,
+    current_fence: AtomicU64,
+    projection_attempts: AtomicU64,
+    stale_projection_attempts: AtomicU64,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl FencedRetirementSessionStore {
+    fn new(fence: u64) -> Self {
+        Self {
+            inner: Arc::new(MemoryStore::new()),
+            presented_fence: AtomicU64::new(fence),
+            current_fence: AtomicU64::new(fence),
+            projection_attempts: AtomicU64::new(0),
+            stale_projection_attempts: AtomicU64::new(0),
+        }
+    }
+
+    fn rotate_fence(&self, fence: u64) {
+        self.current_fence.store(fence, Ordering::SeqCst);
+    }
+
+    fn projection_attempts(&self) -> u64 {
+        self.projection_attempts.load(Ordering::SeqCst)
+    }
+
+    fn stale_projection_attempts(&self) -> u64 {
+        self.stale_projection_attempts.load(Ordering::SeqCst)
+    }
+
+    fn authorize_projection(&self) -> Result<(), meerkat_store::SessionStoreError> {
+        self.projection_attempts.fetch_add(1, Ordering::SeqCst);
+        let presented = self.presented_fence.load(Ordering::SeqCst);
+        let current = self.current_fence.load(Ordering::SeqCst);
+        if presented == current {
+            return Ok(());
+        }
+        self.stale_projection_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        Err(meerkat_store::SessionStoreError::Internal(format!(
+            "stale fencing token: presented {presented}, current {current}"
+        )))
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[async_trait]
+impl SessionStore for FencedRetirementSessionStore {
+    async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+        self.authorize_projection()?;
+        SessionStore::save(self.inner.as_ref(), session).await
+    }
+
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+    ) -> Result<(), meerkat_store::SessionStoreError> {
+        self.authorize_projection()?;
+        SessionStore::save_transcript_rewrite(self.inner.as_ref(), session, commit).await
+    }
+
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), meerkat_store::SessionStoreError> {
+        self.authorize_projection()?;
+        SessionStore::save_authoritative_projection(self.inner.as_ref(), session).await
+    }
+
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), meerkat_store::SessionStoreError> {
+        self.authorize_projection()?;
+        SessionStore::save_authoritative_projection_if_current_revision(
+            self.inner.as_ref(),
+            session,
+            expected_current_revision,
+        )
+        .await
+    }
+
+    async fn load(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+        SessionStore::load(self.inner.as_ref(), id).await
+    }
+
+    async fn list(
+        &self,
+        filter: meerkat_core::session_store::SessionFilter,
+    ) -> Result<Vec<meerkat_core::session::SessionMeta>, meerkat_store::SessionStoreError> {
+        SessionStore::list(self.inner.as_ref(), filter).await
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+        SessionStore::delete(self.inner.as_ref(), id).await
+    }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, meerkat_store::SessionStoreError> {
+        SessionStore::delete_if_current_revision(self.inner.as_ref(), id, expected_current_revision)
+            .await
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
+    let fenced_store = Arc::new(FencedRetirementSessionStore::new(1));
+    let session_store: Arc<dyn SessionStore> = fenced_store.clone();
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let adapter = service
+        .runtime_adapter()
+        .expect("persistent service runtime adapter");
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create persistent mob");
+    let identity = AgentIdentity::from("w-fenced-retirement");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn fenced persistent member");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed fenced member");
+
+    handle
+        .retire(identity.clone())
+        .await
+        .expect("retire while the admitted write fence remains valid");
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read roster after fenced retirement")
+            .is_none(),
+        "successful retirement must remove the roster anchor"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "successful retirement must unregister the exact runtime session"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live session after fenced retirement"),
+        "successful retirement must remove the live session actor"
+    );
+
+    let attempts_at_retirement = fenced_store.projection_attempts();
+    assert!(
+        attempts_at_retirement > 0,
+        "the fenced fixture must observe session creation/archive projections"
+    );
+    fenced_store.rotate_fence(2);
+    handle
+        .shutdown()
+        .await
+        .expect("whole-mob shutdown after fenced retirement");
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        fenced_store.projection_attempts(),
+        attempts_at_retirement,
+        "no SessionStore projection may begin after successful retirement"
+    );
+    assert_eq!(
+        fenced_store.stale_projection_attempts(),
+        0,
+        "rotating authority after successful retirement must observe no old-fence writer"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_incarnation() {
     let memory_store = Arc::new(MemoryStore::new());
@@ -48350,6 +48573,137 @@ async fn test_retire_final_event_append_failure_survives_cold_restart() {
             .count(),
         1,
         "cold retry must publish exactly one final event"
+    );
+}
+
+/// A terminal journal failure retains a Retiring roster row after the session
+/// archive and exact runtime unregister have already completed. For an
+/// autonomous member that row is a publication retry anchor, not a live host;
+/// the MobMachine shutdown disposition must not interrupt the absent runtime.
+#[tokio::test]
+async fn test_shutdown_skips_interrupt_for_archived_autonomous_retirement_anchor() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::with_events(events.clone()))
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let identity = AgentIdentity::from("w-autonomous-retire-anchor");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous worker");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous worker");
+    events.fail_appends_for("MemberRetired").await;
+
+    handle
+        .retire(identity.clone())
+        .await
+        .expect_err("final retirement event append should be fault-injected");
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read retained retirement anchor")
+            .is_some(),
+        "failed terminal publication must retain the exact roster retry anchor"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "archive completion must unregister the runtime before terminal publication"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "archive completion must remove the live session before terminal publication"
+    );
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown must treat an archived Retiring row as a journal retry anchor");
+}
+
+/// Host-owned session disposal unregisters the Mob-attached runtime without
+/// archiving or deleting the host's durable session document. If terminal
+/// `MemberRetired` publication then fails, shutdown must recognize the
+/// retained Retiring row as a publication retry anchor instead of trying to
+/// interrupt the already-unregistered runtime.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_shutdown_skips_interrupt_for_host_owned_runtime_release_anchor() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::with_events(events.clone()))
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let identity = AgentIdentity::from("w-host-owned-retire-anchor");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous worker");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous worker");
+
+    service.set_archive_authority_unknown(&session_id).await;
+    service.set_archive_not_found(&session_id).await;
+    events.fail_appends_for("MemberRetired").await;
+
+    handle
+        .retire(identity.clone())
+        .await
+        .expect_err("final retirement event append should be fault-injected");
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read retained host-owned retirement anchor")
+            .is_some(),
+        "failed terminal publication must retain the exact roster retry anchor"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "host-owned disposal must unregister the Mob-attached runtime before terminal publication"
+    );
+    assert!(
+        service
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load host-owned durable session")
+            .is_some(),
+        "host-owned disposal must retain the host's durable session projection"
+    );
+    assert!(
+        !service
+            .live_session_actor_registered(&session_id)
+            .await
+            .expect("observe actor registry after host-owned disposal"),
+        "host-owned runtime release must remove the Mob-attached live actor"
+    );
+    let baseline_interrupts = service.interrupt_call_count();
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown must treat a host-owned released Retiring row as a journal retry anchor");
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "shutdown must not interrupt an already-released host-owned runtime"
     );
 }
 

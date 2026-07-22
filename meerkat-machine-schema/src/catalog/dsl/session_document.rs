@@ -441,6 +441,19 @@ pub enum SessionArchiveRuntimeObservation {
     QuiescentTerminal,
 }
 
+/// Machine-owned disposition for realizing a committed runtime checkpoint as
+/// a compatibility session-document projection.
+///
+/// `Archived` is absorbing: a delayed runtime-loop teardown checkpoint may
+/// still carry valid committed runtime bytes, but it must not overwrite the
+/// terminal document or invoke its downstream projection writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCheckpointProjectionDisposition {
+    #[default]
+    IgnoreArchived,
+    Project,
+}
+
 // ---------------------------------------------------------------------------
 // Transcript-edit region (folded from the meerkat-session persistent.rs
 // `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
@@ -814,6 +827,15 @@ machine! {
             },
 
             // -----------------------------------------------------------
+            // Runtime-checkpoint projection region. A runtime-loop teardown
+            // can finish a committed checkpoint after archive has made the
+            // session-document lifecycle terminal. THIS machine owns whether
+            // the compatibility projection is still enabled; the shell only
+            // realizes Project or the absorbing IgnoreArchived no-op.
+            // -----------------------------------------------------------
+            ResolveRuntimeCheckpointProjection { session_id: SessionId },
+
+            // -----------------------------------------------------------
             // Runtime-snapshot read-source region. On load, the committed
             // runtime session snapshot normally leads the durable store head
             // (it commits at the run boundary). A torn shutdown can freeze it
@@ -1037,6 +1059,13 @@ machine! {
             // so it is emitted on both branches.
             RuntimeProjectionRollbackResolved {
                 disposition: Enum<RuntimeProjectionRollbackDisposition>,
+            },
+
+            // Runtime-checkpoint compatibility-projection disposition.
+            // Archived is an absorbing no-op: no downstream SessionStore
+            // projection writer may be invoked for retained runtime bytes.
+            RuntimeCheckpointProjectionResolved {
+                disposition: Enum<RuntimeCheckpointProjectionDisposition>,
             },
 
             // Runtime-snapshot read-source verdict. The shell mirrors
@@ -1309,6 +1338,7 @@ machine! {
         disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
         disposition RuntimeProjectionRollbackResolved => local seam NoOwnerRealization,
+        disposition RuntimeCheckpointProjectionResolved => local seam NoOwnerRealization,
         disposition RuntimeSnapshotReadSourceResolved => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
@@ -3799,6 +3829,41 @@ machine! {
             to Ready
             emit RuntimeProjectionRollbackResolved {
                 disposition: RuntimeProjectionRollbackDisposition::RejectDivergent
+            }
+        }
+
+        // ===============================================================
+        // Runtime-checkpoint projection region. Total over the canonical
+        // lifecycle-terminal state: Active projects, while Archived is an
+        // absorbing no-op even when a delayed teardown still holds valid
+        // committed runtime checkpoint bytes.
+        // ===============================================================
+
+        transition ResolveRuntimeCheckpointProjectionActive {
+            on input ResolveRuntimeCheckpointProjection { session_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Active
+            }
+            update {}
+            to Ready
+            emit RuntimeCheckpointProjectionResolved {
+                disposition: RuntimeCheckpointProjectionDisposition::Project
+            }
+        }
+
+        transition ResolveRuntimeCheckpointProjectionArchived {
+            on input ResolveRuntimeCheckpointProjection { session_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Archived
+            }
+            update {}
+            to Ready
+            emit RuntimeCheckpointProjectionResolved {
+                disposition: RuntimeCheckpointProjectionDisposition::IgnoreArchived
             }
         }
 

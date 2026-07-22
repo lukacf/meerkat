@@ -319,6 +319,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeProjectionRollbackReject`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeCheckpointProjectionActive`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCheckpointProjectionArchived`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
 - `ApplyPendingToolResults`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
@@ -431,6 +437,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `RuntimeProjectionRollbackResolved`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeCheckpointProjectionResolved`
+  - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `RuntimeSnapshotReadSourceResolved`
   - anchors: (unclaimed)

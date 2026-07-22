@@ -4086,6 +4086,7 @@ async fn collect_live_observations_until_output_settles(
 
 fn observation_is_output(text: &str) -> bool {
     text.contains("\"assistant_text_delta\"")
+        || text.contains("\"assistant_transcript_delta\"")
         || text.contains("\"assistant_audio_chunk\"")
         || text.contains("\"turn_completed\"")
 }
@@ -4203,7 +4204,11 @@ async fn settle_live_turn_after_input(
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
     if prior_capture.saw_turn_completed {
-        return Ok(LiveObservationCapture::default());
+        // `TurnCompleted` is a reliable control observation, not a media
+        // drain fence. Live adapters may still have lower-priority audio
+        // queued behind it, so consume trailing frames before asserting on
+        // the completed turn.
+        return drain_live_observations_until_idle(reader, timeout_secs).await;
     }
     let output_already_started = !prior_capture.output_text.is_empty()
         || !prior_capture.output_audio_pcm.is_empty()
@@ -4227,6 +4232,7 @@ async fn settle_live_turn_after_input(
             collect_live_observations_until_turn_completed(reader, timeout_secs).await?,
         );
     }
+    capture.merge_from(drain_live_observations_until_idle(reader, timeout_secs).await?);
     Ok(capture)
 }
 

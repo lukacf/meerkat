@@ -436,6 +436,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
+- `ResolveAutonomousShutdownMemberAction`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, session_has_live_actor: Bool, session_projection_visible: Bool, runtime_residue_present: Bool, archive_authority_known: Bool)
 - `KickoffMarkPending`(member_id: AgentIdentity, objective_id: String)
 - `BindObjectiveOwner`(owner_id: AgentIdentity, objective_id: String)
 - `KickoffMarkStarting`(member_id: AgentIdentity)
@@ -615,6 +616,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberSpawnRequired`(agent_identity: AgentIdentity)
 - `MemberRetainRequired`(agent_identity: AgentIdentity)
 - `MemberRetireRequired`(agent_identity: AgentIdentity)
+- `AutonomousShutdownMemberActionResolved`(action: AutonomousShutdownMemberActionKind, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `OwnerBridgeSessionBound`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
@@ -1180,6 +1182,99 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_material_missing`
 - Emits: `MemberWaitClassified`
 - To: `Destroyed`
+
+### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorRunning`
+- From: `Running`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `retirement_session_present`
+  - `retirement_session_exact`
+  - `retirement_session_binding_absent_or_exact`
+  - `member_retiring`
+  - `runtime_not_live`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `member_disposal_complete`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Running`
+
+### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorStopped`
+- From: `Stopped`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `retirement_session_present`
+  - `retirement_session_exact`
+  - `retirement_session_binding_absent_or_exact`
+  - `member_retiring`
+  - `runtime_not_live`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `member_disposal_complete`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Stopped`
+
+### `ResolveAutonomousShutdownMemberActionTerminalRetryAnchorCompleted`
+- From: `Completed`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `retirement_session_present`
+  - `retirement_session_exact`
+  - `retirement_session_binding_absent_or_exact`
+  - `member_retiring`
+  - `runtime_not_live`
+  - `session_ingress_detach_closed`
+  - `kickoff_quiesced`
+  - `member_disposal_complete`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Completed`
+
+### `ResolveAutonomousShutdownMemberActionInterruptRunning`
+- From: `Running`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `not_terminal_retry_anchor`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Running`
+
+### `ResolveAutonomousShutdownMemberActionInterruptStopped`
+- From: `Stopped`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `not_terminal_retry_anchor`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Stopped`
+
+### `ResolveAutonomousShutdownMemberActionInterruptCompleted`
+- From: `Completed`
+- On: `ResolveAutonomousShutdownMemberAction`(agent_identity, agent_runtime_id, fence_token, generation, session_id, session_has_live_actor, session_projection_visible, runtime_residue_present, archive_authority_known)
+- Guards:
+  - `exact_runtime`
+  - `exact_generation`
+  - `exact_fence`
+  - `autonomous_member`
+  - `not_terminal_retry_anchor`
+- Emits: `AutonomousShutdownMemberActionResolved`
+- To: `Completed`
 
 ### `ResolveFlowDelegationEdgeAdmissionAllowedRunning`
 - From: `Running`
@@ -13076,7 +13171,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
-- `mob_actor_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, recover durable incarnations, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff pending/replay and resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `mob_actor_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, recover durable incarnations, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, classify exact autonomous shutdown interruption versus terminal retirement anchors, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff pending/replay and resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)

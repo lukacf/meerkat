@@ -917,6 +917,58 @@ impl std::fmt::Display for ResumeSelfHostedSelection {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeCheckpointProjectionDisposition {
+    #[default]
+    #[serde(rename = "IgnoreArchived")]
+    IgnoreArchived,
+    #[serde(rename = "Project")]
+    Project,
+}
+impl RuntimeCheckpointProjectionDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::IgnoreArchived => "IgnoreArchived",
+            Self::Project => "Project",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCheckpointProjectionDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "IgnoreArchived" => Ok(Self::IgnoreArchived),
+            "Project" => Ok(Self::Project),
+            other => Err(format!(
+                "invalid RuntimeCheckpointProjectionDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCheckpointProjectionDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCheckpointProjectionDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeProjectionRollbackDisposition {
     #[default]
     #[serde(rename = "RejectDivergent")]
@@ -1794,6 +1846,10 @@ pub mod inputs {
         pub row_is_runtime_checkpoint: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeCheckpointProjection {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeSnapshotReadSource {
         pub session_id: SessionId,
         pub store_head_extends_snapshot: bool,
@@ -1866,6 +1922,7 @@ pub enum Input {
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
     ResolveRuntimeProjectionRollback(inputs::ResolveRuntimeProjectionRollback),
+    ResolveRuntimeCheckpointProjection(inputs::ResolveRuntimeCheckpointProjection),
     ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
@@ -1942,6 +1999,9 @@ impl Input {
             Self::ResolveRuntimeProjectionRollback(_) => {
                 InputKind::ResolveRuntimeProjectionRollback
             }
+            Self::ResolveRuntimeCheckpointProjection(_) => {
+                InputKind::ResolveRuntimeCheckpointProjection
+            }
             Self::ResolveRuntimeSnapshotReadSource(_) => {
                 InputKind::ResolveRuntimeSnapshotReadSource
             }
@@ -1991,6 +2051,7 @@ pub enum InputKind {
     ClassifyLiveSessionAuthority,
     RecoverSessionFromStore,
     ResolveRuntimeProjectionRollback,
+    ResolveRuntimeCheckpointProjection,
     ResolveRuntimeSnapshotReadSource,
     ApplyPendingToolResults,
     TranscriptEdit,
@@ -2128,6 +2189,10 @@ pub mod effects {
         pub disposition: RuntimeProjectionRollbackDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeCheckpointProjectionResolved {
+        pub disposition: RuntimeCheckpointProjectionDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeSnapshotReadSourceResolved {
         pub read_from_store_head: bool,
     }
@@ -2188,6 +2253,7 @@ pub enum Effect {
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
     RuntimeProjectionRollbackResolved(effects::RuntimeProjectionRollbackResolved),
+    RuntimeCheckpointProjectionResolved(effects::RuntimeCheckpointProjectionResolved),
     RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
@@ -2226,6 +2292,7 @@ pub enum EffectKind {
     LiveSessionAuthorityClassified,
     SessionStoreRecoverySourceResolved,
     RuntimeProjectionRollbackResolved,
+    RuntimeCheckpointProjectionResolved,
     RuntimeSnapshotReadSourceResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
@@ -2336,6 +2403,8 @@ pub enum TransitionId {
     ResolveRuntimeSnapshotReadSourceSnapshot,
     ResolveRuntimeProjectionRollbackRebuild,
     ResolveRuntimeProjectionRollbackReject,
+    ResolveRuntimeCheckpointProjectionActive,
+    ResolveRuntimeCheckpointProjectionArchived,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

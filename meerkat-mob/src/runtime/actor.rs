@@ -13576,6 +13576,112 @@ impl MobActor {
         Ok(())
     }
 
+    async fn autonomous_shutdown_member_should_interrupt(
+        &mut self,
+        entry: &RosterEntry,
+    ) -> Result<bool, MobError> {
+        let session_id = entry.member_ref.bridge_session_id().cloned();
+        let (
+            session_has_live_actor,
+            session_projection_visible,
+            runtime_residue_present,
+            archive_authority_known,
+        ) = match session_id.as_ref() {
+            Some(session_id) => {
+                let session_has_live_actor = self
+                    .session_service
+                    .live_session_actor_registered(session_id)
+                    .await?;
+                let session_projection_visible = self
+                    .session_service
+                    .load_persisted_session(session_id)
+                    .await?
+                    .is_some();
+                #[cfg(feature = "runtime-adapter")]
+                    let runtime_residue_present = match self.runtime_adapter.as_ref() {
+                        Some(adapter) => adapter
+                            .archive_runtime_residue_present(session_id)
+                            .await
+                            .map_err(|error| {
+                                MobError::Internal(format!(
+                                    "autonomous shutdown runtime-residue observation failed for '{session_id}': {error}"
+                                ))
+                            })?,
+                        None => false,
+                    };
+                #[cfg(not(feature = "runtime-adapter"))]
+                let runtime_residue_present = false;
+                let archive_authority_known = self
+                    .session_service
+                    .session_known_to_archive_authority(session_id)
+                    .await?;
+                (
+                    session_has_live_actor,
+                    session_projection_visible,
+                    runtime_residue_present,
+                    archive_authority_known,
+                )
+            }
+            None => (false, false, false, false),
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
+        let dsl_generation = mob_dsl::Generation::from_domain(entry.generation);
+        let dsl_session_id = session_id.as_ref().map(mob_dsl::SessionId::from_domain);
+        let transition = self.apply_dsl_input_collect_transition(
+            mob_dsl::MobMachineInput::ResolveAutonomousShutdownMemberAction {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: dsl_fence_token,
+                generation: dsl_generation,
+                session_id: dsl_session_id.clone(),
+                session_has_live_actor,
+                session_projection_visible,
+                runtime_residue_present,
+                archive_authority_known,
+            },
+            "resolve_autonomous_shutdown_member_action",
+        )?;
+        let mut resolved = transition
+            .effects()
+            .iter()
+            .filter_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::AutonomousShutdownMemberActionResolved {
+                    action,
+                    agent_identity,
+                    agent_runtime_id,
+                    fence_token,
+                    generation,
+                    session_id,
+                } if agent_identity == &dsl_identity
+                    && agent_runtime_id == &dsl_runtime_id
+                    && fence_token == &dsl_fence_token
+                    && generation == &dsl_generation
+                    && session_id == &dsl_session_id =>
+                {
+                    Some(*action)
+                }
+                _ => None,
+            });
+        let action = resolved.next().ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine returned no autonomous shutdown action for '{}'",
+                entry.agent_identity
+            ))
+        })?;
+        if resolved.next().is_some() {
+            return Err(MobError::Internal(format!(
+                "MobMachine returned multiple autonomous shutdown actions for '{}'",
+                entry.agent_identity
+            )));
+        }
+        Ok(matches!(
+            action,
+            mob_dsl::AutonomousShutdownMemberActionKind::Interrupt
+        ))
+    }
+
     async fn stop_all_autonomous_members(&mut self) -> Result<(), MobError> {
         let entries = {
             let roster = self.roster.read().await;
@@ -13585,6 +13691,25 @@ impl MobActor {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        // Physical roster retention outlives archive when the terminal
+        // MemberRetired journal append fails. Feed raw carrier observations to
+        // MobMachine and mirror its exact-incarnation action; the actor does
+        // not infer whether a row is live or a publication-only retry anchor.
+        let mut interruptible_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if self
+                .autonomous_shutdown_member_should_interrupt(&entry)
+                .await?
+            {
+                interruptible_entries.push(entry);
+            } else {
+                self.autonomous_stop_interrupts
+                    .remove(&entry.agent_identity);
+                self.autonomous_stop_interrupted
+                    .remove(&entry.agent_identity);
+            }
+        }
+        let entries = interruptible_entries;
         if entries.is_empty() {
             self.autonomous_stop_interrupts.clear();
             self.autonomous_stop_interrupted.clear();

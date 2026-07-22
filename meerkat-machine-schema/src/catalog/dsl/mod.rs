@@ -749,6 +749,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &["RejectDivergent", "RebuildToAuthority"],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeCheckpointProjectionDisposition",
+                &["IgnoreArchived", "Project"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveSessionAuthorityReason",
                 &[
                     "StoredArchived",
@@ -3276,6 +3280,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
+                "AutonomousShutdownMemberActionKind",
+                &["Interrupt", "SkipTerminalRetirementAnchor"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MemberWaitClassificationKind",
                 &["RuntimeMaterialPresent", "MissingRuntimeMaterial"],
             ),
@@ -3583,6 +3591,7 @@ runtime_internal_inputs!(
         ClassifyFlowRunPublicResult,
         BindOwnerBridgeSession,
         ClassifyMemberWait,
+        ResolveAutonomousShutdownMemberAction,
         // Sampled by the actor as part of `MemberStatus`; the transition owns
         // the durable progress/health projection but is not independently
         // callable from a public surface.

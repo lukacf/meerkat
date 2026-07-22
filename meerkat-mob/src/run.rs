@@ -675,6 +675,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::BindOwnerBridgeSession { .. }
             | mob_dsl::MobMachineInput::BindObjectiveOwner { .. }
             | mob_dsl::MobMachineInput::Shutdown
+            | mob_dsl::MobMachineInput::ResolveAutonomousShutdownMemberAction { .. }
             | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
             | mob_dsl::MobMachineInput::ConcludeObjective { .. }
@@ -1966,6 +1967,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
             | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. }
             | mob_dsl::MobMachineInput::ObserveMemberProgress { .. }
+            | mob_dsl::MobMachineInput::ResolveAutonomousShutdownMemberAction { .. }
             | mob_dsl::MobMachineInput::BindObjectiveOwner { .. }
             | mob_dsl::MobMachineInput::ConcludeObjective { .. } => {
                 return Err(MobError::Internal(format!(

@@ -745,6 +745,17 @@ pub enum MobMemberState {
     Retiring,
 }
 
+/// Machine-owned shutdown action for one exact autonomous member
+/// incarnation. The fail-closed default keeps interruption enabled; skipping
+/// is reserved for a machine-proven terminal retirement retry anchor after
+/// either Mob-owned archive or host-owned runtime release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AutonomousShutdownMemberActionKind {
+    #[default]
+    Interrupt,
+    SkipTerminalRetirementAnchor,
+}
+
 /// Typed public wait-admission result for member waits. MobMachine emits this
 /// class before wait surfaces decide whether an absent runtime-material
 /// snapshot is a hard failure.

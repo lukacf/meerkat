@@ -551,8 +551,15 @@ pub trait MobSessionService:
     }
 
     /// Acquire the stable session mutation boundary shared by runtime turns,
-    /// direct turns, and non-turn durable writers. Ephemeral/custom services
-    /// without such a boundary retain the no-op default.
+    /// direct turns, and non-turn durable writers. The latter includes archive
+    /// projection and abnormal/exit teardown recovery, not only ordinary turn
+    /// finalization.
+    ///
+    /// This guard serializes one admitted mutation interval. It does not close
+    /// admission, drain future work, or permanently revoke writers; callers
+    /// that need terminal quiescence must await the owning lifecycle operation.
+    /// Ephemeral/custom services without such a boundary retain the no-op
+    /// default.
     async fn acquire_runtime_turn_finalization_guard(
         &self,
         _session_id: &SessionId,

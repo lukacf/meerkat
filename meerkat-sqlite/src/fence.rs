@@ -27,11 +27,37 @@
 //! profile is the fence *holder's* profile; maintenance work runs under the
 //! exclusive fence and does not take shared guards.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::SqliteStoreError;
+
+/// Lock paths exclusively held BY THIS PROCESS.
+///
+/// Holder self-admission: the maintenance verb holds the exclusive fence
+/// while reusing production store code paths in-process (bulk checkpoint
+/// adoption runs through the ordinary, CAS-hardened store machinery).
+/// Those operations must pass their own fence — and an OS-level shared
+/// re-lock from the same process would deadlock against the held exclusive
+/// lock — so guard acquisition consults this registry first.
+fn held_exclusive_locks() -> &'static Mutex<HashSet<PathBuf>> {
+    static REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn registry_key(lock_path: &Path) -> PathBuf {
+    std::fs::canonicalize(lock_path).unwrap_or_else(|_| lock_path.to_path_buf())
+}
+
+fn process_holds_exclusive(lock_path: &Path) -> bool {
+    held_exclusive_locks()
+        .lock()
+        .map(|held| held.contains(&registry_key(lock_path)))
+        .unwrap_or(false)
+}
 
 /// Suffix appended to a database file name to form its fence lock file.
 pub const FENCE_LOCK_SUFFIX: &str = "mfence";
@@ -75,6 +101,10 @@ impl OperationGuard {
             return Ok(Self { _lock: None });
         }
         let lock_path = fence_lock_path(db_path);
+        if process_holds_exclusive(&lock_path) {
+            // Fence-holder self-admission (see `held_exclusive_locks`).
+            return Ok(Self { _lock: None });
+        }
         let Some(file) = open_lock_file(&lock_path) else {
             return Ok(Self { _lock: None });
         };
@@ -112,10 +142,15 @@ impl ExclusiveFence {
             .truncate(false)
             .open(&lock_path)?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(Self {
-                _lock: file,
-                lock_path,
-            })),
+            Ok(()) => {
+                if let Ok(mut held) = held_exclusive_locks().lock() {
+                    held.insert(registry_key(&lock_path));
+                }
+                Ok(Some(Self {
+                    _lock: file,
+                    lock_path,
+                }))
+            }
             Err(err) if is_would_block(&err) => Ok(None),
             Err(err) => Err(SqliteStoreError::Io(std::io::Error::other(err))),
         }
@@ -144,6 +179,14 @@ impl ExclusiveFence {
     }
 }
 
+impl Drop for ExclusiveFence {
+    fn drop(&mut self) {
+        if let Ok(mut held) = held_exclusive_locks().lock() {
+            held.remove(&registry_key(&self.lock_path));
+        }
+    }
+}
+
 fn is_would_block(err: &std::fs::TryLockError) -> bool {
     matches!(err, std::fs::TryLockError::WouldBlock)
 }
@@ -162,15 +205,24 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_fence_blocks_operations_typed() {
+    fn exclusive_fence_blocks_foreign_operations_typed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("db.sqlite3");
-        let fence = ExclusiveFence::try_acquire(&db)
-            .expect("io")
-            .expect("acquired");
-        let err = OperationGuard::for_database(&db).expect_err("fence must block ops");
+        // Simulate ANOTHER process holding the exclusive fence: a raw
+        // exclusive lock on the fence file without the holder registry entry
+        // (the registry is what self-admits the in-process holder).
+        let lock_path = fence_lock_path(&db);
+        let foreign = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        foreign.try_lock().expect("foreign exclusive lock");
+        let err = OperationGuard::for_database(&db).expect_err("fence must block foreign ops");
         assert!(matches!(err, SqliteStoreError::MaintenanceFenceHeld { .. }));
-        drop(fence);
+        drop(foreign);
         OperationGuard::for_database(&db).expect("released after drop");
     }
 
@@ -191,6 +243,27 @@ mod tests {
         drop(guard);
         let fence = handle.join().expect("thread");
         assert!(fence.lock_path().ends_with("db.sqlite3.mfence"));
+    }
+
+    #[test]
+    fn fence_holder_operations_self_admit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("db.sqlite3");
+        let fence = ExclusiveFence::try_acquire(&db)
+            .expect("io")
+            .expect("acquired");
+        // The holder process's own store operations pass their guards while
+        // the fence is held (bulk maintenance reuses production store code).
+        let guard = OperationGuard::for_database(&db).expect("holder self-admission");
+        drop(guard);
+        drop(fence);
+        // After release, ordinary shared guards work as usual...
+        OperationGuard::for_database(&db).expect("released");
+        // ...and a second process-side exclusive acquisition still excludes.
+        let fence = ExclusiveFence::try_acquire(&db)
+            .expect("io")
+            .expect("reacquired");
+        drop(fence);
     }
 
     #[test]

@@ -980,6 +980,20 @@ async fn load_verified_runtime_checkpoint_authority(
 /// The legacy variant retains the exact loaded bytes: the migration stamp's
 /// authority base takes byte custody of the observed source BLOB, so custody
 /// must bind to what the store actually held, never a re-serialization.
+/// Outcome of [`PersistentSessionService::adopt_legacy_checkpoints`].
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LegacyCheckpointAdoptionReport {
+    /// Session-store rows enumerated.
+    pub scanned: usize,
+    /// Rows already carrying verified checkpoint authority (no-ops).
+    pub already_verified: usize,
+    /// Rows adopted by this sweep (any migration disposition).
+    pub adopted: usize,
+    /// Per-session refusals (divergent pairs, invalid evidence) — reported,
+    /// never synthesized around.
+    pub refused: Vec<(meerkat_core::SessionId, String)>,
+}
+
 enum CommittedCheckpointCopy {
     Absent,
     Verified(VerifiedCheckpointAuthority),
@@ -7201,6 +7215,77 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// the machine-owned one-time recovery migration
     /// (`migrate_legacy_checkpoint_authority`) stamps the observed
     /// conversation and this resolver returns the migrated authority.
+    /// Bulk, offline form of the machine-owned legacy-checkpoint adoption
+    /// (`rkat storage migrate` case 4).
+    ///
+    /// Enumerates every session-store row and drives the SAME migration the
+    /// committed-authority resolver performs lazily (dispositions, CAS-
+    /// hardened writes, and idempotence included), so operators can take the
+    /// adoption cost out of resume/certification windows. Divergent pairs
+    /// refuse per session and are reported rather than aborting the sweep.
+    ///
+    /// Scope note: rows discoverable through `SessionStore::list` are the
+    /// sweep universe; a legacy runtime snapshot with no store row is not
+    /// enumerable through public store traits and continues to heal lazily
+    /// at its first authority touch.
+    ///
+    /// Callers run this under the exclusive maintenance fence; the fence's
+    /// holder self-admission lets these production store paths pass their
+    /// per-operation guards in-process.
+    pub async fn adopt_legacy_checkpoints(
+        &self,
+    ) -> Result<LegacyCheckpointAdoptionReport, SessionError> {
+        const ROLE: &str = "bulk legacy checkpoint adoption";
+        let metas = self
+            .store
+            .list(meerkat_core::session_store::SessionFilter::default())
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let mut report = LegacyCheckpointAdoptionReport::default();
+        for meta in metas {
+            report.scanned += 1;
+            let id = meta.id;
+            // Full loads, not index metadata: the census must not trust
+            // possibly-defaulted list metadata (JSONL index rows).
+            let store_session = self
+                .store
+                .load(&id)
+                .await
+                .map_err(|error| SessionError::Store(Box::new(error)))?;
+            let runtime_copy =
+                load_runtime_checkpoint_copy(self.runtime_store.as_ref(), &id, ROLE).await?;
+            let store_row_legacy = match store_session.as_ref() {
+                Some(row) => match row.try_checkpoint_state() {
+                    Ok(state) => matches!(
+                        state,
+                        meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+                    ),
+                    Err(error) => {
+                        report.refused.push((
+                            id,
+                            format!("session-store checkpoint evidence is invalid: {error}"),
+                        ));
+                        continue;
+                    }
+                },
+                None => false,
+            };
+            let runtime_legacy = matches!(runtime_copy, CommittedCheckpointCopy::Legacy { .. });
+            if !store_row_legacy && !runtime_legacy {
+                report.already_verified += 1;
+                continue;
+            }
+            match self
+                .migrate_legacy_checkpoint_authority(&id, runtime_copy, store_session, ROLE)
+                .await
+            {
+                Ok(_) => report.adopted += 1,
+                Err(error) => report.refused.push((id, error.to_string())),
+            }
+        }
+        Ok(report)
+    }
+
     async fn load_committed_checkpoint_authority(
         &self,
         id: &SessionId,

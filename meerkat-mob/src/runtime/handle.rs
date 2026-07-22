@@ -5358,6 +5358,12 @@ impl MobHandle {
     ) -> Result<RunId, MobError> {
         self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
             .await?;
+        // Definition membership is immutable for the lifetime of this handle.
+        // Reject an unknown flow before invoking an embedder-owned provisioner:
+        // that barrier may materialize agents or allocate external resources.
+        if !self.definition.flows.contains_key(&flow_id) {
+            return Err(MobError::FlowNotFound(flow_id));
+        }
         let provisioner = self
             .flow_target_provisioner
             .read()

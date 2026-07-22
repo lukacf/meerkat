@@ -17836,6 +17836,29 @@ async fn test_stopped_unknown_flow_run_flow_is_rejected_by_machine_admission() {
     );
 }
 
+#[tokio::test]
+async fn test_unknown_flow_does_not_invoke_target_provisioner() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    let provision_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&provision_calls);
+    handle.install_flow_target_provisioner(Arc::new(move || {
+        observed_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Ok(()) })
+    }));
+
+    let result = handle
+        .run_flow(FlowId::from("missing-flow"), serde_json::json!({}))
+        .await;
+
+    assert!(matches!(result, Err(MobError::FlowNotFound(_))));
+    assert_eq!(
+        provision_calls.load(Ordering::Relaxed),
+        0,
+        "unknown flow ids must fail before side-effecting target provisioning"
+    );
+}
+
 fn mob_command_arm_source<'a>(source: &'a str, command: &str) -> &'a str {
     let marker = format!("                MobCommand::{command}");
     let start = source

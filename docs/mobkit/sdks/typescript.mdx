@@ -1,0 +1,209 @@
+---
+title: "TypeScript SDK"
+description: "TypeScript SDK for MobKit with type-safe contracts, parity tests, and ESM/CommonJS support."
+icon: "js"
+---
+
+The TypeScript SDK (`@rkat/mobkit-sdk`) provides type-safe access to the MobKit JSON-RPC gateway from Node.js.
+
+## Installation
+
+```bash
+npm install @rkat/mobkit-sdk
+```
+
+## Quick start
+
+```typescript
+import { MobKit, memory } from "@rkat/mobkit-sdk";
+
+const rt = await MobKit.builder()
+  .mob("config/mob.toml")
+  .memory(memory.localJson())
+  .persistentState(".mobkit/state")
+  .consoleConfig("config/console.toml")
+  .gateway("./target/debug/rpc_gateway")
+  .build();
+
+const handle = rt.mobHandle();
+const status = await handle.status();
+console.log("Running:", status.running);
+
+const results = await handle.memoryQuery({
+  entity: "identity:ops",
+  topic: "deployment",
+  store: "knowledge_graph",
+});
+
+const evaluation = await handle.schedulingEvaluate([
+  {
+    schedule_id: "daily-report",
+    interval: "0 9 * * *",
+    timezone: "Europe/Stockholm",
+    jitter_ms: 0,
+    enabled: true,
+  },
+], Date.now());
+```
+
+For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
+
+## Type definitions
+
+The SDK exports TypeScript interfaces matching the Rust contracts:
+
+```typescript
+interface ModuleConfig {
+  id: string;
+  command: string;
+  args: string[];
+  restart_policy: "never" | "on_failure" | "always";
+}
+
+interface EventEnvelope<T> {
+  event_id: string;
+  source: string;
+  timestamp_ms: number;
+  event: T;
+}
+
+interface UnifiedEvent {
+  kind: "agent" | "module";
+  agentId?: string;
+  eventType?: string;
+  module?: string;
+  payload?: unknown;
+}
+
+interface ScheduleDefinition {
+  schedule_id: string;
+  interval: string;
+  timezone: string;
+  jitter_ms: number;
+  enabled: boolean;
+}
+```
+
+## Module support
+
+The SDK supports both ESM and CommonJS:
+
+```typescript
+// ESM
+import { MobKit } from "@rkat/mobkit-sdk";
+
+// CommonJS
+const { MobKit } = require("@rkat/mobkit-sdk");
+```
+
+### Cross-module identity check
+
+Because dual CJS+ESM packaging, vitest module isolation, and
+hoisted-vs-nested monorepos can ship two distinct `RpcError`
+constructors in the same process, **prefer the structural type guards
+over `instanceof`**:
+
+```typescript
+import { isRpcError, isMobEventsStaleError } from "@rkat/mobkit-sdk";
+
+try {
+  await handle.queryMobEvents({ afterSeq: cursor });
+} catch (err) {
+  if (isMobEventsStaleError(err)) {
+    // err.afterCursor, err.latestCursor available
+  } else if (isRpcError(err)) {
+    console.error(`RPC ${err.method} failed: ${err.code}`);
+  } else {
+    throw err;
+  }
+}
+```
+
+## Structural mob events + flow runs
+
+Both APIs return the full meerkat ledger projection:
+
+```typescript
+import {
+  MobEventsStaleError,
+  MOB_EVENTS_STALE_CURSOR_CODE,
+} from "@rkat/mobkit-sdk";
+
+const events = await handle.queryMobEvents({
+  eventTypes: ["flow_started", "flow_completed"],
+  mobId: "home",
+});
+for (const e of events) {
+  console.log(e.cursor, e.kind, e.runId, e.data);
+}
+
+// MobStructuralEvent.cursor is the meerkat ledger cursor — durable
+// across mobkit restarts on persistent_state builds. Resume by
+// passing the highest-seen cursor as afterSeq.
+try {
+  const more = await handle.queryMobEvents({ afterSeq: lastCursor });
+} catch (err) {
+  if (err instanceof MobEventsStaleError) {
+    // Rewind to err.latestCursor and reconnect.
+  }
+}
+
+// Flow runs with the full ledger projection
+const runs = await handle.listRuns(); // or handle.listRuns("flow-id")
+for (const run of runs) {
+  console.log(run.runId, run.status, run.stepLedger.length);
+}
+```
+
+## Mobpack authoring
+
+`MobHandle` wraps the full Flow Editor authoring surface (`mobkit/mobpacks/*`) with typed methods: `mobpackTemplates`, `mobpackCatalogs`, `mobpackValidate`, `mobpackSource`, `mobpackExport`, `mobpackImport`, `mobpackList`, `mobpackGet`, `mobpackCreate`, `mobpackSave`, `mobpackDelete`, `mobpackUndo`, `mobpackRedo`, `mobpackApplyOperation`, `mobpackDeployCommand`, and `mobpackDeploy`.
+
+```typescript
+// Create a draft from the blank template, validate, export
+const draft = await handle.mobpackCreate({ template: "blank", name: "support-bot" });
+const document = draft.row.document;
+
+const validation = await handle.mobpackValidate(document);
+console.log(validation.ok, validation.displayRows.length);
+
+const pack = await handle.mobpackExport(document);
+const archive = Buffer.from(pack.contentBase64, "base64"); // pack.filename, pack.mediaType
+```
+
+`mobpackDeploy(document, true)` sends `execute: true`, which writes the archive and runs `rkat mob run` on the host — gated by the surface's advertised `authoring_capabilities` and, on ABAC-enforced runtimes, the caller's `mobpack.deploy` grant. See the [Flow Editor guide](/mobkit/guides/flow-editor).
+
+## Rust parity notes
+
+The TypeScript SDK targets the JSON-RPC gateway. Rust also exposes lower-level native builder options for in-process embedding; those remain Rust-native and are not mirrored one-for-one in the gateway SDKs.
+
+External identity providers are all-or-nothing: configure `continuityStore()`, `leaseProvider()`, and `scratchDir()` together. The SDK sends the corresponding init flags to Rust, and provider callbacks use Rust's wire shape (`result` tags and `ttl`). `LeaseProvider.renewLeases(...)` is atomic from the caller's perspective: a rejected promise means no input grant was changed, while every returned `renewed` or `lost` result is already committed for that identity. Providers must not commit a replacement grant and then reject.
+Continuity stores should treat `checkpoint_version` as monotonic per identity and continuity generation. A live session rebind changes `session_id` without resetting the version; only destructive reset advances `generation` and starts the version stream over.
+
+Gateway memory config accepts `{ backend: "local_json" }` with an optional `healthCheckEndpoint` (`memory.localJson(...)`); the legacy Elephant `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
+
+The builder forwards `consoleConfig(path)` as `runtime_options.console_config_path`, which lets the bundled console consume the same `console_config` contract projected by `/console/experience`. Use `consoleAuthRequired(false)` only for explicit local demos.
+
+## HTTP transport timeout
+
+`createJsonRpcHttpTransport` defaults to a 60-second timeout (via
+`AbortController`) so a server that accepts but never replies cannot
+hang the caller's `await` forever. Override per-call:
+
+```typescript
+import { createJsonRpcHttpTransport } from "@rkat/mobkit-sdk";
+
+const transport = createJsonRpcHttpTransport(endpoint, {
+  timeoutMs: 5_000,
+});
+```
+
+## Contract parity
+
+The TypeScript SDK includes parity tests that validate type definitions against the Rust core. This ensures the SDK stays in sync with the runtime API across releases.
+
+## See also
+
+- [JSON-RPC API](/mobkit/api/rpc) -- full method reference
+- [Rust SDK](/mobkit/sdks/rust) -- primary Rust interface
+- [Python SDK](/mobkit/sdks/python) -- Python equivalent

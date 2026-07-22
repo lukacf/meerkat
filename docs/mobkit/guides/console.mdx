@@ -1,0 +1,488 @@
+---
+title: "Console"
+description: "Embedded MobKit console with configurable branding, grouped roster, chat workspace, timeline replay, signals, logs, and operator controls."
+icon: "desktop"
+---
+
+MobKit ships a web-based admin console embedded directly in the Rust gateway binary. The console provides real-time visibility into agents, conversations, events, logs, approvals, and recovery actions. The stock shell is built from shared `@console-core` and `@console-components` packages, while app-specific policy stays in runtime config and host code.
+
+## Accessing the console
+
+Once the runtime is serving HTTP, open the console at:
+
+```
+http://localhost:8080/console
+```
+
+The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, with no external CDN or build step at deployment time.
+
+For development with instant hot-reload:
+
+```bash
+cd console
+npm run dev    # starts Vite at http://localhost:5199 with proxy to gateway
+```
+
+## Runtime contract
+
+The bundled console uses a small set of stable protocol surfaces:
+
+| Surface | Purpose |
+|---------|---------|
+| `GET /console/experience` | Initial runtime snapshot, affordances, topology, health, and `console_config`. |
+| `GET /console/modules` | Loaded module summary. |
+| `GET /console/identities` | Identity-first list and inspection summary. |
+| `GET /console/timeline` | Replayable console frames for initial load and older-history paging. |
+| `GET /console/timeline/stream` | Bounded replay followed by live timeline frames. |
+| `GET /console/identity/{identity}/stream` | Identity-filtered timeline stream convenience route. |
+| `POST /console/rpc` | JSON-RPC 2.0 endpoint for console commands. |
+| `POST /console/rpc/multipart` | Multipart JSON-RPC for image send/upload. |
+| `GET /blobs/{blob_id}` | Blob/image retrieval for rendered media. |
+
+The console contract version is `0.5.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.5.0.json`. The runtime JSON-RPC contract is separately versioned by `MOBKIT_CONTRACT_VERSION`.
+
+## Layout
+
+The console uses a configurable workbench layout built on the shared `ConsoleWorkbench` component:
+
+```
+┌─────────────┬──────────────────────────┬────────────────┐
+│  Sidebar    │  Dock (chat panels)      │  Activity Rail │
+│  (agents)   │  ┌────┐ ┌────┐          │  (events)      │
+│             │  │tab1│ │tab2│  +        │                │
+│  + Spawn    │  ├────┴─┴────┴──────────┤│  Events        │
+│  ↻ Reconcile│  │                      ││  • text_delta  │
+│             │  │   Conversation        ││  • run_started │
+│  Agents + ≡ │  │                      ││  • ...         │
+│  ┌ Domain 3 │  │   [Message Billing]  ││                │
+│  │ Billing  │  │   ↑                  ││                │
+│  │ Delivery │  │                      ││                │
+│  │ Support  │  │  To: Billing  lead   ││                │
+│  ├ Internal │  └──────────────────────┘│                │
+│  │ Gate     │                          │                │
+│  └ Coord. 2 │                          │                │
+│    Router   │                          │                │
+│    Triage   │                          │                │
+└─────────────┴──────────────────────────┴────────────────┘
+```
+
+### Sidebar - controls and roster
+
+The left column is navigation. It can show stock controls such as topology, roster, logs, health, and approvals, plus app-defined buttons. Clicking an agent opens chat; details and profile-style data belong in roster surfaces.
+
+Agents can be grouped by configured selectors. The default useful pattern is labels first, then structural fallbacks:
+
+```toml
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.realm"]
+section_order = ["Personal", "Initiatives", "Internal"]
+fallback_group = "Agents"
+fallback_subgroup = "Other"
+default_pinned_agent_ids = ["identity:ops-lead"]
+collapse_single_subgroup = true
+```
+
+Each agent row shows:
+- Agent display name and member ID
+- Status badge (active, running, idle)
+- Pin action; pinned agents persist in local storage after the first user interaction
+
+Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
+
+### Dock — Chat panels
+
+The center area is a multi-panel tabbed workspace. Each panel contains a `ConversationPane` with a `ConsoleComposer`.
+
+**Tab strip** at the top:
+- Click a tab to switch panels
+- `+` to create a new empty tab
+- `×` to close a tab
+
+**Split panels** — click the split controls (← → ↑ ↓, visible on hover) to divide a panel. This lets you chat with multiple agents side-by-side.
+
+**Composer** at the bottom of each panel:
+- Textarea with "Message {agent}..." placeholder
+- Send button (↑) — also supports Enter to send, Shift+Enter for newline
+- Footer shows: target agent, member ID, profile, and status
+
+### Signals rail - event feed
+
+The right column shows user-meaningful signals: requests, assistant replies, peer messages, image events, relevant tool activity, and alert levels. Low-level transport envelopes, scaffold prompts, raw checksum tokens, and raw tool metadata are filtered out before reaching the user-facing view.
+
+## Agent grouping
+
+Agents are grouped in the sidebar by `console_config.agent_list`. Selectors support `labels.<key>`, `label:<key>`, raw label keys, and direct fields such as `group`, `subgroup`, `role`, `kind`, `identity`, `member_id`, and `agent_id`.
+
+Prefer mob member labels for domain-specific grouping:
+
+```rust
+use std::collections::BTreeMap;
+
+fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+SpawnMemberSpec::new(ProfileName::from("lead"), MeerkatId::from("domain:billing"))
+    .with_labels(labels(&[
+        ("display_name", "Billing"),
+        ("console_group", "Domain"),
+        ("org", "Payments"),
+    ]));
+```
+
+### Well-known labels
+
+| Label | Purpose |
+|-------|---------|
+| `display_name` | Human-readable name shown in the sidebar (overrides member_id) |
+| `console_group` | Recommended domain grouping selector for the stock console |
+| `group` | Legacy/sidebar group fallback |
+| `org` / `realm` | Common subgroup selectors |
+| `addressable` | Set `"false"` to hide send-message actions for internal agents |
+| `singleton` | Set `"true"` to prevent agent retirement |
+
+## Console configuration
+
+The stock console can be shaped by `config/console.toml` in the conventional workspace layout. `mobkit_gateway` loads that file automatically; `rpc_gateway` accepts `runtime_options.console_config_path`, and the TypeScript builder exposes `.consoleConfig("config/console.toml")`.
+
+The parsed config is projected through `GET /console/experience` as `console_config`.
+
+```toml
+title = "OB3"
+
+[brand]
+label = "Open Brain"
+logo_url = "/assets/ob3.svg"
+logo_alt = "OB3"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "prod"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+initial_agent = "identity:ops-lead"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "critical"
+empty_text = "No meaningful signals yet."
+
+[[rail.filter_presets]]
+id = "critical"
+label = "Critical"
+alert_levels = ["critical"]
+
+[sidebar]
+visible_controls = ["topology", "roster", "logs", "health"]
+hidden_controls = []
+
+[[sidebar.buttons]]
+id = "ob3-board"
+label = "OB3 Board"
+href = "https://example.test/ob3"
+target = "_blank"
+icon_name = "external-link"
+
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.realm"]
+section_order = ["Personal", "Initiatives", "Internal"]
+fallback_group = "Agents"
+fallback_subgroup = "Other"
+default_pinned_agent_ids = ["identity:ops-lead"]
+collapse_single_subgroup = true
+
+[[agent_list.badges]]
+id = "org"
+label = "Org"
+field = "labels.org"
+tone = "info"
+
+[[agent_list.sections]]
+name = "Initiatives"
+collapsed = false
+empty_title = "No initiatives"
+empty_text = "Create one in Linear."
+
+[actions]
+inspect_label = "Profile"
+chat_label = "Open chat"
+send_label = "Send to agent"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset"
+show_reset = false
+
+[realms.ob3]
+title = "OB3"
+
+[realms.ob3.agent_list]
+subgroup_by = ["labels.org"]
+```
+
+Keep this config view-level. It should decide presentation, ordering, visibility, labels, defaults, and links. It should not decide runtime authorization, routing, or whether an agent exists.
+
+## CSS customization
+
+The console uses the shared `@console-components` stylesheet with `--cc-*` CSS custom properties. Override these on a wrapper element with `data-cc-theme="dark"` (or `"light"`).
+
+### Key tokens
+
+| Token | Default | Purpose |
+|-------|---------|---------|
+| `--cc-workbench-sidebar-width` | `260px` | Sidebar column width |
+| `--cc-workbench-activity-width` | `280px` | Activity rail column width |
+| `--cc-sidebar-safe-top` | `8px` | Top padding in the sidebar |
+| `--cc-sidebar-pad-left` | `14px` | Left padding in the sidebar |
+| `--cc-sidebar-pad-right` | `14px` | Right padding in the sidebar |
+| `--cc-content-width` | `768px` | Max width for conversation content |
+| `--cc-composer-width` | `784px` | Max width for the composer |
+| `--cc-window-scale` | `1` | DPI scaling factor |
+
+### Theming
+
+The console defaults to dark mode. Set `data-cc-theme="light"` on the root to switch to light mode. The shared components respond to both themes.
+
+The sidebar uses a panel surface background (`rgba(21, 22, 27, 0.82)`) to differentiate from the main area. The body background is `#131316`.
+
+## Resizable panels
+
+Both the sidebar and activity rail are resizable by dragging the edge dividers:
+
+- **Sidebar divider** — drag the right edge of the sidebar (min 180px, max 420px)
+- **Activity rail divider** — drag the left edge of the activity rail (min 200px, max 480px)
+
+The resizers use pointer capture for smooth dragging and show a subtle glow line on hover.
+
+## Experience metadata
+
+The console fetches its initial state from `GET /console/experience`, which returns agent data, topology, and health information. The key field for the sidebar is `agent_sidebar.live_snapshot.agents`:
+
+```typescript
+interface ConsoleAgent {
+  agent_id: string;
+  member_id: string;
+  label: string;
+  kind: string;           // "mob_agent" or "module_agent"
+  profile?: string;
+  state?: string;
+  group?: string;         // sidebar grouping
+  addressable?: boolean;
+  affordances?: {
+    can_send_message?: boolean;
+    can_retire?: boolean;
+    can_respawn?: boolean;
+    runtime_mode?: string;
+  };
+  labels?: Record<string, string>;
+}
+```
+
+Identity-first status and inspect payloads use lowercase wire enums for addressability:
+`"addressable"` and `"internal_only"`.
+
+## Messaging protocol
+
+<Steps>
+  <Step title="Seed the timeline">
+    Panels load recent visible frames with `GET /console/timeline?identity=identity:luka&mode=recent&limit=...`. Older history is paged with `before`; live continuation uses `latest_cursor`.
+  </Step>
+  <Step title="Send message">
+    Identity-addressed panels call `mobkit/console/send` through `POST /console/rpc`:
+    ```json
+    {
+      "identity": "identity:luka",
+      "content": "What is on my calendar tomorrow?",
+      "origin": "console:panel-1",
+      "idempotency_key": "panel-1:turn-1",
+      "handling_mode": "queue"
+    }
+    ```
+    Returns `{ "interaction_id": "...", "identity": "..." }`.
+
+    The legacy `POST /console/send` route still exists for compatibility. New console clients should prefer JSON-RPC.
+  </Step>
+  <Step title="Receive response frames">
+    The timeline stream delivers canonical console frames:
+    ```
+    event: text_delta
+    data: {"id":"frame-1","cursor":"console:241","identity":"identity:luka","event":"text_delta","data":{"text":"done"}}
+    ```
+    If a requested cursor is no longer replayable, the stream returns `409 replay_unavailable`; refetch a recent page and resume from its `latest_cursor`.
+  </Step>
+</Steps>
+
+## Console routes
+
+| Route | Method | Response |
+|-------|--------|----------|
+| `/console` | GET | HTML page |
+| `/console/assets/console-app.js` | GET | React bundle (JavaScript) |
+| `/console/assets/console-app.css` | GET | Stylesheet (CSS) |
+| `/console/experience` | GET | Experience metadata (JSON) |
+| `/console/modules` | GET | Loaded modules list (JSON) |
+| `/console/identities` | GET | Identity-first records |
+| `/console/timeline` | GET | Replayable console timeline page |
+| `/console/timeline/stream` | GET | Timeline SSE replay and live continuation |
+| `/console/identity/{identity}/stream` | GET | Identity-filtered timeline SSE |
+| `/console/send` | POST | Legacy console send |
+| `/console/rpc` | POST | JSON-RPC 2.0 endpoint |
+| `/console/rpc/multipart` | POST | Multipart JSON-RPC for images/blobs |
+| `/blobs/{blob_id}` | GET | Blob/image retrieval |
+
+Primary RPC methods:
+
+- `mobkit/console/send` - identity-addressed console send
+- `mobkit/interact` - identity-addressed interaction that returns a `/console/identity/{identity}/stream` route
+- `mobkit/console/query_timeline` - timeline replay query
+- `mobkit/console/list_identities` and `mobkit/console/inspect_identity` - identity-first inspection
+- `mobkit/blob/upload` - multipart blob upload
+- `mobkit/retire`, `mobkit/respawn`, and `mobkit/reset` - operator lifecycle actions
+- `mobkit/send_message` - legacy member-addressed send path
+- `mobkit/topology/query`, `mobkit/topology/plan`, `mobkit/topology/apply`,
+  `mobkit/topology/operation/get`, and `mobkit/topology/audit/query` - optional,
+  revisioned connection management and separately permissioned durable audit
+
+Topology management is opt-in at the runtime. With the default disabled
+policy, the stock console remains a passive topology viewer and does not show
+the Connections tab. Read-only mode exposes searchable connection state with
+server-provided denial reasons. Editable mode offers only pairwise actions
+authorized for both endpoints; bulk controls appear only when a host supplies
+an explicitly bounded action and the runtime advertises `topology.bulk`.
+
+The reusable `TopologyPanel` keeps the authority-local and bilateral CAS
+contracts distinct. Stock JSON-RPC hosts supply the scalar query `revision`.
+Same-process coordinator hosts also supply the exact
+`authority_revisions` map as `authorityRevisions`; mutation callbacks receive
+that map as `expectedAuthorityRevisions` and must pass it to the bilateral
+coordinator as `expected_revisions`. Cross-authority hosts must never collapse
+that map to the scalar local revision or route the intent through the local
+JSON-RPC adapter. They may use `topologyAuthorityRevisionToken` as the
+component's scalar view token when the coordinator snapshot has no scalar
+revision, but never as the coordinator CAS value.
+
+Editable mode requires a durable runtime state path; MobKit fails closed
+rather than accepting reconnect/suppression intent that would disappear on
+restart:
+
+```rust
+let runtime = UnifiedRuntimeBuilder::new(...)
+    .persistent_state(app_state_dir)
+    .topology_control(TopologyControlPolicy {
+        mode: TopologyControlMode::Editable,
+        allow_bulk: false,
+        max_batch_size: 1,
+        allow_cross_authority: false,
+        ..TopologyControlPolicy::default()
+    })?
+    .build()
+    .await?;
+```
+
+## Authentication
+
+Console access is governed by `ConsolePolicy`:
+
+```rust
+ConsolePolicy {
+    require_app_auth: false,  // set true for production
+    read_only: false,         // set true for view-only deployments
+}
+```
+
+When `require_app_auth` is `true`, every request is checked against the `AuthPolicy`. See [authentication](/mobkit/guides/authentication) for details.
+When `read_only` is `true`, the console can inspect identities, timelines,
+logs, and topology, but chat sends, uploads, lifecycle controls, and other write
+RPCs are denied server-side.
+
+Upstream hosts that already know a user's ACL can also force the stock console UI
+into view-only mode without changing MobKit auth: set
+`window.__MOBKIT_CONSOLE_READ_ONLY__ = true` before loading the console bundle,
+or append `?console_read_only=true` (also accepted:
+`mobkit_console_read_only=true` or `view_only=true`) to the console URL. This is
+a frontend-only affordance for per-user UX; direct RPC calls are still governed
+by the server-side `ConsolePolicy.read_only` setting.
+
+Console mutation endpoints assume non-ambient credentials: pass bearer tokens
+explicitly in the `Authorization` header or `auth_token` query parameter for
+SSE/browser bootstrap cases. If a host proxy converts console auth into cookies
+or another browser-ambient credential, that host must add origin and CSRF
+protection before exposing mutation routes such as `/console/rpc`,
+`/console/rpc/multipart`, or `/console/send`.
+
+## Build system
+
+The console has two build modes:
+
+| Mode | Tool | Format | Use case |
+|------|------|--------|----------|
+| Production | esbuild | IIFE (browser) + CJS (library) | Embedded in Rust binary |
+| Development | Vite | ESM with HMR | Instant hot-reload at localhost:5199 |
+
+The production build resolves `@console-core` and `@console-components` as local workspace packages via esbuild aliases. The browser bundle and CSS are embedded in the gateway binary.
+
+### Development workflow
+
+```bash
+# Terminal 1: start the gateway
+MOBKIT_REF_ADDR=127.0.0.1:63210 MOBKIT_REF_HTTP_MODE=serve \
+  ./scripts/repo-cargo run -p meerkat-mobkit --example library_mode_reference
+
+# Terminal 2: start the Vite dev server (proxies API calls to gateway)
+cd console && npm run dev
+```
+
+Edit any file in `console/src/` or `packages/` — changes appear instantly in the browser.
+
+## Architecture
+
+```
+packages/
+├── console-core/         # Types, state management, reducers (framework-agnostic)
+│   └── src/
+│       ├── conversation.ts   # Message types, timeline grouping
+│       ├── dock.ts           # Multi-panel state, presets, actions
+│       ├── sidebar.ts        # Block → section → item hierarchy
+│       ├── activity.ts       # Roster, pulse, feed panel types
+│       ├── composer.ts       # Composer view state, toolbar items
+│       └── rich-content.ts   # Markdown → rich block parser
+│
+├── console-components/   # React components + CSS (portable, no app imports)
+│   └── src/
+│       ├── workbench/        # 3-column grid layout
+│       ├── sidebar/          # Hierarchical agent sidebar
+│       ├── dock/             # Tabbed multi-panel with splits
+│       ├── conversation/     # Message transcript + empty state
+│       ├── composer/         # Frosted glass input shell
+│       ├── activity/         # Activity rail with roster/pulse/feed
+│       └── styles/           # CSS tokens, themes, per-domain stylesheets
+│
+console/
+├── src/
+│   ├── ConsoleApp.tsx        # Main app: wires shared components + data
+│   ├── lib/adapters.ts       # MobKit data → console-core view states
+│   ├── lib/network.ts        # RPC, SSE, fetch helpers
+│   ├── lib/agents.ts         # Agent normalization
+│   ├── icon.tsx              # SVG sprite sheet + Icon renderer
+│   ├── console-host.css      # MobKit-specific overrides + global styles
+│   └── types.ts              # ConsoleAgent, ConsoleFrame, etc.
+├── build.cjs                 # esbuild production build
+├── vite.config.ts            # Vite dev server config
+└── smoke.cjs                 # JSDOM smoke test
+```
+
+The shared packages (`console-core` and `console-components`) are designed to be consumed by any application — MobKit, meerkat-app, or other hosts. They never import app stores, network code, or platform-specific APIs.
+
+## See also
+
+- [Unified runtime](/mobkit/guides/unified-runtime) — how the console is composed with the runtime
+- [SSE API](/mobkit/api/sse) — protocol details
+- [Authentication](/mobkit/guides/authentication) — console access control

@@ -1,0 +1,84 @@
+---
+title: "Introduction"
+description: "MobKit — build advanced multi-agent systems with a few lines of code. Orchestrate groups of Meerkat agents with built-in routing, lifecycle management, and operational tooling."
+icon: "boxes-stacked"
+---
+
+MobKit lets you stand up a production multi-agent system in a few lines of code. You describe the agents you want, how they connect, and what operational capabilities they need — MobKit handles the rest: spawning, wiring, routing, lifecycle management, and a live admin console.
+
+It builds on [Meerkat](https://github.com/lukacf/meerkat), which provides the agent runtime (prompt assembly, tool dispatch, sessions, the core agent loop). MobKit adds the orchestration layer that turns individual agents into coordinated groups.
+
+```python
+rt = await (
+    MobKit.builder()
+    .mob("mob.toml")
+    .persistent_state("./state")
+    .roster(my_roster)
+    .gateway("./rpc_gateway")
+    .build()
+)
+
+triage = rt.agent("triage:main")
+luka = rt.agent("identity:luka")
+
+await triage.dispatch_text("New event", origin="connector")
+await luka.send("What's happening?")
+output = await luka.wait_for_output(timeout=60)
+```
+
+<img src="/mobkit/images/architecture-overview.png" alt="MobKit architecture: Your App → MobKit (orchestration, routing, lifecycle, admin console) → Meerkat (agent loop, sessions, tools, comms). Agent topology: Domain, Personal, and Task agents." style={{ borderRadius: '8px', marginTop: '1rem', marginBottom: '1rem' }} />
+
+## What you can build
+
+MobKit's primary pattern is layered agent architectures — but it's not limited to any single topology:
+
+- **Domain agents** that own a capability (email, calendar, code review, data analysis)
+- **Personal agents** that represent a user and delegate to domain agents
+- **Group agents** that coordinate across a team or initiative
+- **Task agents** that are spawned on demand for short-lived work
+
+You define agents as profiles in a mob config, wire them together with peer connections, and MobKit handles the lifecycle: spawning at startup, retiring when no longer needed, respawning on failure, and reconciling the roster when your desired topology changes.
+
+## What MobKit provides
+
+- **Orchestration.** Bootstrap an entire mob and its operational modules in a single call. Process supervision, health gates, and configurable restart policies.
+- **Identity-first continuity.** Durable agent identities with roster providers, topology-aware prompts, non-destructive respawn, destructive reset, and in-process reconciliation. Agents survive restarts with stable session IDs.
+- **Roster management.** List, inspect, spawn, retire, and respawn members. Ensure agents exist before sending them work. Reconcile the roster against a desired state.
+- **Operational subsystems.** Message routing with sink adapters, risk-based approval gates, cron scheduling with timezone support, and semantic memory — all wired in as supervised modules.
+- **Admin console.** React web UI with agent sidebar, activity feed, chat inspector, topology view, and health overview — all updating in real time via SSE.
+- **Session persistence.** JSON file storage for development, BigQuery adapter for production. Complements Meerkat's own runtime-backed session durability.
+- **Authentication.** JWT/OIDC validation with JWKS discovery and email allowlists. Google, GitHub, Generic OIDC, and Service Identity providers.
+- **SDKs.** Python and TypeScript SDKs with typed returns and contract parity tests against the Rust core.
+
+## MobKit and Meerkat
+
+| | Meerkat | MobKit |
+|---|---|---|
+| **Role** | Agent runtime — runs individual agents | Orchestration — coordinates groups of agents |
+| **Owns** | Agent loop, prompt assembly, tool dispatch, sessions, comms | Startup, routing, lifecycle management, operational subsystems |
+| **Interface** | Library crate, CLI, REST, RPC, MCP | Library crate, JSON-RPC, admin console, SDKs |
+
+Meerkat is the engine that makes each agent work. MobKit is the toolkit that makes them work together.
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/mobkit/quickstart">
+    Bootstrap a runtime with modules and a Meerkat mob in under a minute.
+  </Card>
+  <Card title="Core Concepts" icon="shapes" href="/mobkit/concepts/modules">
+    Modules, events, gating, delivery, scheduling, memory, and sessions.
+  </Card>
+  <Card title="Guides" icon="book-open" href="/mobkit/guides/unified-runtime">
+    Step-by-step walkthroughs for the unified runtime, module system, and console.
+  </Card>
+  <Card title="Architecture" icon="layer-group" href="/mobkit/reference/architecture">
+    Internal architecture, crate structure, and design decisions.
+  </Card>
+  <Card title="APIs" icon="plug" href="/mobkit/api/rpc">
+    JSON-RPC, REST, and SSE protocol references.
+  </Card>
+  <Card title="SDKs" icon="code" href="/mobkit/sdks/rust">
+    Rust, TypeScript, and Python SDK documentation.
+  </Card>
+</CardGroup>

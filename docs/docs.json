@@ -15,183 +15,286 @@
   "navbar": {
     "links": [
       {
-        "label": "GitHub",
+        "label": "Meerkat GitHub",
         "href": "https://github.com/lukacf/meerkat"
+      },
+      {
+        "label": "MobKit GitHub",
+        "href": "https://github.com/lukacf/meerkat-mobkit"
       }
     ]
   },
   "navigation": {
-    "tabs": [
+    "products": [
       {
-        "tab": "Documentation",
-        "groups": [
+        "product": "Meerkat",
+        "description": "Library-first agent runtime",
+        "icon": "/logo.png",
+        "tabs": [
           {
-            "group": "Getting started",
-            "pages": ["introduction", "quickstart", "guides/auth"]
-          },
-          {
-            "group": "Concepts",
-            "pages": [
-              "concepts/overview",
-              "concepts/composability",
-              "concepts/realms",
-              "concepts/realm-inheritance",
-              "concepts/sessions",
-              "concepts/auth-and-bindings",
-              "concepts/memory-and-compaction",
-              "concepts/comms",
-              "concepts/mobs",
-              "concepts/scheduling",
-              "concepts/workgraph",
-              "concepts/tools",
-              "concepts/providers",
-              "concepts/configuration"
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Getting started",
+                "pages": ["introduction", "quickstart", "guides/auth"]
+              },
+              {
+                "group": "Concepts",
+                "pages": [
+                  "concepts/overview",
+                  "concepts/composability",
+                  "concepts/realms",
+                  "concepts/realm-inheritance",
+                  "concepts/sessions",
+                  "concepts/auth-and-bindings",
+                  "concepts/memory-and-compaction",
+                  "concepts/comms",
+                  "concepts/mobs",
+                  "concepts/scheduling",
+                  "concepts/workgraph",
+                  "concepts/tools",
+                  "concepts/providers",
+                  "concepts/configuration"
+                ]
+              },
+              {
+                "group": "Guides: Models And Hosting",
+                "pages": [
+                  "guides/self-hosting-models",
+                  "guides/image-generation"
+                ]
+              },
+              {
+                "group": "Guides: Runtime Behavior",
+                "pages": [
+                  "guides/realms",
+                  "guides/structured-output",
+                  "guides/memory",
+                  "guides/hooks",
+                  "guides/skills",
+                  "guides/scheduling",
+                  "guides/workgraph",
+                  "guides/realtime"
+                ]
+              },
+              {
+                "group": "Guides: Orchestration",
+                "pages": [
+                  "guides/comms",
+                  "guides/mobs",
+                  "guides/mobpack"
+                ]
+              },
+              {
+                "group": "Examples: Foundations",
+                "pages": [
+                  "examples/gallery",
+                  "examples/sessions",
+                  "examples/tools"
+                ]
+              },
+              {
+                "group": "Examples: Capabilities",
+                "pages": [
+                  "examples/hooks",
+                  "examples/skills",
+                  "examples/memory",
+                  "examples/workgraph",
+                  "examples/structured-output"
+                ]
+              },
+              {
+                "group": "Examples: Orchestration And Deployment",
+                "pages": [
+                  "examples/comms",
+                  "examples/mobs",
+                  "examples/mobpack",
+                  "examples/wasm"
+                ]
+              }
             ]
           },
           {
-            "group": "Guides: Models And Hosting",
-            "pages": [
-              "guides/self-hosting-models",
-              "guides/image-generation"
+            "tab": "SDKs",
+            "groups": [
+              {
+                "group": "Rust",
+                "pages": [
+                  "rust/overview",
+                  "rust/tools-and-stores",
+                  "rust/advanced"
+                ]
+              },
+              {
+                "group": "Python",
+                "pages": [
+                  "sdks/python/overview",
+                  "sdks/python/reference"
+                ]
+              },
+              {
+                "group": "TypeScript",
+                "pages": [
+                  "sdks/typescript/overview",
+                  "sdks/typescript/reference"
+                ]
+              }
             ]
           },
           {
-            "group": "Guides: Runtime Behavior",
-            "pages": [
-              "guides/realms",
-              "guides/structured-output",
-              "guides/memory",
-              "guides/hooks",
-              "guides/skills",
-              "guides/scheduling",
-              "guides/workgraph",
-              "guides/realtime"
+            "tab": "CLI & APIs",
+            "groups": [
+              {
+                "group": "CLI",
+                "pages": [
+                  "cli/commands",
+                  "cli/configuration"
+                ]
+              },
+              {
+                "group": "APIs",
+                "pages": [
+                  "api/rest",
+                  "api/rpc",
+                  "api/mcp"
+                ]
+              }
             ]
           },
           {
-            "group": "Guides: Orchestration",
-            "pages": [
-              "guides/comms",
-              "guides/mobs",
-              "guides/mobpack"
-            ]
-          },
-          {
-            "group": "Examples: Foundations",
-            "pages": [
-              "examples/gallery",
-              "examples/sessions",
-              "examples/tools"
-            ]
-          },
-          {
-            "group": "Examples: Capabilities",
-            "pages": [
-              "examples/hooks",
-              "examples/skills",
-              "examples/memory",
-              "examples/workgraph",
-              "examples/structured-output"
-            ]
-          },
-          {
-            "group": "Examples: Orchestration And Deployment",
-            "pages": [
-              "examples/comms",
-              "examples/mobs",
-              "examples/mobpack",
-              "examples/wasm"
+            "tab": "Reference",
+            "groups": [
+              {
+                "group": "Reference",
+                "pages": [
+                  "reference/api-reference",
+                  "reference/builtin-tools",
+                  "reference/workgraph-reference",
+                  "reference/hooks-reference",
+                  "reference/skills-reference",
+                  "reference/structured-output-reference",
+                  "reference/comms-reference",
+                  "reference/capability-matrix",
+                  "reference/session-contracts",
+                  "reference/skills-governance-runbook"
+                ]
+              },
+              {
+                "group": "Architecture",
+                "pages": [
+                  "reference/architecture",
+                  "reference/runtime-architecture",
+                  "reference/machine-authority",
+                  "architecture/meerkat-dogma",
+                  "architecture/meerkat-dogma-commentary",
+                  "architecture/realm-config-inheritance-plan",
+                  "architecture/multi-host-mobs-plan",
+                  "architecture/stopped-phase-revival-plan",
+                  "architecture/workgraph-attention-goals",
+                  "architecture/delivery-interaction-operations",
+                  "reference/mob-architecture",
+                  "reference/design-philosophy"
+                ]
+              },
+              {
+                "group": "Operations",
+                "pages": [
+                  "reference/build-and-ci",
+                  "guides/cd-and-distribution"
+                ]
+              }
             ]
           }
         ]
       },
       {
-        "tab": "SDKs",
-        "groups": [
+        "product": "MobKit",
+        "description": "Application and orchestration layer for Meerkat",
+        "icon": "/mobkit/logo.png",
+        "tabs": [
           {
-            "group": "Rust",
-            "pages": [
-              "rust/overview",
-              "rust/tools-and-stores",
-              "rust/advanced"
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Getting started",
+                "pages": [
+                  "mobkit/introduction",
+                  "mobkit/quickstart"
+                ]
+              },
+              {
+                "group": "Core concepts",
+                "pages": [
+                  "mobkit/concepts/modules",
+                  "mobkit/concepts/events",
+                  "mobkit/concepts/roster",
+                  "mobkit/concepts/gating",
+                  "mobkit/concepts/access-control",
+                  "mobkit/concepts/delivery",
+                  "mobkit/concepts/scheduling",
+                  "mobkit/concepts/memory",
+                  "mobkit/concepts/sessions"
+                ]
+              },
+              {
+                "group": "Guides",
+                "pages": [
+                  "mobkit/guides/unified-runtime",
+                  "mobkit/guides/module-system",
+                  "mobkit/guides/console",
+                  "mobkit/guides/flow-editor",
+                  "mobkit/guides/authentication"
+                ]
+              }
             ]
           },
           {
-            "group": "Python",
-            "pages": [
-              "sdks/python/overview",
-              "sdks/python/reference"
+            "tab": "APIs",
+            "groups": [
+              {
+                "group": "Protocols",
+                "pages": [
+                  "mobkit/api/rpc",
+                  "mobkit/api/rest",
+                  "mobkit/api/sse"
+                ]
+              }
             ]
           },
           {
-            "group": "TypeScript",
-            "pages": [
-              "sdks/typescript/overview",
-              "sdks/typescript/reference"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "CLI & APIs",
-        "groups": [
-          {
-            "group": "CLI",
-            "pages": [
-              "cli/commands",
-              "cli/configuration"
+            "tab": "SDKs",
+            "groups": [
+              {
+                "group": "Rust",
+                "pages": ["mobkit/sdks/rust"]
+              },
+              {
+                "group": "TypeScript",
+                "pages": ["mobkit/sdks/typescript"]
+              },
+              {
+                "group": "Python",
+                "pages": ["mobkit/sdks/python"]
+              }
             ]
           },
           {
-            "group": "APIs",
-            "pages": [
-              "api/rest",
-              "api/rpc",
-              "api/mcp"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Reference",
-        "groups": [
-          {
-            "group": "Reference",
-            "pages": [
-              "reference/api-reference",
-              "reference/builtin-tools",
-              "reference/workgraph-reference",
-              "reference/hooks-reference",
-              "reference/skills-reference",
-              "reference/structured-output-reference",
-              "reference/comms-reference",
-              "reference/capability-matrix",
-              "reference/session-contracts",
-              "reference/skills-governance-runbook"
-            ]
-          },
-          {
-            "group": "Architecture",
-            "pages": [
-              "reference/architecture",
-              "reference/runtime-architecture",
-              "reference/machine-authority",
-              "architecture/meerkat-dogma",
-              "architecture/meerkat-dogma-commentary",
-              "architecture/realm-config-inheritance-plan",
-              "architecture/multi-host-mobs-plan",
-              "architecture/stopped-phase-revival-plan",
-              "architecture/workgraph-attention-goals",
-              "architecture/delivery-interaction-operations",
-              "reference/mob-architecture",
-              "reference/design-philosophy"
-            ]
-          },
-          {
-            "group": "Operations",
-            "pages": [
-              "reference/build-and-ci",
-              "guides/cd-and-distribution"
+            "tab": "Reference",
+            "groups": [
+              {
+                "group": "Architecture",
+                "pages": [
+                  "mobkit/reference/architecture",
+                  "mobkit/reference/configuration"
+                ]
+              },
+              {
+                "group": "Governance",
+                "pages": [
+                  "mobkit/reference/decisions",
+                  "mobkit/reference/governance"
+                ]
+              }
             ]
           }
         ]

@@ -1,0 +1,114 @@
+name: Publish MobKit docs
+
+on:
+  repository_dispatch:
+    types: [mobkit-release-published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Public MobKit release tag to republish"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-mobkit-docs
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish latest MobKit release
+    runs-on: ubuntu-latest
+    env:
+      MOBKIT_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || github.event.inputs.release_tag }}
+      EXPECTED_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || '' }}
+      EXPECTED_VERSION: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || '' }}
+    steps:
+      - name: Checkout docs.rkat.ai source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Checkout immutable MobKit release
+        uses: actions/checkout@v4
+        with:
+          repository: lukacf/meerkat-mobkit
+          ref: ${{ env.MOBKIT_TAG }}
+          path: _mobkit-release
+          fetch-depth: 0
+
+      - name: Verify public release identity and latestness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MOBKIT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid MobKit release tag: $MOBKIT_TAG" >&2
+            exit 1
+          fi
+
+          actual_sha=$(git -C _mobkit-release rev-parse HEAD)
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("_mobkit-release/Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ "v$version" != "$MOBKIT_TAG" ]]; then
+            echo "::error::Tag $MOBKIT_TAG does not match MobKit version $version" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_SHA" && "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Release checkout $actual_sha does not match dispatched SHA $EXPECTED_SHA" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_VERSION" && "$version" != "$EXPECTED_VERSION" ]]; then
+            echo "::error::Release version $version does not match dispatched version $EXPECTED_VERSION" >&2
+            exit 1
+          fi
+
+          latest_tag=$(gh api repos/lukacf/meerkat-mobkit/releases/latest --jq .tag_name)
+          if [[ "$latest_tag" != "$MOBKIT_TAG" ]]; then
+            echo "::error::Refusing to replace latest docs with $MOBKIT_TAG; latest public release is $latest_tag" >&2
+            exit 1
+          fi
+
+          python3 _mobkit-release/scripts/verify-published-registries.py --version "$version"
+
+      - name: Generate released MobKit documentation
+        run: |
+          set -euo pipefail
+          python3 scripts/sync-mobkit-docs.py _mobkit-release \
+            --source-ref "$MOBKIT_TAG" \
+            --require-clean
+
+      - name: Validate complete Mintlify site
+        run: make docs-check
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate Mintlify parsing and links
+        working-directory: docs
+        run: npx --yes mint@4.2.728 broken-links
+
+      - name: Publish generated snapshot to main
+        run: |
+          set -euo pipefail
+          git add docs/mobkit
+          if git diff --cached --quiet; then
+            echo "docs.rkat.ai already contains $MOBKIT_TAG"
+            exit 0
+          fi
+
+          unexpected=$(git diff --cached --name-only | grep -Ev '^docs/mobkit/' || true)
+          if [[ -n "$unexpected" ]]; then
+            echo "::error::MobKit docs publication staged unexpected paths:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs: publish MobKit ${MOBKIT_TAG}"
+          git push origin HEAD:main

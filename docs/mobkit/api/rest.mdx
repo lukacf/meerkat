@@ -1,0 +1,213 @@
+---
+title: "REST API"
+description: "HTTP endpoints for console access, experience metadata, module inspection, timeline replay, JSON-RPC ingress, and blobs."
+icon: "globe"
+---
+
+MobKit serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
+
+## Base URL
+
+```
+http://localhost:8080
+```
+
+The port is configurable at runtime startup.
+
+---
+
+## Console endpoints
+
+### `GET /console`
+
+Returns the admin console HTML page. The page is a self-contained single-page React application with no external dependencies.
+
+**Response:** `text/html`
+
+### `GET /console/assets/console-app.js`
+
+Returns the console React bundle as JavaScript.
+
+**Response:** `application/javascript`
+
+### `GET /console/assets/console-app.css`
+
+Returns the console stylesheet.
+
+**Response:** `text/css`
+
+---
+
+## JSON API endpoints
+
+### `GET /console/experience`
+
+Returns experience metadata describing the current runtime state. This is the primary data source for the console UI.
+
+**Response:**
+
+```json
+{
+  "agent_sidebar": {
+    "title": "Agents",
+    "live_snapshot": {
+      "agents": [
+        {
+          "agent_id": "agent-001",
+          "member_id": "lead-1",
+          "label": "Team Lead",
+          "kind": "autonomous_host"
+        }
+      ]
+    }
+  },
+  "activity_feed": { "title": "Activity" },
+  "chat_inspector": { "title": "Chat" },
+  "topology": {
+    "title": "Topology",
+    "live_snapshot": {
+      "nodes": [...],
+      "node_count": 5
+    }
+  },
+  "health_overview": {
+    "title": "Health",
+    "live_snapshot": {
+      "loaded_modules": ["router", "delivery", "scheduling"],
+      "loaded_module_count": 3,
+      "running": true
+    }
+  }
+}
+```
+
+When a Meerkat mob runtime is configured, the response includes live agent data from the mob. Without a mob runtime, only module-level information is returned. When console UI config is loaded, the response includes `console_config`, the view-level contract consumed by the bundled console.
+
+### `GET /console/modules`
+
+Returns the list of loaded modules.
+
+**Response:**
+
+```json
+{
+  "modules": [
+    { "id": "router", "health": "healthy" },
+    { "id": "delivery", "health": "healthy" },
+    { "id": "scheduling", "health": "starting" }
+  ]
+}
+```
+
+### `GET /console/identities`
+
+Returns identity-first records and inspection metadata when an identity runtime is configured.
+
+**Response:** JSON object containing identity records and affordances.
+
+### `GET /console/timeline`
+
+Returns console timeline frames from the MobKit console log store. This endpoint is the REST equivalent of `mobkit/console/query_timeline`.
+
+<Accordion title="Query parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | no | Restrict results to one console identity. |
+| `conversation_id` | `string` | no | Restrict results to one conversation. |
+| `mode` | `"since"` or `"recent"` | no | `since` scans forward after `after`; `recent` returns the latest visible frames in display order. Defaults to `since` for compatibility. |
+| `after` | `console:<seq>` | no | Exclusive lower cursor bound for continuation. |
+| `before` | `console:<seq>` | no | Exclusive upper cursor bound, primarily for older-history paging with `recent`. |
+| `limit` | `usize` | no | Visible frame limit, clamped by the server. |
+</Accordion>
+
+Response frames are visibility-filtered and returned in display order. `next_cursor` is safe to use as the next `after` cursor for `since` pagination; `latest_cursor` is the latest cursor for the target window and is useful for live continuation after a `recent` seed.
+
+```json
+{
+  "frames": [],
+  "next_cursor": "console:240",
+  "latest_cursor": "console:240",
+  "exhausted": false
+}
+```
+
+### `GET /console/timeline/stream`
+
+Streams a bounded timeline replay followed by live console frames. It accepts the same query parameters as `GET /console/timeline` and returns `text/event-stream`.
+
+If the requested cursor can no longer be replayed, the route returns HTTP **409** with `{"error":"replay_unavailable"}` and cursor context. Clients should refetch a recent page and resume from `latest_cursor`.
+
+### `GET /console/identity/{identity}/stream`
+
+Identity-filtered convenience route for the same console timeline stream. It sets the `identity` filter from the path and accepts the remaining timeline query parameters.
+
+### `POST /console/send`
+
+Legacy console send route backed by the console aggregator. New clients should prefer `POST /console/rpc` with `mobkit/console/send`.
+
+### `POST /console/rpc`
+
+JSON-RPC 2.0 endpoint for console and runtime operations.
+
+### `POST /console/rpc/multipart`
+
+Multipart JSON-RPC endpoint. Supported methods:
+
+| Method | Purpose |
+|--------|---------|
+| `mobkit/console/send` | Send console content with image upload placeholders. |
+| `mobkit/blob/upload` | Store a single blob/image and return a blob ID. |
+
+Multipart image uploads are bounded by the server-side image count and byte limits.
+
+### `GET /blobs/{blob_id}`
+
+Returns blob/image content by ID when a blob store is configured.
+
+---
+
+## Authentication
+
+When `ConsolePolicy.require_app_auth` is `true`, all endpoints require a valid JWT token in the `Authorization` header:
+
+```
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+```
+
+The token is validated against the configured auth policy. See [authentication](/mobkit/guides/authentication) for details.
+
+MobKit's built-in console auth is bearer-token based and does not rely on
+cookies. Deployments that add cookie-backed console auth at a reverse proxy must
+also add CSRF/origin protection for mutating console routes.
+
+Set `ConsolePolicy.read_only` to `true` to serve the console in view-only mode.
+Read endpoints and streams remain available, while mutating JSON-RPC methods
+such as `mobkit/console/send`, `mobkit/blob/upload`, lifecycle controls, gating
+decisions, and metadata writes are omitted from `mobkit/capabilities` and return
+a read-only error if called directly.
+
+## Error responses
+
+API errors return standard HTTP status codes with a JSON body:
+
+```json
+{
+  "error": "unauthorized",
+  "message": "Email not in allowlist"
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success |
+| `400` | Bad request (invalid parameters) |
+| `401` | Unauthorized (missing or invalid token) |
+| `403` | Forbidden (valid token, insufficient permissions) |
+| `404` | Not found |
+| `500` | Internal server error |
+
+## See also
+
+- [JSON-RPC](/mobkit/api/rpc) -- full programmatic API
+- [SSE API](/mobkit/api/sse) -- event streaming protocol
+- [Console guide](/mobkit/guides/console) -- admin console details

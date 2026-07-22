@@ -1,0 +1,100 @@
+---
+title: "Roster and member lifecycle"
+description: "The mob roster tracks all members and their lifecycle states. List, inspect, spawn, retire, and respawn members through the roster API."
+icon: "users"
+---
+
+The roster is the authoritative record of every member in a mob. It tracks active and retiring members, their profiles, peer wiring, and labels. All roster mutations flow through the gateway's JSON-RPC interface, and every query returns a consistent `MobMemberSnapshot`.
+
+<Warning>
+The member API on this page is the **worker plane**: it is the right surface
+for ephemeral, disposable members — helpers a parent agent spawns and an
+idle-retire policy reaps. **Durable members (per-user agents, long-lived
+coordinators, anything that must survive a restart) belong on the identity
+plane**: declare them in an identity roster and reconcile, instead of
+`ensure_member`-ing them into the mob roster. Identity-plane members get
+continuity records, lease-fenced embodiment, and resume across restarts —
+mob-plane members get none of that. On an identity-first gateway the member
+methods below re-dispatch to identity semantics automatically.
+</Warning>
+
+## Member states
+
+Each member is in exactly one lifecycle state at any time.
+
+| State | Constant | Description |
+|-------|----------|-------------|
+| `active` | `MEMBER_STATE_ACTIVE` | Member is running and accepting work |
+| `retiring` | `MEMBER_STATE_RETIRING` | Member is draining active work before disposal |
+
+<Note>
+Idle members with no active sessions may be immediately disposed when retired, skipping the `retiring` phase entirely.
+</Note>
+
+## Roster operations
+
+All operations are exposed as JSON-RPC methods on the gateway.
+
+| Method | Description |
+|--------|-------------|
+| `mobkit/list_members` | List all members (active + retiring) |
+| `mobkit/get_member` | Get a single member by ID |
+| `mobkit/retire_member` | Transition a member to retiring |
+| `mobkit/respawn_member` | Replace a member with a fresh instance |
+| `mobkit/ensure_member` | Idempotent: spawn if missing, return snapshot |
+| `mobkit/find_members` | Find members by label key-value |
+
+## MobMemberSnapshot
+
+Every roster query returns one or more `MobMemberSnapshot` objects:
+
+```json
+{
+  "meerkat_id": "agent-1",
+  "profile": "worker",
+  "state": "active",
+  "wired_to": ["agent-2", "agent-3"],
+  "labels": {"owner": "user-123"}
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `meerkat_id` | `String` | Unique identifier for the member |
+| `profile` | `String` | Profile name assigned at spawn |
+| `state` | `String` | Current lifecycle state (`active` or `retiring`) |
+| `wired_to` | `Vec<String>` | Peer IDs this member is connected to |
+| `labels` | `Map<String, String>` | Arbitrary key-value metadata |
+
+## Python SDK
+
+The Python SDK exposes typed wrappers for every roster operation:
+
+```python
+from meerkat_mobkit import MEMBER_STATE_ACTIVE, MemberSnapshot
+
+members = await handle.list_members()
+active = [m for m in members if m.state == MEMBER_STATE_ACTIVE]
+
+snapshot = await handle.get_member("agent-1")
+print(snapshot.profile, snapshot.wired_to)
+
+await handle.retire_member("agent-1")
+await handle.respawn_member("agent-1")
+```
+
+`list_members()` and `find_members()` return `list[MemberSnapshot]`. Single-member operations (`get_member`, `ensure_member`) return a single `MemberSnapshot`. Mutation operations (`retire_member`, `respawn_member`) return the updated snapshot after the state transition completes.
+
+## Reconciliation
+
+The `reconcile()` call uses the roster to determine which members to spawn, retain, or retire. It compares the desired member set (from the session build options) against the current roster and applies the minimal set of mutations to converge.
+
+See the [unified runtime guide](/mobkit/guides/unified-runtime) for the full reconciliation flow.
+
+## See also
+
+- [Identity-first doctrine](https://github.com/lukacf/meerkat-mobkit/blob/main/docs/design/identity-first-doctrine.md) -- when to use the identity plane vs this worker plane
+
+- [Python SDK](/mobkit/sdks/python) -- full SDK reference including roster helpers
+- [RPC API](/mobkit/api/rpc) -- JSON-RPC protocol and method signatures
+- [Unified runtime guide](/mobkit/guides/unified-runtime) -- reconciliation and session lifecycle

@@ -1,0 +1,159 @@
+---
+title: "Decisions"
+description: "Policy enforcement: auth rules, console access, runtime ops constraints, release validation, and BigQuery naming."
+icon: "scale-balanced"
+---
+
+MobKit's decision layer enforces operational policies through typed validation functions. Each function takes a policy or configuration input and returns a typed error on violation.
+
+## Console access
+
+`enforce_console_route_access` checks whether a request should be allowed to access console routes.
+
+```rust
+enforce_console_route_access(
+    &auth_policy,
+    &console_policy,
+    &ConsoleAccessRequest {
+        provider: AuthProvider::GoogleOAuth,
+        email: "admin@example.com".to_string(),
+    },
+)?;
+```
+
+### Decision rules
+
+| # | Condition | Result |
+|---|-----------|--------|
+| 1 | `require_app_auth` is `false` | Allow |
+| 2 | Provider is `ServiceIdentity` | Validate `svc:` prefix and allowlist |
+| 3 | Provider does not match `default_provider` | `AuthProviderMismatch` |
+| 4 | Provider is `TestProvider` | `AuthProviderNotSupported` |
+| 5 | Email not in `email_allowlist` | `EmailNotAllowlisted` |
+| 6 | All checks pass | Allow |
+
+---
+
+## Runtime ops validation
+
+`validate_runtime_ops_policy` enforces v0.1 operational constraints.
+
+```rust
+validate_runtime_ops_policy(&RuntimeOpsPolicy {
+    replica_count: 1,
+    metrics: MetricsPolicy { enforce_slo_targets: false },
+})?;
+```
+
+| Constraint | Required value | Error |
+|------------|---------------|-------|
+| `replica_count` | Must be `1` | `ReplicaCountMustBeOne` |
+| `metrics.enforce_slo_targets` | Must be `false` | `SloTargetsNotSupportedV01` |
+
+---
+
+## BigQuery naming
+
+`validate_bigquery_naming` ensures dataset and table names are safe.
+
+```rust
+validate_bigquery_naming(&BigQueryNaming {
+    dataset: "mobkit_sessions".into(),
+    table: "session_rows".into(),
+})?;
+```
+
+### Validation rules
+
+- Dataset must be non-empty
+- Table must be non-empty
+- Both must contain only ASCII alphanumeric characters, underscores, and hyphens
+- No dots, semicolons, spaces, or other special characters
+
+---
+
+## Trusted module loading
+
+`load_trusted_mobkit_modules_from_toml` parses and validates a trust manifest.
+
+```rust
+let modules = load_trusted_mobkit_modules_from_toml(r#"
+[[modules]]
+id = "router"
+command = "meerkat-router"
+"#)?;
+```
+
+### Validation rules
+
+- Module `id` must be non-empty
+- Module `command` must be non-empty
+- TOML must parse correctly
+- Restart policy defaults to `OnFailure` when omitted
+
+---
+
+## Release metadata
+
+`validate_release_metadata` ensures release targets are complete and the support matrix is valid.
+
+```rust
+validate_release_metadata(&ReleaseMetadata {
+    targets: vec![
+        "crates.io".into(),
+        "npm".into(),
+        "pypi".into(),
+        "github-releases".into(),
+    ],
+    support_matrix: "same-as-meerkat".into(),
+})?;
+```
+
+### Required targets
+
+Every release must include all four targets:
+
+| Target | Registry |
+|--------|----------|
+| `crates.io` | Rust crate |
+| `npm` | TypeScript/React package |
+| `pypi` | Python package |
+| `github-releases` | Binary releases |
+
+### Validation rules
+
+- No duplicate targets
+- All required targets must be present
+- `support_matrix` must equal `"same-as-meerkat"`
+
+---
+
+## Error types
+
+All decision functions return `DecisionPolicyError`:
+
+| Variant | Cause |
+|---------|-------|
+| `EmptyBigQueryDataset` | BigQuery dataset name is empty |
+| `EmptyBigQueryTable` | BigQuery table name is empty |
+| `InvalidBigQueryName` | Name contains disallowed characters |
+| `TomlParse` | Trust manifest TOML parsing failed |
+| `MissingModuleId` | Module declaration has empty ID |
+| `MissingModuleCommand` | Module declaration has empty command |
+| `AuthProviderMismatch` | Request provider differs from configured |
+| `AuthProviderNotSupported` | TestProvider used in production |
+| `EmailNotAllowlisted` | Email not in allowlist |
+| `InvalidServiceIdentity` | Service identity format invalid |
+| `ServiceIdentityNotAllowlisted` | Service identity not in allowlist |
+| `ReplicaCountMustBeOne` | Replica count is not 1 |
+| `SloTargetsNotSupportedV01` | SLO targets enabled in v0.1 |
+| `MissingReleaseTarget` | Required release target missing |
+| `DuplicateReleaseTarget` | Same target listed twice |
+| `InvalidSupportMatrix` | Support matrix is not "same-as-meerkat" |
+| `InvalidTrustedAuthConfig` | Trusted OIDC config invalid |
+
+## See also
+
+- [Authentication](/mobkit/guides/authentication) -- auth policy usage
+- [Configuration](/mobkit/reference/configuration) -- all configuration types
+- [Governance](/mobkit/reference/governance) -- release candidate tracking

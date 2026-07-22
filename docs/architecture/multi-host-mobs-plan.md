@@ -1139,7 +1139,7 @@ The admission chain is irreducibly host-local three times over: staged-session m
 | `Resume` names a session the member host cannot produce | Typed ack `ResumeSessionNotFound`; spawn aborts via the ladder / `member_materialization_failures`; never a silent `Fresh` fallback. |
 | `Resume` of an autonomous-mode member on a host without an interaction injector; snapshot restore on `durable_sessions=false` | Typed ack `CapabilityMissing { capability }`; admission already rejects provably-missing capabilities controlling-side (§7.3). |
 | `Fork` variant reaches the materialize wire | Fail-closed V4 decode error; admission-level `LaunchModeUnsupported` if ever constructed. |
-| Fork source has no readable session / owning host unreachable | Typed `ForkSourceUnavailable { NoSession | RemoteReadUnavailable }`; spawn does not proceed with partial context. |
+| Fork source has no readable session / owning host unreachable | Typed `ForkSourceUnavailable` with cause `NoSession` or `RemoteReadUnavailable`; spawn does not proceed with partial context. |
 | `ReleaseMember` on an ephemeral host | `MemberReleased { RuntimeReleasedOnly { NoDurableSessions } }`; machine records the typed disposal class; console labels it; capability was declared at bind. |
 | `ReleaseMember` replay / already archived | Recorded-disposal replay at the same fence; `AlreadyArchived`/`NotFound` fold to success-class (actor.rs:15708-15716 tolerance, session_document.rs `AlreadyArchived` verdict). |
 | Remote spawn requested on a mob without `owner_bridge_session_id` | Typed admission reject (L5 invariant); the silent ops-owner skip never applies to `HostMaterialized`. |

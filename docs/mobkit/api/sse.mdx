@@ -1,0 +1,220 @@
+---
+title: "SSE API"
+description: "Server-Sent Events for real-time MobKit interaction and event subscription flows."
+icon: "bolt"
+---
+
+MobKit uses Server-Sent Events (SSE) for several real-time flows:
+
+- agent-scoped streaming through `GET /agents/{agent_id}/events`
+- mob-merged streaming through `GET /mob/events`
+- structural mob events through `GET /mobkit/mob_events/stream`
+- console timeline replay and live continuation through `GET /console/timeline/stream`
+- identity-filtered console timeline streaming through `GET /console/identity/{identity}/stream`
+- event subscription and replay through `mobkit/events/subscribe`
+
+## Authentication
+
+Every SSE route honors `RuntimeDecisionState.console.require_app_auth`.
+When `require_app_auth` is on, the request must carry one of:
+
+- `Authorization: Bearer <token>` header, or
+- `?auth_token=<token>` query parameter
+
+Missing or invalid credentials return HTTP **401**. Tokens are
+percent-decoded; a token containing characters that need URL-encoding
+(`=`, `&`, `+`, `%`) is handled correctly.
+
+## Agent event stream
+
+```
+GET /agents/{agent_id}/events
+```
+
+Subscribe to raw Meerkat agent events for one agent (`Content-Type: text/event-stream`).
+
+### Frame format
+
+```
+id: evt-1
+event: text_delta
+data: {"type": "text_delta", "delta": "Analyzing the metrics now..."}
+
+id: evt-2
+event: tool_call
+data: {"type": "tool_call", "name": "query_metrics", "args": {...}}
+
+id: evt-3
+event: interaction_complete
+data: {"type": "interaction_complete", "result": "Done."}
+```
+
+## Console timeline stream
+
+```
+GET /console/timeline/stream
+```
+
+Streams a bounded replay snapshot followed by live console timeline frames. The route accepts the same `identity`, `conversation_id`, `after`, `before`, `mode`, and `limit` parameters as [`GET /console/timeline`](/mobkit/api/rest).
+
+If replay cannot satisfy the requested cursor, the server returns HTTP **409** with:
+
+```json
+{
+  "error": "replay_unavailable",
+  "requested_cursor": "console:10",
+  "latest_cursor": "console:240"
+}
+```
+
+Clients should resume from `latest_cursor` rather than retrying the stale cursor.
+
+## Identity timeline stream
+
+```
+GET /console/identity/{identity}/stream
+```
+
+Convenience route for an identity-filtered console timeline stream. It sets the timeline query `identity` from the path and otherwise behaves like `GET /console/timeline/stream`.
+
+## Event subscription
+
+Use the `mobkit/events/subscribe` JSON-RPC method to request a point-in-time event snapshot plus replay frames.
+
+Example request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "sub-1",
+  "method": "mobkit/events/subscribe",
+  "params": {
+    "scope": "mob",
+    "last_event_id": "evt-42"
+  }
+}
+```
+
+The response includes:
+
+| Field | Description |
+|-------|-------------|
+| `keep_alive.interval_ms` | Server keep-alive cadence |
+| `keep_alive.event` | Keep-alive event name |
+| `event_frames` | SSE-ready frames for replay |
+| `events` | Parsed event payloads |
+
+Supported scopes:
+
+| Scope | Notes |
+|-------|-------|
+| `mob` | Whole runtime |
+| `agent` | Requires `agent_id` |
+| `interaction` | Interaction-scoped replay |
+
+## Structural mob events stream
+
+```
+GET /mobkit/mob_events/stream?after_seq=<cursor>&mob_id=<id>&run_id=<id>&event_types=<list>
+```
+
+Per-client SSE stream of structural `MobEvent`s (typed envelopes
+preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
+full `MobEventKind` payload).
+
+Each connection opens its own `MobEventsView::subscribe_after` so
+catch-up and live tail share the same ordered stream — there is no
+race window between snapshot and live subscription.
+
+### Query parameters
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `after_seq` | u64 | Resume from this cursor (exclusive). When omitted, starts at the current `latest_cursor` (live tail only). |
+| `mob_id` | string | Filter by mob id |
+| `run_id` | string | Filter by flow run id |
+| `step_id` | string | Filter by flow step id |
+| `event_types` | comma-separated | e.g. `flow_started,step_completed` |
+| `since_ms` / `until_ms` | u64 | Inclusive / exclusive timestamp filters |
+| `identity` / `member_id` | string | Filter by agent identity |
+
+### Frame format
+
+```
+event: flow_started
+id: mob-evt-1234
+data: {"event_id":"mob-evt-1234","cursor":1234,"mob_id":"home","run_id":"...","kind":"flow_started",...}
+```
+
+### Stale cursor
+
+If `after_seq > latest_cursor`, the route returns HTTP **410 Gone**
+with `{"error":"event_query_stale","after_cursor":N,"latest_cursor":M}`.
+SDK clients should rewind to `latest_cursor` and reconnect.
+
+### Continuation from `mobkit/mob_events/subscribe`
+
+The JSON-RPC handshake returns a snapshot frame plus a
+`subscribe_url` field that already encodes the resume cursor and
+filters:
+
+```json
+{
+  "stream": "mob_events",
+  "events": [...],
+  "next_after_seq": 1234,
+  "subscribe_url": "/mobkit/mob_events/stream?after_seq=1234&mob_id=home",
+  "keep_alive": {"interval_ms": 15000, "event": "keep_alive"}
+}
+```
+
+`after_seq` falls back to `latest_cursor` captured at handshake
+when the snapshot is empty, so the SSE handler picks up gaplessly
+even when no events match yet.
+
+### Cursor durability
+
+`MobStructuralEvent.cursor` is the meerkat ledger cursor — durable
+across mobkit gateway restarts when the runtime is built with
+`.persistent_state(path)`. SDK consumers can checkpoint a cursor
+and resume by reconnecting with `after_seq=<checkpointed cursor>`.
+
+## Keep-alive
+
+The server sends keep-alive frames at a configurable interval (default: 15 seconds) to prevent connection timeouts:
+
+```
+: keep-alive
+```
+
+When the console timeline broadcast lags (slow consumer, channel saturated), the stream closes. Clients should refetch a recent timeline page and reconnect from the returned `latest_cursor` or a fresh `Last-Event-ID`.
+
+## Sending messages
+
+To send a message to an agent, use the `mobkit/send_message` RPC method and capture the returned `session_id` for correlation:
+
+```json
+{
+  "accepted": true,
+  "member_id": "lead-1",
+  "session_id": "0195c3f2-8f40-7f95-a5a7-cc4f7d90d3d1"
+}
+```
+
+Then observe streamed responses via `GET /console/timeline/stream`, `GET /console/identity/{identity}/stream`, or broader replayable event history via `mobkit/events/subscribe`.
+
+## Error handling
+
+If the target agent/member does not exist or a subscription request is malformed, SSE routes return an HTTP error response before opening the stream:
+
+| Status | Cause |
+|--------|-------|
+| `400` | Empty or invalid member ID / malformed body |
+| `404` | Member not found |
+| `500` | Internal server error |
+
+## See also
+
+- [REST API](/mobkit/api/rest) -- HTTP endpoints overview
+- [Console guide](/mobkit/guides/console) -- how the console uses SSE
+- [Events](/mobkit/concepts/events) -- unified event model

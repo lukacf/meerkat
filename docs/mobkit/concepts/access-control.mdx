@@ -1,0 +1,183 @@
+---
+title: "Access control"
+description: "Optional ABAC for the console: control which users can see which agents and what they can do with them, configurable live per user."
+icon: "lock"
+---
+
+MobKit ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
+
+There are no roles. Every check evaluates the caller's attributes (subject, group memberships) against the resource's attributes (agent identity, role, labels) for one action — the closest thing to a role is a rule that bundles a group with a set of actions.
+
+## The model
+
+- **Principal** — the authenticated console caller: the `subject` (email or token `sub`) plus the groups it belongs to. On an open console (`require_app_auth = false`) the principal is anonymous and only matches rules without subject constraints.
+- **Resource** — usually an agent: its identity, role, and labels (the same labels you already use for console grouping).
+- **Action** — a verb from a fixed vocabulary:
+
+| Action | Grants |
+|--------|--------|
+| `agent.view` | See the agent anywhere: sidebar, roster, topology, timeline frames, event streams, inspection |
+| `agent.send` | Send messages to the agent |
+| `agent.memory.write` | Persist durable identity-scoped agent memory for future context injection |
+| `agent.memory.delete` | Delete durable identity-scoped agent memory records |
+| `agent.memory.read` | Read identity-scoped memory: recall/manifest RPCs and the console Memory panel. An **unscoped** grant (a rule with no resource selector) additionally reads realm-scoped records and the dream history |
+| `operator.memory.read` | Read operator-scoped memory (cross-mob personal facts). Always an explicit rule — never implied by an unscoped `agent.memory.read` and never granted by the migration rewrite |
+| `agent.memory.admin` | Reserved for administrative memory operations (imports, re-keying); no RPC maps to it yet |
+| `mob.memory.read` | Read mob-scoped memory records in the Memory panel |
+| `mob.memory.propose` | Propose records into mob scope (future propose surfaces) |
+| `mob.memory.commit` | Reserved for a future direct mob-commit RPC — steward promotions ride the gating flow (`gating.decide`), not this action |
+| `memory.quarantine.review` | Read the quarantine queue and quarantined record bodies |
+| `agent.spawn` | Create members: ensure/spawn/fork helpers, run flows |
+| `agent.respawn` | Respawn the agent |
+| `agent.retire` | Retire / force-cancel / delete the agent |
+| `agent.reset` | Reset durable agent state |
+| `gating.view` / `gating.decide` | Read and decide approval gates |
+| `mob.observe` | Subscribe to whole-mob raw event streams |
+| `runtime.admin` | Routing tables, labels, wiring, reconcile |
+| `topology.view` | Inspect topology state for an agent; also requires `agent.view` |
+| `topology.connect` / `topology.disconnect` / `topology.reconnect` | Plan or apply the corresponding edge action; required independently on both endpoints |
+| `topology.bulk` | Submit more than one explicit topology operation in a bounded transaction |
+| `topology.cross_authority` | Use the same-process bilateral host coordinator for an edge spanning two authorities; never enables authority-local JSON-RPC cross-mutation |
+| `topology.audit` | Read durable topology mutation attempts and actor/principal attribution; required on every endpoint returned |
+| `mobpack.author` | Author mobpacks in the Flow Editor: drafts, authoring operations, validation, source rendering, export/import, authoring catalogs |
+| `mobpack.deploy` | Execute a mobpack flow run on the host (`rkat mob run`); also unlocks the editor's deploy affordances |
+| `access.admin` | Read and edit this configuration |
+
+- **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
+
+Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
+
+### Spawn-lineage inheritance
+
+Members spawned **by an agent** (via `mob_spawn_member`, `delegate`, and the other agent-facing spawn tools) inherit their spawning parent's permissions. The spawn path records a `spawned_by` label as console metadata, and agent checks evaluate the member **and its spawn ancestors**: a rule that matches the parent — by identity, role, or labels — also matches the members it spawned, transitively. Deny-overrides is preserved across the chain, so a `deny` on the parent also denies its descendants, and a member-specific `deny` beats any inherited `allow`.
+
+This is what makes agent-fanned-out workers governable without per-worker rules: granting `agent.view` on a coordinator lets the operator watch everything that coordinator spawns, and hiding a sensitive lead also hides its helpers. Lineage resolution is bounded (depth 8) and cycle-safe, and members can always carry their own labels or rules to override the inherited outcome (subject to deny-overrides).
+
+Lineage is **runtime-derived only**: `spawned_by` and `via_tool` come from the spawn path's own record of who performed the spawn. A `spawned_by` claim arriving through caller-controlled labels (spawn specs, roster labels) is stripped at every enforcement seam — an unverified claim could otherwise mint inherited visibility, or hide a member behind a denied parent. The lineage registry is in-memory: it repopulates as members are spawned and does not survive a runtime restart.
+
+<Warning>
+Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.
+</Warning>
+
+## Configuration
+
+Drop a `config/access.toml` next to your other config files — its presence opts the deployment in:
+
+```toml
+enabled = true
+admins = ["root@example.com"]
+
+[groups.ops]
+description = "Operations"
+members = ["alice@example.com", "bob@example.com"]
+
+# Ops can see every agent...
+[[rules]]
+id = "ops-view-all"
+groups = ["ops"]
+actions = ["agent.view"]
+
+# ...but only interact with the ops lead.
+[[rules]]
+id = "ops-send-lead"
+groups = ["ops"]
+actions = ["agent.send"]
+agents = ["identity:ops-lead"]
+
+# Contractors see only the payments org, read-only.
+[[rules]]
+id = "contractors-payments-readonly"
+groups = ["contractors"]
+actions = ["agent.view"]
+[rules.match_labels]
+org = "payments"
+
+# Nobody but admins ever touches the auditor, even via wildcards.
+[[rules]]
+id = "protect-auditor"
+effect = "deny"
+actions = ["agent.*"]
+agents = ["identity:auditor"]
+```
+
+Enabling requires at least one admin subject — the config layer refuses any state that would lock every administrator out.
+
+Programmatic embedders use the builder instead:
+
+```rust
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .access_control_file("config/access.toml")?
+    .build()
+    .await?;
+```
+
+```typescript
+const mobkit = await MobKit.builder()
+  .mobConfig("config/mob.toml")
+  .accessControl("config/access.toml") // auto-discovered if the file exists
+  .start();
+```
+
+```python
+mobkit = await (
+    MobKit.builder()
+    .mob("config/mob.toml")
+    .access_control("config/access.toml")  # auto-discovered if the file exists
+    .build()
+)
+```
+
+## Live administration from the console
+
+Administrators get an **Access** entry in the console workbench (it never appears for anyone else). It edits the live configuration through the `mobkit/access/*` RPC methods — group membership, rules, admins, and the enforcement toggle all apply on the next request, no restart, and persist back to `access.toml`:
+
+| Method | Purpose |
+|--------|---------|
+| `mobkit/access/status` | Caller's own standing (any caller) |
+| `mobkit/access/get` / `set` | Read / replace the whole config |
+| `mobkit/access/enable` | Toggle enforcement |
+| `mobkit/access/rules/upsert` / `delete` | Edit one rule |
+| `mobkit/access/groups/set` / `delete` | Assign people to groups |
+| `mobkit/access/preview` | Evaluate "would subject X be allowed to ..." |
+
+All write methods require `access.admin` (or admin standing) and return the new config revision. Denied operations everywhere surface as JSON-RPC error `-32030` with `data.kind = "access_denied"`, or HTTP `403` on REST/SSE surfaces.
+
+**Bootstrap:** a fresh controller (disabled, no admins) lets any authenticated console user open the Access panel, name admins, and enable enforcement. The moment admins exist, only they (and `access.admin` grantees) can administer.
+
+## What gets enforced
+
+- `/console/experience` — agents the caller can't view vanish from the sidebar, roster, topology, identity status; per-agent affordances (`can_send_message`, `can_retire`, `can_respawn`) and runtime capabilities are intersected with the caller's grants, so the stock console UI degrades invisibly. Affordances are resolved per agent: a caller who can view and retire an agent but not message it gets a disabled composer on that agent while keeping the retire action — having no send grant anywhere does not flip the whole console to deployment read-only.
+- `/console/timeline`, timeline streams, and `mobkit/console/query_timeline` — frames for hidden identities are filtered out.
+- `mobkit/console/send` and `/console/send` — require `agent.send` on the target.
+- `mobkit/agent_memory/remember` and `mobkit/agent_memory/forget` — require `agent.memory.write` and `agent.memory.delete` respectively on the target identity. `mobkit/agent_memory/recall` and `mobkit/agent_memory/manifest` require **both** `agent.memory.read` and `agent.view` on the identity.
+- `mobkit/memory/panel/*` (the console Memory panel, read-only) — every returned record is filtered by its scope: identity-scoped records need `agent.memory.read` + `agent.view` on that identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and `mobkit/memory/panel/dreams` need an unscoped `agent.memory.read` grant, and quarantined records plus `mobkit/memory/panel/quarantine` need `memory.quarantine.review`. The review grant only opens the quarantine surface — each queue record and pending promotion is still filtered by the per-scope read grants above on its (target) scope. Memory content is more sensitive than roster visibility — plain `agent.view` alone no longer reads any of it.
+- Lifecycle and runtime RPCs — mapped to `agent.retire` / `agent.respawn` / `agent.reset` / `agent.spawn` / `runtime.admin` per method.
+- Topology control — query visibility requires `agent.view` and
+  `topology.view` per endpoint. Connect, disconnect, and reconnect require the
+  matching `topology.*` grant on both endpoint identities for planning as well
+  as applying. Multi-operation requests also require `topology.bulk`; the
+  runtime still enforces its finite batch ceiling. Durable mutation audit and
+  actor/principal attribution require the separate `topology.audit` grant on
+  every endpoint in a returned record. Cross-authority mutation is separately
+  gated and is available only to a same-process host coordinating both
+  runtimes; the authority-local JSON-RPC surface fails it closed.
+- `/agents/{id}/events` — requires `agent.view` on that agent. `/mob/events` and `/mobkit/mob_events/stream` require `mob.observe` to open and additionally filter each event by `agent.view` on its source (see below).
+
+Label- and role-based rules resolve against an attribute cache the runtime refreshes from every roster projection, so selectors keep working on surfaces that only carry an identity string.
+
+<Note>
+**Migration — memory read actions.** Recall used to ride bare `agent.view`. Configs written before `agent.memory.read` existed (no `*.memory.*` action mentioned in any rule) keep working: on load, every rule matching `agent.view` is extended to also cover `agent.memory.read` — allow *and* deny rules alike — and a warning is logged recommending explicit rules. The rewrite is materialized into the persisted config, so it happens once. A config that mentions any memory action anywhere is taken literally.
+</Note>
+
+### `mob.observe` and per-agent filtering
+
+`mob.observe` gates *access to the whole-mob event surfaces* — `/mob/events`, `/mobkit/mob_events/stream`, and `mobkit/mob_events/query` / `subscribe`. It does **not** override per-agent `agent.view`: events flowing through those surfaces are still filtered per agent, so a caller with `mob.observe` but not `agent.view` on agent X sees neither X's live events nor X's lifecycle entries. (Mob-level structural events with no agent attribution flow on the `mob.observe` grant alone.) To observe the entire mob, grant `mob.observe` together with `agent.view` on `*`.
+
+### `/blobs/{id}` is a capability surface
+
+`/blobs/{id}` serves content-addressed (`sha256:…`) blobs. Blobs are deduplicated by content hash and have no single owning agent, so they are gated by console authentication plus hash unguessability rather than per-agent ACL. A 256-bit content hash is only learnable through a surface the caller is already allowed to see (e.g. a visible agent's timeline frame), so a denied caller cannot enumerate another agent's images. Do not treat blob URLs as a per-agent confidentiality boundary; treat them as capability URLs.
+
+## Relationship to authentication
+
+Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). Running with access control enabled but authentication off is possible (anonymous callers match only unconstrained rules), but for per-user policy you want auth on.

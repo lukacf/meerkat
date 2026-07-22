@@ -1,0 +1,103 @@
+---
+title: "Governance"
+description: "Release candidate tracking, traceability matrix, validation, and governance state contracts."
+icon: "clipboard-check"
+---
+
+MobKit includes a governance system for tracking release candidates through implementation. The governance layer validates that all contracts are traced, documented, and verified before a release.
+
+## Governance state
+
+The runtime declares its governance state as a string. The primary state for in-progress work:
+
+```
+"realignment_in_progress"
+```
+
+`validate_governance_state` verifies the state is recognized:
+
+```rust
+validate_governance_state("realignment_in_progress")?;
+```
+
+## Traceability statuses
+
+Every contract or feature in MobKit carries a traceability status. The strict status set used for validation:
+
+| Status | Meaning |
+|--------|---------|
+| `TYPED` | Contract has Rust types defined |
+| `WIRED` | Types are connected to runtime paths |
+| `VALIDATED` | Integration tests pass |
+| `PROVISIONAL` | Implementation exists but awaiting full validation |
+| `MISSING` | Not yet implemented |
+| `DEFERRED` | Explicitly deferred to a future release |
+| `STUBBED` | Placeholder implementation for testing |
+
+### Validation
+
+```rust
+validate_traceability_statuses(&["TYPED", "WIRED", "VALIDATED"])?;
+```
+
+All provided statuses must be in the `STRICT_TRACEABILITY_STATUSES` set. Unknown statuses produce a `GovernanceValidationError`.
+
+## Baseline verification
+
+The optional source-baseline check can verify that the required Meerkat API
+symbols are available in a local Meerkat checkout. Supply the checkout
+explicitly, or set `MEERKAT_REPO`; there is no machine-specific default:
+
+```rust
+use std::path::Path;
+
+let report: BaselineVerificationReport =
+    verify_meerkat_baseline_symbols(Some(Path::new("/path/to/meerkat")))?;
+```
+
+The baseline check ensures that:
+- Required Meerkat crates are present
+- Expected API symbols are exported
+- Version compatibility is maintained
+
+### Required symbols
+
+The `REQUIRED_MEERKAT_SYMBOLS` constant lists every Meerkat API entry point that MobKit depends on. Missing symbols produce a `BaselineVerificationError`.
+
+## Governance contracts
+
+`validate_governance_contracts` runs the full governance validation suite:
+
+1. Governance state validation
+2. Traceability status validation
+3. Baseline symbol verification
+
+This is available as a standalone binary (`governance_check`) for CI integration.
+
+## Governance validation errors
+
+| Error | Cause |
+|-------|-------|
+| `InvalidState` | Governance state not recognized |
+| `InvalidTraceabilityStatus` | Status not in strict set |
+| `BaselineVerificationFailed` | Required Meerkat symbols missing |
+| `ContractNotTraced` | Contract lacks traceability annotation |
+
+## CLI tools
+
+MobKit provides standalone binaries for governance checks:
+
+| Binary | Purpose |
+|--------|---------|
+| `baseline_check` | Verify Meerkat prerequisites |
+| `governance_check` | Validate governance state and traceability |
+| `mobkit_gateway` | JSON-RPC gateway |
+| `mcp_fixture` | MCP test fixture |
+
+These can be run in CI pipelines to enforce governance before merge.
+
+## See also
+
+- [Decisions](/mobkit/reference/decisions) -- runtime policy enforcement
+- [Configuration](/mobkit/reference/configuration) -- release metadata validation
+- [Architecture](/mobkit/reference/architecture) -- crate structure

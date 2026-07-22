@@ -1,0 +1,204 @@
+---
+title: "Memory"
+description: "Operational memory assertions plus optional identity-first agent memory injection."
+icon: "brain"
+---
+
+MobKit has two memory-adjacent surfaces, and they serve different latency
+classes:
+
+- `agent_memory` is hot identity memory plus prompt injection. It is keyed by
+  stable `AgentIdentity`, stored by realm, and injected during
+  create/resume/materialize and ordinary identity-first turns.
+- `mobkit/memory/*` is an operational assertion and conflict ledger used by
+  routing/gating flows. It is persisted as a local JSON file under
+  `persistent_state`, optionally gated by an HTTP health check. Query
+  semantics are exact filters over stored assertions plus an optional
+  substring `query` filter.
+
+## Architecture
+
+The bundled `agent_memory` provider is intentionally lightweight. It writes an
+inspectable markdown hot store under `<persistent_state>/agent-memory` so an
+explicit `remember` write is available to the next turn without requiring an
+external service or LLM-powered extraction pipeline. This store is the default
+gateway implementation, not the long-term knowledge authority.
+
+Elephant is not integrated today. A real Elephant integration — a deep-memory
+hub with a knowledge graph, document/vector retrieval, truth maintenance,
+provenance, and ABAC/redaction — is the wire-boundary provider described in the
+memory hub roadmap (`docs/design/memory-hub-roadmap.md` in the repository).
+Nothing in the current runtime sends data to Elephant.
+
+Meerkat's session semantic memory is a separate layer again: it indexes
+compacted session content and exposes semantic recall through Meerkat's
+`memory_search` tool. MobKit's `agent_memory` injector can be backed by a
+provider that consults session memory or other stores, but the MobKit runtime
+does not assume semantic/vector search from `mobkit/memory/*`.
+
+The operational ledger backend persists assertions and conflict signals as a
+local JSON file, optionally gated by an HTTP health check before every ledger
+read/write. Configuration is provided through `LocalJsonMemoryBackendConfig`:
+
+```rust
+LocalJsonMemoryBackendConfig {
+    state_path: "/var/mobkit/state/memory-ledger-state.json",
+    health_check_endpoint: Some("http://localhost:3000"),
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state_path` | `String` | Local JSON file the ledger is persisted to |
+| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL; when set, `GET <endpoint>/v1/health` must return 2xx before each ledger read/write |
+
+The legacy `ElephantMemoryBackendConfig` shape (`kind = "elephant"` with an
+`endpoint`) is still accepted for config compatibility and logs a deprecation
+warning: despite its name it never sent data to Elephant — the `endpoint` was
+only ever health-checked and the ledger persisted locally. It maps to the
+local-JSON backend with `endpoint` as the health-check endpoint.
+
+When using the Python or TypeScript SDK through the stock `rpc_gateway`, configure the ledger with `memory.local_json()` (Python) / `memory.localJson()` (TypeScript), optionally passing a health-check endpoint, and enable `.persistent_state(path)`. The gateway derives the state file as `<persistent_state>/memory-ledger-state.json` (an existing legacy `<persistent_state>/elephant-memory-state.json` is adopted automatically so restarts keep their data). The deprecated `memory.elephant(endpoint)` helpers still work and emit the legacy `backend: "elephant"` wire shape; fields such as `stores`, `space_id`, and `collection` are rejected at init so unsupported configuration does not become a silent no-op.
+
+## Indexing
+
+Index an operational assertion with a `MemoryIndexRequest`:
+
+```rust
+MemoryIndexRequest {
+    entity: "identity:ops".to_string(),
+    topic: "deployment".to_string(),
+    store: Some("knowledge_graph".to_string()),
+    fact: Some("Production deploys require approval.".to_string()),
+    metadata: Some(json!({ "source": "runbook" })),
+    conflict: None,
+    conflict_reason: None,
+}
+```
+
+The current MobKit runtime stores a canonical assertion locally and persists it when the memory backend is configured. Set `conflict: Some(true)` with `conflict_reason` to record a conflict signal instead of a normal assertion.
+
+## Querying
+
+Query memory with a `MemoryQueryRequest`:
+
+```rust
+MemoryQueryRequest {
+    entity: Some("identity:ops".to_string()),
+    topic: Some("deployment".to_string()),
+    store: Some("knowledge_graph".to_string()),
+    query: None,
+}
+```
+
+The current MobKit runtime filters stored assertions and conflict signals by `entity`, `topic`, and `store` (exact matches). The optional `query` parameter is applied afterwards as a case-insensitive substring filter across entity, topic, and fact (reason for conflict signals). Semantic/vector search should be supplied by a provider or upstream Meerkat memory surface rather than assumed from this RPC.
+
+## Agent memory injection
+
+Gateway users can enable identity-first injection with:
+
+```typescript
+MobKit.builder()
+  .persistentState(".mobkit/state")
+  .rosterProvider(appRosterProvider)
+  .agentMemory({
+    realm: "default",
+    selection: "contextual",
+    maxEntries: 8,
+    recallTimeoutMs: 500,
+    recallFailurePolicy: "skip",
+  })
+```
+
+By default, the bundled provider writes markdown under `<persistent_state>/agent-memory/<realm>/<identity>.md`. Records are inspectable and are injected as a quoted observation block for the matching durable identity. The bundled markdown store enforces an explicit retention policy per identity file: at most 512 records and 8 MiB of rendered markdown, retaining the newest records when compacting. Recall reads within that bounded file, contextual recall receives the raw turn or RPC `query_text`, ignores common stopwords, scores matching records, and size-caps injected records; malformed records are skipped rather than promoted into runtime context. Automatic build/turn injection is time-bounded by `recall_timeout_ms` (default `500`) and defaults to `recall_failure_policy: "skip"`, so provider slowness or outage does not block normal delivery. Set `recall_failure_policy: "fail"` for fail-closed deployments. Explicit `mobkit/agent_memory/recall` calls still return provider errors to the caller.
+
+Apps write identity-scoped agent memory explicitly through `mobkit/agent_memory/remember`, TypeScript `handle.rememberAgentMemory(...)`, or Python `handle.remember_agent_memory(...)`; read it through `mobkit/agent_memory/recall`, `handle.recallAgentMemory(...)`, or `handle.recall_agent_memory(...)`; and delete individual records through `mobkit/agent_memory/forget`, `handle.forgetAgentMemory(...)`, or `handle.forget_agent_memory(...)`. A successful `remember` means the configured hot identity-memory provider durably accepted the record and it is available to the next identity-first send for that identity, plus build context on materialization/resume/respawn/reset. It does not imply Elephant entity extraction, truth maintenance, or document/vector indexing has completed. Custom providers receive both raw `query_text` and normalized `query_terms` so they can implement stronger retrieval without changing MobKit runtime authority.
+
+Agent memory is identity-scoped rather than session-scoped. A session respawn or identity reset does not delete stored memory; apps that need privacy reset semantics can call `mobkit/agent_memory/forget` for specific records or use a provider that clears memory as part of the app's identity lifecycle. `forget` removes records from future recall and injection, but it cannot remove text already delivered into an active model context; reset or respawn the identity after deletion when immediate context revocation matters.
+
+## The `memory` recorder tool
+
+With the SQLite store (the default), identity-first members get a capability-gated `memory` tool: `remember`, `update`, `forget`, `recall`, and `propose_to_mob`. Writes carry real agent authorship and always enter at the `agent_observed` trust tier or below — an agent that verified a fact records the verification as a *claim* in provenance (`epistemic: "verified_claim"` plus `verification_evidence`); the trust-tier upgrade is a steward-only reviewed operation. `update` supersedes a record within its own lineage in the agent's own identity scope; cross-identity updates are rejected by the store validator. `propose_to_mob` queues a proposal for mob scope — a steward or operator must commit it. Tool results are an indexing-excluded message class, so confirmations and recall payloads never echo into session semantic memory. Disable the tool with `agent_memory.recorder_tool: false` (default `true` when agent memory is enabled).
+
+## Content trust and session taint
+
+A memory tool that can be poisoned by prompt injection is worse than no memory tool, so the recorder ships with a deterministic firewall:
+
+- **Content-trust classification** (`agent_memory.content_trust`): web/fetch tools and provider-native search are always untrusted; MCP servers are untrusted by default with a `trusted_mcp_servers` allowlist; `untrusted_tools` / `trusted_tools` give explicit per-tool overrides. In this release classification is by tool *name* (tool events do not carry provenance yet), so MCP tools are attributable to a server only when their names are qualified as `mcp__<server>__<tool>`; list unqualified MCP tool names in `untrusted_tools`.
+- **Session-sticky taint**: once a session ingests untrusted tool content, every LLM-authored memory write from that session lands `quarantined` — stored, auditable, but never injected or recalled until review. Taint clears only at a fresh-context boundary (reset, respawn, fresh spawn); compaction does not clear it.
+- **Write posture** (`agent_memory.llm_writes`): `"observed"` (default) quarantines only tainted-session writes; `"quarantined"` quarantines *every* LLM-authored write pending review. Choose `"quarantined"` if you cannot accept the known race: a write issued in the same turn as the session's *first* untrusted ingestion can beat the observe-stream taint signal (closed in a later phase by dispatch-time taint visibility).
+
+Application/operator writes (the `mobkit/agent_memory/*` RPCs) are non-LLM principals and are never quarantined by this machinery. `llm_writes` and `content_trust` require `store: "sqlite"`; configuring them with the markdown store fails loudly at startup.
+
+```typescript
+MobKit.builder().agentMemory({
+  llmWrites: "observed",
+  recorderTool: true,
+  contentTrust: {
+    trustedMcpServers: ["knowledge_graph"],
+    untrustedTools: ["scrape_page"],
+  },
+})
+```
+
+## Conflict detection
+
+Conflict signals are recorded through `mobkit/memory/index` with
+`conflict: true` and an optional `conflict_reason`. When competing claims exist
+about the same entity/topic, MobKit's gating subsystem checks for an active
+conflict before approving an action.
+
+A `MemoryConflictSignal` carries:
+- The `entity`, `topic`, and `store` the conflict is scoped to
+- An optional free-form `reason`
+- The `updated_at_ms` timestamp of the most recent signal
+
+This integrates with [gating](/mobkit/concepts/gating) to prevent agents from acting on contested information. There is no automatic truth maintenance today; a truth layer is part of the memory hub roadmap.
+
+## Health checks
+
+When `health_check_endpoint` is configured, the ledger adapter performs a TCP-level health check against it before every ledger read/write. The health check:
+
+1. Resolves the endpoint hostname
+2. Opens a TCP connection with `MEMORY_LEDGER_HEALTHCHECK_TIMEOUT` (2s)
+3. Sends an HTTP GET to `/v1/health`
+4. Verifies a 2xx status response
+
+Failed health checks produce `LocalJsonMemoryStoreError::ExternalCallFailed` with diagnostic details. Without a configured endpoint, no health check is performed.
+
+## Memory store info
+
+`mobkit/memory/stores` returns a `MemoryStoreInfo` entry per supported store:
+
+```rust
+MemoryStoreInfo {
+    store: "knowledge_graph",
+    record_count: 42,
+}
+```
+
+`record_count` counts stored assertions plus active conflict signals for the store. This is available through the RPC API for monitoring and diagnostics.
+
+## Console Memory panel
+
+When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel — trust through inspectability. It is strictly read-only and served by four `mobkit/memory/panel/*` RPC methods:
+
+| Method | Returns |
+|--------|---------|
+| `mobkit/memory/panel/records` | Records filtered by realm/scope/status, newest-updated first, keyset cursor (`{realm?, scope?, identity?, scope_key?, status?, limit?, cursor?}`). List rows are body-free (`body_bytes` stands in) |
+| `mobkit/memory/panel/record` | One record with body, its supersede chain (ancestors, committed successors, trailing uncommitted claimants), and its injection-ledger usage |
+| `mobkit/memory/panel/quarantine` | The quarantine queue plus pending gated promotions. The queue is read-only — verdicts belong to the memory steward's dream and the gating flow |
+| `mobkit/memory/panel/dreams` | Steward dream-run summaries reconstructed from the audit rows (op counts and kinds, quarantined ops, sampled record ids and rationales) |
+
+Memory lifecycle events (`memory.dream.*`, `memory.record.promoted`, `memory.quarantine.verdict`, `memory.write.quarantined`, `memory.taint.transition`, `memory.hygiene.*`, ...) flow onto the console timeline as standard envelopes and render in the timeline and Signals surfaces.
+
+Visibility is governed by the [access-control](/mobkit/concepts/access-control) memory actions: identity-scoped records need `agent.memory.read` + `agent.view` on the identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and dream history need an unscoped `agent.memory.read` grant, and quarantined content needs `memory.quarantine.review`. The panel's nav entry appears when the experience projection reports `memory.can_read`.
+
+Embedders wire the panel by handing the store to the runtime: `runtime.set_memory_panel_store(store)` before building the console router.
+
+## See also
+
+- [Gating](/mobkit/concepts/gating) -- conflict-aware approval gates
+- [Access control](/mobkit/concepts/access-control) -- the memory read actions governing panel visibility
+- `docs/design/memory-hub-roadmap.md` (in the repository) -- the roadmap for a real Elephant-backed memory hub
+- [RPC API](/mobkit/api/rpc) -- `memory.*` methods

@@ -17,7 +17,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage check-rust-release-config check-rust-release-packaging check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-full machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit audit-generated-headers semver-breaks
+.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage check-rust-release-config check-rust-release-packaging check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-full machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit audit-generated-headers semver-breaks
 
 # Default target
 all: ci
@@ -472,6 +472,16 @@ doc:
 docs-check:
 	@echo "$(GREEN)Checking Mintlify docs...$(NC)"
 	@$(PYTHON) scripts/validate-mintlify-docs.py
+	@$(PYTHON) scripts/test_sync_mobkit_docs.py
+	@$(PYTHON) scripts/test_publish_mobkit_docs.py
+
+MOBKIT_REPO ?= ../meerkat-mobkit
+MOBKIT_REF ?= $(shell git -C "$(MOBKIT_REPO)" describe --tags --exact-match HEAD 2>/dev/null)
+
+docs-sync-mobkit:
+	@test -n "$(MOBKIT_REF)" || (echo "$(RED)MOBKIT_REPO must point to an exact release tag$(NC)" && exit 1)
+	@echo "$(GREEN)Syncing released MobKit docs from $(MOBKIT_REF)...$(NC)"
+	@$(PYTHON) scripts/sync-mobkit-docs.py "$(MOBKIT_REPO)" --source-ref "$(MOBKIT_REF)" --require-clean
 
 # Open documentation in browser
 doc-open:
@@ -798,6 +808,7 @@ help:
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"
 	@echo "  $(GREEN)doc$(NC)           - Generate documentation"
 	@echo "  $(GREEN)docs-check$(NC)    - Validate Mintlify docs navigation and links"
+	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit release tag"
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"

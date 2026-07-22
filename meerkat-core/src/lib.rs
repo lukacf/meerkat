@@ -74,6 +74,7 @@ pub mod session_store;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
+pub mod storage_layout;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
@@ -284,8 +285,10 @@ pub use retry::{
     select_retry_delay,
 };
 pub use runtime_bootstrap::{
-    ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
-    RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
+    ContextConfig, DualRootResolution, REALM_MANIFEST_FILE_NAME, RealmConfig, RealmLocator,
+    RealmRootChoice, RealmRootDefault, RealmSelection, RuntimeBootstrap, RuntimeBootstrapError,
+    default_state_root, derive_workspace_realm_id, fnv1a64_hex, generate_realm_id,
+    realm_exists_under, sanitize_realm_id,
 };
 pub use runtime_epoch::{
     EpochCursorSnapshot, EpochCursorState, RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
@@ -341,6 +344,9 @@ pub use session_store::{
     head_canonical_plain_save_guard, session_head_cas_token, strand_layout_for_history,
 };
 pub use state::LoopState;
+pub use storage_layout::{
+    ResolvedStorage, StorageLayout, StorageLayoutInputs, find_project_root, local_realms_candidate,
+};
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,

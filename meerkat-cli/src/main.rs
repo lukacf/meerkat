@@ -4279,6 +4279,10 @@ async fn write_comms_binding_out(
 #[derive(Clone)]
 struct RuntimeScope {
     locator: RealmLocator,
+    /// How the state root was chosen (explicit flag / existing realm /
+    /// surface default) — realm re-resolution (mob-host config override)
+    /// keys off this.
+    root_choice: meerkat_core::RealmRootChoice,
     instance_id: Option<String>,
     backend_hint: Option<RealmBackend>,
     origin_hint: RealmOrigin,
@@ -4349,10 +4353,6 @@ fn resolve_runtime_scope_with_realm(
         RealmSelection::Isolated => RealmOrigin::Generated,
         RealmSelection::WorkspaceDerived { .. } => RealmOrigin::Workspace,
     };
-    let state_root = cli
-        .state_root
-        .clone()
-        .unwrap_or_else(|| default_cli_state_root(&context_root));
     let realm_cfg = RealmConfig {
         selection,
         instance_id: cli.instance.clone(),
@@ -4360,9 +4360,25 @@ fn resolve_runtime_scope_with_realm(
             .realm_backend
             .map(Into::into)
             .map(|b: RealmBackend| b.as_str().to_string()),
-        state_root: Some(state_root),
+        state_root: cli.state_root.clone(),
     };
-    let locator = realm_cfg.resolve_locator()?;
+    // Realm-id-first dual-root resolution: an explicit --state-root wins;
+    // else the realm is used where it already exists (project-local
+    // <context-root>/.rkat/realms or the user-global data dir; both is a
+    // typed split-brain refusal); else the CLI's documented project-local
+    // default applies.
+    let resolution = realm_cfg.resolve_locator_dual_root(
+        Some(&meerkat_core::local_realms_candidate(&context_root)),
+        meerkat_core::RealmRootDefault::ProjectLocal,
+    )?;
+    let locator = resolution.locator;
+    if resolution.choice == meerkat_core::RealmRootChoice::ExistingGlobal {
+        tracing::info!(
+            realm = %locator.realm,
+            state_root = %locator.state_root.display(),
+            "realm resolved to the user-global state root where it already exists"
+        );
+    }
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
@@ -4370,6 +4386,7 @@ fn resolve_runtime_scope_with_realm(
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
+        root_choice: resolution.choice,
         instance_id: cli.instance.clone(),
         // Only pass an explicit backend hint when the caller asked for one.
         // Existing realms are always opened using their pinned manifest backend.
@@ -4381,10 +4398,6 @@ fn resolve_runtime_scope_with_realm(
         #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
         oauth_flow_authority,
     })
-}
-
-fn default_cli_state_root(context_root: &Path) -> PathBuf {
-    context_root.join(".rkat").join("realms")
 }
 
 async fn resolve_config_store(
@@ -16936,6 +16949,7 @@ mod tests {
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
+            root_choice: meerkat_core::RealmRootChoice::Explicit,
             locator: RealmLocator {
                 state_root: state_root.clone(),
                 realm: meerkat_core::connection::RealmId::parse(realm_id)
@@ -24642,7 +24656,7 @@ default_model = "gpt-5.4"
         let root = PathBuf::from("/tmp/example-project");
 
         assert_eq!(
-            default_cli_state_root(&root),
+            meerkat_core::local_realms_candidate(&root),
             PathBuf::from("/tmp/example-project/.rkat/realms")
         );
     }
@@ -25386,6 +25400,7 @@ supports_reasoning = true
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
+            root_choice: meerkat_core::RealmRootChoice::Explicit,
             locator: RealmLocator {
                 state_root: root.clone(),
                 realm: meerkat_core::connection::RealmId::parse("test-realm")

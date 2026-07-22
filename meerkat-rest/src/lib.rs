@@ -390,7 +390,20 @@ impl AppState {
         expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        let locator = bootstrap.realm.resolve_locator()?;
+        // Realm-id-first dual-root resolution; the project-local candidate
+        // participates only with an explicit --context-root (see rkat-rpc).
+        let locator = bootstrap
+            .realm
+            .resolve_locator_dual_root(
+                bootstrap
+                    .context
+                    .context_root
+                    .as_deref()
+                    .map(meerkat_core::local_realms_candidate)
+                    .as_deref(),
+                meerkat_core::RealmRootDefault::UserGlobal,
+            )?
+            .locator;
         let realm = locator.realm;
         let instance_id = bootstrap.realm.instance_id;
         let backend_hint = bootstrap

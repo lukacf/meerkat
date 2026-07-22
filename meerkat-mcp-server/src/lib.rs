@@ -1265,7 +1265,20 @@ impl MeerkatMcpState {
         expose_paths: bool,
         default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let locator = bootstrap.realm.resolve_locator()?;
+        // Realm-id-first dual-root resolution; the project-local candidate
+        // participates only with an explicit --context-root (see rkat-rpc).
+        let locator = bootstrap
+            .realm
+            .resolve_locator_dual_root(
+                bootstrap
+                    .context
+                    .context_root
+                    .as_deref()
+                    .map(meerkat_core::local_realms_candidate)
+                    .as_deref(),
+                meerkat_core::RealmRootDefault::UserGlobal,
+            )?
+            .locator;
         // Locator now carries the typed `RealmId` directly; no need to
         // reparse at the mcp-server boundary. Downstream `meerkat_store::*_in`
         // call sites obtain `&str` via `RealmId::as_str`.

@@ -258,24 +258,13 @@ fn remove_file_nonblocking_on_drop(path: PathBuf) {
 }
 
 fn default_realms_root() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("meerkat")
-        .join("realms")
+    meerkat_core::default_state_root()
 }
 
-pub fn sanitize_realm_id(realm_id: &str) -> String {
-    realm_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
+/// Sanitize a realm id into its on-disk directory name.
+/// (Canonical copy lives in `meerkat_core::runtime_bootstrap`; re-exported
+/// here for compatibility.)
+pub use meerkat_core::sanitize_realm_id;
 
 pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
     let safe = sanitize_realm_id(realm_id);
@@ -290,6 +279,10 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
     }
 }
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
+)]
 pub fn realm_paths(realm_id: &str) -> RealmPaths {
     realm_paths_in(&default_realms_root(), realm_id)
 }
@@ -340,6 +333,10 @@ async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<()
     Ok(())
 }
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
+)]
 pub async fn start_realm_lease(
     realm_id: &str,
     instance_id: Option<&str>,
@@ -403,6 +400,10 @@ pub async fn start_realm_lease_in(
     })
 }
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
+)]
 pub async fn inspect_realm_leases(
     realm_id: &str,
     cleanup_stale: bool,
@@ -504,6 +505,10 @@ pub async fn list_realm_manifests_in(
     Ok(manifests)
 }
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
+)]
 pub async fn ensure_realm_manifest(
     realm_id: &str,
     backend_hint: Option<RealmBackend>,
@@ -739,6 +744,10 @@ fn parse_realm_backend(realm_id: &str, backend: &str) -> Result<RealmBackend, St
     }
 }
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
+)]
 pub async fn open_realm_session_store(
     realm_id: &str,
     backend_hint: Option<RealmBackend>,
@@ -795,26 +804,11 @@ pub async fn open_realm_session_store_in(
     }
 }
 
-pub fn fnv1a64_hex(input: &str) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0100_0000_01b3;
-    let mut hash = OFFSET;
-    for b in input.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    format!("{hash:016x}")
-}
-
-pub fn derive_workspace_realm_id(path: &Path) -> String {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let key = canonical.to_string_lossy();
-    format!("ws-{}", fnv1a64_hex(&key))
-}
-
-pub fn generate_realm_id() -> String {
-    format!("realm-{}", Uuid::now_v7())
-}
+/// Realm-identity derivation helpers. (Canonical copies live in
+/// `meerkat_core::runtime_bootstrap`; re-exported here for compatibility —
+/// the previous local `generate_realm_id` used `Uuid::now_v7()` directly,
+/// core's uses the time-compat shim; both mint `realm-<uuidv7>`.)
+pub use meerkat_core::{derive_workspace_realm_id, fnv1a64_hex, generate_realm_id};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

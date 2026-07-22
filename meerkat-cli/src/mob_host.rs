@@ -690,15 +690,30 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         && scope.origin_hint == RealmOrigin::Workspace
         && file_realm != scope.locator.realm.as_str()
     {
+        // Re-resolve the config-file realm with the same dual-root probing
+        // as the primary scope: an explicit --state-root stays pinned; a
+        // defaulted root lets the overridden realm be found where it already
+        // exists instead of assuming the workspace realm's root.
+        let pinned_root = (scope.root_choice == meerkat_core::RealmRootChoice::Explicit)
+            .then(|| scope.locator.state_root.clone());
         let realm_cfg = RealmConfig {
             selection: RealmSelection::Explicit {
                 realm_id: file_realm.clone(),
             },
             instance_id: scope.instance_id.clone(),
             backend_hint: None,
-            state_root: Some(scope.locator.state_root.clone()),
+            state_root: pinned_root,
         };
-        scope.locator = realm_cfg.resolve_locator()?;
+        let local_candidate = scope
+            .context_root
+            .as_deref()
+            .map(meerkat_core::local_realms_candidate);
+        let resolution = realm_cfg.resolve_locator_dual_root(
+            local_candidate.as_deref(),
+            meerkat_core::RealmRootDefault::ProjectLocal,
+        )?;
+        scope.locator = resolution.locator;
+        scope.root_choice = resolution.choice;
         scope.origin_hint = RealmOrigin::Explicit;
         let (reloaded_config, reloaded_root) = crate::load_config(&scope).await?;
         config = reloaded_config;

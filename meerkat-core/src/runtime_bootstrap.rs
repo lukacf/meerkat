@@ -76,6 +76,21 @@ pub enum RuntimeBootstrapError {
     ConflictingSelection,
     #[error("invalid explicit realm id: {0}")]
     InvalidRealmId(String),
+    /// The same realm id is materialized under both candidate state roots.
+    /// Choosing either silently would deepen the split; resolution is an
+    /// operator decision.
+    #[error(
+        "realm '{realm_id}' exists under both candidate state roots \
+         ('{}' and '{}'); refusing to choose. Run `rkat storage doctor` to \
+         inspect both copies and `rkat storage migrate` to reconcile them, \
+         or pass --state-root to pick one explicitly.",
+        .local.display(), .global.display()
+    )]
+    RealmSplitBrain {
+        realm_id: String,
+        local: PathBuf,
+        global: PathBuf,
+    },
 }
 
 /// Default global state root shared across surfaces.
@@ -84,6 +99,78 @@ pub fn default_state_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("meerkat")
         .join("realms")
+}
+
+/// File name of the realm manifest inside a realm directory.
+///
+/// Vocabulary only: the manifest codec is owned by `meerkat-store`; this
+/// constant exists so realm-id-first root probing (below) and read-only
+/// diagnostics can recognize a materialized realm without depending on the
+/// store crate.
+pub const REALM_MANIFEST_FILE_NAME: &str = "realm_manifest.json";
+
+/// Sanitize a realm id into its on-disk directory name.
+///
+/// (Moved here from `meerkat-store`, which re-exports it: root probing needs
+/// the directory-name convention below the store crate in the dependency
+/// order.)
+pub fn sanitize_realm_id(realm_id: &str) -> String {
+    realm_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Which root a surface uses when the realm exists under neither candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealmRootDefault {
+    /// The project-local candidate (`<context-root>/.rkat/realms`) — the
+    /// CLI's documented default. Falls back to the user-global root when no
+    /// local candidate exists.
+    ProjectLocal,
+    /// The user-global data-dir root — the server surfaces' documented
+    /// default.
+    UserGlobal,
+}
+
+/// Provenance of the resolved state root (surfaces log it; doctor reports it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealmRootChoice {
+    /// An explicit `--state-root`/config root won; no probing happened.
+    Explicit,
+    /// The realm already exists under the project-local candidate.
+    ExistingLocal,
+    /// The realm already exists under the user-global candidate.
+    ExistingGlobal,
+    /// Neither candidate holds the realm; the surface default applies.
+    Default,
+}
+
+/// A resolved locator plus the provenance of its state root.
+#[derive(Debug, Clone)]
+pub struct DualRootResolution {
+    pub locator: RealmLocator,
+    pub choice: RealmRootChoice,
+}
+
+/// True when `realms_root` holds a materialized realm directory for `realm`.
+///
+/// The probe is manifest-file existence under the sanitized directory name.
+/// Path-aliased ids (`a.b` vs `a_b` sanitize identically) can therefore
+/// probe true for a sibling identity; that is safe for *root routing*
+/// because the store's manifest open stays fail-closed on identity mismatch
+/// — the invariant here is only that the resolver never *creates* a twin.
+pub fn realm_exists_under(realms_root: &Path, realm: &RealmId) -> bool {
+    realms_root
+        .join(sanitize_realm_id(realm.as_str()))
+        .join(REALM_MANIFEST_FILE_NAME)
+        .is_file()
 }
 
 impl RealmConfig {
@@ -109,18 +196,104 @@ impl RealmConfig {
     /// Resolve a concrete `(state_root, realm)` locator.
     pub fn resolve_locator(&self) -> Result<RealmLocator, RuntimeBootstrapError> {
         let state_root = self.state_root.clone().unwrap_or_else(default_state_root);
+        let realm = self.resolve_realm_identity()?;
+        Ok(RealmLocator { state_root, realm })
+    }
+
+    /// Resolve the realm identity exactly once (Isolated selection mints a
+    /// fresh id per call, so callers that also probe roots must not resolve
+    /// twice).
+    pub fn resolve_realm_identity(&self) -> Result<RealmId, RuntimeBootstrapError> {
         let realm_raw = match &self.selection {
             RealmSelection::Explicit { realm_id } => realm_id.clone(),
             RealmSelection::Isolated => generate_realm_id(),
             RealmSelection::WorkspaceDerived { root } => derive_workspace_realm_id(root),
         };
-        let realm = RealmId::parse(&realm_raw).map_err(|source| match source {
+        RealmId::parse(&realm_raw).map_err(|source| match source {
             IdentityError::Empty => RuntimeBootstrapError::InvalidRealmId(realm_raw.clone()),
             IdentityError::InvalidChar(_) => {
                 RuntimeBootstrapError::InvalidRealmId(realm_raw.clone())
             }
-        })?;
-        Ok(RealmLocator { state_root, realm })
+        })
+    }
+
+    /// Realm-id-first dual-root locator resolution.
+    ///
+    /// Resolves the realm identity *before* choosing a root, then probes for
+    /// **that specific realm** under both candidate roots:
+    ///
+    /// 1. an explicit `state_root` (flag/config) wins — no probing;
+    /// 2. else the single candidate root where the realm already exists is
+    ///    used where it lies;
+    /// 3. both candidates holding the realm is a typed
+    ///    [`RuntimeBootstrapError::RealmSplitBrain`] refusal;
+    /// 4. neither: the surface's documented default root applies.
+    ///
+    /// `local_candidate` is the project-local candidate
+    /// (`<context-root>/.rkat/realms`). The CLI always has one; server
+    /// surfaces pass one only when started with an explicit context root,
+    /// which keeps their no-flags behavior unchanged.
+    ///
+    /// The invariant this preserves (the reason probing is realm-id-first
+    /// rather than parent-directory-exists): resolution must never route a
+    /// realm that exists only under one root into the other and thereby
+    /// *create* an empty twin.
+    pub fn resolve_locator_dual_root(
+        &self,
+        local_candidate: Option<&Path>,
+        default_root: RealmRootDefault,
+    ) -> Result<DualRootResolution, RuntimeBootstrapError> {
+        self.resolve_locator_dual_root_with(local_candidate, &default_state_root(), default_root)
+    }
+
+    /// [`Self::resolve_locator_dual_root`] with an injected user-global
+    /// candidate (testability; production passes [`default_state_root`]).
+    pub fn resolve_locator_dual_root_with(
+        &self,
+        local_candidate: Option<&Path>,
+        global_candidate: &Path,
+        default_root: RealmRootDefault,
+    ) -> Result<DualRootResolution, RuntimeBootstrapError> {
+        let realm = self.resolve_realm_identity()?;
+        if let Some(explicit) = &self.state_root {
+            return Ok(DualRootResolution {
+                locator: RealmLocator {
+                    state_root: explicit.clone(),
+                    realm,
+                },
+                choice: RealmRootChoice::Explicit,
+            });
+        }
+        let global_candidate = global_candidate.to_path_buf();
+        let in_local = local_candidate.is_some_and(|root| realm_exists_under(root, &realm));
+        let in_global = realm_exists_under(&global_candidate, &realm);
+        let (state_root, choice) = match (in_local, in_global) {
+            (true, true) => {
+                // `is_some_and` above guarantees the candidate exists here.
+                let local = local_candidate.map(Path::to_path_buf).unwrap_or_default();
+                return Err(RuntimeBootstrapError::RealmSplitBrain {
+                    realm_id: realm.as_str().to_string(),
+                    local,
+                    global: global_candidate,
+                });
+            }
+            (true, false) => (
+                local_candidate.map(Path::to_path_buf).unwrap_or_default(),
+                RealmRootChoice::ExistingLocal,
+            ),
+            (false, true) => (global_candidate, RealmRootChoice::ExistingGlobal),
+            (false, false) => {
+                let root = match (default_root, local_candidate) {
+                    (RealmRootDefault::ProjectLocal, Some(local)) => local.to_path_buf(),
+                    _ => global_candidate,
+                };
+                (root, RealmRootChoice::Default)
+            }
+        };
+        Ok(DualRootResolution {
+            locator: RealmLocator { state_root, realm },
+            choice,
+        })
     }
 }
 
@@ -207,5 +380,162 @@ mod tests {
         let b = cfg.resolve_locator().map(|locator| locator.realm);
         assert!(a.is_ok());
         assert_eq!(a.ok(), b.ok());
+    }
+
+    mod dual_root {
+        use super::*;
+
+        fn materialize_realm(realms_root: &Path, realm_id: &str) {
+            let dir = realms_root.join(sanitize_realm_id(realm_id));
+            std::fs::create_dir_all(&dir).expect("create realm dir");
+            std::fs::write(dir.join(REALM_MANIFEST_FILE_NAME), b"{}").expect("write manifest");
+        }
+
+        fn explicit_cfg(realm_id: &str) -> RealmConfig {
+            RealmConfig {
+                selection: RealmSelection::Explicit {
+                    realm_id: realm_id.to_string(),
+                },
+                ..RealmConfig::default()
+            }
+        }
+
+        #[test]
+        fn explicit_state_root_wins_without_probing() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let local = tmp.path().join("local");
+            materialize_realm(&local, "team");
+            let mut cfg = explicit_cfg("team");
+            cfg.state_root = Some(tmp.path().join("explicit"));
+            let global = tmp.path().join("global");
+            let resolved = cfg
+                .resolve_locator_dual_root_with(
+                    Some(&local),
+                    &global,
+                    RealmRootDefault::ProjectLocal,
+                )
+                .expect("resolve");
+            assert_eq!(resolved.choice, RealmRootChoice::Explicit);
+            assert_eq!(resolved.locator.state_root, tmp.path().join("explicit"));
+        }
+
+        #[test]
+        fn realm_existing_only_locally_is_used_where_it_lies() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let local = tmp.path().join("local");
+            materialize_realm(&local, "team");
+            let global = tmp.path().join("global");
+            let resolved = explicit_cfg("team")
+                .resolve_locator_dual_root_with(Some(&local), &global, RealmRootDefault::UserGlobal)
+                .expect("resolve");
+            // Even on a surface whose default is the global root.
+            assert_eq!(resolved.choice, RealmRootChoice::ExistingLocal);
+            assert_eq!(resolved.locator.state_root, local);
+        }
+
+        #[test]
+        fn absent_realm_falls_to_surface_default() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let local = tmp.path().join("local");
+            std::fs::create_dir_all(&local).expect("mkdir");
+            let global = tmp.path().join("global");
+            let resolved = explicit_cfg("team")
+                .resolve_locator_dual_root_with(
+                    Some(&local),
+                    &global,
+                    RealmRootDefault::ProjectLocal,
+                )
+                .expect("resolve");
+            assert_eq!(resolved.choice, RealmRootChoice::Default);
+            assert_eq!(resolved.locator.state_root, local);
+        }
+
+        #[test]
+        fn project_local_default_without_candidate_falls_back_global() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let global = tmp.path().join("global");
+            let resolved = explicit_cfg("team")
+                .resolve_locator_dual_root_with(None, &global, RealmRootDefault::ProjectLocal)
+                .expect("resolve");
+            assert_eq!(resolved.choice, RealmRootChoice::Default);
+            assert_eq!(resolved.locator.state_root, global);
+        }
+
+        #[test]
+        fn isolated_identity_is_minted_exactly_once_per_resolution() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let global = tmp.path().join("global");
+            let cfg = RealmConfig::default(); // Isolated
+            let resolved = cfg
+                .resolve_locator_dual_root_with(None, &global, RealmRootDefault::UserGlobal)
+                .expect("resolve");
+            // A fresh isolated realm never probes true anywhere, so it lands
+            // on the default root with a single minted identity.
+            assert_eq!(resolved.choice, RealmRootChoice::Default);
+            assert!(resolved.locator.realm.as_str().starts_with("realm-"));
+        }
+
+        #[test]
+        fn probe_recognizes_only_manifested_realms() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path().join("realms");
+            let realm = RealmId::parse("team").expect("realm id");
+            assert!(!realm_exists_under(&root, &realm));
+            // A bare directory without a manifest is not a materialized realm.
+            std::fs::create_dir_all(root.join("team")).expect("mkdir");
+            assert!(!realm_exists_under(&root, &realm));
+            materialize_realm(&root, "team");
+            assert!(realm_exists_under(&root, &realm));
+        }
+
+        #[test]
+        fn split_brain_is_a_typed_refusal() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let local = tmp.path().join("local");
+            let global = tmp.path().join("global");
+            materialize_realm(&local, "team");
+            materialize_realm(&global, "team");
+            let err = explicit_cfg("team")
+                .resolve_locator_dual_root_with(
+                    Some(&local),
+                    &global,
+                    RealmRootDefault::ProjectLocal,
+                )
+                .expect_err("split brain must refuse");
+            match &err {
+                RuntimeBootstrapError::RealmSplitBrain {
+                    realm_id,
+                    local: found_local,
+                    global: found_global,
+                } => {
+                    assert_eq!(realm_id, "team");
+                    assert_eq!(found_local, &local);
+                    assert_eq!(found_global, &global);
+                }
+                other => panic!("wrong error: {other}"),
+            }
+            let message = err.to_string();
+            assert!(message.contains("rkat storage doctor"), "{message}");
+        }
+
+        #[test]
+        fn realm_existing_only_globally_is_used_where_it_lies() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let local = tmp.path().join("local");
+            let global = tmp.path().join("global");
+            std::fs::create_dir_all(&local).expect("mkdir");
+            materialize_realm(&global, "team");
+            let resolved = explicit_cfg("team")
+                .resolve_locator_dual_root_with(
+                    Some(&local),
+                    &global,
+                    RealmRootDefault::ProjectLocal,
+                )
+                .expect("resolve");
+            // Even on a surface whose default is the local root: the probe
+            // must not create an empty local twin of a global realm.
+            assert_eq!(resolved.choice, RealmRootChoice::ExistingGlobal);
+            assert_eq!(resolved.locator.state_root, global);
+        }
     }
 }

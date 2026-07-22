@@ -309,7 +309,12 @@ impl Config {
         }
 
         // Storage config
+        #[allow(deprecated)]
         if other.storage.directory.is_some() {
+            tracing::warn!(
+                "config key `storage.directory` is deprecated and ignored; \
+                 realm state roots are resolved by the storage layout"
+            );
             self.storage.directory = other.storage.directory;
         }
 
@@ -1837,19 +1842,16 @@ pub enum CommsRuntimeMode {
 // removed in the same 0.6.0 cutover (plan §6.10).
 
 /// Storage configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Directory for file-based storage
+    /// Directory for file-based storage.
+    #[deprecated(
+        since = "0.8.4",
+        note = "no surface consumes this; realm state roots are resolved by \
+                meerkat_core::StorageLayout. Slated for removal."
+    )]
     pub directory: Option<PathBuf>,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            directory: data_dir().map(|d| d.join("sessions")),
-        }
-    }
 }
 
 /// Budget configuration
@@ -2673,45 +2675,6 @@ mod optional_duration_serde {
             }
             _ => Err(D::Error::custom("expected string or number for duration")),
         }
-    }
-}
-
-/// Find the project root directory by walking up from `start_dir` looking for `.rkat/`.
-pub fn find_project_root(start_dir: &std::path::Path) -> Option<PathBuf> {
-    let mut current = start_dir.to_path_buf();
-    loop {
-        if current.join(".rkat").is_dir() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
-}
-
-/// Get the data directory for Meerkat.
-///
-/// Priority:
-/// 1. Nearest ancestor containing .rkat/
-/// 2. User's home directory ~/.rkat/
-pub fn data_dir() -> Option<PathBuf> {
-    // 1. Check for project root .rkat
-    if let Ok(cwd) = std::env::current_dir()
-        && let Some(root) = find_project_root(&cwd)
-    {
-        return Some(root.join(".rkat"));
-    }
-
-    // 2. Fallback to ~/.rkat
-    dirs::home_dir().map(|h| h.join(".rkat"))
-}
-
-// Stub for home directory resolution
-pub mod dirs {
-    use std::path::PathBuf;
-
-    pub fn home_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(PathBuf::from)
     }
 }
 

@@ -208,7 +208,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|b: RealmBackend| b.as_str().to_string()),
         state_root: cli.state_root.clone(),
     };
-    let locator = realm_cfg.resolve_locator()?;
+    // Realm-id-first dual-root resolution. The project-local candidate is
+    // probed only when an explicit --context-root was given, keeping the
+    // no-flags server behavior (user-global data-dir root) unchanged.
+    let locator = realm_cfg
+        .resolve_locator_dual_root(
+            cli.context_root
+                .as_deref()
+                .map(meerkat_core::local_realms_candidate)
+                .as_deref(),
+            meerkat_core::RealmRootDefault::UserGlobal,
+        )?
+        .locator;
 
     let backend_hint = cli.realm_backend.map(Into::into);
     let (manifest, persistence) = meerkat::open_realm_persistence_in(

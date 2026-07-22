@@ -250,11 +250,19 @@ pub use factory::{
 pub mod help;
 
 mod persistence;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub mod storage_provider;
 pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_in;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use persistence::open_realm_persistence_with_provider;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use storage_provider::{
+    DiskStorageProvider, RealmOpenContext, RealmStorageProvider, RealmStoreSet,
+};
 
 mod meerkat_machine;
 

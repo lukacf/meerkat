@@ -344,7 +344,7 @@ pub fn fnv1a64_hex(input: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

@@ -90,6 +90,26 @@ pub enum StoreError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("maintenance fence is held for '{path}'; storage is under offline maintenance")]
     MaintenanceFenceHeld { path: std::path::PathBuf },
+
+    /// The realm manifest's format version is newer than this binary
+    /// supports (typed refusal: an unknown format may have relocated
+    /// storage this binary would otherwise recreate empty).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "realm manifest for '{realm_id}' has format {found}, this binary supports up to \
+         {supported}; refusing to open"
+    )]
+    ManifestFromTheFuture {
+        realm_id: String,
+        found: u32,
+        supported: u32,
+    },
+
+    /// The realm is pinned to an external storage provider that this
+    /// composition does not supply.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("realm '{realm_id}' is pinned to external storage provider '{provider}'")]
+    ExternalProviderRealm { realm_id: String, provider: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]

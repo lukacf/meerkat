@@ -78,6 +78,40 @@ pub struct RealmManifest {
     #[serde(default)]
     pub origin: RealmOrigin,
     pub created_at: String,
+    /// Manifest format version. 1 (implicit, not serialized) is the
+    /// original shape; 2 adds `provider` / `ephemeral_domains`. Readers
+    /// refuse formats newer than [`SUPPORTED_MANIFEST_FORMAT`] typed
+    /// ([`StoreError::ManifestFromTheFuture`]) instead of silently ignoring
+    /// fields they do not understand.
+    #[serde(
+        default = "default_manifest_format",
+        skip_serializing_if = "is_default_manifest_format"
+    )]
+    pub manifest_format: u32,
+    /// External storage-provider discriminator. `None` = the built-in disk
+    /// backends. Written together with an `external:<name>` backend string
+    /// so pre-v2 binaries reject the realm typed
+    /// (`UnsupportedRealmBackend`) rather than opening a renamed-away path
+    /// and creating an empty twin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Storage domains this realm explicitly declares ephemeral. A durable
+    /// slot resolving to a non-persistent store without its domain listed
+    /// here is a startup error (fail-closed durability).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ephemeral_domains: Vec<String>,
+}
+
+/// Newest manifest format this binary understands.
+pub const SUPPORTED_MANIFEST_FORMAT: u32 = 2;
+
+fn default_manifest_format() -> u32 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if signature
+fn is_default_manifest_format(format: &u32) -> bool {
+    *format == 1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +121,12 @@ struct PersistedRealmManifest {
     #[serde(default)]
     pub origin: RealmOrigin,
     pub created_at: String,
+    #[serde(default = "default_manifest_format")]
+    pub manifest_format: u32,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub ephemeral_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -642,6 +682,9 @@ async fn create_or_read_manifest_under_lock(
             .unwrap_or_default()
             .as_secs()
             .to_string(),
+        manifest_format: default_manifest_format(),
+        provider: None,
+        ephemeral_domains: Vec::new(),
     };
 
     write_manifest_atomically(paths, &manifest).await?;
@@ -714,6 +757,27 @@ fn manifest_parse_error_may_be_transient(err: &StoreError) -> bool {
 fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
     let persisted: PersistedRealmManifest =
         serde_json::from_slice(bytes).map_err(StoreError::Serialization)?;
+    if persisted.manifest_format > SUPPORTED_MANIFEST_FORMAT {
+        // Refuse rather than ignore: an unknown future format may have
+        // relocated storage this binary would otherwise recreate empty.
+        return Err(StoreError::ManifestFromTheFuture {
+            realm_id: persisted.realm_id.clone(),
+            found: persisted.manifest_format,
+            supported: SUPPORTED_MANIFEST_FORMAT,
+        });
+    }
+    if let Some(name) = persisted
+        .provider
+        .clone()
+        .or_else(|| externals_backend_provider(&persisted.backend))
+    {
+        // Realm pinned to an external provider: the built-in disk
+        // composition must not open (or re-materialize) it.
+        return Err(StoreError::ExternalProviderRealm {
+            realm_id: persisted.realm_id,
+            provider: name,
+        });
+    }
     let backend = parse_realm_backend(&persisted.realm_id, &persisted.backend)?;
     // Wave-c C-12: lift the persisted realm slug into the typed
     // `RealmId` atom. Validation failure at this boundary means the
@@ -726,7 +790,18 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
         backend,
         origin: persisted.origin,
         created_at: persisted.created_at,
+        manifest_format: persisted.manifest_format,
+        provider: None,
+        ephemeral_domains: persisted.ephemeral_domains,
     })
+}
+
+/// `external:<name>` backend strings mark provider-pinned realms; pre-v2
+/// binaries reject them via `UnsupportedRealmBackend`.
+fn externals_backend_provider(backend: &str) -> Option<String> {
+    backend
+        .strip_prefix("external:")
+        .map(|name| name.to_string())
 }
 
 fn parse_realm_backend(realm_id: &str, backend: &str) -> Result<RealmBackend, StoreError> {
@@ -811,10 +886,88 @@ pub async fn open_realm_session_store_in(
 pub use meerkat_core::{derive_workspace_realm_id, fnv1a64_hex, generate_realm_id};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_v1_shape_is_preserved_on_write() {
+        let manifest = RealmManifest {
+            realm: meerkat_core::RealmId::parse("team").expect("realm id"),
+            backend: supported_backend(),
+            origin: RealmOrigin::Explicit,
+            created_at: "0".to_string(),
+            manifest_format: 1,
+            provider: None,
+            ephemeral_domains: Vec::new(),
+        };
+        let json = serde_json::to_value(&manifest).expect("serialize");
+        let object = json.as_object().expect("object");
+        // v1 realms keep byte-compatible manifests: no v2 keys serialized.
+        assert!(!object.contains_key("manifest_format"), "{json}");
+        assert!(!object.contains_key("provider"), "{json}");
+        assert!(!object.contains_key("ephemeral_domains"), "{json}");
+    }
+
+    #[test]
+    fn manifest_from_the_future_is_refused_typed() {
+        let bytes = serde_json::json!({
+            "realm_id": "team",
+            "backend": "sqlite",
+            "created_at": "0",
+            "manifest_format": SUPPORTED_MANIFEST_FORMAT + 1,
+        })
+        .to_string();
+        let err = parse_manifest_bytes(bytes.as_bytes()).expect_err("must refuse");
+        assert!(
+            matches!(err, StoreError::ManifestFromTheFuture { found, .. } if found == SUPPORTED_MANIFEST_FORMAT + 1),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn external_provider_realm_is_refused_typed() {
+        for manifest in [
+            serde_json::json!({
+                "realm_id": "team",
+                "backend": "external:bigquery",
+                "created_at": "0",
+            }),
+            serde_json::json!({
+                "realm_id": "team",
+                "backend": "sqlite",
+                "created_at": "0",
+                "manifest_format": 2,
+                "provider": "bigquery",
+            }),
+        ] {
+            let bytes = manifest.to_string();
+            let err = parse_manifest_bytes(bytes.as_bytes()).expect_err("must refuse");
+            assert!(
+                matches!(
+                    &err,
+                    StoreError::ExternalProviderRealm { provider, .. } if provider == "bigquery"
+                ),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ephemeral_domains_round_trip() {
+        let bytes = serde_json::json!({
+            "realm_id": "team",
+            "backend": "sqlite",
+            "created_at": "0",
+            "manifest_format": 2,
+            "ephemeral_domains": ["blobs"],
+        })
+        .to_string();
+        let manifest = parse_manifest_bytes(bytes.as_bytes()).expect("parse");
+        assert_eq!(manifest.ephemeral_domains, vec!["blobs".to_string()]);
+        assert_eq!(manifest.manifest_format, 2);
+    }
 
     fn supported_backend() -> RealmBackend {
         #[cfg(feature = "sqlite")]

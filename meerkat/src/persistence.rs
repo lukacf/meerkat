@@ -47,6 +47,14 @@ pub enum PersistenceError {
     Runtime(#[from] RuntimeStoreError),
     #[error(transparent)]
     WorkGraph(#[from] meerkat_workgraph::WorkGraphError),
+    /// A `Durable` storage slot resolved to a non-persistent store without
+    /// the realm manifest declaring that domain ephemeral (fail-closed
+    /// durability; see `storage_provider`).
+    #[error(
+        "durable storage domain '{domain}' resolved to a non-persistent store without an \
+         ephemeral declaration in the realm manifest; refusing to start"
+    )]
+    DurabilityViolation { domain: String },
 }
 
 /// Backend-owned pairing of a session store with its matching runtime companion.
@@ -276,21 +284,99 @@ pub async fn open_realm_persistence_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
+    open_realm_persistence_with_provider(
+        &crate::storage_provider::DiskStorageProvider,
+        realms_root,
+        realm_id,
+        backend_hint,
+        origin_hint,
+        None,
+    )
+    .await
+}
+
+/// Bootstrap convergence: ensure the manifest, open the realm's stores
+/// through the provider seam, enforce fail-closed durability, and compose
+/// the bundle (event projection included when the provider names a
+/// projection root).
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub async fn open_realm_persistence_with_provider(
+    provider: &dyn crate::storage_provider::RealmStorageProvider,
+    realms_root: &std::path::Path,
+    realm_id: &str,
+    backend_hint: Option<RealmBackend>,
+    origin_hint: Option<RealmOrigin>,
+    layout: Option<meerkat_core::StorageLayout>,
+) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
     let manifest =
         ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
     let paths = realm_paths_in(realms_root, realm_id);
-    let store_path = match manifest.backend {
-        #[cfg(feature = "jsonl-store")]
-        RealmBackend::Jsonl => paths.sessions_jsonl_dir.clone(),
-        RealmBackend::Memory => paths.root.clone(),
-        RealmBackend::Sqlite => paths.root.clone(),
+    let realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+    let ctx = crate::storage_provider::RealmOpenContext {
+        locator: meerkat_core::RealmLocator {
+            state_root: realms_root.to_path_buf(),
+            realm,
+        },
+        manifest: manifest.clone(),
+        paths,
+        layout,
+    };
+    let set = provider.open(&ctx).await?;
+    crate::storage_provider::enforce_fail_closed_durability(&set, &manifest)?;
+
+    let mut bundle = if let Some(projection_root) = set.projection_root.clone() {
+        PersistenceBundle::with_realm_context(
+            manifest.clone(),
+            set.store_path.clone(),
+            projection_root,
+            RealmSubsystemStores {
+                session_store: set.session_store.clone(),
+                runtime_store: set.runtime_store.clone(),
+                blob_store: set.blob_store.clone(),
+                schedule_store: set.schedule_store.clone(),
+                workgraph_store: set.workgraph_store.clone(),
+            },
+        )
+    } else {
+        let mut bundle = PersistenceBundle::new_with_subsystem_stores(
+            set.session_store.clone(),
+            set.runtime_store.clone(),
+            set.blob_store.clone(),
+            set.schedule_store.clone(),
+            set.workgraph_store.clone(),
+        );
+        bundle.manifest = Some(manifest.clone());
+        bundle.store_path = Some(set.store_path.clone());
+        bundle
+    };
+    bundle.artifact_store = set.artifact_store.clone();
+
+    Ok((manifest, bundle))
+}
+
+/// The built-in disk composition (sqlite / jsonl / memory), unchanged in
+/// behavior from before the provider seam existed. Crate-visible so the
+/// `DiskStorageProvider` stays a thin adapter.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub(crate) fn open_disk_store_set(
+    ctx: &crate::storage_provider::RealmOpenContext,
+) -> Result<crate::storage_provider::RealmStoreSet, PersistenceError> {
+    use crate::storage_provider::RealmStoreSet;
+    use meerkat_core::{DurabilityDeclaration, DurabilityResolution};
+    let paths = &ctx.paths;
+    let manifest = &ctx.manifest;
+    let durable_disk =
+        |domain: &str| DurabilityDeclaration::durable(domain, DurabilityResolution::Persistent);
+    let declared_ephemeral = |domain: &str| {
+        DurabilityDeclaration::durable(domain, DurabilityResolution::DeclaredEphemeral)
     };
 
-    let bundle = match manifest.backend {
+    match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => {
             let session_store: Arc<dyn SessionStore> =
-                Arc::new(JsonlStore::new(paths.sessions_jsonl_dir));
+                Arc::new(JsonlStore::new(paths.sessions_jsonl_dir.clone()));
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             let artifact_store: Arc<dyn ArtifactStore> =
@@ -302,22 +388,33 @@ pub async fn open_realm_persistence_in(
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 paths.runtime_sqlite_path.clone(),
             )?) as Arc<dyn RuntimeStore>;
-            let mut bundle = PersistenceBundle::with_realm_context(
-                manifest.clone(),
-                store_path,
-                paths.root,
-                RealmSubsystemStores {
-                    session_store,
-                    runtime_store,
-                    blob_store,
-                    schedule_store,
-                    workgraph_store,
-                },
-            );
-            bundle.artifact_store = artifact_store;
-            bundle
+            Ok(RealmStoreSet {
+                session_store,
+                runtime_store,
+                schedule_store,
+                workgraph_store,
+                blob_store,
+                artifact_store,
+                store_path: paths.sessions_jsonl_dir.clone(),
+                projection_root: Some(paths.root.clone()),
+                durability: vec![
+                    durable_disk("sessions"),
+                    durable_disk("runtime"),
+                    durable_disk("workgraph"),
+                    durable_disk("blobs"),
+                    durable_disk("artifacts"),
+                    // Scheduling is disabled on the jsonl backend by design.
+                    DurabilityDeclaration::durable(
+                        "schedule",
+                        DurabilityResolution::DeclaredEphemeral,
+                    ),
+                ],
+            })
         }
         RealmBackend::Memory => {
+            // The memory backend IS the ephemeral declaration: every slot
+            // resolves declared-ephemeral rather than silently
+            // non-persistent.
             let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
             let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
             let artifact_store: Arc<dyn ArtifactStore> =
@@ -326,17 +423,27 @@ pub async fn open_realm_persistence_in(
             let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
             let runtime_store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new())
                 as Arc<dyn RuntimeStore>;
-            let mut bundle = PersistenceBundle::new_with_subsystem_stores(
+            Ok(RealmStoreSet {
                 session_store,
                 runtime_store,
-                blob_store,
                 schedule_store,
                 workgraph_store,
-            );
-            bundle.manifest = Some(manifest.clone());
-            bundle.store_path = Some(store_path);
-            bundle.artifact_store = artifact_store;
-            bundle
+                blob_store,
+                artifact_store,
+                store_path: paths.root.clone(),
+                projection_root: None,
+                durability: [
+                    "sessions",
+                    "runtime",
+                    "schedule",
+                    "workgraph",
+                    "blobs",
+                    "artifacts",
+                ]
+                .iter()
+                .map(|domain| declared_ephemeral(domain))
+                .collect(),
+            })
         }
         RealmBackend::Sqlite => {
             let sqlite_store = Arc::new(SqliteSessionStore::open(
@@ -355,24 +462,29 @@ pub async fn open_realm_persistence_in(
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             let artifact_store: Arc<dyn ArtifactStore> =
                 Arc::new(FsArtifactStore::new(paths.root.join("artifacts")));
-            let mut bundle = PersistenceBundle::with_realm_context(
-                manifest.clone(),
-                store_path,
-                paths.root,
-                RealmSubsystemStores {
-                    session_store: sqlite_store as Arc<dyn SessionStore>,
-                    runtime_store,
-                    blob_store,
-                    schedule_store,
-                    workgraph_store,
-                },
-            );
-            bundle.artifact_store = artifact_store;
-            bundle
+            Ok(RealmStoreSet {
+                session_store: sqlite_store as Arc<dyn SessionStore>,
+                runtime_store,
+                schedule_store,
+                workgraph_store,
+                blob_store,
+                artifact_store,
+                store_path: paths.root.clone(),
+                projection_root: Some(paths.root.clone()),
+                durability: [
+                    "sessions",
+                    "runtime",
+                    "schedule",
+                    "workgraph",
+                    "blobs",
+                    "artifacts",
+                ]
+                .iter()
+                .map(|domain| durable_disk(domain))
+                .collect(),
+            })
         }
-    };
-
-    Ok((manifest, bundle))
+    }
 }
 
 #[cfg(all(test, feature = "session-store"))]

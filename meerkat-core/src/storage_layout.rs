@@ -264,7 +264,7 @@ pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::runtime_bootstrap::RealmSelection;
@@ -277,7 +277,10 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("mkdir");
         assert_eq!(find_project_root(&nested), None);
         std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
-        assert_eq!(find_project_root(&nested), Some(project.clone()));
+        assert_eq!(
+            find_project_root(&nested).as_deref(),
+            Some(project.as_path())
+        );
         // A plain file also counts (the live historical semantic).
         let file_project = tmp.path().join("file-proj");
         std::fs::create_dir_all(&file_project).expect("mkdir");

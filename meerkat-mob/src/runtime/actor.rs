@@ -4353,6 +4353,10 @@ pub(super) struct MobActor {
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) command_tx: mpsc::Sender<RoutedMobCommand>,
+    /// Late-bound embedder barrier shared by every handle for this mob,
+    /// including member-session operator tools created by the actor.
+    pub(super) flow_target_provisioner:
+        Arc<std::sync::RwLock<Option<super::handle::FlowTargetProvisioner>>>,
     pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
@@ -11069,6 +11073,7 @@ impl MobActor {
             // `MobHandle` returned from `MobBuilder`. Tools built from the
             // actor do not dial realtime endpoints.
             realtime_session_factory: None,
+            flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
         }
     }
 

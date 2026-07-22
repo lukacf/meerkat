@@ -101,6 +101,17 @@ pub fn default_state_root() -> PathBuf {
         .join("realms")
 }
 
+/// Default user-global instance root for a surface's own (non-realm)
+/// state, e.g. `data_dir()/meerkat/rest`. Surfaces call this instead of
+/// deriving ambient roots themselves (the storage-ambient gate bans
+/// `dirs::*` outside the bootstrap/layout modules).
+pub fn default_surface_instance_root(surface: &str) -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("meerkat")
+        .join(surface)
+}
+
 /// File name of the realm manifest inside a realm directory.
 ///
 /// Vocabulary only: the manifest codec is owned by `meerkat-store`; this

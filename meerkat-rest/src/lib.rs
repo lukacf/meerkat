@@ -1969,10 +1969,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 }
 
 fn rest_instance_root() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("meerkat")
-        .join("rest")
+    meerkat_core::runtime_bootstrap::default_surface_instance_root("rest")
 }
 
 fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {

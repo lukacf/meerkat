@@ -186,6 +186,9 @@ jobs:
       - name: Runtime authority bypass audit
         run: make runtime-authority-bypass
 
+      - name: Storage ambient-resolution gate
+        run: make storage-ambient-gate
+
       - name: Machine authority docs gate
         run: make machine-authority-docs-gate
 

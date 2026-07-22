@@ -14,6 +14,7 @@ pub mod rmat_audit;
 pub mod rmat_policy;
 pub mod runtime_authority_bypass;
 pub mod seam_inventory;
+pub mod storage_ambient_gate;
 pub mod typed_carrier;
 
 use anyhow::{Result, bail};
@@ -62,6 +63,11 @@ enum Commands {
     /// `scripts/pre-push-bridge-no-responsestatus.sh` grep gate).
     #[command(name = "bridge-classifier")]
     BridgeClassifier,
+    /// Storage-unification anti-ambient-resolution gate: durable storage
+    /// roots come from the layout/bootstrap modules, not ambient process
+    /// state (dirs::* / HOME / XDG reads outside the allowlist).
+    #[command(name = "storage-ambient-gate")]
+    StorageAmbientGate,
     /// Structural queue-to-run pilot bypass gate: raw accepted enqueue,
     /// dequeue, and stage calls must stay behind explicit generated
     /// authority/capability wrappers.
@@ -112,6 +118,9 @@ pub fn run() -> Result<()> {
         }
         Commands::BridgeClassifier => {
             run_machine_authority_task(bridge_classifier::run_bridge_classifier)
+        }
+        Commands::StorageAmbientGate => {
+            run_machine_authority_task(storage_ambient_gate::run_storage_ambient_gate)
         }
         Commands::RuntimeAuthorityBypass => {
             run_machine_authority_task(runtime_authority_bypass::run_runtime_authority_bypass)

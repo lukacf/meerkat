@@ -88,8 +88,9 @@ pub const FINDING_DOCTOR_INTERNAL: &str = "doctor-internal";
 const DANGLING_BLOB_REPORT_CAP: usize = 50;
 
 /// Database files probed per realm directory, with the ledger domains their
-/// owning stores stamp there.
-const REALM_DATABASE_FILES: &[(&str, &[&str])] = &[
+/// owning stores stamp there. Shared with the Phase 6 migration framework
+/// (`rkat storage migrate` reports the same file × domain matrix).
+pub const REALM_DATABASE_FILES: &[(&str, &[&str])] = &[
     (
         "sessions.sqlite3",
         &["session-store", "schedule-store", "runtime-store"],
@@ -246,14 +247,31 @@ fn sweep_root(
     realm_dirs.sort();
 
     for dir in realm_dirs {
-        let manifest_path = dir.join(REALM_MANIFEST_FILE_NAME);
-        if !manifest_path.is_file() {
-            continue; // not a materialized realm directory
-        }
         let dir_name = dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if crate::migrate::is_backup_artifact_name(&dir_name) {
+            // An archived realm copy under the registered backup naming
+            // (`rkat storage migrate` split-brain resolution). It still
+            // carries a manifest, but it is a frozen artifact, not a live
+            // realm — treating it as one would resurrect the split-brain
+            // finding forever. `rkat storage prune` owns its lifecycle.
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Info,
+                    FINDING_BACKUP_ARTIFACT,
+                    "archived realm directory (`*.pre-<version>-<timestamp>` backup artifact); \
+                     lifecycle owned by `rkat storage prune`",
+                )
+                .with_path(dir.clone()),
+            );
+            continue;
+        }
+        let manifest_path = dir.join(REALM_MANIFEST_FILE_NAME);
+        if !manifest_path.is_file() {
+            continue; // not a materialized realm directory
+        }
         let manifest = read_manifest_lenient(&manifest_path);
         let (realm_label, backend) = match &manifest {
             Ok((realm_id, backend)) => (realm_id.clone(), Some(backend.clone())),

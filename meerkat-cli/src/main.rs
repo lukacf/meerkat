@@ -19,6 +19,7 @@ mod mcp;
 mod mob_host;
 #[cfg(feature = "comms")]
 mod stdin_events;
+mod storage_migrate;
 mod stream_renderer;
 
 use base64::Engine as _;
@@ -2005,12 +2006,13 @@ enum Commands {
     /// Check local setup and common prerequisites
     Doctor,
 
-    /// Storage diagnostics (read-only in this release)
+    /// Storage diagnostics and offline maintenance
     ///
-    /// `storage doctor` never mutates anything. Mutation verbs
-    /// (`storage migrate` for offline migration, `storage prune` for
-    /// migration-backup-artifact lifecycle) arrive in a later release; realm
-    /// deletion stays under `rkat realm delete` / `rkat realm prune`.
+    /// `storage doctor` never mutates anything. `storage migrate` is the
+    /// offline migration framework (dry-run by default; `--apply` runs the
+    /// fenced structural migration). `storage prune` owns the lifecycle of
+    /// registered migration backup artifacts only; realm deletion stays
+    /// under `rkat realm delete` / `rkat realm prune`.
     Storage {
         #[command(subcommand)]
         command: StorageCommands,
@@ -2030,8 +2032,8 @@ enum Commands {
     },
 }
 
-/// Storage diagnostics verbs. Mutation verbs (`migrate`, `prune`) slot in
-/// here in a later release (Phase 6 of the storage unification arc).
+/// Storage diagnostics and offline-maintenance verbs (Phase 6 of the
+/// storage unification arc).
 #[derive(Subcommand)]
 enum StorageCommands {
     /// Read-only diagnosis of realm storage across candidate state roots
@@ -2053,11 +2055,95 @@ enum StorageCommands {
     /// Exit codes: 0 = no error-severity findings; 1 = errors found.
     ///
     /// This command never mutates anything. It is unrelated to
-    /// `rkat realm prune` (destructive realm deletion); the future
-    /// `rkat storage prune` will own migration-backup-artifact lifecycle
-    /// only.
+    /// `rkat realm prune` (destructive realm deletion); `rkat storage
+    /// prune` owns migration-backup-artifact lifecycle only.
     Doctor {
         /// Emit the diagnosis as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
+    },
+
+    /// Offline migration framework (dry-run by default)
+    ///
+    /// Sweeps the same candidate roots as `storage doctor` and, per realm:
+    /// (1) ledger baseline — under the realm's exclusive maintenance fence,
+    /// every store is opened through its normal constructor so the guarded
+    /// schema-ledger migrations converge files of any vintage (dry-run
+    /// reports what would be stamped, read-only); (2) state-root adoption —
+    /// report-only, realms are used where they lie; (3) split-brain
+    /// reconciliation — a realm id under 2+ swept roots produces a
+    /// per-domain divergence report and a fail-closed refusal unless
+    /// `--apply --adopt-root <path>` names the root to keep, in which case
+    /// every other copy is archived read-only under the registered
+    /// `*.pre-<version>-<timestamp>` backup naming (no merging, no
+    /// synthesis); (4) checkpoint-evidence adoption — the machine-owned
+    /// bulk sweep stamps legacy pre-typed session checkpoints (sqlite
+    /// realms; jsonl realms heal lazily and are reported as skipped);
+    /// (5) deprecated leftovers — report-only. Per-mob databases under
+    /// `mobs/` are report-only in v1.
+    ///
+    /// Credential stores are never read, moved, or reported by this
+    /// command.
+    ///
+    /// Exit codes: 0 = clean; 1 = errors or fail-closed refusals
+    /// (split-brain without --adopt-root, maintenance fence not
+    /// acquirable).
+    Migrate {
+        /// Perform the fenced migration (default is a read-only dry-run)
+        #[arg(long)]
+        apply: bool,
+
+        /// Emit the migration report as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
+
+        /// Split-brain resolution: the swept state root whose realm copy is
+        /// adopted; every other copy is archived read-only. Requires
+        /// --apply.
+        #[arg(long = "adopt-root", value_name = "PATH")]
+        adopt_root: Option<PathBuf>,
+
+        /// Seconds to wait for in-flight store operations to drain when
+        /// acquiring the exclusive maintenance fence.
+        #[arg(long = "fence-wait-secs", value_name = "SECS", default_value_t = 10)]
+        fence_wait_secs: u64,
+    },
+
+    /// Delete registered migration backup artifacts (dry-run by default)
+    ///
+    /// Enumerates registered maintenance artifacts under the swept roots —
+    /// `*.pre-<version>-<timestamp>` migration backups (files or archived
+    /// realm directories) and `*.corrupt-<timestamp>` index quarantines —
+    /// with sizes and ages. With --apply, deletes those at least
+    /// --older-than-days old. Never touches anything outside the
+    /// registered naming patterns.
+    ///
+    /// Unrelated to `rkat realm prune`, which deletes live realms; this
+    /// command only manages maintenance backup artifacts.
+    ///
+    /// Exit codes: 0 = clean; 1 = deletion failures.
+    Prune {
+        /// Delete matching artifacts (default lists them)
+        #[arg(long)]
+        apply: bool,
+
+        /// Minimum artifact age in days for deletion (0 = all)
+        #[arg(long = "older-than-days", value_name = "DAYS", default_value_t = 30)]
+        older_than_days: u64,
+
+        /// Emit the prune report as pretty JSON
         #[arg(long)]
         json: bool,
 
@@ -7531,20 +7617,39 @@ where
 async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow::Result<()> {
     match command {
         StorageCommands::Doctor { json, roots } => handle_storage_doctor(cli, *json, roots).await,
+        StorageCommands::Migrate {
+            apply,
+            json,
+            roots,
+            adopt_root,
+            fence_wait_secs,
+        } => {
+            handle_storage_migrate(
+                cli,
+                *apply,
+                *json,
+                roots,
+                adopt_root.as_deref(),
+                *fence_wait_secs,
+            )
+            .await
+        }
+        StorageCommands::Prune {
+            apply,
+            older_than_days,
+            json,
+            roots,
+        } => handle_storage_prune(cli, *apply, *older_than_days, *json, roots).await,
     }
 }
 
-/// Read-only storage diagnosis. Resolves candidate roots WITHOUT opening
+/// Candidate state roots for the storage verbs, resolved WITHOUT opening
 /// persistence, taking leases, or building a service: an explicit
 /// `--state-root`/`--root` set is used verbatim (and nothing else is read);
 /// otherwise the sweep covers the CLI's project-local candidate and the
 /// user-global data root — the same two candidates the dual-root realm
 /// resolver probes.
-async fn handle_storage_doctor(
-    cli: &Cli,
-    json: bool,
-    extra_roots: &[PathBuf],
-) -> anyhow::Result<()> {
+fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut state_roots: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = &cli.state_root {
         state_roots.push(explicit.clone());
@@ -7558,10 +7663,29 @@ async fn handle_storage_doctor(
         state_roots.push(meerkat_core::local_realms_candidate(&context_root));
         state_roots.push(meerkat_core::default_state_root());
     }
-    let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
+    state_roots
+}
+
+/// Validated `--realm` filter for the storage verbs.
+fn storage_realm_filter(cli: &Cli) -> anyhow::Result<Option<String>> {
     if let Some(realm) = &cli.realm {
         meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm)?;
-        scope = scope.with_realm(realm.clone());
+        Ok(Some(realm.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Read-only storage diagnosis over the storage sweep roots.
+async fn handle_storage_doctor(
+    cli: &Cli,
+    json: bool,
+    extra_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let state_roots = storage_sweep_roots(cli, extra_roots);
+    let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
+    if let Some(realm) = storage_realm_filter(cli)? {
+        scope = scope.with_realm(realm);
     }
 
     let diagnosis = meerkat_store::diagnose_disk_roots(&scope).await;
@@ -7575,6 +7699,74 @@ async fn handle_storage_doctor(
     let errors = diagnosis.count(meerkat_core::FindingSeverity::Error);
     if errors > 0 {
         anyhow::bail!("storage doctor found {errors} error-severity finding(s)");
+    }
+    Ok(())
+}
+
+/// Offline migration framework (`rkat storage migrate`); dry-run by
+/// default. Dispatches before runtime-scope resolution like the other
+/// storage verbs (the dual-root resolver refuses split-brain realms, and
+/// reconciling them is exactly this verb's job).
+async fn handle_storage_migrate(
+    cli: &Cli,
+    apply: bool,
+    json: bool,
+    extra_roots: &[PathBuf],
+    adopt_root: Option<&Path>,
+    fence_wait_secs: u64,
+) -> anyhow::Result<()> {
+    if adopt_root.is_some() && !apply {
+        anyhow::bail!("--adopt-root requires --apply (split-brain resolution archives a copy)");
+    }
+    let options = storage_migrate::MigrateOptions {
+        roots: storage_sweep_roots(cli, extra_roots),
+        realm_filter: storage_realm_filter(cli)?,
+        apply,
+        adopt_root: adopt_root.map(Path::to_path_buf),
+        fence_wait: Duration::from_secs(fence_wait_secs),
+        // Ambient home resolution stays in this bootstrap module (the
+        // storage-ambient gate's allowlist); the migrate module receives
+        // the probe path explicitly. Report-only.
+        legacy_home_sessions: dirs::home_dir().map(|home| home.join(".rkat").join("sessions")),
+    };
+    let report = storage_migrate::run_storage_migrate(options).await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        storage_migrate::print_migrate_report_text(&report);
+    }
+
+    if report.has_errors() {
+        anyhow::bail!("storage migrate reported errors or fail-closed refusals");
+    }
+    Ok(())
+}
+
+/// Registered-backup-artifact lifecycle (`rkat storage prune`); dry-run by
+/// default.
+async fn handle_storage_prune(
+    cli: &Cli,
+    apply: bool,
+    older_than_days: u64,
+    json: bool,
+    extra_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let options = storage_migrate::PruneOptions {
+        roots: storage_sweep_roots(cli, extra_roots),
+        apply,
+        older_than_days,
+    };
+    let report = storage_migrate::run_storage_prune(options).await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        storage_migrate::print_prune_report_text(&report);
+    }
+
+    if !report.errors.is_empty() {
+        anyhow::bail!("storage prune reported errors");
     }
     Ok(())
 }

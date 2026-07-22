@@ -22,6 +22,8 @@ pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod json_column;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod migrate;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod realm;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod schedule_sqlite_store;
@@ -43,6 +45,11 @@ pub use blob::MemoryBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use doctor::{DiskStorageMigrator, diagnose_disk_roots};
 pub use error::StoreError;
+#[cfg(not(target_arch = "wasm32"))]
+pub use migrate::{
+    MigrateMode, MigrateReport, PruneReport, RealmMaintenanceFence, archive_path_read_only,
+    backup_artifact_name,
+};
 
 // Re-export the canonical trait, filter, and error from meerkat-core.
 // Custom storage backends depend only on meerkat-core; existing consumers

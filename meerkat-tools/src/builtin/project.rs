@@ -21,23 +21,6 @@ pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
     meerkat_core::storage_layout::find_project_root(start_dir)
 }
 
-/// Find an ancestor directory containing the specified marker directory.
-///
-/// Walks up the directory tree from `start` looking for a directory
-/// that contains a subdirectory or file named `marker`.
-#[cfg(test)]
-fn find_ancestor_with(start: &Path, marker: &str) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    loop {
-        if current.join(marker).exists() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
-}
-
 /// Ensure `.rkat` directory exists in project root, creating if needed.
 ///
 /// # Arguments

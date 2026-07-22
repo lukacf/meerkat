@@ -13,6 +13,77 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Added (storage unification arc)
+
+- **`meerkat-sqlite`**: new leaf crate owning the shared SQLite mechanics —
+  DDL-free connection opening under named policy profiles (`Primary` /
+  `ReadOnly` / `Maintenance`), the per-file schema migration ledger
+  (`meerkat_schema(domain, version)` with the pinned concurrent-open
+  transaction protocol and a typed, health-visible `SchemaFromTheFuture`
+  refusal), the `JsonColumnBytes` codec, per-operation maintenance-fence
+  guards, and storage-level error classification.
+- **`meerkat-store-conformance`**: new published crate with the per-trait
+  storage conformance profiles (baseline / incremental / guarded-projection),
+  the capability-discovery chapter (`as_incremental` swallow made loud), the
+  append-only-media chapter (emulated-CAS revision-guard semantics,
+  superseded-sibling dedup ownership, checkpoint monotonicity), the
+  legacy-data axis, and blob/artifact chapters — downstream backends run the
+  identical suite.
+- **`meerkat_core::StorageLayout`**: the single path authority resolved at
+  bootstrap (invocation context, walked-up project root, the
+  `user_home_root`/`user_rkat_root` split, credentials/comms-identity/cache
+  slots, state root), plus realm-id-first dual-root resolution: an explicit
+  `--state-root` wins; a realm existing under exactly one candidate root
+  (project-local `.rkat/realms` or the user-global data dir) is used where it
+  lies; both is a typed split-brain refusal pointing at doctor; the resolver
+  never creates an empty twin.
+- **`meerkat::storage_provider`**: the `RealmStorageProvider` seam (one
+  provider supplies all durable stores for a realm; the facade composes),
+  machine-readable durability classes (`Durable` / `RebuildableCache` /
+  `Scratch`) with fail-closed enforcement (an undeclared non-persistent
+  durable slot is a startup error, never a silent in-memory fallback), and
+  realm-manifest v2 read defenses (`manifest_format` refusal for future
+  formats; provider-pinned realms refuse disk opens typed).
+- **`rkat storage doctor`** (read-only, live-realm-safe, `--json`): per-root
+  realm inventory, schema-ledger state per database, dual-root twin
+  detection, checkpoint-evidence census, dangling blob references, orphaned
+  lease/lock/backup artifacts. `StorageMigrator::diagnose` is the
+  shape-stable hook remote/mobkit backends implement.
+- **`rkat storage migrate [--apply]`** (dry-run by default, offline,
+  fail-closed) and **`rkat storage prune`**: ledger baselining, split-brain
+  reconciliation (exact-dedup report + adopt-one-root/archive-other; no
+  synthesis), bulk machine-owned legacy-checkpoint adoption
+  (`PersistentSessionService::adopt_legacy_checkpoints`), registered
+  `*.pre-<version>-<timestamp>` backup artifacts with a prune lifecycle.
+- New CI gate `storage-ambient-gate`: bans ambient root resolution
+  (`dirs::*`, `HOME`/`XDG` reads) in production code outside the
+  bootstrap/layout modules and documented conventions.
+
+### Changed (storage unification arc — operator-visible)
+
+- The shared SQLite opener is DDL-free: schedule/runtime opens no longer
+  plant empty session tables in co-tenant files (existing stray tables are
+  tolerated by ledger baselining and doctor).
+- `SQLITE_BUSY_TIMEOUT_MS` harmonizes on the one shared 60s value (was
+  redefined six times at 5s/60s); the workgraph attention-column upgrade and
+  the mob event-route/operator-fence upgrades became once-per-file ledger
+  migrations instead of per-open probes.
+- Every SQLite file gains a `meerkat_schema` ledger table and a sibling
+  `<file>.mfence` fence-lock file (operators reading realm directories will
+  see both; doctor inventories them).
+- Server surfaces (`rkat-rpc`/`rkat-rest`/`rkat-mcp`) keep their no-flags
+  behavior; with an explicit `--context-root` plus `--realm`, a realm already
+  materialized project-locally now resolves to that root instead of the
+  user-global default.
+
+### Deprecated (storage unification arc)
+
+- `StorageConfig.directory` (never consumed by any surface; warns when set).
+- The ambient no-`_in` realm helpers (`realm_paths`, `start_realm_lease`,
+  `inspect_realm_leases`, `ensure_realm_manifest`,
+  `open_realm_session_store`) and `meerkat_skills::resolve_repositories` —
+  use the explicit-root variants.
+
 ### Breaking
 
 - Generated `MeerkatMachine` recovery alphabets replace the eight

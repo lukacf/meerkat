@@ -122,10 +122,16 @@ This is a large workspace (~40 crates). Careless builds waste minutes. Follow th
 ## Architecture
 
 ```
+meerkat-sqlite    → Shared SQLite mechanics (connection profiles, meerkat_schema migration
+                     ledger, JsonColumnBytes codec, per-operation maintenance-fence guards)
+meerkat-store-conformance → Published storage conformance harness (per-trait capability
+                     profiles, capability-discovery, append-only media, legacy-data, blob chapters)
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor + CompactionCurator traits, MemoryStore trait,
                      ToolExecutionPolicy/ExecutionPolicyGatedDispatcher (list-preserving call-level tool gate), SessionError
                      Owns the model-catalog vocabulary types + ModelCatalog mechanics (no provider data)
+                     Also: StorageLayout path authority + realm-id-first dual-root resolution,
+                     DurabilityClass vocabulary, StorageMigrator::diagnose seam
 meerkat-models    → Provider model catalog/capabilities data (core stays provider-free);
                      exposes `canonical()` ModelCatalog injected into core seams
 meerkat-llm-core  → LLM wire-client trait + streaming plumbing (LlmClient, BlockAssembler, LlmClientAdapter)
@@ -243,6 +249,12 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig, CompactionCurator (host-supplied summary producer; substitutes the compaction LLM call)
 - `meerkat-core/src/completion_feed.rs` - CompletionFeed trait, CompletionEntry, CompletionSeq
 - `meerkat-core/src/memory.rs` - MemoryStore trait (index/search + drop_scope/enumerate_scoped lifecycle APIs)
+- `meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` - Shared SQLite mechanics (named connection profiles, meerkat_schema ledger + pinned protocol, per-op fence guards)
+- `meerkat-core/src/storage_layout.rs` - StorageLayout path authority (+ realm-id-first dual-root resolution in runtime_bootstrap.rs)
+- `meerkat-core/src/storage_durability.rs` - DurabilityClass/DurabilityDeclaration vocabulary (fail-closed durable slots)
+- `meerkat-core/src/storage_diagnostics.rs` - StorageDiagnosis/StorageMigrator diagnose seam (doctor vocabulary)
+- `meerkat-store/src/doctor.rs` - Read-only disk diagnosis behind `rkat storage doctor`
+- `meerkat/src/storage_provider.rs` - RealmStorageProvider seam + DiskStorageProvider (facade composes PersistenceBundle)
 - `meerkat-core/src/tool_execution_policy.rs` - ToolExecutionPolicy (sealed resolved form of ops::ToolAccessPolicy) + ExecutionPolicyGatedDispatcher (list-preserving call-level gate; deny = ordinary access_denied tool error)
 - `meerkat-core/src/runtime_epoch.rs` - RuntimeEpochId, SessionRuntimeBindings, RuntimeBuildMode, EpochCursorState
 - `meerkat-anthropic/src/client.rs` - Anthropic streaming implementation (meerkat-client is a re-export shim)
@@ -300,7 +312,7 @@ make fmt         # Auto-fix formatting
 make audit       # Security audit via cargo-deny
 ```
 
-**`make ci` runs** (in order): `docs-check` → `fmt-check` → `legacy-surface-gate` → `session-control-gate` → `deprecated-backend-gate` → `bridge-no-responsestatus-gate` → `sync-meerkat-dogma-skill-docs` → `verify-version-parity` → `verify-schema-freshness` → `verify-sdk-codegen-freshness` → `verify-sdk-event-inventory` → `verify-rpc-surface-alignment` → `verify-rest-surface-alignment` → `verify-sdk-wrapper-freshness` → `verify-machine-poster-coverage` → `check-rust-release-packaging` → `machine-check-drift` → `machine-authority-docs-gate` → `runtime-authority-bypass` → `lint` → `lint-feature-matrix` → `test-unit` → `test-int` → `e2e-fast` → `e2e-system` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `seam-inventory` → `rmat-audit` → `audit-generated-headers` → `audit`
+**`make ci` runs** (in order): `docs-check` → `fmt-check` → `legacy-surface-gate` → `session-control-gate` → `deprecated-backend-gate` → `bridge-no-responsestatus-gate` → `sync-meerkat-dogma-skill-docs` → `verify-version-parity` → `verify-schema-freshness` → `verify-sdk-codegen-freshness` → `verify-sdk-event-inventory` → `verify-rpc-surface-alignment` → `verify-rest-surface-alignment` → `verify-sdk-wrapper-freshness` → `verify-machine-poster-coverage` → `check-rust-release-packaging` → `machine-check-drift` → `machine-authority-docs-gate` → `runtime-authority-bypass` → `storage-ambient-gate` → `lint` → `lint-feature-matrix` → `test-unit` → `test-int` → `e2e-fast` → `e2e-system` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `seam-inventory` → `rmat-audit` → `audit-generated-headers` → `audit`
 
 `rmat-audit` runs the typed governance gates: `xtask effect-authority`, `xtask ownership-ledger --check-drift`, and `xtask rmat-audit --strict` (RMAT read-seam enforcement is the `ForbiddenShellAuthorityReads` AST rule). The bridge gate is `xtask bridge-classifier` (`scripts/pre-push-bridge-no-responsestatus.sh` is a thin wrapper). The old `scripts/audit-effect-authority.sh` is deleted.
 
@@ -333,7 +345,7 @@ The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on
 | `build_web_sdk_package` | Always | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
 | `update_homebrew` | After GitHub release | Updates the Homebrew tap formula |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 38 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 40 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual | Publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -395,7 +407,7 @@ Six files must agree on the same version:
 | `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all internal crate dependencies in `Cargo.toml` (38 path deps) must match the workspace version.
+Additionally, all internal crate dependencies in `Cargo.toml` (40 path deps) must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -447,7 +459,7 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 38 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 40 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -463,8 +475,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (38 crates, dependency order):
-`meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (40 crates, dependency order):
+`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-runtime` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 ### Key Rules for AI Agents
 

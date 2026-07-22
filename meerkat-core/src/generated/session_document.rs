@@ -241,6 +241,7 @@ pub enum LegacyCheckpointMigrationDisposition {
     MigrateCanonicalSnapshot,
     AdoptProjectionExtension,
     MigrateStoreProjection,
+    RebuildProjectionFromTypedSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -785,6 +786,7 @@ enum SessionDocumentTransition {
     ResolveLegacyCheckpointMigrationDivergentCopies,
     ResolveLegacyCheckpointMigrationSnapshotOnly,
     ResolveLegacyCheckpointMigrationStoreRowOnly,
+    ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
     ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
     ApplyPendingToolResults,
     TranscriptEditFork,
@@ -3374,6 +3376,14 @@ impl SessionDocumentMachineAuthority {
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == false)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
                         && (runtime_snapshot_legacy == true)
                         && (store_row_present == true)
                         && (store_row_legacy == false))
@@ -3417,6 +3427,12 @@ impl SessionDocumentMachineAuthority {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateStoreProjection, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot, },
                         ])
                     }
                     SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped => {

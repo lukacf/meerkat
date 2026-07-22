@@ -934,6 +934,14 @@ ResolveLegacyCheckpointMigrationStoreRowOnly(session_id, runtime_snapshot_presen
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
+ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
+    /\ phase = "Ready"
+    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = FALSE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
 ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
     /\ phase = "Ready"
     /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE))
@@ -1118,6 +1126,7 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationDivergentCopies(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E store_row_legacy \in BOOLEAN : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotOnly(session_id, TRUE, TRUE, FALSE, store_row_legacy, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E runtime_snapshot_legacy \in BOOLEAN : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationStoreRowOnly(session_id, FALSE, runtime_snapshot_legacy, TRUE, TRUE, transcript_relation)
+    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection(session_id, TRUE, FALSE, TRUE, TRUE, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)

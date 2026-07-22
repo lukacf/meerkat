@@ -773,6 +773,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "MigrateCanonicalSnapshot",
                     "AdoptProjectionExtension",
                     "MigrateStoreProjection",
+                    "RebuildProjectionFromTypedSnapshot",
                 ],
             ),
             NamedTypeBinding::string_enum(

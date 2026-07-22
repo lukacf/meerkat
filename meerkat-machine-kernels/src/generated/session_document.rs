@@ -37,6 +37,8 @@ pub enum LegacyCheckpointMigrationDisposition {
     AdoptProjectionExtension,
     #[serde(rename = "MigrateStoreProjection")]
     MigrateStoreProjection,
+    #[serde(rename = "RebuildProjectionFromTypedSnapshot")]
+    RebuildProjectionFromTypedSnapshot,
 }
 impl LegacyCheckpointMigrationDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -45,6 +47,7 @@ impl LegacyCheckpointMigrationDisposition {
             Self::MigrateCanonicalSnapshot => "MigrateCanonicalSnapshot",
             Self::AdoptProjectionExtension => "AdoptProjectionExtension",
             Self::MigrateStoreProjection => "MigrateStoreProjection",
+            Self::RebuildProjectionFromTypedSnapshot => "RebuildProjectionFromTypedSnapshot",
         }
     }
 }
@@ -56,6 +59,7 @@ impl std::convert::TryFrom<&str> for LegacyCheckpointMigrationDisposition {
             "MigrateCanonicalSnapshot" => Ok(Self::MigrateCanonicalSnapshot),
             "AdoptProjectionExtension" => Ok(Self::AdoptProjectionExtension),
             "MigrateStoreProjection" => Ok(Self::MigrateStoreProjection),
+            "RebuildProjectionFromTypedSnapshot" => Ok(Self::RebuildProjectionFromTypedSnapshot),
             other => Err(format!(
                 "invalid LegacyCheckpointMigrationDisposition value `{other}`"
             )),
@@ -2555,6 +2559,7 @@ pub enum TransitionId {
     ResolveLegacyCheckpointMigrationDivergentCopies,
     ResolveLegacyCheckpointMigrationSnapshotOnly,
     ResolveLegacyCheckpointMigrationStoreRowOnly,
+    ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
     ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
     ApplyPendingToolResults,
     TranscriptEditFork,

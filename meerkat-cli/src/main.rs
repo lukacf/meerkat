@@ -99,7 +99,7 @@ const EXIT_BUDGET_EXHAUSTED: u8 = 2;
 
 const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from the terminal";
 
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nRealm defaults:\n  - context root: current directory, unless --context-root is supplied\n  - state root: <context-root>/.rkat/realms, unless --state-root is supplied\n  - realm id: workspace-derived ws-... unless --realm or --isolated is supplied\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor, storage\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nRealm defaults:\n  - context root: current directory, unless --context-root is supplied\n  - state root: <context-root>/.rkat/realms, unless --state-root is supplied\n  - realm id: workspace-derived ws-... unless --realm or --isolated is supplied\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
 const HELP_AFTER_HELP: &str = "Examples:\n  rkat help \"How do I add an mcp server and schedule to remove it in 30 minutes\"\n  rkat help \"Use gemini with my vertex auth, load ~/codex/skills\" --prompt \"Write a match-3 game in Erlang\"";
 
 const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --html \"make a visual explainer\"\n  rkat run --browser \"create an implementation plan\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - realm state under <context-root>/.rkat/realms; use --verbose to print the active realm root\n  - `--tools safe`\n  - provider-native web search on for supporting models; use `--no-web-search` to disable\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
@@ -733,6 +733,7 @@ fn normalize_cli_args(
         "capabilities",
         "models",
         "doctor",
+        "storage",
         "auth",
         "help",
         "resume",
@@ -2004,6 +2005,17 @@ enum Commands {
     /// Check local setup and common prerequisites
     Doctor,
 
+    /// Storage diagnostics (read-only in this release)
+    ///
+    /// `storage doctor` never mutates anything. Mutation verbs
+    /// (`storage migrate` for offline migration, `storage prune` for
+    /// migration-backup-artifact lifecycle) arrive in a later release; realm
+    /// deletion stays under `rkat realm delete` / `rkat realm prune`.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommands,
+    },
+
     /// Auth profile management — list, inspect, test, log in, log out,
     /// delete, and check status of realm-scoped auth profiles.
     /// `login` runs the interactive OAuth flow by default, or writes an
@@ -2015,6 +2027,45 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+}
+
+/// Storage diagnostics verbs. Mutation verbs (`migrate`, `prune`) slot in
+/// here in a later release (Phase 6 of the storage unification arc).
+#[derive(Subcommand)]
+enum StorageCommands {
+    /// Read-only diagnosis of realm storage across candidate state roots
+    ///
+    /// Safe against live realms: takes no leases, opens databases
+    /// read-only, and creates nothing. Reports per-root realm inventory,
+    /// manifest state, schema-ledger versions per database, dual-root
+    /// split-brain twins, a checkpoint-evidence census (verified vs
+    /// legacy-unverified sessions), dangling session→blob references, and
+    /// orphaned lock/lease/backup artifacts.
+    ///
+    /// By default the sweep covers the project-local root
+    /// (`<context-root>/.rkat/realms`) and the user-global data root. When
+    /// any explicit root is given (the global `--state-root` or one or more
+    /// `--root`), ONLY those roots are read. `--realm` restricts the sweep
+    /// to one realm id (split-brain twins for it are still detected across
+    /// all swept roots).
+    ///
+    /// Exit codes: 0 = no error-severity findings; 1 = errors found.
+    ///
+    /// This command never mutates anything. It is unrelated to
+    /// `rkat realm prune` (destructive realm deletion); the future
+    /// `rkat storage prune` will own migration-backup-artifact lifecycle
+    /// only.
+    Doctor {
+        /// Emit the diagnosis as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
     },
 }
 
@@ -3255,6 +3306,22 @@ async fn main() -> anyhow::Result<ExitCode> {
     };
     init_tracing(&cli);
 
+    // `rkat storage …` dispatches before runtime-scope resolution on
+    // purpose: the dual-root resolver refuses a realm materialized under
+    // both candidate roots with a typed split-brain error pointing at
+    // doctor, and doctor is the tool that diagnoses exactly that state. The
+    // storage handlers open no persistence bundle, take no realm leases,
+    // and read only their candidate roots.
+    if let Some(Commands::Storage { command }) = &cli.command {
+        return Ok(match handle_storage_command(command, &cli).await {
+            Ok(()) => ExitCode::from(EXIT_SUCCESS),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                ExitCode::from(EXIT_ERROR)
+            }
+        });
+    }
+
     let cli_scope = if auth_config_realm.is_some() {
         resolve_runtime_scope_with_realm(&cli, None)?
     } else {
@@ -3482,6 +3549,11 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models => handle_models_catalog(&cli_scope).await,
         Commands::Doctor => handle_doctor(&cli_scope).await,
+        // Storage verbs are dispatched before scope resolution (see the
+        // early dispatch at the top of main); this arm is unreachable.
+        Commands::Storage { .. } => Err(anyhow::anyhow!(
+            "storage commands are dispatched before runtime-scope resolution"
+        )),
         Commands::Auth { command } => {
             handle_auth_command(command, &cli_scope, auth_config_realm.as_deref()).await
         }
@@ -7454,6 +7526,135 @@ where
     } else {
         "warn\tprovider\topenai missing RKAT_OPENAI_API_KEY/OPENAI_API_KEY or AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT"
     }
+}
+
+async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow::Result<()> {
+    match command {
+        StorageCommands::Doctor { json, roots } => handle_storage_doctor(cli, *json, roots).await,
+    }
+}
+
+/// Read-only storage diagnosis. Resolves candidate roots WITHOUT opening
+/// persistence, taking leases, or building a service: an explicit
+/// `--state-root`/`--root` set is used verbatim (and nothing else is read);
+/// otherwise the sweep covers the CLI's project-local candidate and the
+/// user-global data root — the same two candidates the dual-root realm
+/// resolver probes.
+async fn handle_storage_doctor(
+    cli: &Cli,
+    json: bool,
+    extra_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let mut state_roots: Vec<PathBuf> = Vec::new();
+    if let Some(explicit) = &cli.state_root {
+        state_roots.push(explicit.clone());
+    }
+    state_roots.extend(extra_roots.iter().cloned());
+    if state_roots.is_empty() {
+        let context_root = cli
+            .context_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        state_roots.push(meerkat_core::local_realms_candidate(&context_root));
+        state_roots.push(meerkat_core::default_state_root());
+    }
+    let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
+    if let Some(realm) = &cli.realm {
+        meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm)?;
+        scope = scope.with_realm(realm.clone());
+    }
+
+    let diagnosis = meerkat_store::diagnose_disk_roots(&scope).await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diagnosis)?);
+    } else {
+        print_storage_diagnosis_text(&scope, &diagnosis);
+    }
+
+    let errors = diagnosis.count(meerkat_core::FindingSeverity::Error);
+    if errors > 0 {
+        anyhow::bail!("storage doctor found {errors} error-severity finding(s)");
+    }
+    Ok(())
+}
+
+fn print_storage_diagnosis_text(
+    scope: &meerkat_core::DiagnoseScope,
+    diagnosis: &meerkat_core::StorageDiagnosis,
+) {
+    use meerkat_core::FindingSeverity;
+
+    println!("Swept {} state root(s):", scope.state_roots.len());
+    for root in &scope.state_roots {
+        println!("  {}", root.display());
+    }
+    if let Some(realm) = &scope.realm {
+        println!("Realm filter: {realm}");
+    }
+    println!();
+
+    for (severity, header) in [
+        (FindingSeverity::Error, "Errors:"),
+        (FindingSeverity::Warning, "Warnings:"),
+        (FindingSeverity::Info, "Info:"),
+    ] {
+        let group: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == severity)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("{header}");
+        for finding in group {
+            let realm = finding
+                .realm
+                .as_deref()
+                .map(|realm| format!(" realm={realm}"))
+                .unwrap_or_default();
+            println!("  [{}]{realm} {}", finding.code, finding.message);
+            if let Some(path) = &finding.path {
+                println!("      at {}", path.display());
+            }
+        }
+        println!();
+    }
+
+    println!("Inventory ({} realm(s)):", diagnosis.inventory.len());
+    for entry in &diagnosis.inventory {
+        println!(
+            "  {}  backend={}  {}",
+            entry.realm,
+            entry.backend.as_deref().unwrap_or("unknown"),
+            entry.root.display()
+        );
+        for database in &entry.databases {
+            let name = database
+                .path
+                .strip_prefix(&entry.root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| database.path.display().to_string());
+            let domains = database
+                .domains
+                .iter()
+                .map(|(domain, version)| match version {
+                    Some(version) => format!("{domain}={version}"),
+                    None => format!("{domain}=none"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    {name}: {domains}");
+        }
+    }
+    println!();
+    println!(
+        "storage doctor: {} error(s), {} warning(s), {} info",
+        diagnosis.count(FindingSeverity::Error),
+        diagnosis.count(FindingSeverity::Warning),
+        diagnosis.count(FindingSeverity::Info)
+    );
 }
 
 async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {

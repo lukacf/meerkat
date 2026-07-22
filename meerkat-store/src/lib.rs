@@ -13,6 +13,8 @@ pub mod adapter;
 pub mod approval_file_store;
 pub mod artifact;
 pub mod blob;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctor;
 mod error;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,6 +40,8 @@ pub use adapter::StoreAdapter;
 pub use approval_file_store::FileApprovalStore;
 pub use artifact::MemoryArtifactStore;
 pub use blob::MemoryBlobStore;
+#[cfg(not(target_arch = "wasm32"))]
+pub use doctor::{DiskStorageMigrator, diagnose_disk_roots};
 pub use error::StoreError;
 
 // Re-export the canonical trait, filter, and error from meerkat-core.

@@ -141,7 +141,7 @@ pub struct RealmPaths {
 
 pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
 pub const REALM_LEASE_STALE_TTL_SECS: u64 = 30;
-const MANIFEST_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const MANIFEST_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const MANIFEST_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 const MANIFEST_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 

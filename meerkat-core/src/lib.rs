@@ -74,6 +74,7 @@ pub mod session_store;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
+pub mod storage_diagnostics;
 pub mod storage_durability;
 pub mod storage_layout;
 pub mod surface_metadata;
@@ -345,6 +346,10 @@ pub use session_store::{
     head_canonical_plain_save_guard, session_head_cas_token, strand_layout_for_history,
 };
 pub use state::LoopState;
+pub use storage_diagnostics::{
+    DatabaseInventory, DiagnoseScope, FindingSeverity, StorageDiagnosis, StorageDiagnosticsError,
+    StorageFinding, StorageInventoryEntry, StorageMigrator,
+};
 pub use storage_durability::{DurabilityClass, DurabilityDeclaration, DurabilityResolution};
 pub use storage_layout::{
     ResolvedStorage, StorageLayout, StorageLayoutInputs, find_project_root, local_realms_candidate,

@@ -956,9 +956,12 @@ mod tests {
 
     #[test]
     fn ephemeral_domains_round_trip() {
+        // Feature-aware backend string: this lane may build without the
+        // sqlite feature, and unknown backend values reject typed.
+        let backend = serde_json::to_value(supported_backend()).expect("backend string");
         let bytes = serde_json::json!({
             "realm_id": "team",
-            "backend": "sqlite",
+            "backend": backend,
             "created_at": "0",
             "manifest_format": 2,
             "ephemeral_domains": ["blobs"],

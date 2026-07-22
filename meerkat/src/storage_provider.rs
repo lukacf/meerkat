@@ -73,6 +73,13 @@ pub trait RealmStorageProvider: Send + Sync {
 
     /// Open (or create) the realm's stores.
     async fn open(&self, ctx: &RealmOpenContext) -> Result<RealmStoreSet, PersistenceError>;
+
+    /// The provider's migration hook (diagnosis now; mutation verbs land as
+    /// defaulted methods on [`meerkat_core::StorageMigrator`]). `None` =
+    /// this provider has no migration story yet.
+    fn migrator(&self) -> Option<&dyn meerkat_core::StorageMigrator> {
+        None
+    }
 }
 
 /// Enforce the fail-closed durability rule against the realm manifest.
@@ -108,5 +115,11 @@ impl RealmStorageProvider for DiskStorageProvider {
 
     async fn open(&self, ctx: &RealmOpenContext) -> Result<RealmStoreSet, PersistenceError> {
         crate::persistence::open_disk_store_set(ctx)
+    }
+
+    fn migrator(&self) -> Option<&dyn meerkat_core::StorageMigrator> {
+        static DISK_MIGRATOR: meerkat_store::doctor::DiskStorageMigrator =
+            meerkat_store::doctor::DiskStorageMigrator;
+        Some(&DISK_MIGRATOR)
     }
 }

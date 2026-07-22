@@ -26634,6 +26634,15 @@ async fn test_peer_only_retire_supervisor_checkpoint_cold_retry_never_recontacts
     );
     let intents_before_cold_retry = external.received_intents().await.len();
     external.task.abort();
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown must skip a peer-only terminal-publication retry anchor");
+    assert_eq!(
+        external.received_intents().await.len(),
+        intents_before_cold_retry,
+        "shutdown must not recontact an offline peer after retirement and supervisor revocation"
+    );
     drop(handle);
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
@@ -26805,6 +26814,15 @@ async fn test_peer_only_retire_final_append_after_revoke_survives_cold_restart()
     );
     let intents_before_cold_retry = external.received_intents().await.len();
     external.task.abort();
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown must skip a peer-only final-publication retry anchor");
+    assert_eq!(
+        external.received_intents().await.len(),
+        intents_before_cold_retry,
+        "shutdown must not recontact an offline peer after final publication fails"
+    );
     drop(handle);
     events.allow_appends_for("MemberRetired").await;
 

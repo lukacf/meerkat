@@ -7547,6 +7547,7 @@ pub mod inputs {
         pub session_projection_visible: bool,
         pub runtime_residue_present: bool,
         pub archive_authority_known: bool,
+        pub placed_release_confirmed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForceCancel {
@@ -10503,9 +10504,15 @@ pub enum TransitionId {
     ClassifyMemberWaitMissingRuntimeMaterialStopped,
     ClassifyMemberWaitMissingRuntimeMaterialCompleted,
     ClassifyMemberWaitMissingRuntimeMaterialDestroyed,
-    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorRunning,
-    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorStopped,
-    ResolveAutonomousShutdownMemberActionTerminalRetryAnchorCompleted,
+    ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorRunning,
+    ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorStopped,
+    ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchorCompleted,
+    ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorRunning,
+    ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorStopped,
+    ResolveAutonomousShutdownMemberActionPeerOnlyTerminalRetryAnchorCompleted,
+    ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorRunning,
+    ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorStopped,
+    ResolveAutonomousShutdownMemberActionPlacedTerminalRetryAnchorCompleted,
     ResolveAutonomousShutdownMemberActionInterruptRunning,
     ResolveAutonomousShutdownMemberActionInterruptStopped,
     ResolveAutonomousShutdownMemberActionInterruptCompleted,

@@ -13581,6 +13581,13 @@ impl MobActor {
         entry: &RosterEntry,
     ) -> Result<bool, MobError> {
         let session_id = entry.member_ref.bridge_session_id().cloned();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let placed_host = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .get(&dsl_identity)
+            .cloned();
         let (
             session_has_live_actor,
             session_projection_visible,
@@ -13624,7 +13631,42 @@ impl MobActor {
             }
             None => (false, false, false, false),
         };
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        // A placed host release is terminal only for the exact current
+        // identity/host/session/generation/fence tuple. Keep the durable event
+        // as the shell observation and let MobMachine combine it with the
+        // retained placement/carrier state; a historical release from before
+        // MobReset or another incarnation must never suppress interruption.
+        let placed_release_confirmed = match (placed_host.as_ref(), session_id.as_ref()) {
+            (Some(host), Some(session_id)) => {
+                let all_events = self.events.replay_all().await?;
+                let mob_events = all_events
+                    .iter()
+                    .filter(|event| event.mob_id == self.definition.id)
+                    .collect::<Vec<_>>();
+                let epoch_start = mob_events
+                    .iter()
+                    .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+                    .map_or(0, |index| index + 1);
+                let member_session_id = session_id.to_string();
+                mob_events[epoch_start..].iter().any(|event| {
+                    matches!(
+                        &event.kind,
+                        MobEventKind::RemoteMemberReleaseConfirmed {
+                            agent_identity,
+                            host_id,
+                            member_session_id: confirmed_session_id,
+                            generation,
+                            fence_token,
+                        } if agent_identity == &entry.agent_identity
+                            && host_id == host.as_str()
+                            && confirmed_session_id == &member_session_id
+                            && generation == &entry.generation
+                            && fence_token == &entry.fence_token
+                    )
+                })
+            }
+            _ => false,
+        };
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
         let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
         let dsl_generation = mob_dsl::Generation::from_domain(entry.generation);
@@ -13640,6 +13682,7 @@ impl MobActor {
                 session_projection_visible,
                 runtime_residue_present,
                 archive_authority_known,
+                placed_release_confirmed,
             },
             "resolve_autonomous_shutdown_member_action",
         )?;

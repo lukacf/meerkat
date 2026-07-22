@@ -1067,6 +1067,77 @@ pub fn session_checkpoints_are_exact(
     Ok(session_checkpoint_relation(left, right)? == SessionCheckpointRelation::Exact)
 }
 
+/// Mechanical transcript relation between two legacy (unstamped) copies of the
+/// same session document, observed during one-time recovery migration.
+///
+/// Legacy documents carry no stamps, so ancestry cannot be proven typed. The
+/// only mechanical proof available is per-message canonical-JSON prefix
+/// equality over the transcripts. Non-transcript fields are deliberately not
+/// compared: whichever copy migration adopts carries its own non-transcript
+/// fields wholesale, and pre-typed writers routinely differ on save-time
+/// bookkeeping without diverging conversation content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacySessionTranscriptRelation {
+    /// Same message count and per-message canonical equality.
+    Identical,
+    /// The snapshot's transcript is a strict prefix of the projection's.
+    ProjectionExtendsSnapshot,
+    /// The projection's transcript is a strict prefix of the snapshot's.
+    SnapshotExtendsProjection,
+    /// Neither transcript is a prefix of the other.
+    Divergent,
+}
+
+/// Classify the transcript relation between the committed runtime snapshot
+/// copy and the session-store projection copy of one legacy session document.
+///
+/// Both documents must decode as `LegacyUnverified` and carry the same
+/// session id; typed documents must use `session_checkpoint_relation`.
+pub fn legacy_session_transcript_relation(
+    snapshot: &Session,
+    projection: &Session,
+) -> Result<LegacySessionTranscriptRelation, SessionCheckpointError> {
+    for (side, session) in [("snapshot", snapshot), ("projection", projection)] {
+        if !matches!(
+            session.try_checkpoint_state()?,
+            SessionCheckpointState::LegacyUnverified { .. }
+        ) {
+            return Err(SessionCheckpointError::AuthorityBaseConflict(format!(
+                "legacy transcript relation requires an untyped legacy {side} document"
+            )));
+        }
+    }
+    if snapshot.id() != projection.id() {
+        return Err(SessionCheckpointError::SessionIdMismatch {
+            expected: snapshot.id().clone(),
+            actual: projection.id().clone(),
+        });
+    }
+    let snapshot_messages = snapshot.messages();
+    let projection_messages = projection.messages();
+    let shared = snapshot_messages.len().min(projection_messages.len());
+    for (snapshot_message, projection_message) in snapshot_messages
+        .iter()
+        .take(shared)
+        .zip(projection_messages.iter().take(shared))
+    {
+        let snapshot_value = serde_json::to_value(snapshot_message)?;
+        let projection_value = serde_json::to_value(projection_message)?;
+        if snapshot_value != projection_value {
+            return Ok(LegacySessionTranscriptRelation::Divergent);
+        }
+    }
+    Ok(
+        match snapshot_messages.len().cmp(&projection_messages.len()) {
+            std::cmp::Ordering::Equal => LegacySessionTranscriptRelation::Identical,
+            std::cmp::Ordering::Less => LegacySessionTranscriptRelation::ProjectionExtendsSnapshot,
+            std::cmp::Ordering::Greater => {
+                LegacySessionTranscriptRelation::SnapshotExtendsProjection
+            }
+        },
+    )
+}
+
 /// Periodic session persistence hook.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -1638,5 +1709,58 @@ mod tests {
             session_checkpoint_digest(&session).expect("original digest"),
             session_checkpoint_digest(&reconstructed).expect("reconstructed digest")
         );
+    }
+
+    #[test]
+    fn legacy_transcript_relation_classifies_prefix_extension_and_divergence() {
+        let snapshot = session_with_text("turn one");
+
+        let identical = snapshot.clone();
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &identical).expect("identical relation"),
+            LegacySessionTranscriptRelation::Identical
+        );
+
+        let mut extended = snapshot.clone();
+        extended.push(Message::User(UserMessage::text("turn two".to_string())));
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &extended).expect("extension relation"),
+            LegacySessionTranscriptRelation::ProjectionExtendsSnapshot
+        );
+        assert_eq!(
+            legacy_session_transcript_relation(&extended, &snapshot)
+                .expect("stale projection relation"),
+            LegacySessionTranscriptRelation::SnapshotExtendsProjection
+        );
+
+        let mut divergent = snapshot.clone();
+        std::sync::Arc::make_mut(&mut divergent.messages).clear();
+        divergent.push(Message::User(UserMessage::text(
+            "a different turn one".to_string(),
+        )));
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &divergent).expect("divergent relation"),
+            LegacySessionTranscriptRelation::Divergent
+        );
+    }
+
+    #[test]
+    fn legacy_transcript_relation_refuses_typed_documents_and_foreign_sessions() {
+        let legacy = session_with_text("legacy copy");
+        let typed = stamped_root(&session_with_text("typed copy"));
+        assert!(matches!(
+            legacy_session_transcript_relation(&typed, &legacy),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+        assert!(matches!(
+            legacy_session_transcript_relation(&legacy, &typed),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+
+        let foreign = session_with_text("legacy copy");
+        assert!(matches!(
+            legacy_session_transcript_relation(&legacy, &foreign),
+            Err(SessionCheckpointError::SessionIdMismatch { .. })
+        ));
     }
 }

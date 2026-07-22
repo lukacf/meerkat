@@ -27,6 +27,130 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LegacyCheckpointMigrationDisposition {
+    #[default]
+    #[serde(rename = "RefuseDivergent")]
+    RefuseDivergent,
+    #[serde(rename = "MigrateCanonicalSnapshot")]
+    MigrateCanonicalSnapshot,
+    #[serde(rename = "AdoptProjectionExtension")]
+    AdoptProjectionExtension,
+    #[serde(rename = "MigrateStoreProjection")]
+    MigrateStoreProjection,
+}
+impl LegacyCheckpointMigrationDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RefuseDivergent => "RefuseDivergent",
+            Self::MigrateCanonicalSnapshot => "MigrateCanonicalSnapshot",
+            Self::AdoptProjectionExtension => "AdoptProjectionExtension",
+            Self::MigrateStoreProjection => "MigrateStoreProjection",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LegacyCheckpointMigrationDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RefuseDivergent" => Ok(Self::RefuseDivergent),
+            "MigrateCanonicalSnapshot" => Ok(Self::MigrateCanonicalSnapshot),
+            "AdoptProjectionExtension" => Ok(Self::AdoptProjectionExtension),
+            "MigrateStoreProjection" => Ok(Self::MigrateStoreProjection),
+            other => Err(format!(
+                "invalid LegacyCheckpointMigrationDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LegacyCheckpointMigrationDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LegacyCheckpointMigrationDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LegacyCheckpointTranscriptRelation {
+    #[default]
+    #[serde(rename = "Divergent")]
+    Divergent,
+    #[serde(rename = "Identical")]
+    Identical,
+    #[serde(rename = "ProjectionExtendsSnapshot")]
+    ProjectionExtendsSnapshot,
+    #[serde(rename = "SnapshotExtendsProjection")]
+    SnapshotExtendsProjection,
+    #[serde(rename = "NotComparable")]
+    NotComparable,
+}
+impl LegacyCheckpointTranscriptRelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Divergent => "Divergent",
+            Self::Identical => "Identical",
+            Self::ProjectionExtendsSnapshot => "ProjectionExtendsSnapshot",
+            Self::SnapshotExtendsProjection => "SnapshotExtendsProjection",
+            Self::NotComparable => "NotComparable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LegacyCheckpointTranscriptRelation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Divergent" => Ok(Self::Divergent),
+            "Identical" => Ok(Self::Identical),
+            "ProjectionExtendsSnapshot" => Ok(Self::ProjectionExtendsSnapshot),
+            "SnapshotExtendsProjection" => Ok(Self::SnapshotExtendsProjection),
+            "NotComparable" => Ok(Self::NotComparable),
+            other => Err(format!(
+                "invalid LegacyCheckpointTranscriptRelation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LegacyCheckpointTranscriptRelation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LegacyCheckpointTranscriptRelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveSessionAuthorityKind {
     #[default]
     #[serde(rename = "LiveAuthoritative")]
@@ -1850,6 +1974,15 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLegacyCheckpointMigration {
+        pub session_id: SessionId,
+        pub runtime_snapshot_present: bool,
+        pub runtime_snapshot_legacy: bool,
+        pub store_row_present: bool,
+        pub store_row_legacy: bool,
+        pub transcript_relation: LegacyCheckpointTranscriptRelation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeSnapshotReadSource {
         pub session_id: SessionId,
         pub store_head_extends_snapshot: bool,
@@ -1923,6 +2056,7 @@ pub enum Input {
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
     ResolveRuntimeProjectionRollback(inputs::ResolveRuntimeProjectionRollback),
     ResolveRuntimeCheckpointProjection(inputs::ResolveRuntimeCheckpointProjection),
+    ResolveLegacyCheckpointMigration(inputs::ResolveLegacyCheckpointMigration),
     ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
@@ -2002,6 +2136,9 @@ impl Input {
             Self::ResolveRuntimeCheckpointProjection(_) => {
                 InputKind::ResolveRuntimeCheckpointProjection
             }
+            Self::ResolveLegacyCheckpointMigration(_) => {
+                InputKind::ResolveLegacyCheckpointMigration
+            }
             Self::ResolveRuntimeSnapshotReadSource(_) => {
                 InputKind::ResolveRuntimeSnapshotReadSource
             }
@@ -2052,6 +2189,7 @@ pub enum InputKind {
     RecoverSessionFromStore,
     ResolveRuntimeProjectionRollback,
     ResolveRuntimeCheckpointProjection,
+    ResolveLegacyCheckpointMigration,
     ResolveRuntimeSnapshotReadSource,
     ApplyPendingToolResults,
     TranscriptEdit,
@@ -2193,6 +2331,10 @@ pub mod effects {
         pub disposition: RuntimeCheckpointProjectionDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LegacyCheckpointMigrationResolved {
+        pub disposition: LegacyCheckpointMigrationDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeSnapshotReadSourceResolved {
         pub read_from_store_head: bool,
     }
@@ -2254,6 +2396,7 @@ pub enum Effect {
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
     RuntimeProjectionRollbackResolved(effects::RuntimeProjectionRollbackResolved),
     RuntimeCheckpointProjectionResolved(effects::RuntimeCheckpointProjectionResolved),
+    LegacyCheckpointMigrationResolved(effects::LegacyCheckpointMigrationResolved),
     RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
@@ -2293,6 +2436,7 @@ pub enum EffectKind {
     SessionStoreRecoverySourceResolved,
     RuntimeProjectionRollbackResolved,
     RuntimeCheckpointProjectionResolved,
+    LegacyCheckpointMigrationResolved,
     RuntimeSnapshotReadSourceResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
@@ -2405,6 +2549,13 @@ pub enum TransitionId {
     ResolveRuntimeProjectionRollbackReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
+    ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,
+    ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection,
+    ResolveLegacyCheckpointMigrationProjectionExtension,
+    ResolveLegacyCheckpointMigrationDivergentCopies,
+    ResolveLegacyCheckpointMigrationSnapshotOnly,
+    ResolveLegacyCheckpointMigrationStoreRowOnly,
+    ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

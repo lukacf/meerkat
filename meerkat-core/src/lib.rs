@@ -121,14 +121,15 @@ pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
 };
 pub use checkpoint::{
-    SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION, SessionCheckpointAncestryProof,
-    SessionCheckpointAnchor, SessionCheckpointAuthorityBase, SessionCheckpointDigest,
-    SessionCheckpointError, SessionCheckpointMetadataState, SessionCheckpointProvenance,
-    SessionCheckpointRelation, SessionCheckpointRevision, SessionCheckpointStamp,
-    SessionCheckpointState, SessionCheckpointer, SessionGeneration, SessionLineageId,
-    legacy_session_source_blob_digest, session_checkpoint_digest,
-    session_checkpoint_metadata_state, session_checkpoint_relation, session_checkpoints_are_exact,
-    session_transcript_history_checkpoint_digest, transcript_history_checkpoint_digest,
+    LegacySessionTranscriptRelation, SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION,
+    SessionCheckpointAncestryProof, SessionCheckpointAnchor, SessionCheckpointAuthorityBase,
+    SessionCheckpointDigest, SessionCheckpointError, SessionCheckpointMetadataState,
+    SessionCheckpointProvenance, SessionCheckpointRelation, SessionCheckpointRevision,
+    SessionCheckpointStamp, SessionCheckpointState, SessionCheckpointer, SessionGeneration,
+    SessionLineageId, legacy_session_source_blob_digest, legacy_session_transcript_relation,
+    session_checkpoint_digest, session_checkpoint_metadata_state, session_checkpoint_relation,
+    session_checkpoints_are_exact, session_transcript_history_checkpoint_digest,
+    transcript_history_checkpoint_digest,
 };
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,

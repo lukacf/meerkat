@@ -50,6 +50,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
 - `ResolveRuntimeProjectionRollback`(session_id: SessionId, row_continues_authority: Bool, row_is_runtime_checkpoint: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
+- `ResolveLegacyCheckpointMigration`(session_id: SessionId, runtime_snapshot_present: Bool, runtime_snapshot_legacy: Bool, store_row_present: Bool, store_row_legacy: Bool, transcript_relation: LegacyCheckpointTranscriptRelation)
 - `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, store_head_extends_snapshot: Bool, store_head_is_runtime_checkpoint: Bool, session_is_live: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
@@ -90,6 +91,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
 - `RuntimeProjectionRollbackResolved`(disposition: RuntimeProjectionRollbackDisposition)
 - `RuntimeCheckpointProjectionResolved`(disposition: RuntimeCheckpointProjectionDisposition)
+- `LegacyCheckpointMigrationResolved`(disposition: LegacyCheckpointMigrationDisposition)
 - `RuntimeSnapshotReadSourceResolved`(read_from_store_head: Bool)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
@@ -925,6 +927,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `RuntimeCheckpointProjectionResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationProjectionExtension`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationDivergentCopies`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationSnapshotOnly`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationStoreRowOnly`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
 - To: `Ready`
 
 ### `ApplyPendingToolResults`

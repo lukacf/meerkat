@@ -4,6 +4,32 @@ description: "Plan to unify Meerkat's fragmented storage: one path authority, sh
 icon: "database"
 ---
 
+**Revision 5 (implementation).** The arc is implemented on the
+`storage-unification` branch (phases 0-6). Deltas discovered and decided
+during implementation, recorded here so the plan stays honest against the
+code: the dead config field is `StorageConfig.directory` (no
+`SessionStoreConfig` exists); the two `find_project_root` copies were NOT
+byte-identical — the canonical copy adopts the live `exists()` semantic;
+the maintenance fence is per-database-file `<file>.mfence` OS locks with
+per-operation shared guards and **holder self-admission** (the migrate
+process's own production store paths pass their guards; bulk checkpoint
+adoption runs through the CAS-hardened #909/#910 machinery while the fence
+is held); mob's event-route backfill and memory's NULL-`session_id` heal
+remain open-time heals (old binaries keep writing pre-migration shapes) —
+only their schema halves became ledger migrations; the per-mob storage
+*factory* hook is deferred to the mobkit composite provider where it has a
+real consumer; external-provider manifests are read-refused now but the
+write path ships with the first real external provider; wire `ErrorCode`
+additions for storage refusals are deferred (startup refusals are typed at
+the process boundary; no contracts change was needed in this arc);
+`RealmSelection::Isolated` minting was fixed to resolve identity exactly
+once; the ambient no-`_in` realm helpers are deprecated rather than
+deleted (published API); doctor/migrate/prune dispatch before realm
+resolution so they can run against the split-brain states the resolver
+refuses; per-mob `mobs/*.db` files are report-only in migrate v1. A sixth
+busy-timeout definition beyond the plan's count (mob's realm-profile
+store) was found and folded in.
+
 **Revision 4.** Revision 2 incorporated three reviews of the original draft:
 the ob3 validator team (remote/BigQuery downstream on ephemeral disk), the
 HomeCore operators (tuple-world state-generation deployment on local

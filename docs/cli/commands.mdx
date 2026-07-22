@@ -350,7 +350,7 @@ session→blob references, and orphaned lease/lock/backup artifacts. Exit 0
 means no error-severity findings; exit 1 means errors were found.
 
 ```bash
-rkat storage migrate [--apply] [--json] [--root PATH]...
+rkat storage migrate [--apply] [--json] [--root PATH]... [--adopt-root PATH] [--fence-wait-secs SECS]
 rkat storage prune [--apply] [--older-than-days N] [--json] [--root PATH]...
 ```
 

@@ -4619,6 +4619,8 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "LiveSessionAuthorityReason",
         "RuntimeProjectionRollbackDisposition",
         "RuntimeCheckpointProjectionDisposition",
+        "LegacyCheckpointTranscriptRelation",
+        "LegacyCheckpointMigrationDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
         "SessionArchiveRuntimeObservation",
@@ -4718,6 +4720,8 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "LiveSessionAuthorityReason" => Ok("StoredArchived"),
         "RuntimeProjectionRollbackDisposition" => Ok("RejectDivergent"),
         "RuntimeCheckpointProjectionDisposition" => Ok("IgnoreArchived"),
+        "LegacyCheckpointTranscriptRelation" => Ok("Divergent"),
+        "LegacyCheckpointMigrationDisposition" => Ok("RefuseDivergent"),
         "SessionDocumentLifecycle" => Ok("Active"),
         "SessionArchiveDisposition" => Ok("Archive"),
         "SessionArchiveRuntimeObservation" => Ok("Absent"),
@@ -5537,6 +5541,8 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "PendingContinuationPublicTerminal"
             | "SessionDocumentLifecycle"
             | "RuntimeCheckpointProjectionDisposition"
+            | "LegacyCheckpointTranscriptRelation"
+            | "LegacyCheckpointMigrationDisposition"
             | "SessionArchiveDisposition"
             | "SessionArchiveRuntimeObservation"
     )
@@ -5597,6 +5603,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RecoverSessionLifecycleTerminal",
         "ArchiveSessionDocument",
         "ResolveRuntimeCheckpointProjection",
+        "ResolveLegacyCheckpointMigration",
     ] {
         machine
             .inputs
@@ -5633,6 +5640,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionLifecycleTerminalRecovered",
         "SessionArchiveResolved",
         "RuntimeCheckpointProjectionResolved",
+        "LegacyCheckpointMigrationResolved",
     ] {
         machine
             .effects
@@ -5664,6 +5672,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "LiveSessionAuthorityReason",
         "RuntimeProjectionRollbackDisposition",
         "RuntimeCheckpointProjectionDisposition",
+        "LegacyCheckpointTranscriptRelation",
+        "LegacyCheckpointMigrationDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
         "SessionArchiveRuntimeObservation",

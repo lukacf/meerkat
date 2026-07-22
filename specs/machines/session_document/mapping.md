@@ -325,6 +325,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeCheckpointProjectionArchived`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationProjectionExtension`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationDivergentCopies`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationSnapshotOnly`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationStoreRowOnly`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
 - `ApplyPendingToolResults`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
@@ -439,6 +460,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeCheckpointProjectionResolved`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `LegacyCheckpointMigrationResolved`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `RuntimeSnapshotReadSourceResolved`

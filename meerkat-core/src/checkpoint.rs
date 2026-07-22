@@ -1067,6 +1067,134 @@ pub fn session_checkpoints_are_exact(
     Ok(session_checkpoint_relation(left, right)? == SessionCheckpointRelation::Exact)
 }
 
+/// Mechanical transcript relation between two legacy (unstamped) copies of the
+/// same session document, observed during one-time recovery migration.
+///
+/// Legacy documents carry no stamps, so ancestry cannot be proven typed. The
+/// only mechanical proof available is per-message canonical-JSON prefix
+/// equality over the transcripts. Non-transcript fields are deliberately not
+/// compared: whichever copy migration adopts carries its own non-transcript
+/// fields wholesale, and pre-typed writers routinely differ on save-time
+/// bookkeeping without diverging conversation content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacySessionTranscriptRelation {
+    /// Same message count and per-message canonical equality.
+    Identical,
+    /// The snapshot's transcript is a strict prefix of the projection's.
+    ProjectionExtendsSnapshot,
+    /// The projection's transcript is a strict prefix of the snapshot's.
+    SnapshotExtendsProjection,
+    /// Neither transcript is a prefix of the other.
+    Divergent,
+}
+
+/// Classify the transcript relation between the committed runtime snapshot
+/// copy and the session-store projection copy of one legacy session document.
+///
+/// Both documents must decode as `LegacyUnverified` and carry the same
+/// session id; typed documents must use `session_checkpoint_relation`.
+pub fn legacy_session_transcript_relation(
+    snapshot: &Session,
+    projection: &Session,
+) -> Result<LegacySessionTranscriptRelation, SessionCheckpointError> {
+    for (side, session) in [("snapshot", snapshot), ("projection", projection)] {
+        if !matches!(
+            session.try_checkpoint_state()?,
+            SessionCheckpointState::LegacyUnverified { .. }
+        ) {
+            return Err(SessionCheckpointError::AuthorityBaseConflict(format!(
+                "legacy transcript relation requires an untyped legacy {side} document"
+            )));
+        }
+    }
+    if snapshot.id() != projection.id() {
+        return Err(SessionCheckpointError::SessionIdMismatch {
+            expected: snapshot.id().clone(),
+            actual: projection.id().clone(),
+        });
+    }
+    let snapshot_messages = snapshot.messages();
+    let projection_messages = projection.messages();
+    let shared = snapshot_messages.len().min(projection_messages.len());
+    for (snapshot_message, projection_message) in snapshot_messages
+        .iter()
+        .take(shared)
+        .zip(projection_messages.iter().take(shared))
+    {
+        let snapshot_value = serde_json::to_value(snapshot_message)?;
+        let projection_value = serde_json::to_value(projection_message)?;
+        if snapshot_value != projection_value {
+            return Ok(LegacySessionTranscriptRelation::Divergent);
+        }
+    }
+    Ok(
+        match snapshot_messages.len().cmp(&projection_messages.len()) {
+            std::cmp::Ordering::Equal => LegacySessionTranscriptRelation::Identical,
+            std::cmp::Ordering::Less => LegacySessionTranscriptRelation::ProjectionExtendsSnapshot,
+            std::cmp::Ordering::Greater => {
+                LegacySessionTranscriptRelation::SnapshotExtendsProjection
+            }
+        },
+    )
+}
+
+/// One adopted legacy session: the typed migration stamp bound to the exact
+/// source bytes, the stamped document, and its serialized durable form.
+pub struct AdoptedLegacySession {
+    pub session: Session,
+    pub stamp: SessionCheckpointStamp,
+    pub serialized: Vec<u8>,
+}
+
+/// Adopt one pre-typed (legacy-unverified) session BLOB into typed checkpoint
+/// authority via a one-time recovery migration.
+///
+/// This is the shared stamping seam for every backend that holds pre-typed
+/// documents — the disk resolver, remote store implementations, and
+/// continuity-snapshot adoption — so the ordering subtleties live in exactly
+/// one place. Contract for callers:
+///
+/// - `source_blob` must be the FINAL bytes: perform any metadata repair
+///   (for example comms-name rewrites at restore) before calling, because
+///   the stamp's `Legacy` authority base takes byte custody of exactly these
+///   bytes.
+/// - `observed_generation` / `observed_checkpoint_revision` must come from
+///   the externally observed continuity cursor when one exists. `INITIAL`
+///   cursors are correct only for lineages that never minted authority
+///   (pre-typed fleets with no continuity generation floor); stamping a
+///   lower generation than the continuity row records makes the mismatch
+///   sticky, because the document then verifies and no longer re-migrates.
+/// - The blob must decode as a legacy-unverified document; typed documents
+///   are refused with a typed error, never re-stamped.
+pub fn adopt_legacy_session(
+    source_blob: &[u8],
+    observed_generation: SessionGeneration,
+    observed_checkpoint_revision: SessionCheckpointRevision,
+) -> Result<AdoptedLegacySession, SessionCheckpointError> {
+    let mut session: Session = serde_json::from_slice(source_blob)?;
+    let stamp = SessionCheckpointStamp::recovery_migration(
+        &session,
+        source_blob,
+        observed_generation,
+        observed_checkpoint_revision,
+    )?;
+    session.install_checkpoint_stamp(stamp.clone())?;
+    let serialized = serde_json::to_vec(&session)?;
+    match session.try_checkpoint_state()? {
+        SessionCheckpointState::Verified(verified) if verified == stamp => {}
+        _ => {
+            return Err(SessionCheckpointError::AuthorityBaseConflict(
+                "adopted legacy session failed post-install verification".to_string(),
+            ));
+        }
+    }
+    Ok(AdoptedLegacySession {
+        session,
+        stamp,
+        serialized,
+    })
+}
+
 /// Periodic session persistence hook.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -1638,5 +1766,94 @@ mod tests {
             session_checkpoint_digest(&session).expect("original digest"),
             session_checkpoint_digest(&reconstructed).expect("reconstructed digest")
         );
+    }
+
+    #[test]
+    fn legacy_transcript_relation_classifies_prefix_extension_and_divergence() {
+        let snapshot = session_with_text("turn one");
+
+        let identical = snapshot.clone();
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &identical).expect("identical relation"),
+            LegacySessionTranscriptRelation::Identical
+        );
+
+        let mut extended = snapshot.clone();
+        extended.push(Message::User(UserMessage::text("turn two".to_string())));
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &extended).expect("extension relation"),
+            LegacySessionTranscriptRelation::ProjectionExtendsSnapshot
+        );
+        assert_eq!(
+            legacy_session_transcript_relation(&extended, &snapshot)
+                .expect("stale projection relation"),
+            LegacySessionTranscriptRelation::SnapshotExtendsProjection
+        );
+
+        let mut divergent = snapshot.clone();
+        std::sync::Arc::make_mut(&mut divergent.messages).clear();
+        divergent.push(Message::User(UserMessage::text(
+            "a different turn one".to_string(),
+        )));
+        assert_eq!(
+            legacy_session_transcript_relation(&snapshot, &divergent).expect("divergent relation"),
+            LegacySessionTranscriptRelation::Divergent
+        );
+    }
+
+    #[test]
+    fn adopt_legacy_session_stamps_blob_and_refuses_typed_documents() {
+        let legacy = session_with_text("legacy blob");
+        let blob = serde_json::to_vec(&legacy).expect("legacy session should serialize");
+        let adopted = adopt_legacy_session(
+            &blob,
+            SessionGeneration::INITIAL,
+            SessionCheckpointRevision::INITIAL,
+        )
+        .expect("legacy blob should adopt");
+        assert_eq!(
+            adopted.stamp.provenance(),
+            SessionCheckpointProvenance::RecoveryMigration
+        );
+        assert_eq!(adopted.stamp.generation(), SessionGeneration::INITIAL);
+        let reloaded: Session =
+            serde_json::from_slice(&adopted.serialized).expect("adopted bytes should decode");
+        assert!(matches!(
+            reloaded
+                .try_checkpoint_state()
+                .expect("adopted checkpoint state should decode"),
+            SessionCheckpointState::Verified(stamp) if stamp == adopted.stamp
+        ));
+
+        let typed_blob =
+            serde_json::to_vec(&stamped_root(&legacy)).expect("typed session should serialize");
+        assert!(matches!(
+            adopt_legacy_session(
+                &typed_blob,
+                SessionGeneration::INITIAL,
+                SessionCheckpointRevision::INITIAL,
+            ),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_transcript_relation_refuses_typed_documents_and_foreign_sessions() {
+        let legacy = session_with_text("legacy copy");
+        let typed = stamped_root(&session_with_text("typed copy"));
+        assert!(matches!(
+            legacy_session_transcript_relation(&typed, &legacy),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+        assert!(matches!(
+            legacy_session_transcript_relation(&legacy, &typed),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+
+        let foreign = session_with_text("legacy copy");
+        assert!(matches!(
+            legacy_session_transcript_relation(&legacy, &foreign),
+            Err(SessionCheckpointError::SessionIdMismatch { .. })
+        ));
     }
 }

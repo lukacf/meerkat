@@ -59,6 +59,7 @@ use meerkat_core::service::{
     StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
+    LegacyCheckpointMigrationDisposition, LegacyCheckpointTranscriptRelation,
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, RuntimeCheckpointProjectionDisposition,
     SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
     SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
@@ -970,6 +971,56 @@ async fn load_verified_runtime_checkpoint_authority(
         return Ok(None);
     };
     VerifiedCheckpointAuthority::from_serialized(serialized, session_id, role).map(Some)
+}
+
+/// The committed runtime snapshot classified for authority resolution: absent,
+/// fully verified, or a pre-typed legacy document eligible for the one-time
+/// recovery migration. Malformed evidence and intra-turn rows still error.
+enum CommittedCheckpointCopy {
+    Absent,
+    Verified(VerifiedCheckpointAuthority),
+    Legacy(Session),
+}
+
+async fn load_runtime_checkpoint_copy(
+    runtime_store: &dyn RuntimeStore,
+    session_id: &SessionId,
+    role: &str,
+) -> Result<CommittedCheckpointCopy, SessionError> {
+    let Some(serialized) = runtime_store
+        .load_session_snapshot(&LogicalRuntimeId::for_session(session_id))
+        .await
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to load {role} for session {session_id}: {error}"
+            )))
+        })?
+    else {
+        return Ok(CommittedCheckpointCopy::Absent);
+    };
+    let session: Session = serde_json::from_slice(&serialized).map_err(|error| {
+        SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
+            "failed to decode {role} for session {session_id}: {error}"
+        ))))
+    })?;
+    if session.id() != session_id {
+        return Err(session_checkpoint_read_error(
+            meerkat_core::SessionCheckpointError::SessionIdMismatch {
+                expected: session_id.clone(),
+                actual: session.id().clone(),
+            },
+        ));
+    }
+    if matches!(
+        session
+            .try_checkpoint_state()
+            .map_err(session_checkpoint_read_error)?,
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+    ) {
+        return Ok(CommittedCheckpointCopy::Legacy(session));
+    }
+    VerifiedCheckpointAuthority::from_session_with_serialized(session, serialized, session_id, role)
+        .map(CommittedCheckpointCopy::Verified)
 }
 
 fn session_materialized_at_transcript_revision(
@@ -3209,6 +3260,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         } else {
             match Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await? {
                 Some(snapshot) => {
+                    // A pre-typed legacy snapshot cannot enter read-source
+                    // arbitration (every verified-stamp read below fails
+                    // closed on it). Run the machine-owned one-time recovery
+                    // migration first; the migrated document is the
+                    // committed authority for this read and both durable
+                    // copies now carry the typed stamp.
+                    let snapshot = if matches!(
+                        snapshot
+                            .try_checkpoint_state()
+                            .map_err(session_checkpoint_read_error)?,
+                        meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+                    ) {
+                        self.load_committed_checkpoint_authority(
+                            id,
+                            "authoritative session read",
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            SessionError::Agent(AgentError::InternalError(format!(
+                                "legacy checkpoint migration returned no authority for session {id}"
+                            )))
+                        })?
+                        .session
+                    } else {
+                        snapshot
+                    };
                     // The committed runtime snapshot normally leads the
                     // durable store head (it commits at the run boundary).
                     // A torn shutdown can freeze it as a stale strict
@@ -3237,6 +3314,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         .load(id)
                         .await
                         .map_err(|e| SessionError::Store(Box::new(e)))?;
+                    // A store-only pre-typed row (fleets that predate runtime
+                    // checkpointing entirely) migrates through the same
+                    // machine-owned seam before recovery-source eligibility.
+                    let store_projection = match store_projection {
+                        Some(row)
+                            if matches!(
+                                row.try_checkpoint_state()
+                                    .map_err(session_checkpoint_read_error)?,
+                                meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+                            ) =>
+                        {
+                            Some(
+                                self.load_committed_checkpoint_authority(
+                                    id,
+                                    "authoritative session read",
+                                )
+                                .await?
+                                .ok_or_else(|| {
+                                    SessionError::Agent(AgentError::InternalError(format!(
+                                        "legacy checkpoint migration returned no authority for session {id}"
+                                    )))
+                                })?
+                                .session,
+                            )
+                        }
+                        other => other,
+                    };
                     // Recovery-source eligibility (whether a store-only
                     // projection may stand in as authoritative when the
                     // runtime snapshot is absent) is owned by the canonical
@@ -6742,27 +6846,254 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// One-time, level-triggered recovery migration of a pre-typed session
+    /// document into typed checkpoint authority.
+    ///
+    /// Every document written before typed checkpoint stamps decodes as
+    /// legacy-unverified and fails closed at each authority seam; nothing in
+    /// the released upgrade path stamps existing fleets. The shell here
+    /// observes only mechanical carriers — which durable copies exist,
+    /// whether each is legacy, and the transcript prefix relation between
+    /// them — and mirrors the canonical `SessionDocumentMachine` migration
+    /// disposition exactly. It never chooses a copy itself.
+    ///
+    /// Cursor seeding matches the shipped v0.6.34 migrator: the migration
+    /// root retains `SessionGeneration::INITIAL` and
+    /// `SessionCheckpointRevision::INITIAL`. Identity matching compares
+    /// session/lineage/generation only, and lease/fence cursors are
+    /// ownership, never checkpoint content.
+    ///
+    /// Write order is runtime snapshot first, projection second: a crash
+    /// between the two leaves a verified runtime authority over a legacy
+    /// row, which every reader already tolerates and the next projection
+    /// write converges.
+    async fn migrate_legacy_checkpoint_authority(
+        &self,
+        id: &SessionId,
+        runtime_snapshot: Option<Session>,
+        store_row: Option<Session>,
+        role: &str,
+    ) -> Result<VerifiedCheckpointAuthority, SessionError> {
+        let runtime_snapshot_present = runtime_snapshot.is_some();
+        let runtime_snapshot_legacy = runtime_snapshot.is_some();
+        let store_row_present = store_row.is_some();
+        let store_row_legacy = match store_row.as_ref() {
+            Some(row) => matches!(
+                row.try_checkpoint_state()
+                    .map_err(session_checkpoint_read_error)?,
+                meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+            ),
+            None => false,
+        };
+        let transcript_relation = match (runtime_snapshot.as_ref(), store_row.as_ref()) {
+            (Some(snapshot), Some(row)) if store_row_legacy => {
+                match meerkat_core::legacy_session_transcript_relation(snapshot, row)
+                    .map_err(session_checkpoint_read_error)?
+                {
+                    meerkat_core::LegacySessionTranscriptRelation::Identical => {
+                        LegacyCheckpointTranscriptRelation::Identical
+                    }
+                    meerkat_core::LegacySessionTranscriptRelation::ProjectionExtendsSnapshot => {
+                        LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
+                    }
+                    meerkat_core::LegacySessionTranscriptRelation::SnapshotExtendsProjection => {
+                        LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
+                    }
+                    meerkat_core::LegacySessionTranscriptRelation::Divergent => {
+                        LegacyCheckpointTranscriptRelation::Divergent
+                    }
+                }
+            }
+            _ => LegacyCheckpointTranscriptRelation::NotComparable,
+        };
+
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .resolve_legacy_checkpoint_migration(
+                SessionDocumentKey::new(id.to_string()),
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation,
+            )
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected legacy checkpoint migration resolution for session {id}: {error}"
+                )))
+            })?;
+        let disposition = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition } => {
+                    Some(*disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no legacy checkpoint migration disposition for session {id}"
+                )))
+            })?;
+
+        let (source, write_runtime_snapshot, disposition_label) = match disposition {
+            LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot => {
+                (runtime_snapshot, true, "migrate_canonical_snapshot")
+            }
+            LegacyCheckpointMigrationDisposition::AdoptProjectionExtension => {
+                (store_row, true, "adopt_projection_extension")
+            }
+            LegacyCheckpointMigrationDisposition::MigrateStoreProjection => {
+                (store_row, false, "migrate_store_projection")
+            }
+            LegacyCheckpointMigrationDisposition::RefuseDivergent => {
+                tracing::warn!(
+                    session_id = %id,
+                    role,
+                    "legacy checkpoint copies are divergent; one-time recovery migration \
+                     refused fail-closed and requires the explicit operator migration tool"
+                );
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare {role} for session {id}: legacy checkpoint copies are \
+                     divergent (the committed runtime snapshot and the session-store \
+                     projection are not related by transcript prefix extension); one-time \
+                     recovery migration is refused fail-closed and requires the explicit \
+                     operator migration tool"
+                ))));
+            }
+        };
+        let source = source.ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority named an absent legacy copy while migrating session {id}"
+            )))
+        })?;
+
+        let source_blob = serde_json::to_vec(&source).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize legacy migration source for session {id}: {error}"
+            )))
+        })?;
+        // INITIAL cursors match the shipped v0.6.34 migrator and are correct
+        // for lineages that never minted authority. Fleets whose continuity
+        // rows record a nonzero generation floor adopt through the exported
+        // `adopt_legacy_session` helper with the observed cursor instead.
+        let adopted = meerkat_core::adopt_legacy_session(
+            &source_blob,
+            meerkat_core::SessionGeneration::INITIAL,
+            meerkat_core::SessionCheckpointRevision::INITIAL,
+        )
+        .map_err(|error| checkpoint_prepare_error(id, role, error))?;
+        let prepared = PreparedCheckpointDocument {
+            session: adopted.session,
+            stamp: adopted.stamp,
+            serialized: adopted.serialized,
+        };
+
+        if write_runtime_snapshot {
+            self.runtime_store
+                .commit_session_snapshot(
+                    &Self::runtime_id_for_session(id),
+                    SessionDelta {
+                        session_snapshot: prepared.serialized.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "legacy migration runtime snapshot persistence failed for session {id}: {error}"
+                    )))
+                })?;
+        }
+        if let Some(incremental) = self.incremental.clone() {
+            save_session_projection_incremental(
+                incremental.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &prepared.session,
+                &[],
+            )
+            .await?;
+        } else {
+            // The pre-typed row may legitimately shrink (a stale-prefix
+            // projection rebuilt from the canonical snapshot), so this is the
+            // authoritative-projection save, not the append-guarded `save`.
+            self.store
+                .save_authoritative_projection(&prepared.session)
+                .await
+                .map_err(|error| SessionError::Store(Box::new(error)))?;
+        }
+        // Migration cost lands inside ordinary resume/certification windows;
+        // operators expect it to be observable, not inferred from latency.
+        tracing::info!(
+            session_id = %id,
+            role,
+            disposition = disposition_label,
+            source_bytes = source_blob.len(),
+            wrote_runtime_snapshot = write_runtime_snapshot,
+            "one-time legacy checkpoint recovery migration stamped a pre-typed session document"
+        );
+        VerifiedCheckpointAuthority::from_session_with_serialized(
+            prepared.session,
+            prepared.serialized,
+            id,
+            role,
+        )
+    }
+
     /// Resolve the latest verified committed document authority without ever
     /// treating the legacy Boolean or an intra-turn projection as authority.
     /// RuntimeStore wins unless SessionStore carries a verified committed
     /// direct successor (the projection-only lifecycle commit case).
+    ///
+    /// A legacy-unverified copy on either side no longer fails closed here:
+    /// the machine-owned one-time recovery migration
+    /// (`migrate_legacy_checkpoint_authority`) stamps the observed
+    /// conversation and this resolver returns the migrated authority.
     async fn load_committed_checkpoint_authority(
         &self,
         id: &SessionId,
         role: &str,
     ) -> Result<Option<VerifiedCheckpointAuthority>, SessionError> {
-        let runtime = load_verified_runtime_checkpoint_authority(
+        let runtime_copy = load_runtime_checkpoint_copy(
             self.runtime_store.as_ref(),
             id,
             "committed runtime session snapshot",
         )
         .await?;
-        let Some(store_session) = self
+        let store_session = self
             .store
             .load(id)
             .await
-            .map_err(|error| SessionError::Store(Box::new(error)))?
-        else {
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let store_row_is_legacy = match store_session.as_ref() {
+            Some(row) => matches!(
+                row.try_checkpoint_state().map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "session-store checkpoint evidence while preparing {role} for session {id} is invalid: {error}"
+                    )))
+                })?,
+                meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+            ),
+            None => false,
+        };
+        let runtime = match runtime_copy {
+            CommittedCheckpointCopy::Legacy(snapshot) => {
+                return self
+                    .migrate_legacy_checkpoint_authority(id, Some(snapshot), store_session, role)
+                    .await
+                    .map(Some);
+            }
+            CommittedCheckpointCopy::Absent if store_row_is_legacy => {
+                return self
+                    .migrate_legacy_checkpoint_authority(id, None, store_session, role)
+                    .await
+                    .map(Some);
+            }
+            CommittedCheckpointCopy::Absent => None,
+            CommittedCheckpointCopy::Verified(authority) => Some(authority),
+        };
+        let Some(store_session) = store_session else {
             return Ok(runtime);
         };
         let store_stamp = match store_session.try_checkpoint_state().map_err(|error| {
@@ -30141,5 +30472,328 @@ mod tests {
             .await
             .expect("revision-body read must be served from load_messages");
         assert_eq!(page.messages.len(), 2, "parent body served out-of-line");
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy-checkpoint recovery migration (the released fleets written
+    // before typed checkpoint stamps). Every shape here reproduces a real
+    // pre-0.8.2 store layout and must heal level-triggered on first touch.
+    // ------------------------------------------------------------------
+
+    fn legacy_migration_service(
+        store: &Arc<dyn SessionStore>,
+        runtime_store: &Arc<InMemoryRuntimeStore>,
+    ) -> PersistentSessionService<DummyBuilder> {
+        PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(store),
+            Arc::clone(runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+    }
+
+    fn legacy_session_with_texts(texts: &[&str]) -> Session {
+        let mut session = Session::new();
+        for text in texts {
+            session.push(Message::User(UserMessage::text((*text).to_string())));
+        }
+        session
+    }
+
+    fn with_transcript_truncated(session: &Session, keep: usize) -> Session {
+        let mut document = serde_json::to_value(session).expect("session should serialize");
+        document
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("session messages should be an array")
+            .truncate(keep);
+        serde_json::from_value(document).expect("truncated session should deserialize")
+    }
+
+    async fn seed_legacy_runtime_snapshot(runtime_store: &InMemoryRuntimeStore, session: &Session) {
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(session.id()),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(session)
+                        .expect("legacy session should serialize"),
+                },
+            )
+            .await
+            .expect("legacy runtime snapshot should commit");
+    }
+
+    async fn verified_runtime_snapshot(
+        runtime_store: &InMemoryRuntimeStore,
+        id: &SessionId,
+    ) -> meerkat_core::SessionCheckpointStamp {
+        let bytes = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let snapshot: Session =
+            serde_json::from_slice(&bytes).expect("runtime snapshot should decode");
+        match snapshot
+            .try_checkpoint_state()
+            .expect("runtime snapshot checkpoint state should decode")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                panic!("runtime snapshot should be stamped after migration")
+            }
+        }
+    }
+
+    async fn verified_store_row(
+        store: &Arc<dyn SessionStore>,
+        id: &SessionId,
+    ) -> meerkat_core::SessionCheckpointStamp {
+        let row = store
+            .load(id)
+            .await
+            .expect("store row load should succeed")
+            .expect("store row should exist");
+        match row
+            .try_checkpoint_state()
+            .expect("store row checkpoint state should decode")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                panic!("store row should be stamped after migration")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_snapshot_with_identical_projection_auto_migrates() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let legacy = with_legacy_checkpoint_marker(
+            &legacy_session_with_texts(&["turn one", "turn two"]),
+            true,
+        );
+        let id = legacy.id().clone();
+        seed_legacy_runtime_snapshot(&runtime_store, &legacy).await;
+        store.save(&legacy).await.expect("legacy row should save");
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("legacy authority load should migrate, not refuse")
+            .expect("migrated authority should exist");
+        assert_eq!(
+            authority.stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
+        assert_eq!(
+            authority.stamp.generation(),
+            meerkat_core::SessionGeneration::INITIAL
+        );
+        assert_eq!(authority.session.messages().len(), 2);
+
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(snapshot_stamp, authority.stamp);
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, authority.stamp);
+
+        // Level-triggered idempotency: the second load sees Verified copies
+        // and returns the exact same stamp without re-migrating.
+        let again = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("verified authority load should succeed")
+            .expect("verified authority should exist");
+        assert_eq!(again.stamp, authority.stamp);
+    }
+
+    #[tokio::test]
+    async fn legacy_projection_extension_is_adopted_without_losing_the_tail() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let mut projection = snapshot.clone();
+        projection.push(Message::User(UserMessage::text(
+            "projection-only trailing turn".to_string(),
+        )));
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+        store
+            .save(&projection)
+            .await
+            .expect("extended projection should save");
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("extension migration should succeed")
+            .expect("migrated authority should exist");
+        assert_eq!(
+            authority.session.messages().len(),
+            3,
+            "the projection-only trailing turn must survive migration"
+        );
+        assert_eq!(
+            authority.stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
+
+        // Both durable copies converge on the adopted extension.
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(snapshot_stamp, authority.stamp);
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, authority.stamp);
+    }
+
+    #[tokio::test]
+    async fn legacy_stale_projection_is_rebuilt_from_canonical_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let stale_projection = with_transcript_truncated(&snapshot, 1);
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+        store
+            .save(&stale_projection)
+            .await
+            .expect("stale projection should save");
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("stale-projection migration should succeed")
+            .expect("migrated authority should exist");
+        assert_eq!(
+            authority.session.messages().len(),
+            2,
+            "canonical snapshot must win over its own stale prefix"
+        );
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, authority.stamp);
+        let row = store
+            .load(&id)
+            .await
+            .expect("store row load should succeed")
+            .expect("store row should exist");
+        assert_eq!(row.messages().len(), 2, "projection rebuilt from canonical");
+    }
+
+    #[tokio::test]
+    async fn store_only_legacy_row_auto_migrates_without_runtime_snapshot() {
+        // The 0.7.9 fleet shape: no runtime-store snapshot exists at all and
+        // the session-store row is the sole durable copy.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let legacy =
+            with_legacy_checkpoint_marker(&legacy_session_with_texts(&["only durable copy"]), true);
+        let id = legacy.id().clone();
+        store.save(&legacy).await.expect("legacy row should save");
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("store-only migration should succeed")
+            .expect("migrated authority should exist");
+        assert_eq!(
+            authority.stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, authority.stamp);
+    }
+
+    #[tokio::test]
+    async fn divergent_legacy_copies_refuse_migration_and_mutate_nothing() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "snapshot tail"]);
+        let id = snapshot.id().clone();
+        let mut divergent = with_transcript_truncated(&snapshot, 1);
+        divergent.push(Message::User(UserMessage::text(
+            "conflicting projection tail".to_string(),
+        )));
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+        store
+            .save(&divergent)
+            .await
+            .expect("divergent projection should save");
+
+        let error = match service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("divergent legacy copies must refuse migration"),
+        };
+        assert!(
+            error.to_string().contains("divergent"),
+            "refusal must name the divergence: {error}"
+        );
+
+        // Fail-closed: neither durable copy was mutated.
+        let bytes = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let untouched: Session =
+            serde_json::from_slice(&bytes).expect("runtime snapshot should decode");
+        assert!(matches!(
+            untouched
+                .try_checkpoint_state()
+                .expect("checkpoint state should decode"),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+        ));
+        let row = store
+            .load(&id)
+            .await
+            .expect("store row load should succeed")
+            .expect("store row should exist");
+        assert!(matches!(
+            row.try_checkpoint_state()
+                .expect("checkpoint state should decode"),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_snapshot_heals_ordinary_authoritative_resume_read() {
+        // The production brick: an upgraded binary resuming a pre-typed
+        // session through the ordinary read path must migrate, not refuse.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let legacy = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = legacy.id().clone();
+        seed_legacy_runtime_snapshot(&runtime_store, &legacy).await;
+        store.save(&legacy).await.expect("legacy row should save");
+
+        let session = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("authoritative resume read should migrate legacy copies")
+            .expect("session should exist");
+        assert_eq!(session.messages().len(), 2);
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(
+            snapshot_stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
     }
 }

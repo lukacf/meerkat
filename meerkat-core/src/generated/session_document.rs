@@ -225,6 +225,25 @@ pub enum RuntimeCheckpointProjectionDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LegacyCheckpointTranscriptRelation {
+    #[default]
+    Divergent,
+    Identical,
+    ProjectionExtendsSnapshot,
+    SnapshotExtendsProjection,
+    NotComparable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LegacyCheckpointMigrationDisposition {
+    #[default]
+    RefuseDivergent,
+    MigrateCanonicalSnapshot,
+    AdoptProjectionExtension,
+    MigrateStoreProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionDocumentLifecycle {
     #[default]
     Active,
@@ -457,6 +476,14 @@ pub enum SessionDocumentInput {
     ResolveRuntimeCheckpointProjection {
         session_id: SessionDocumentKey,
     },
+    ResolveLegacyCheckpointMigration {
+        session_id: SessionDocumentKey,
+        runtime_snapshot_present: bool,
+        runtime_snapshot_legacy: bool,
+        store_row_present: bool,
+        store_row_legacy: bool,
+        transcript_relation: LegacyCheckpointTranscriptRelation,
+    },
     ResolveRuntimeSnapshotReadSource {
         session_id: SessionDocumentKey,
         store_head_extends_snapshot: bool,
@@ -586,6 +613,9 @@ pub enum SessionDocumentEffect {
     },
     RuntimeCheckpointProjectionResolved {
         disposition: RuntimeCheckpointProjectionDisposition,
+    },
+    LegacyCheckpointMigrationResolved {
+        disposition: LegacyCheckpointMigrationDisposition,
     },
     RuntimeSnapshotReadSourceResolved {
         read_from_store_head: bool,
@@ -749,6 +779,13 @@ enum SessionDocumentTransition {
     ResolveRuntimeProjectionRollbackReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
+    ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,
+    ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection,
+    ResolveLegacyCheckpointMigrationProjectionExtension,
+    ResolveLegacyCheckpointMigrationDivergentCopies,
+    ResolveLegacyCheckpointMigrationSnapshotOnly,
+    ResolveLegacyCheckpointMigrationStoreRowOnly,
+    ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -3268,6 +3305,129 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true)
+                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Identical))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true)
+                        && (transcript_relation
+                            == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true)
+                        && (transcript_relation
+                            == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationProjectionExtension);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true)
+                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Divergent))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentCopies,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == false))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotOnly,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == false)
+                        && (store_row_present == true)
+                        && (store_row_legacy == true))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationStoreRowOnly,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveLegacyCheckpointMigration")?;
+                match transition {
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationProjectionExtension => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::AdoptProjectionExtension, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentCopies => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotOnly => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationStoreRowOnly => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateStoreProjection, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveLegacyCheckpointMigration_transition" }),
+                }
+            }
             SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
                 session_id,
                 store_head_extends_snapshot,
@@ -4023,6 +4183,25 @@ impl SessionDocumentMachineAuthority {
         session_id: SessionDocumentKey,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id })
+    }
+
+    pub fn resolve_legacy_checkpoint_migration(
+        &mut self,
+        session_id: SessionDocumentKey,
+        runtime_snapshot_present: bool,
+        runtime_snapshot_legacy: bool,
+        store_row_present: bool,
+        store_row_legacy: bool,
+        transcript_relation: LegacyCheckpointTranscriptRelation,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveLegacyCheckpointMigration {
+            session_id,
+            runtime_snapshot_present,
+            runtime_snapshot_legacy,
+            store_row_present,
+            store_row_legacy,
+            transcript_relation,
+        })
     }
 
     pub fn resolve_runtime_snapshot_read_source(

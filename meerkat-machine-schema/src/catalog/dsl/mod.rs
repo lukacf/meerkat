@@ -752,6 +752,29 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeCheckpointProjectionDisposition",
                 &["IgnoreArchived", "Project"],
             ),
+            // Legacy-checkpoint recovery-migration region typed vocabulary
+            // (one-time migration of pre-typed documents into typed
+            // checkpoint authority; RefuseDivergent/Divergent are the
+            // fail-closed defaults).
+            NamedTypeBinding::string_enum(
+                "LegacyCheckpointTranscriptRelation",
+                &[
+                    "Divergent",
+                    "Identical",
+                    "ProjectionExtendsSnapshot",
+                    "SnapshotExtendsProjection",
+                    "NotComparable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LegacyCheckpointMigrationDisposition",
+                &[
+                    "RefuseDivergent",
+                    "MigrateCanonicalSnapshot",
+                    "AdoptProjectionExtension",
+                    "MigrateStoreProjection",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveSessionAuthorityReason",
                 &[

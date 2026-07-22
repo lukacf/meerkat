@@ -36,6 +36,7 @@ fs4 = "0.12"
 tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
+meerkat-store-conformance = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 toml = { workspace = true }

@@ -35,6 +35,7 @@ ENTRIES=(
   "meerkat-client=${ROOT}/meerkat-client"
   "meerkat-providers=${ROOT}/meerkat-providers"
   "meerkat-store=${ROOT}/meerkat-store"
+  "meerkat-store-conformance=${ROOT}/meerkat-store-conformance"
   "meerkat-tools=${ROOT}/meerkat-tools"
   "meerkat-runtime=${ROOT}/meerkat-runtime"
   "meerkat-session=${ROOT}/meerkat-session"

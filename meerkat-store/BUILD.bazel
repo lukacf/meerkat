@@ -144,6 +144,62 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
+    ] + all_crate_deps(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "conformance_test",
+    aliases = aliases(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "conformance",
+    crate_root = "tests/conformance.rs",
+    crate_features = [
+        "jsonl",
+        "memory",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/conformance.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.3",
+        "CARGO_BIN_NAME": "conformance",
+        "CARGO_MANIFEST_DIR": "./meerkat-store",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-store",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
+        "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
         normal = True,
@@ -197,6 +253,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -251,6 +308,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -305,6 +363,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -359,6 +418,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -413,6 +473,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -467,6 +528,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -521,6 +583,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-schedule:meerkat_schedule",
         "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
         package_name = "meerkat-store",
@@ -532,6 +595,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":conformance_test",
         ":legacy_text_json_upgrade_carry_test",
         ":meerkat_store_unit_test",
         ":rct_contracts_test",

@@ -17,6 +17,7 @@ members = [
     "meerkat-schedule",
     "meerkat-workgraph",
     "meerkat-store",
+    "meerkat-store-conformance",
     "meerkat-tools",
     "meerkat-mcp",
     "meerkat-mcp-server",
@@ -175,6 +176,7 @@ meerkat-machine-derive = { version = "0.8.3", path = "meerkat-machine-derive" }
 meerkat-machine-dsl = { version = "0.8.3", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.3", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.3", path = "meerkat-store", default-features = false }
+meerkat-store-conformance = { version = "0.8.3", path = "meerkat-store-conformance" }
 oai-rt-rs = "0.4.0"
 
 [profile.dev]

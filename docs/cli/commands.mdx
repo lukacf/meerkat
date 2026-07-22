@@ -70,6 +70,9 @@ derived workspace identity and the default project-local state root.
 | `rkat models` | List built-in models plus configured self-hosted aliases |
 | `rkat capabilities` | Show runtime capabilities |
 | `rkat doctor` | Check local setup, provider keys, and self-hosted server reachability |
+| `rkat storage doctor` | Read-only storage diagnosis (realm inventory, schema ledgers, split-brain twins, checkpoint census) |
+| `rkat storage migrate` | Offline, fenced storage migration (dry-run by default) |
+| `rkat storage prune` | Lifecycle for registered storage backup artifacts |
 | `rkat init` | Create project config from the global template |
 
 ## Prompt-first usage
@@ -325,6 +328,41 @@ For self-hosted setups, `doctor` checks the normalized `/v1/models` endpoint for
 For Gemma 4, prefer `chat_completions` in your server config unless you have validated a specific `responses` path for your serving stack.
 
 Follow [Self-hosting models](/guides/self-hosting-models) for the full Gemma 4 examples.
+
+## storage
+
+Storage administration verbs. All of them dispatch before realm resolution,
+so they run against the exact on-disk state they diagnose — including
+split-brain realms the normal resolver refuses.
+
+```bash
+rkat storage doctor [--json] [--root PATH]...
+```
+
+Read-only and safe against a live realm: takes no leases, opens read-only
+connections only, creates nothing. Sweeps the project-local
+(`<context-root>/.rkat/realms`) and user-global candidate roots by default;
+any explicit root (`--state-root` or repeatable `--root`) restricts the
+sweep to exactly those roots. `--realm` focuses the sweep on one realm.
+Reports per-root realm inventory, schema-ledger state per database,
+dual-root twins, the legacy-vs-verified checkpoint census, dangling
+session→blob references, and orphaned lease/lock/backup artifacts. Exit 0
+means no error-severity findings; exit 1 means errors were found.
+
+```bash
+rkat storage migrate [--apply] [--json] [--root PATH]...
+rkat storage prune [--apply] [--older-than-days N] [--json] [--root PATH]...
+```
+
+`migrate` is dry-run by default, offline, resumable, and fail-closed: it
+baselines schema ledgers, reports state-root adoption, refuses split-brain
+realms unless told which root to adopt (the other copy is archived
+read-only under the registered `*.pre-<version>-<timestamp>` backup naming
+— divergent data is preserved and reported, never merged), and performs the
+machine-owned legacy-checkpoint adoption in bulk under the maintenance
+fence. `prune` lists registered backup artifacts and deletes them only with
+`--apply`. Not to be confused with `rkat realm prune`, which deletes whole
+realm directories.
 
 ## mcp
 

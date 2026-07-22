@@ -165,7 +165,13 @@ Sessions are realm-scoped.
 
 - Same `realm_id`: shared visibility and config context.
 - Different `realm_id`: strict isolation.
-- Backend is pinned per realm via `realm_manifest.json`.
+- Backend is pinned per realm via `realm_manifest.json` (manifest format 2
+  adds `provider` and `ephemeral_domains`; readers refuse formats newer than
+  they support instead of silently ignoring fields, and realms pinned to an
+  external storage provider refuse built-in disk opens typed).
+- State roots resolve realm-id-first across the project-local and
+  user-global candidates; a realm materialized under both is a typed
+  split-brain refusal (see `rkat storage doctor`).
 
 ## Compaction contract
 
@@ -197,6 +203,27 @@ restart.
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows.
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
+
+### Storage mechanics (schema ledger, fence, durability classes)
+
+Every SQLite file in a realm carries a `meerkat_schema(domain, version)`
+migration ledger; stores bring their domain up to date at open under a
+pinned concurrent-open protocol, and a file whose ledger is ahead of the
+binary refuses typed (`SchemaFromTheFuture`) — a rollback candidate fails
+certification cleanly instead of crash-looping. Each database also has a
+sibling `<file>.mfence` lock file: store operations hold a shared
+per-operation guard, and offline maintenance (`rkat storage migrate`) takes
+the exclusive side after in-flight operations drain. Backup artifacts
+written by maintenance use the registered `*.pre-<version>-<timestamp>`
+naming that `rkat storage doctor` inventories and `rkat storage prune`
+owns.
+
+Every store slot a realm composes carries a machine-readable durability
+class (`durable` / `rebuildable_cache` / `scratch`) and its resolution; a
+durable slot resolving to a non-persistent store without the realm manifest
+declaring that domain ephemeral is a startup error — never a silent
+in-memory fallback. Deployment tooling can rely on the classes (for
+example, cloning only durable domains between state generations).
 
 ### Session storage layout (0.7.25+): head-canonical strands
 

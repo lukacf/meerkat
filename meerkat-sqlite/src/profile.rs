@@ -125,11 +125,39 @@ pub fn open_with(
     conn.busy_timeout(busy)?;
 
     if let ConnectionProfile::Primary { .. } = profile {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        set_wal_journal_mode(&conn, busy)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
     }
 
     Ok(conn)
+}
+
+/// Convert (or confirm) the WAL journal mode with a bounded retry.
+///
+/// Converting a fresh rollback-journal database to WAL needs an exclusive
+/// lock, and SQLite can return `SQLITE_BUSY` from the journal-mode pragma
+/// WITHOUT consulting the busy handler while concurrent creators race the
+/// conversion. Once a file is WAL the pragma is a lock-free no-op, so the
+/// retry only ever spins during the first-create race.
+fn set_wal_journal_mode(
+    conn: &Connection,
+    busy_timeout: Duration,
+) -> Result<(), SqliteStoreError> {
+    // Bound the retry by the connection's busy policy (with a small floor so
+    // zero-timeout profiles still tolerate the momentary create race).
+    let deadline = std::time::Instant::now() + busy_timeout.max(Duration::from_millis(250));
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if crate::error::is_busy_or_locked(&error)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn open_existing(

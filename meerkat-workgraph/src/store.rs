@@ -18,7 +18,6 @@ use crate::types::{
 };
 use crate::{WorkAttentionMachine, WorkGraphMachine};
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]

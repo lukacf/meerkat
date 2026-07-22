@@ -226,6 +226,7 @@ fn read_version_tx(tx: &Transaction<'_>, domain: &str) -> Result<Option<i64>, Sq
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::profile::{ConnectionProfile, open};

@@ -109,6 +109,7 @@ pub fn is_busy_or_locked(error: &rusqlite::Error) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

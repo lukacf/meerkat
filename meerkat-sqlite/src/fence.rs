@@ -192,6 +192,7 @@ fn is_would_block(err: &std::fs::TryLockError) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -235,9 +236,8 @@ mod tests {
             ExclusiveFence::try_acquire(&db).expect("io").is_none(),
             "fence must not be acquirable while an operation is in flight"
         );
-        let db_clone = db.clone();
         let handle = std::thread::spawn(move || {
-            ExclusiveFence::acquire(&db_clone, Duration::from_secs(5)).expect("acquire")
+            ExclusiveFence::acquire(&db, Duration::from_secs(5)).expect("acquire")
         });
         std::thread::sleep(Duration::from_millis(100));
         drop(guard);

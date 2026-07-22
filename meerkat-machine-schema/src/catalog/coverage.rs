@@ -1269,6 +1269,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ResolveLegacyCheckpointMigrationDivergentCopies",
                         "ResolveLegacyCheckpointMigrationSnapshotOnly",
                         "ResolveLegacyCheckpointMigrationStoreRowOnly",
+                        "ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection",
                         "ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped",
                     ])
                     .effects(&[

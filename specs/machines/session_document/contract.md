@@ -977,6 +977,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LegacyCheckpointMigrationResolved`
 - To: `Ready`
 
+### `ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
 ### `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
 - From: `Ready`
 - On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)

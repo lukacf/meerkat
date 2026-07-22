@@ -343,6 +343,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLegacyCheckpointMigrationStoreRowOnly`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
 - `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)

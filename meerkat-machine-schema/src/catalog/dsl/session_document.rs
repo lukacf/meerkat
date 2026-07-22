@@ -485,6 +485,11 @@ pub enum LegacyCheckpointMigrationDisposition {
     MigrateCanonicalSnapshot,
     AdoptProjectionExtension,
     MigrateStoreProjection,
+    /// The runtime snapshot is already typed but the session-store row is
+    /// still legacy (a crash between the migration's two durable writes, or
+    /// a pre-existing partial adoption). The shell rebuilds the projection
+    /// from the verified runtime authority; nothing is re-stamped.
+    RebuildProjectionFromTypedSnapshot,
 }
 
 // ---------------------------------------------------------------------------
@@ -4076,6 +4081,29 @@ machine! {
             to Ready
             emit LegacyCheckpointMigrationResolved {
                 disposition: LegacyCheckpointMigrationDisposition::MigrateStoreProjection
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection {
+            on input ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_snapshot_present == true
+                && runtime_snapshot_legacy == false
+                && store_row_present == true
+                && store_row_legacy == true
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationResolved {
+                disposition: LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot
             }
         }
 

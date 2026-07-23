@@ -238,6 +238,20 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- **Mob-shutdown restart wedge: a cancelled checkpointer gate no longer
+  silently drops the committed-boundary SessionStore projection.** Mob stop
+  cancels (and retry-flaps) per-session checkpointer gates before member
+  loops quiesce; boundary commits landing in that window advanced the
+  RuntimeStore authority while the projection skip returned success, so two
+  such commits left the SessionStore more than one revision behind — a
+  divergence the resume-side authority reconciler refuses forever
+  ("RuntimeStore and SessionStore checkpoint authorities conflict",
+  identities permanently degraded after restart). The gate keeps its
+  no-write-after-cancel contract but now fails with the retryable
+  projection error, so the terminal-recovery drain re-projects the
+  committed snapshot on restart and the stores reconverge. The
+  authority-conflict error now names both stamps and their bases.
+
 - Cold runtime recovery is level-triggered over every persisted lifecycle
   shape. Decodable prior-process rows normalize through target-local CAS to a
   fresh unbound Idle shell over the existing session; unsupported or unsafe

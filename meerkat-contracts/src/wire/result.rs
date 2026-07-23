@@ -96,6 +96,10 @@ impl From<RunResult> for WireRunResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WirePendingToolCall {
+    /// Provider-issued tool-use identifier that the callback result must
+    /// reference. This is a required top-level protocol field; it is never
+    /// inferred from or injected into `args`.
+    pub tool_use_id: String,
     /// Name of the external tool the agent is waiting on.
     pub tool_name: String,
     /// Raw arguments the agent passed to the tool.
@@ -132,14 +136,13 @@ pub struct WireCallbackPending {
 }
 
 impl WireCallbackPending {
-    /// Build a pending contract for a single blocked tool call.
-    pub fn single(
+    /// Build a pending contract for the complete blocked callback set.
+    pub fn many(
         session_id: SessionId,
         session_ref: Option<String>,
         session_created: bool,
         resumable: bool,
-        tool_name: String,
-        args: serde_json::Value,
+        pending_tool_calls: Vec<WirePendingToolCall>,
     ) -> Self {
         Self {
             status: WireCallbackPendingStatus::PendingToolCall,
@@ -147,8 +150,31 @@ impl WireCallbackPending {
             session_ref,
             session_created,
             resumable,
-            pending_tool_calls: vec![WirePendingToolCall { tool_name, args }],
+            pending_tool_calls,
         }
+    }
+
+    /// Build a pending contract for a single blocked tool call.
+    pub fn single(
+        session_id: SessionId,
+        session_ref: Option<String>,
+        session_created: bool,
+        resumable: bool,
+        tool_use_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    ) -> Self {
+        Self::many(
+            session_id,
+            session_ref,
+            session_created,
+            resumable,
+            vec![WirePendingToolCall {
+                tool_use_id,
+                tool_name,
+                args,
+            }],
+        )
     }
 }
 
@@ -204,6 +230,40 @@ mod tests {
         assert_eq!(
             json["skill_diagnostics"]["source_health"]["state"],
             "unhealthy"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wire_pending_tool_call_requires_top_level_tool_use_id() -> Result<(), serde_json::Error> {
+        let call = WirePendingToolCall {
+            tool_use_id: "call-1".to_string(),
+            tool_name: "external".to_string(),
+            args: serde_json::json!({"question": "approve?"}),
+        };
+        let json = serde_json::to_value(&call)?;
+        assert_eq!(json["tool_use_id"], "call-1");
+        assert!(json["args"].get("tool_use_id").is_none());
+
+        let missing = serde_json::json!({
+            "tool_name": "external",
+            "args": {"question": "approve?"}
+        });
+        assert!(
+            serde_json::from_value::<WirePendingToolCall>(missing).is_err(),
+            "tool_use_id is a required wire field"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn wire_pending_tool_call_schema_requires_tool_use_id() -> Result<(), serde_json::Error> {
+        let schema = serde_json::to_value(schemars::schema_for!(WirePendingToolCall))?;
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "tool_use_id"))
         );
         Ok(())
     }

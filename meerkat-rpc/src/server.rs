@@ -856,16 +856,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let (callback_request_tx, callback_request_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let callback_id_counter = Arc::new(AtomicU64::new(0));
-        let registered_tools = Arc::new(std::sync::RwLock::new(Vec::new()));
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
 
         // Wire callback tool state into the runtime so session/create handlers
         // can build CallbackToolDispatchers that route through this server.
-        runtime.set_callback_channel(
-            callback_request_tx.clone(),
-            callback_id_counter.clone(),
-            registered_tools,
-        );
+        runtime.set_callback_channel(callback_request_tx.clone(), callback_id_counter.clone());
 
         let router = MethodRouter::new(runtime, config_store, notification_sink)
             .with_skill_runtime(skill_runtime);
@@ -1008,8 +1003,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     /// Get the shared registered tools list.
-    pub fn registered_tools(&self) -> Arc<std::sync::RwLock<Vec<meerkat_core::ToolDef>>> {
-        self.router.runtime().registered_tools()
+    pub fn registered_tools(&self) -> Vec<meerkat_core::ToolDef> {
+        self.router.runtime().callback_tool_registry().snapshot()
     }
 
     /// Run the server until EOF or a fatal transport error.

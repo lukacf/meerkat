@@ -12,56 +12,18 @@ use meerkat_core::ops_lifecycle::{
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
-/// Gracefully terminate a child process.
-///
-/// On Unix, sends SIGTERM first to allow cleanup, waits up to 2 seconds,
-/// then sends SIGKILL if the process is still running. Uses process groups
-/// to ensure all child processes are terminated.
-///
-/// On non-Unix platforms, falls back to immediate kill.
-#[cfg(unix)]
-async fn graceful_kill(child: &mut Child) -> std::io::Result<()> {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    if let Some(pid) = child.id() {
-        let pgid = Pid::from_raw(pid as i32);
-
-        // Try SIGTERM to the process group first
-        let _ = killpg(pgid, Signal::SIGTERM);
-
-        // Wait up to 2 seconds for graceful exit
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(2)) => {
-                // Still running, force kill the process group
-                let _ = killpg(pgid, Signal::SIGKILL);
-                // Wait for the process to be reaped
-                let _ = child.wait().await;
-            }
-            result = child.wait() => {
-                // Process exited gracefully
-                return result.map(|_| ());
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn graceful_kill(child: &mut Child) -> std::io::Result<()> {
-    child.kill().await
-}
+use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded};
 
 /// Default maximum output buffer size in bytes (1 MB).
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -152,6 +114,214 @@ struct BackgroundJobRecord {
     completion_notified: bool,
 }
 
+/// Acknowledgement level returned by a shell-job cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelJobDisposition {
+    /// A live process waiter accepted the request. Terminal cancellation is
+    /// withheld until that waiter proves process-group containment.
+    CancellationRequested,
+    /// No live process required containment and generated lifecycle authority
+    /// has already projected terminal cancellation.
+    Cancelled,
+}
+
+/// Owns every fact created during background admission until the waiter task
+/// has atomically taken process ownership.
+///
+/// Dropping the submission future cannot await rollback. The guard therefore
+/// fences the process group synchronously, reconciles canonical operation
+/// authority, and schedules removal of any partially published job maps.
+struct SubmissionRollbackGuard {
+    active: bool,
+    job_id: JobId,
+    operation_id: OperationId,
+    child: Option<tokio::process::Child>,
+    process_group: Option<OwnedProcessGroup>,
+    jobs: Arc<Mutex<HashMap<JobId, BackgroundJobRecord>>>,
+    canonical_job_ops: Arc<std::sync::Mutex<HashMap<JobId, OperationId>>>,
+    handles: Arc<Mutex<HashMap<JobId, JoinHandle<()>>>>,
+    cancel_notifiers: Arc<Mutex<HashMap<JobId, Arc<Notify>>>>,
+    cancel_requested: Arc<Mutex<HashSet<JobId>>>,
+    completed_at: Arc<Mutex<HashMap<JobId, Instant>>>,
+    ops_registry: Arc<dyn OpsLifecycleRegistry>,
+}
+
+impl SubmissionRollbackGuard {
+    fn new(manager: &JobManager, job_id: JobId, operation_id: OperationId) -> Self {
+        Self {
+            active: true,
+            job_id,
+            operation_id,
+            child: None,
+            process_group: None,
+            jobs: Arc::clone(&manager.jobs),
+            canonical_job_ops: Arc::clone(&manager.canonical_job_ops),
+            handles: Arc::clone(&manager.handles),
+            cancel_notifiers: Arc::clone(&manager.cancel_notifiers),
+            cancel_requested: Arc::clone(&manager.cancel_requested),
+            completed_at: Arc::clone(&manager.completed_at),
+            ops_registry: Arc::clone(&manager.ops_registry),
+        }
+    }
+
+    fn attach_process(&mut self, child: tokio::process::Child, process_group: OwnedProcessGroup) {
+        self.child = Some(child);
+        self.process_group = Some(process_group);
+    }
+
+    fn mark_started(&mut self) {
+        // The rollback authority accepts both Provisioning and Running. This
+        // method remains as an explicit handoff milestone for the submission
+        // sequence, but rollback no longer maps it onto a public terminal.
+    }
+
+    async fn terminate_process(&mut self) -> Result<(), ShellError> {
+        if let (Some(process_group), Some(child)) =
+            (self.process_group.as_mut(), self.child.as_mut())
+        {
+            process_group
+                .terminate(child)
+                .await
+                .map_err(ShellError::Io)?;
+        }
+        Ok(())
+    }
+
+    fn take_process(&mut self) -> Result<(tokio::process::Child, OwnedProcessGroup), ShellError> {
+        let child = self.child.take().ok_or_else(|| {
+            ShellError::Io(std::io::Error::other(
+                "background submission lost child ownership before waiter handoff",
+            ))
+        })?;
+        let process_group = self.process_group.take().ok_or_else(|| {
+            ShellError::Io(std::io::Error::other(
+                "background submission lost process-group ownership before waiter handoff",
+            ))
+        })?;
+        Ok((child, process_group))
+    }
+
+    fn commit(&mut self) {
+        self.active = false;
+    }
+
+    fn disarm_after_reconciliation(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for SubmissionRollbackGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        if let Some(process_group) = self.process_group.as_mut() {
+            process_group.force_kill_now();
+        }
+
+        let job_id = self.job_id.clone();
+        let operation_id = self.operation_id.clone();
+        let mut child = self.child.take();
+        let mut process_group = self.process_group.take();
+        let jobs = Arc::clone(&self.jobs);
+        let canonical_job_ops = Arc::clone(&self.canonical_job_ops);
+        let handles = Arc::clone(&self.handles);
+        let cancel_notifiers = Arc::clone(&self.cancel_notifiers);
+        let cancel_requested = Arc::clone(&self.cancel_requested);
+        let completed_at = Arc::clone(&self.completed_at);
+        let ops_registry = Arc::clone(&self.ops_registry);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                match (process_group.as_mut(), child.as_mut()) {
+                    (Some(group), Some(child)) => loop {
+                        match group.terminate(child).await {
+                            Ok(()) => break,
+                            Err(error) => {
+                                warn!(
+                                    job_id = %job_id,
+                                    operation_id = %operation_id,
+                                    error = %error,
+                                    "unreturned shell submission containment is not yet proven; withholding lifecycle rollback"
+                                );
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                    },
+                    (None, None) => {}
+                    _ => {
+                        tracing::error!(
+                            job_id = %job_id,
+                            operation_id = %operation_id,
+                            "unreturned shell submission lost paired process ownership; withholding lifecycle rollback"
+                        );
+                        return;
+                    }
+                }
+
+                loop {
+                    match ops_registry.rollback_unreturned_operation(&operation_id) {
+                        Ok(()) => break,
+                        Err(error) => {
+                            warn!(
+                                job_id = %job_id,
+                                operation_id = %operation_id,
+                                error = %error,
+                                "generated authority has not reconciled unreturned shell submission; retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+                canonical_job_ops
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&job_id);
+                if let Some(handle) = handles.lock().await.remove(&job_id) {
+                    handle.abort();
+                }
+                jobs.lock().await.remove(&job_id);
+                cancel_notifiers.lock().await.remove(&job_id);
+                cancel_requested.lock().await.remove(&job_id);
+                completed_at.lock().await.remove(&job_id);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionHandoffStage {
+    JobsPublication,
+    CancelPublication,
+    WaiterHandoff,
+}
+
+#[cfg(test)]
+struct SubmissionHandoffHook {
+    stage: SubmissionHandoffStage,
+    reached: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl SubmissionHandoffHook {
+    fn new(stage: SubmissionHandoffStage) -> Self {
+        Self {
+            stage,
+            reached: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    async fn pause_at(&self, stage: SubmissionHandoffStage) {
+        if self.stage == stage {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 /// Manager for background shell jobs
 ///
 /// Handles spawning, tracking, and managing background shell command execution.
@@ -183,8 +353,12 @@ pub struct JobManager {
     handles: Arc<Mutex<HashMap<JobId, JoinHandle<()>>>>,
     /// Map of job ID to cancellation notifier (for killing)
     cancel_notifiers: Arc<Mutex<HashMap<JobId, Arc<Notify>>>>,
+    /// Accepted cancellation requests awaiting process-group containment ack.
+    cancel_requested: Arc<Mutex<HashSet<JobId>>>,
     /// Map of job ID to completion time (for cleanup)
     completed_at: Arc<Mutex<HashMap<JobId, Instant>>>,
+    #[cfg(test)]
+    submission_handoff_hook: Option<Arc<SubmissionHandoffHook>>,
 }
 
 impl std::fmt::Debug for JobManager {
@@ -214,7 +388,23 @@ impl JobManager {
             ops_registry_bound: false,
             handles: Arc::new(Mutex::new(HashMap::new())),
             cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
+            cancel_requested: Arc::new(Mutex::new(HashSet::new())),
             completed_at: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            submission_handoff_hook: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_submission_handoff_hook(mut self, hook: Arc<SubmissionHandoffHook>) -> Self {
+        self.submission_handoff_hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    async fn pause_submission_handoff(&self, stage: SubmissionHandoffStage) {
+        if let Some(hook) = &self.submission_handoff_hook {
+            hook.pause_at(stage).await;
         }
     }
 
@@ -309,6 +499,10 @@ impl JobManager {
                 self.operation_admission_limit(),
             )
             .map_err(Self::shell_error_for_ops_lifecycle_admission)
+    }
+
+    fn background_operation_display_name(job_id: &JobId) -> String {
+        format!("shell background job {job_id}")
     }
 
     fn start_background_operation(&self, operation_id: &OperationId) -> Result<(), ShellError> {
@@ -592,11 +786,18 @@ impl JobManager {
             .unwrap_or_default()
             .as_secs();
         let operation_id = OperationId::new();
-        self.register_background_operation(operation_id.clone(), format!("shell:{command}"))?;
+        self.register_background_operation(
+            operation_id.clone(),
+            Self::background_operation_display_name(&job_id),
+        )?;
         if let Err(error) = self.start_background_operation(&operation_id) {
-            let _ = self
-                .ops_registry
-                .abort_provisioning(&operation_id, Some(error.to_string()));
+            self.ops_registry
+                .rollback_unreturned_operation(&operation_id)
+                .map_err(|rollback_error| {
+                    ShellError::Io(std::io::Error::other(format!(
+                        "{error}; failed to reconcile unreturned synthetic job: {rollback_error}"
+                    )))
+                })?;
             return Err(error);
         }
 
@@ -659,7 +860,10 @@ impl JobManager {
     /// Returns [`ShellError`] if:
     /// - Working directory validation fails
     /// - Shell executable is not found
-    #[instrument(skip(self), fields(command = %command, timeout_secs = %timeout_secs))]
+    #[instrument(
+        skip(self, command, working_dir),
+        fields(timeout_secs = %timeout_secs, has_working_dir = working_dir.is_some())
+    )]
     pub async fn spawn_job(
         &self,
         command: &str,
@@ -678,7 +882,7 @@ impl JobManager {
 
         // Validate working directory if provided
         let resolved_dir = if let Some(dir) = working_dir {
-            debug!(working_dir = %dir.display(), "Validating working directory");
+            debug!("Validating configured working directory");
             Some(self.config.validate_working_dir_async(dir).await?)
         } else {
             None
@@ -705,7 +909,12 @@ impl JobManager {
             .as_secs();
 
         let operation_id = OperationId::new();
-        self.register_background_operation(operation_id.clone(), format!("shell:{command}"))?;
+        self.register_background_operation(
+            operation_id.clone(),
+            Self::background_operation_display_name(&job_id),
+        )?;
+        let mut submission =
+            SubmissionRollbackGuard::new(self, job_id.clone(), operation_id.clone());
 
         // Create the job with Running status
         let job = BackgroundJob {
@@ -735,6 +944,7 @@ impl JobManager {
         // Capture stdout/stderr
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         // Create new process group on Unix for proper cleanup of child processes.
         // This ensures that when we kill a job, all its child processes are also killed.
@@ -742,40 +952,53 @@ impl JobManager {
         cmd.process_group(0);
 
         // Spawn the child process
-        eprintln!(
-            "[SHELL-DEBUG] shell={} work_dir={} exists={} command={}",
-            shell_path.display(),
-            work_dir.display(),
-            work_dir.exists(),
-            &command[..command.len().min(80)]
-        );
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
-                let _ = self
+                let rollback_result = self
                     .ops_registry
-                    .provisioning_failed(&operation_id, error.to_string());
+                    .rollback_unreturned_operation(&operation_id);
+                if let Err(rollback_error) = rollback_result {
+                    warn!(
+                        job_id = %job_id,
+                        operation_id = %operation_id,
+                        error = %rollback_error,
+                        "generated authority has not reconciled unreturned shell spawn failure; rollback guard will retry"
+                    );
+                } else {
+                    submission.disarm_after_reconciliation();
+                }
                 return Err(ShellError::Io(error));
             }
         };
+        let process_group = OwnedProcessGroup::new(&child);
+        submission.attach_process(child, process_group);
         if let Err(error) = self.start_background_operation(&operation_id) {
-            let mut child = child;
-            let _ = graceful_kill(&mut child).await;
-            let _ = self
-                .ops_registry
-                .abort_provisioning(&operation_id, Some(error.to_string()));
+            submission.terminate_process().await?;
+            self.ops_registry
+                .rollback_unreturned_operation(&operation_id)
+                .map_err(|rollback_error| {
+                    ShellError::Io(std::io::Error::other(format!(
+                        "{error}; failed to reconcile unreturned shell job: {rollback_error}"
+                    )))
+                })?;
+            submission.disarm_after_reconciliation();
             return Err(error);
         }
+        submission.mark_started();
         debug!("Spawned child process");
+        #[cfg(test)]
+        self.pause_submission_handoff(SubmissionHandoffStage::JobsPublication)
+            .await;
 
         // Store the job and cancellation notifier
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
         let cancel_notifiers = Arc::clone(&self.cancel_notifiers);
+        let cancel_requested = Arc::clone(&self.cancel_requested);
         let completed_at = Arc::clone(&self.completed_at);
         let ops_registry = Arc::clone(&self.ops_registry);
         let operation_id_for_task = operation_id.clone();
-        let command_clone = command.to_string();
         let job_id_clone = job_id.clone();
         let job_id_for_completion = job_id.clone();
         let job_id_for_cancel = job_id.clone();
@@ -794,16 +1017,25 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.clone(), operation_id.clone());
+        #[cfg(test)]
+        self.pause_submission_handoff(SubmissionHandoffStage::CancelPublication)
+            .await;
         cancel_notifiers
             .lock()
             .await
             .insert(job_id.clone(), Arc::clone(&cancel_notify));
+        let mut handles_guard = handles.lock().await;
+        #[cfg(test)]
+        self.pause_submission_handoff(SubmissionHandoffStage::WaiterHandoff)
+            .await;
+        let (child, process_group) = submission.take_process()?;
 
         // Spawn the async task to wait for completion
         let handle = tokio::spawn(async move {
             let start = Instant::now();
             let timeout_duration = Duration::from_secs(timeout_secs);
             let mut child = child;
+            let mut process_group = process_group;
 
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
@@ -842,35 +1074,30 @@ impl JobManager {
                 }
             };
 
-            if matches!(wait_outcome, WaitOutcome::TimedOut | WaitOutcome::Cancelled) {
-                let _ = graceful_kill(&mut child).await;
+            // The shell leader is not the process-lifecycle boundary. Always
+            // retire the owned group before terminalizing so an `&` descendant
+            // cannot outlive a completed, failed, cancelled, or timed-out job.
+            loop {
+                match process_group.terminate(&mut child).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        warn!(
+                            job_id = %job_id_clone,
+                            operation_id = %operation_id_for_task,
+                            error = %error,
+                            "background job containment is not yet proven; withholding terminal publication"
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
 
             let duration_secs = start.elapsed().as_secs_f64();
 
-            let stdout_bytes = match stdout_handle.await {
-                Ok(Ok(buf)) => buf,
-                Ok(Err(err)) => {
-                    warn!("Failed to read job stdout: {}", err);
-                    Vec::new()
-                }
-                Err(err) => {
-                    warn!("Job stdout reader task failed: {}", err);
-                    Vec::new()
-                }
-            };
-
-            let stderr_bytes = match stderr_handle.await {
-                Ok(Ok(buf)) => buf,
-                Ok(Err(err)) => {
-                    warn!("Failed to read job stderr: {}", err);
-                    Vec::new()
-                }
-                Err(err) => {
-                    warn!("Job stderr reader task failed: {}", err);
-                    Vec::new()
-                }
-            };
+            let (stdout_bytes, stderr_bytes) = tokio::join!(
+                join_output_bounded(stdout_handle, "job stdout"),
+                join_output_bounded(stderr_handle, "job stderr")
+            );
 
             let stdout = truncate_output_tail(&stdout_bytes, DEFAULT_MAX_OUTPUT_BYTES);
             let stderr = truncate_output_tail(&stderr_bytes, DEFAULT_MAX_OUTPUT_BYTES);
@@ -900,7 +1127,7 @@ impl JobManager {
                     } else if !stderr.is_empty() {
                         stderr.clone()
                     } else {
-                        command_clone.clone()
+                        "shell job completed without output".to_string()
                     };
                     ops_registry.complete_operation(
                         &operation_id_for_task,
@@ -990,10 +1217,13 @@ impl JobManager {
             {
                 cancel_notifiers.lock().await.remove(&job_id_for_cancel);
             }
+            cancel_requested.lock().await.remove(&job_id_for_cancel);
         });
 
-        // Store the handle for task cancellation
-        handles.lock().await.insert(job_id.clone(), handle);
+        // No await is allowed between process ownership transfer and admission
+        // commit: cancellation must see either the rollback guard or the waiter.
+        handles_guard.insert(job_id.clone(), handle);
+        submission.commit();
 
         Ok(job_id)
     }
@@ -1042,7 +1272,7 @@ impl JobManager {
     /// Returns [`ShellError::JobNotFound`] if the job doesn't exist.
     /// Returns [`ShellError::JobNotRunning`] if the job is not in running state.
     #[instrument(skip(self), fields(job_id = %job_id))]
-    pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), ShellError> {
+    pub async fn cancel_job(&self, job_id: &JobId) -> Result<CancelJobDisposition, ShellError> {
         info!("Cancelling job");
 
         let operation_id = {
@@ -1057,35 +1287,52 @@ impl JobManager {
                 .clone()
         };
 
-        self.ops_registry
-            .cancel_operation(&operation_id, Some("cancelled by caller".into()))
-            .map_err(|error| Self::shell_error_for_ops_lifecycle_cancel(job_id, error))?;
-
         let snapshot = self
             .ops_registry
             .snapshot(&operation_id)
-            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
-        {
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?
+            .ok_or_else(|| {
+                ShellError::Io(std::io::Error::other(
+                    "background job lifecycle authority missing",
+                ))
+            })?;
+        if snapshot.terminal {
+            return Err(ShellError::JobNotRunning);
+        }
+
+        // Synthetic jobs have no process waiter, so containment is already
+        // acknowledged and lifecycle authority can terminalize immediately.
+        if !self.handles.lock().await.contains_key(job_id) {
+            self.ops_registry
+                .cancel_operation(&operation_id, Some("cancelled by caller".into()))
+                .map_err(|error| Self::shell_error_for_ops_lifecycle_cancel(job_id, error))?;
+            let snapshot = self
+                .ops_registry
+                .snapshot(&operation_id)
+                .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
             let mut jobs_guard = self.jobs.lock().await;
             let job = jobs_guard.get_mut(job_id).ok_or_else(|| {
                 warn!("Job not found");
                 ShellError::JobNotFound(job_id.to_string())
             })?;
             job.view.status = self.cancelled_view_from_authority(job, snapshot.as_ref())?;
+            return Ok(CancelJobDisposition::Cancelled);
         }
 
-        // Signal the background task to terminate the process.
         let notify = { self.cancel_notifiers.lock().await.get(job_id).cloned() };
-        if let Some(notify) = notify {
-            notify.notify_one();
-        } else {
+        let Some(notify) = notify else {
             warn!("Cancel notifier missing for running job");
+            return Err(ShellError::JobNotRunning);
+        };
+        let accepted = self.cancel_requested.lock().await.insert(job_id.clone());
+        if !accepted {
+            return Err(ShellError::JobNotRunning);
         }
 
-        // Detach the task handle; it will finish and emit the completion event.
-        self.handles.lock().await.remove(job_id);
-
-        Ok(())
+        // Request only. The worker owns TERM/KILL and acknowledges by applying
+        // the terminal lifecycle transition after the group is gone.
+        notify.notify_one();
+        Ok(CancelJobDisposition::CancellationRequested)
     }
 
     /// Remove a job from the manager
@@ -1105,6 +1352,7 @@ impl JobManager {
                 .remove(job_id);
             self.handles.lock().await.remove(job_id);
             self.cancel_notifiers.lock().await.remove(job_id);
+            self.cancel_requested.lock().await.remove(job_id);
             self.completed_at.lock().await.remove(job_id);
         }
         removed
@@ -1126,7 +1374,7 @@ impl JobManager {
     /// most once — subsequent calls will not re-report the same completion.
     ///
     /// Projects from canonical ops-lifecycle snapshots (INV-001). Shell-projected
-    /// detail (command, exit code, stdout/stderr) is supplementary display (INV-002).
+    /// detail (exit code and bounded stdout/stderr) is supplementary display (INV-002).
     /// Returns app-facing `DetachedOpCompletion` — never surfaces `operation_id`.
     pub async fn drain_completed(&self) -> Vec<meerkat_core::agent::DetachedOpCompletion> {
         let mut completions = Vec::new();
@@ -1256,6 +1504,7 @@ impl JobManager {
         let mut jobs_guard = self.jobs.lock().await;
         let mut handles_guard = self.handles.lock().await;
         let mut cancel_notifiers_guard = self.cancel_notifiers.lock().await;
+        let mut cancel_requested_guard = self.cancel_requested.lock().await;
         let mut completed_at_guard = self.completed_at.lock().await;
         let mut canonical_job_ops_guard = self
             .canonical_job_ops
@@ -1278,6 +1527,7 @@ impl JobManager {
             canonical_job_ops_guard.remove(job_id);
             handles_guard.remove(job_id);
             cancel_notifiers_guard.remove(job_id);
+            cancel_requested_guard.remove(job_id);
             completed_at_guard.remove(job_id);
         }
 
@@ -1302,6 +1552,7 @@ impl JobManager {
                 canonical_job_ops_guard.remove(&job_id);
                 handles_guard.remove(&job_id);
                 cancel_notifiers_guard.remove(&job_id);
+                cancel_requested_guard.remove(&job_id);
                 completed_at_guard.remove(&job_id);
             }
         }
@@ -1407,25 +1658,43 @@ impl meerkat_core::completion_feed::CompletionEnrichmentProvider for JobManager 
     fn enrich(
         &self,
         operation_id: &OperationId,
-    ) -> Option<meerkat_core::completion_feed::CompletionEnrichmentData> {
+    ) -> meerkat_core::completion_feed::CompletionEnrichment {
+        self.lookup_completion_enrichment(operation_id)
+    }
+}
+
+impl JobManager {
+    fn lookup_completion_enrichment(
+        &self,
+        operation_id: &OperationId,
+    ) -> meerkat_core::completion_feed::CompletionEnrichment {
+        use meerkat_core::completion_feed::CompletionEnrichment;
+
         // Reverse-lookup: find which job_id maps to this operation_id.
         let canonical = self
             .canonical_job_ops
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let job_id = canonical
+        let Some(job_id) = canonical
             .iter()
             .find(|(_, oid)| *oid == operation_id)
-            .map(|(jid, _)| jid.clone())?;
+            .map(|(jid, _)| jid.clone())
+        else {
+            return CompletionEnrichment::Missing;
+        };
         drop(canonical);
 
         // Try to read the job record. The jobs map uses a tokio::Mutex, so
-        // we use try_lock (sync context). If contended, return None — the
-        // caller will use fallback display.
-        let jobs = self.jobs.try_lock().ok()?;
-        let record = jobs.get(&job_id)?;
+        // we use try_lock (sync context). Contention is retryable and must not
+        // be collapsed into a permanently missing process-local record.
+        let Ok(jobs) = self.jobs.try_lock() else {
+            return CompletionEnrichment::Busy;
+        };
+        let Some(record) = jobs.get(&job_id) else {
+            return CompletionEnrichment::Missing;
+        };
         let detail = Self::build_completion_detail(&record.view);
-        Some(meerkat_core::completion_feed::CompletionEnrichmentData {
+        CompletionEnrichment::Found(meerkat_core::completion_feed::CompletionEnrichmentData {
             job_id: job_id.to_string(),
             detail,
         })
@@ -1445,6 +1714,19 @@ mod tests {
         JobManager::new(config)
             .with_owner_bridge_session_id(SessionId::new())
             .with_ops_registry(registry)
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: i32) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        match kill(Pid::from_raw(pid), None) {
+            Ok(()) => true,
+            Err(Errno::ESRCH) => false,
+            Err(_) => true,
+        }
     }
 
     // ==================== JobManager Struct Tests ====================
@@ -1484,6 +1766,30 @@ mod tests {
         assert_eq!(manager.config.project_root, PathBuf::from("/tmp/test"));
         assert_eq!(manager.config.max_completed_jobs, 100);
         assert_eq!(manager.config.completed_job_ttl_secs, 300);
+    }
+
+    #[tokio::test]
+    async fn completion_enrichment_distinguishes_busy_from_missing() {
+        let manager = bound_job_manager(ShellConfig::default());
+        let operation_id = OperationId::new();
+        let job_id = JobId::new();
+        manager
+            .canonical_job_ops
+            .lock()
+            .unwrap()
+            .insert(job_id, operation_id.clone());
+
+        let held_jobs = manager.jobs.lock().await;
+        assert!(matches!(
+            manager.lookup_completion_enrichment(&operation_id),
+            meerkat_core::completion_feed::CompletionEnrichment::Busy
+        ));
+        drop(held_jobs);
+
+        assert!(matches!(
+            manager.lookup_completion_enrichment(&operation_id),
+            meerkat_core::completion_feed::CompletionEnrichment::Missing
+        ));
     }
 
     #[tokio::test]
@@ -2619,6 +2925,397 @@ mod tests {
 
     // ==================== Regression Tests for Bug Fixes ====================
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_job_kills_term_ignoring_descendant_and_finishes_waiter() {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let temp_dir = TempDir::new().unwrap();
+        let leader_pid_file = temp_dir.path().join("background-leader.pid");
+        let child_pid_file = temp_dir.path().join("background-child.pid");
+        let child_ready_file = temp_dir.path().join("background-child.ready");
+        let config = ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let manager = bound_job_manager(config);
+        let command = format!(
+            "echo $$ > '{}'; (trap '' TERM; echo ready > '{}'; while :; do sleep 1; done) & echo $! > '{}'; wait",
+            leader_pid_file.display(),
+            child_ready_file.display(),
+            child_pid_file.display()
+        );
+        let job_id = manager.spawn_job(&command, None, 30).await.unwrap();
+
+        for _ in 0..100 {
+            if leader_pid_file.exists() && child_pid_file.exists() && child_ready_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let leader_pid: i32 = std::fs::read_to_string(&leader_pid_file)
+            .expect("background shell must publish its process-group leader")
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .expect("background shell must publish its child pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            manager.handles.lock().await.contains_key(&job_id),
+            "background waiter must be registered"
+        );
+        let operation_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("background operation must be published");
+
+        manager.cancel_job(&job_id).await.unwrap();
+        let before_ack = manager
+            .ops_registry
+            .snapshot(&operation_id)
+            .expect("operation snapshot")
+            .expect("operation must exist");
+        let job_before_ack = manager
+            .get_status(&job_id)
+            .await
+            .expect("job status")
+            .expect("job must exist");
+        let completion_before_ack = manager
+            .ops_registry
+            .completion_feed()
+            .expect("completion feed")
+            .list_since(0)
+            .entries
+            .into_iter()
+            .any(|entry| entry.operation_id == operation_id);
+        let waiter_finished = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let terminal = manager
+                    .ops_registry
+                    .snapshot(&operation_id)
+                    .expect("operation snapshot")
+                    .is_some_and(|snapshot| snapshot.terminal);
+                let notifier_retired = !manager.cancel_notifiers.lock().await.contains_key(&job_id);
+                if terminal && notifier_retired {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let descendant_survived = unix_process_exists(child_pid);
+        let after_ack = manager
+            .ops_registry
+            .snapshot(&operation_id)
+            .expect("operation snapshot")
+            .expect("operation must exist");
+
+        if descendant_survived {
+            let _ = killpg(Pid::from_raw(leader_pid), Signal::SIGKILL);
+        }
+        assert!(
+            waiter_finished,
+            "cancellation waiter must not hang on pipes held by a TERM-ignoring descendant"
+        );
+        assert!(
+            !descendant_survived,
+            "cancellation must kill the complete process group after the TERM grace"
+        );
+        assert!(
+            !before_ack.terminal,
+            "a cancellation request must not terminalize the operation before containment ack"
+        );
+        assert!(
+            matches!(job_before_ack.status, JobStatus::Running { .. }),
+            "a cancellation request must not publish terminal job status before containment ack"
+        );
+        assert!(
+            !completion_before_ack,
+            "the completion feed must remain silent until containment ack"
+        );
+        assert!(after_ack.terminal);
+        assert_eq!(after_ack.status, OperationStatus::Cancelled);
+    }
+
+    #[cfg(unix)]
+    async fn assert_aborted_submission_has_no_orphans(
+        manager: &JobManager,
+        pid_file: &Path,
+        window: &str,
+    ) {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let mut terminal_before_containment = false;
+        for _ in 0..500 {
+            let process_alive = std::fs::read_to_string(pid_file)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i32>().ok())
+                .is_some_and(unix_process_exists);
+            let operations = manager
+                .ops_registry
+                .list_operations()
+                .expect("operation inventory");
+            terminal_before_containment |=
+                process_alive && operations.iter().any(|snapshot| snapshot.terminal);
+            if !process_alive && operations.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let operations = manager
+            .ops_registry
+            .list_operations()
+            .expect("operation inventory");
+        let running_jobs: Vec<_> = manager
+            .jobs
+            .lock()
+            .await
+            .values()
+            .filter(|record| matches!(record.view.status, JobStatus::Running { .. }))
+            .map(|record| record.view.id.clone())
+            .collect();
+        let published_pid = std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        let process_alive = published_pid.is_some_and(unix_process_exists);
+
+        let completion_entries = manager
+            .ops_registry
+            .completion_feed()
+            .expect("runtime completion feed")
+            .list_since(0)
+            .entries;
+
+        // Keep a red regression hygienic before asserting its captured state.
+        for job_id in &running_jobs {
+            let _ = manager.cancel_job(job_id).await;
+        }
+        for snapshot in operations.iter().filter(|snapshot| !snapshot.terminal) {
+            let _ = manager
+                .ops_registry
+                .cancel_operation(&snapshot.id, Some("test cleanup".into()));
+        }
+        if process_alive && let Some(pid) = published_pid {
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        }
+
+        assert!(
+            !terminal_before_containment,
+            "aborting submission at {window} terminalized before containment"
+        );
+        assert!(
+            operations.is_empty(),
+            "aborting submission at {window} left operation authority: {operations:?}"
+        );
+        assert!(
+            completion_entries.is_empty(),
+            "aborting an unreturned submission at {window} published phantom completion feed entries: {completion_entries:?}"
+        );
+        assert!(
+            running_jobs.is_empty(),
+            "aborting submission at {window} left running jobs: {running_jobs:?}"
+        );
+        assert!(
+            !process_alive,
+            "aborting submission at {window} left its process group alive"
+        );
+    }
+
+    #[cfg(unix)]
+    fn abort_window_manager(
+        temp_dir: &TempDir,
+        hook: Arc<SubmissionHandoffHook>,
+    ) -> Arc<JobManager> {
+        let config = ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        Arc::new(bound_job_manager(config).with_submission_handoff_hook(hook))
+    }
+
+    #[cfg(unix)]
+    async fn abort_submission_at(stage: SubmissionHandoffStage, window: &str, pid_name: &str) {
+        let temp_dir = TempDir::new().unwrap();
+        let pid_file = temp_dir.path().join(pid_name);
+        let hook = Arc::new(SubmissionHandoffHook::new(stage));
+        let manager = abort_window_manager(&temp_dir, Arc::clone(&hook));
+        let command = format!("echo $$ > '{}'; sleep 30", pid_file.display());
+        let task = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.spawn_job(&command, None, 30).await })
+        };
+
+        tokio::time::timeout(Duration::from_secs(2), hook.reached.notified())
+            .await
+            .expect("submission must reach injected handoff window");
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            pid_file.exists(),
+            "injected handoff must occur after process ownership begins"
+        );
+        task.abort();
+        let _ = task.await;
+        hook.release.notify_one();
+
+        assert_aborted_submission_has_no_orphans(&manager, &pid_file, window).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborted_submission_at_jobs_publication_has_no_orphans() {
+        abort_submission_at(
+            SubmissionHandoffStage::JobsPublication,
+            "jobs publication",
+            "jobs-window.pid",
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborted_submission_at_cancel_publication_has_no_orphans() {
+        abort_submission_at(
+            SubmissionHandoffStage::CancelPublication,
+            "cancel publication",
+            "cancel-window.pid",
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborted_submission_at_waiter_handoff_has_no_orphans() {
+        abort_submission_at(
+            SubmissionHandoffStage::WaiterHandoff,
+            "waiter handoff",
+            "waiter-window.pid",
+        )
+        .await;
+    }
+
+    #[test]
+    fn background_submission_source_does_not_leak_raw_commands_to_stderr() {
+        let source = include_str!("job_manager.rs");
+        let debug_marker = ["[SHELL", "-DEBUG]"].concat();
+        let raw_stderr_macro = ["eprint", "ln!("].concat();
+        assert!(
+            !source.contains(&debug_marker),
+            "background submission must not print raw shell commands to process stderr"
+        );
+        assert!(
+            !source.contains(&raw_stderr_macro),
+            "background submission must use structured redacted tracing, not raw stderr"
+        );
+    }
+
+    #[test]
+    fn background_submission_span_skips_raw_command_argument() {
+        let source = include_str!("job_manager.rs");
+        let spawn_start = source
+            .find("    pub async fn spawn_job(")
+            .expect("spawn function");
+        let attribute_start = source[..spawn_start]
+            .rfind("#[instrument(")
+            .expect("spawn instrument attribute");
+        let attribute = &source[attribute_start..spawn_start];
+
+        assert!(
+            attribute.contains("skip(self, command,"),
+            "spawn_job tracing must explicitly skip the raw command argument"
+        );
+        assert!(
+            !attribute.contains("command ="),
+            "spawn_job tracing fields must not record the raw command"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_operation_display_name_does_not_expose_raw_command() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = bound_job_manager(ShellConfig::with_project_root(
+            temp_dir.path().to_path_buf(),
+        ));
+        let sentinel = "RKAT_SECRET_COMMAND_SENTINEL_7d40b7";
+        let command = format!("printf '{sentinel}'");
+
+        let job_id = manager
+            .register_synthetic_running_job(&command, None, 30)
+            .await
+            .expect("synthetic job registration");
+        let snapshot = manager
+            .ops_lifecycle_snapshot(&job_id)
+            .await
+            .expect("lifecycle snapshot")
+            .expect("registered operation");
+
+        assert!(
+            !snapshot.display_name.contains(sentinel) && !snapshot.display_name.contains(&command),
+            "operation diagnostics must not project raw shell command content"
+        );
+        assert!(
+            snapshot.display_name.contains(job_id.as_ref()),
+            "safe display metadata should retain public job identity"
+        );
+
+        manager
+            .cancel_job(&job_id)
+            .await
+            .expect("synthetic cleanup");
+    }
+
+    #[test]
+    fn unreturned_background_submission_paths_do_not_publish_terminal_completion() {
+        let source = include_str!("job_manager.rs");
+        let synthetic_start = source
+            .find("    pub async fn register_synthetic_running_job(")
+            .expect("synthetic registration function");
+        let spawn_start = source
+            .find("    pub async fn spawn_job(")
+            .expect("spawn function");
+        let status_start = source
+            .find("    pub async fn get_status(")
+            .expect("status function after spawn");
+        let synthetic_source = &source[synthetic_start..spawn_start];
+        let spawn_source = &source[spawn_start..status_start];
+
+        for (name, function_source) in [
+            ("register_synthetic_running_job", synthetic_source),
+            ("spawn_job", spawn_source),
+        ] {
+            assert!(
+                !function_source.contains(".provisioning_failed(")
+                    && !function_source.contains(".abort_provisioning("),
+                "{name} must reconcile an unreturned operation back to absence without publishing a terminal completion"
+            );
+            assert!(
+                function_source.contains(".rollback_unreturned_operation("),
+                "{name} must use typed unreturned-operation rollback"
+            );
+        }
+    }
+
     /// Regression test: multi-byte UTF-8 characters in job output should be handled correctly
     ///
     /// Verifies that job output containing emoji, Chinese characters, and other
@@ -2902,15 +3599,10 @@ mod tests {
         }
     }
 
-    /// Regression test for Task #6: graceful_kill function
+    /// Regression test for process-group termination plumbing.
     ///
-    /// Verifies that the graceful_kill function exists and the code compiles with
-    /// proper SIGTERM/SIGKILL handling. The full integration test of waiting for
-    /// grace period requires more complex setup.
-    ///
-    /// Note: The current architecture owns the child inside the async task,
-    /// so graceful_kill is invoked from the worker when a cancellation or
-    /// timeout signal is received.
+    /// Verifies the shared TERM/grace/KILL path compiles under the real-process
+    /// integration feature.
     #[tokio::test]
     #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
@@ -2919,14 +3611,19 @@ mod tests {
         use tokio::process::Command;
 
         // Test that graceful_kill compiles and can be called
-        let mut child = Command::new("sleep")
-            .arg("1")
-            .spawn()
-            .expect("Failed to spawn test process");
+        let mut command = Command::new("sleep");
+        command.arg("1");
+        command.kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn().expect("Failed to spawn test process");
+        let mut process_group = OwnedProcessGroup::new(&child);
 
-        // graceful_kill should complete without panicking
-        let result = super::graceful_kill(&mut child).await;
-        assert!(result.is_ok(), "graceful_kill should succeed: {result:?}");
+        // Group termination should complete without panicking.
+        let result = process_group.terminate(&mut child).await;
+        assert!(
+            result.is_ok(),
+            "process-group termination should succeed: {result:?}"
+        );
     }
 
     /// Regression test for Task #7: Single write lock for cleanup

@@ -382,13 +382,14 @@ pub async fn create_session_with_params(
             })
             .collect();
         if let Some(tx) = runtime.callback_request_tx() {
-            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    runtime.registered_tools(),
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(
+                crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
+                    runtime.callback_tool_registry(),
                     tx,
                     runtime.callback_id_counter(),
                     inline_tools,
-                ));
+                ),
+            );
             build_config.external_tools = Some(dispatcher);
         }
     }

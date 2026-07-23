@@ -77,7 +77,15 @@ pub enum CompletionOutcome {
     CompletedWithoutResult,
     /// The input reached a callback boundary and requires external tool
     /// fulfillment before the turn can continue.
-    CallbackPending { tool_name: String, args: Value },
+    CallbackPending {
+        tool_use_id: String,
+        tool_name: String,
+        args: Value,
+    },
+    /// One assistant tool-use batch is waiting on multiple external callbacks.
+    CallbackBatchPending {
+        pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
+    },
     /// The input reached the canonical cancellation terminal.
     Cancelled,
     /// The input was abandoned before completing, carrying typed failure
@@ -140,11 +148,33 @@ pub fn interaction_terminal_event(
             result: String::new(),
             structured_output: None,
         },
-        CompletionOutcome::CallbackPending { tool_name, args } => {
+        CompletionOutcome::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        } => AgentEvent::InteractionCallbackPending {
+            interaction_id,
+            pending_tool_calls: vec![meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id,
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }],
+            tool_name,
+            args,
+        },
+        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+            let first = pending_tool_calls.first().cloned().unwrap_or(
+                meerkat_core::error::PendingCallbackToolCall {
+                    tool_use_id: String::new(),
+                    tool_name: "callback_batch".to_string(),
+                    args: Value::Null,
+                },
+            );
             AgentEvent::InteractionCallbackPending {
                 interaction_id,
-                tool_name,
-                args,
+                tool_name: first.tool_name,
+                args: first.args,
+                pending_tool_calls,
             }
         }
         CompletionOutcome::Cancelled => AgentEvent::InteractionFailed {
@@ -489,11 +519,16 @@ impl CompletionHandle {
 
     #[cfg(test)]
     pub(crate) fn already_callback_pending(
+        tool_use_id: String,
         tool_name: String,
         args: Value,
     ) -> Result<Self, crate::RuntimeDriverError> {
         Self::already_resolved_with_generated_class(
-            CompletionOutcome::CallbackPending { tool_name, args },
+            CompletionOutcome::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            },
             crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending,
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
@@ -573,19 +608,29 @@ fn authorized_completion_outcome(
             }
             CompletionOutcome::CompletedWithoutResult
         }
-        RuntimeCompletionResultClass::CallbackPending => {
-            let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
-                attempt.fail();
-                return Err(CompletionWaitError::AuthorityUnavailable(
-                    "runtime completion authority resolved CallbackPending without callback payload"
-                        .to_string(),
-                ));
-            };
-            CompletionOutcome::CallbackPending {
+        RuntimeCompletionResultClass::CallbackPending => match terminal {
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => CompletionOutcome::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+            },
+            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
+                CompletionOutcome::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
+                }
             }
-        }
+            _ => {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                        "runtime completion authority resolved CallbackPending without callback payload"
+                            .to_string(),
+                    ));
+            }
+        },
         RuntimeCompletionResultClass::Cancelled => {
             if terminal.is_some() || finalization_error.is_some() {
                 attempt.fail();
@@ -949,6 +994,7 @@ impl CompletionRegistry {
     fn resolve_callback_pending(
         &mut self,
         input_id: &InputId,
+        tool_use_id: String,
         tool_name: String,
         args: Value,
         cleanup_observation: CompletionCleanupObservation,
@@ -956,7 +1002,11 @@ impl CompletionRegistry {
         if let Some(senders) = self.take_waiters(input_id) {
             Self::send_outcome(
                 senders,
-                CompletionOutcome::CallbackPending { tool_name, args },
+                CompletionOutcome::CallbackPending {
+                    tool_use_id,
+                    tool_name,
+                    args,
+                },
                 cleanup_observation,
             );
         }
@@ -966,6 +1016,7 @@ impl CompletionRegistry {
     pub(crate) fn resolve_callback_pending_authorized(
         &mut self,
         input_id: &InputId,
+        tool_use_id: String,
         tool_name: String,
         args: Value,
         authority: RuntimeCompletionResultAuthority,
@@ -978,6 +1029,7 @@ impl CompletionRegistry {
         }
         self.resolve_callback_pending(
             input_id,
+            tool_use_id,
             tool_name,
             args,
             Self::cleanup_from_realized_attempt(attempt),
@@ -1255,6 +1307,43 @@ mod tests {
             result_class,
             cleanup_observation,
         )
+    }
+
+    #[test]
+    fn callback_batch_terminal_event_preserves_complete_typed_pending_set() {
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        let calls = vec![
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "call-a".to_string(),
+                tool_name: "ask_a".to_string(),
+                args: serde_json::json!({"tool_use_id": "call-a", "question": "a"}),
+            },
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "call-b".to_string(),
+                tool_name: "ask_b".to_string(),
+                args: serde_json::json!({"tool_use_id": "call-b", "question": "b"}),
+            },
+        ];
+
+        let event = interaction_terminal_event(
+            interaction_id,
+            CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls: calls.clone(),
+            },
+        );
+        let meerkat_core::event::AgentEvent::InteractionCallbackPending {
+            interaction_id: actual_id,
+            tool_name,
+            args,
+            pending_tool_calls,
+        } = event
+        else {
+            panic!("expected callback-pending interaction event");
+        };
+        assert_eq!(actual_id, interaction_id);
+        assert_eq!(tool_name, "ask_a");
+        assert_eq!(args, calls[0].args);
+        assert_eq!(pending_tool_calls, calls);
     }
 
     #[tokio::test]
@@ -1682,6 +1771,7 @@ mod tests {
 
         registry.resolve_callback_pending_authorized(
             &input_id,
+            "call-1".to_string(),
             "browser".to_string(),
             serde_json::json!({ "url": "https://example.com" }),
             authority(
@@ -1691,7 +1781,12 @@ mod tests {
         );
 
         match handle.wait_authorized().await {
-            CompletionOutcome::CallbackPending { tool_name, args } => {
+            CompletionOutcome::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "browser");
                 assert_eq!(args, serde_json::json!({ "url": "https://example.com" }));
             }

@@ -746,6 +746,7 @@ impl AgentBuilder {
             model_routing_handle: self.model_routing_handle,
             sticky_model_fallback_commit_coordinator: self.sticky_model_fallback_commit_coordinator,
             pending_sticky_model_fallback_activation: None,
+            pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry,
             active_model_profile,
             external_tool_surface_handle: self.external_tool_surface_handle,

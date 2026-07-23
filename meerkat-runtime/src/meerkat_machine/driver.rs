@@ -2782,11 +2782,18 @@ fn authorized_directed_terminal_outboxes(
             }
         }
         Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackPending {
+            tool_use_id,
             tool_name,
             args,
         }) => InteractionTerminalCandidate::CallbackPending {
+            tool_use_id: tool_use_id.clone(),
             tool_name: tool_name.clone(),
             args: args.clone(),
+        },
+        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackBatchPending {
+            pending_tool_calls,
+        }) => InteractionTerminalCandidate::CallbackBatchPending {
+            pending_tool_calls: pending_tool_calls.clone(),
         },
         Some(
             meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {

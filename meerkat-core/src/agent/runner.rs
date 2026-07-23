@@ -16,6 +16,10 @@ use crate::session_document::{
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_execution::{
+    ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionResolutionContext,
+    ToolExecutionResolutionError,
+};
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
@@ -492,13 +496,26 @@ where
         self.runtime_terminal_failure_witness.take().transpose()
     }
 
-    fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
-        if self.runtime_execution_kind_required && self.runtime_execution_kind.is_none() {
-            return Err(AgentError::InternalError(
-                "runtime_execution_kind not set: turn-state handle is attached but \
-                 the runtime did not stamp RuntimeTurnMetadata.execution_kind"
-                    .to_string(),
-            ));
+    fn require_runtime_execution_kind(
+        &self,
+        expected: crate::lifecycle::RuntimeExecutionKind,
+    ) -> Result<(), AgentError> {
+        if self.runtime_execution_kind_required {
+            match self.runtime_execution_kind {
+                Some(actual) if actual == expected => {}
+                Some(actual) => {
+                    return Err(AgentError::InternalError(format!(
+                        "runtime_execution_kind mismatch: expected {expected:?}, got {actual:?}"
+                    )));
+                }
+                None => {
+                    return Err(AgentError::InternalError(format!(
+                        "runtime_execution_kind not set: expected {expected:?} because a turn-state \
+                         handle is attached but the runtime did not stamp \
+                         RuntimeTurnMetadata.execution_kind"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -604,6 +621,81 @@ where
         }
 
         Ok(())
+    }
+
+    /// Complete a durably staged callback batch.
+    ///
+    /// Returns `Ok(false)` when there is no staged callback state. A staged
+    /// batch publishes all caller results plus any completed siblings
+    /// as one exact adjacent `ToolResults` set, followed by staged assistant
+    /// blocks, and then replaces the durable staging record with an
+    /// idempotency receipt.
+    pub fn apply_pending_callback_tool_results(
+        &mut self,
+        results: Vec<crate::types::ToolResult>,
+    ) -> Result<bool, AgentError> {
+        let resolution = self
+            .session
+            .resolve_pending_callback_tool_results(results)
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "pending callback tool results were rejected: {error}"
+                ))
+            })?;
+        let (batch, ordered_results) = match resolution {
+            crate::session::ResolvedPendingCallbackToolResults::NoState => return Ok(false),
+            crate::session::ResolvedPendingCallbackToolResults::AlreadyApplied { async_ops } => {
+                if !async_ops.is_empty() {
+                    self.pending_callback_async_ops = Some(async_ops);
+                }
+                return Ok(true);
+            }
+            crate::session::ResolvedPendingCallbackToolResults::Pending {
+                batch,
+                ordered_results,
+            } => (batch, ordered_results),
+        };
+        let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
+            batch.session_effects.iter().cloned().partition(|effect| {
+                matches!(
+                    effect,
+                    crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+                )
+            });
+
+        if !pre_tool_effects.is_empty() {
+            self.apply_session_effects(&pre_tool_effects, Some(&batch.run_id))?;
+        }
+
+        let post_tool_messages = post_tool_effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
+                    let mut message = crate::types::BlockAssistantMessage::new(
+                        blocks,
+                        crate::types::StopReason::EndTurn,
+                    );
+                    message.identity = self
+                        .active_transcript_identity
+                        .clone()
+                        .unwrap_or_default()
+                        .with_run_id(batch.run_id.clone());
+                    Some(crate::types::Message::BlockAssistant(message))
+                }
+                _ => None,
+            })
+            .collect();
+        self.session
+            .commit_pending_callback_tool_results(&batch, ordered_results, post_tool_messages)
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to commit pending callback tool batch: {error}"
+                ))
+            })?;
+        if !batch.async_ops.is_empty() {
+            self.pending_callback_async_ops = Some(batch.async_ops.clone());
+        }
+        Ok(true)
     }
 
     /// Set the shared mob authority handle for session-effect application.
@@ -912,25 +1004,94 @@ where
             args: args.as_ref(),
         };
         let dispatch_context = self.tool_dispatch_context.clone();
-        let dispatch_result = match timeout_policy.timeout() {
+        let resolution_started = crate::time_compat::Instant::now();
+        let caller_deadline = timeout_policy.timeout().map_or_else(
+            || ToolDeadlineContributor::unbounded(ToolDeadlineOwner::DirectCaller),
+            |timeout| ToolDeadlineContributor::finite(ToolDeadlineOwner::DirectCaller, timeout),
+        );
+        let resolution_context = match ToolDeadlineChain::new(vec![caller_deadline])
+            .map(ToolExecutionResolutionContext::new)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                return Ok(crate::ops::terminal_tool_outcome_for_error(
+                    call.id,
+                    ToolError::from(ToolExecutionResolutionError::Deadline(error)),
+                ));
+            }
+        };
+        let plan = match crate::resolve_tool_execution_plan_fenced(
+            &self.tools,
+            view,
+            &dispatch_context,
+            &resolution_context,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(crate::ops::terminal_tool_outcome_for_error(
+                    call.id,
+                    ToolError::from(error),
+                ));
+            }
+        };
+        if let Err(error) =
+            self.tools
+                .validate_resolved_execution_plan(view, &resolution_context, &plan)
+        {
+            return Ok(crate::ops::terminal_tool_outcome_for_error(
+                call.id,
+                ToolError::from(error),
+            ));
+        }
+        let effective_timeout = plan.deadlines().effective_timeout();
+        tracing::debug!(
+            tool = %call.name,
+            execution_mode = ?plan.mode(),
+            effective_deadline_ms = ?effective_timeout
+                .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+            deadline_winner = ?plan
+                .deadlines()
+                .winner()
+                .map(|winner| winner.owner().as_str()),
+            deadline_chain = %plan.deadlines().diagnostic(),
+            "resolved external tool execution plan"
+        );
+        let remaining_timeout =
+            effective_timeout.map(|timeout| timeout.saturating_sub(resolution_started.elapsed()));
+        let advertised_timeout_ms =
+            effective_timeout.map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
+        let dispatch_result = match remaining_timeout {
+            Some(timeout) if timeout.is_zero() => Err(crate::error::ToolError::timeout(
+                call.name.clone(),
+                advertised_timeout_ms.unwrap_or(u64::MAX),
+            )),
             Some(timeout) => {
                 match tokio::time::timeout(
                     timeout,
-                    self.tools.dispatch_with_context(view, &dispatch_context),
+                    crate::dispatch_tool_execution_plan_fenced(
+                        &self.tools,
+                        view,
+                        &dispatch_context,
+                        &plan,
+                    ),
                 )
                 .await
                 {
                     Ok(result) => result,
                     Err(_) => Err(crate::error::ToolError::timeout(
                         call.name.clone(),
-                        timeout_policy.timeout_ms().unwrap_or(u64::MAX),
+                        advertised_timeout_ms.unwrap_or(u64::MAX),
                     )),
                 }
             }
             None => {
-                self.tools
-                    .dispatch_with_context(view, &dispatch_context)
-                    .await
+                crate::dispatch_tool_execution_plan_fenced(
+                    &self.tools,
+                    view,
+                    &dispatch_context,
+                    &plan,
+                )
+                .await
             }
         };
 
@@ -946,7 +1107,11 @@ where
                 Ok(outcome)
             }
             Err(crate::error::ToolError::CallbackPending { tool_name, args }) => {
-                Err(AgentError::CallbackPending { tool_name, args })
+                Err(AgentError::CallbackPending {
+                    tool_use_id: call.id,
+                    tool_name,
+                    args,
+                })
             }
             Err(error) => Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error)),
         }
@@ -1347,7 +1512,10 @@ where
     /// aborts its invisible memory stages while retaining real provider usage
     /// and failed-attempt cadence.
     async fn settle_compaction_after_run_error(&mut self, error: AgentError) -> AgentError {
-        if matches!(error, AgentError::CallbackPending { .. }) {
+        if matches!(
+            error,
+            AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. }
+        ) {
             return error;
         }
         match self.abort_uncommitted_compaction_projections().await {
@@ -1585,6 +1753,12 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         self.reset_runtime_terminal_failure_witness();
+        if let Err(err) =
+            self.require_runtime_execution_kind(crate::lifecycle::RuntimeExecutionKind::ContentTurn)
+        {
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -1603,11 +1777,6 @@ where
                  authors the turn transcript"
                     .to_string(),
             ));
-        }
-
-        if let Err(err) = self.require_runtime_execution_kind() {
-            self.clear_runtime_execution_kind();
-            return Err(err);
         }
 
         // Reset state for new run (allows multi-turn on same agent).
@@ -1765,6 +1934,12 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         self.reset_runtime_terminal_failure_witness();
+        if let Err(err) = self
+            .require_runtime_execution_kind(crate::lifecycle::RuntimeExecutionKind::ResumePending)
+        {
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -1811,9 +1986,25 @@ where
             }
         };
 
-        if let Err(err) = self.require_runtime_execution_kind() {
-            self.clear_runtime_execution_kind();
-            return Err(err);
+        let committed_images = self
+            .session
+            .apply_pending_callback_resume_effects()
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to apply callback-staged resume effects: {error}"
+                ))
+            })?;
+        for image in committed_images {
+            let event = AgentEvent::AssistantImageAppended { image };
+            crate::event_tap::tap_try_send(&self.event_tap, &event);
+            if let Some(ref tx) = event_tx
+                && tx.send(event).await.is_err()
+            {
+                tracing::warn!(
+                    "agent event stream receiver dropped while publishing callback-staged image"
+                );
+                break;
+            }
         }
 
         // Reset state for new run (allows multi-turn on same agent).

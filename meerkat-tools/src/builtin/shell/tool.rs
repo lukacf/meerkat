@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
-use meerkat_core::{ExecutionPlacement, ToolDef};
+use meerkat_core::{ExecutionPlacement, ToolCallView, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -16,13 +16,33 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded};
 use super::types::JobId;
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+
+#[cfg(all(test, unix))]
+#[derive(Clone)]
+struct ForegroundProcessGroupTestConfig {
+    control: Arc<dyn super::process_lifecycle::ProcessGroupControl>,
+    term_grace: Duration,
+    kill_settle_timeout: Duration,
+}
+
+#[cfg(all(test, unix))]
+impl std::fmt::Debug for ForegroundProcessGroupTestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForegroundProcessGroupTestConfig")
+            .field("term_grace", &self.term_grace)
+            .field("kill_settle_timeout", &self.kill_settle_timeout)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Maximum number of characters to keep in output before truncation.
 /// This is measured in Unicode characters, not bytes.
@@ -57,34 +77,6 @@ fn truncate_to_tail(s: &str, max_chars: usize) -> String {
     let tail: String = s.chars().skip(skip_count).collect();
 
     format!("[truncated {skip_count} chars]...{tail}")
-}
-
-#[cfg(unix)]
-async fn graceful_kill(child: &mut tokio::process::Child) -> std::io::Result<()> {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    if let Some(pid) = child.id() {
-        let pgid = Pid::from_raw(pid as i32);
-
-        let _ = killpg(pgid, Signal::SIGTERM);
-
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(2)) => {
-                let _ = killpg(pgid, Signal::SIGKILL);
-                let _ = child.wait().await;
-            }
-            result = child.wait() => {
-                return result.map(|_| ());
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn graceful_kill(child: &mut tokio::process::Child) -> std::io::Result<()> {
-    child.kill().await
 }
 
 struct TailBuffer {
@@ -142,23 +134,6 @@ where
     Ok(buffer.into_vec())
 }
 
-async fn join_output(
-    handle: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
-    label: &str,
-) -> Vec<u8> {
-    match handle.await {
-        Ok(Ok(buf)) => buf,
-        Ok(Err(err)) => {
-            warn!("Failed to read {}: {}", label, err);
-            Vec::new()
-        }
-        Err(err) => {
-            warn!("{} reader task failed: {}", label, err);
-            Vec::new()
-        }
-    }
-}
-
 /// Shell tool for executing shell commands
 ///
 /// This tool executes commands using a configured shell (default: Nushell).
@@ -170,6 +145,13 @@ pub struct ShellTool {
     resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
     /// Job manager for background execution and concurrency tracking
     pub job_manager: Arc<super::job_manager::JobManager>,
+    /// Foreground processes whose first containment proof failed. Each task
+    /// owns both the child handle and armed process-group guard until absence
+    /// is proven. Dropping a handle detaches rather than cancels the owner; a
+    /// runtime shutdown drops the armed guard and synchronously KILL-fences it.
+    foreground_containment_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    #[cfg(all(test, unix))]
+    foreground_process_group_test_config: Option<ForegroundProcessGroupTestConfig>,
 }
 
 impl ShellTool {
@@ -180,6 +162,9 @@ impl ShellTool {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
+            foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(all(test, unix))]
+            foreground_process_group_test_config: None,
         }
     }
 
@@ -192,7 +177,66 @@ impl ShellTool {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
+            foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(all(test, unix))]
+            foreground_process_group_test_config: None,
         }
+    }
+
+    #[cfg(all(test, unix))]
+    fn with_foreground_process_control_for_test(
+        mut self,
+        control: Arc<dyn super::process_lifecycle::ProcessGroupControl>,
+        term_grace: Duration,
+        kill_settle_timeout: Duration,
+    ) -> Self {
+        self.foreground_process_group_test_config = Some(ForegroundProcessGroupTestConfig {
+            control,
+            term_grace,
+            kill_settle_timeout,
+        });
+        self
+    }
+
+    async fn retain_foreground_containment_retry(
+        &self,
+        mut child: tokio::process::Child,
+        mut process_group: OwnedProcessGroup,
+    ) {
+        let handle = tokio::spawn(async move {
+            loop {
+                match process_group.terminate(&mut child).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "foreground shell containment remains unproven; managed owner will retry"
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        });
+        let mut tasks = self.foreground_containment_tasks.lock().await;
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(handle);
+    }
+
+    #[cfg(test)]
+    async fn pending_foreground_containment_count_for_test(&self) -> usize {
+        let mut tasks = self.foreground_containment_tasks.lock().await;
+        tasks.retain(|task| !task.is_finished());
+        tasks.len()
+    }
+
+    fn validated_timeout_secs(&self, input: &ShellInput) -> Result<u64, String> {
+        let timeout_secs = input
+            .timeout_secs
+            .unwrap_or(self.config.default_timeout_secs);
+        if timeout_secs == 0 {
+            return Err("timeout_secs must be greater than zero".to_string());
+        }
+        Ok(timeout_secs)
     }
 
     /// Find the shell executable path.
@@ -272,6 +316,9 @@ impl ShellTool {
         // Capture stdout/stderr
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Ensure cancellation contains the direct child even on platforms
+        // without Unix process-group signalling.
+        cmd.kill_on_drop(true);
 
         // Create new process group on Unix for proper cleanup of child processes.
         // This ensures that when we kill the process, all its children are also killed.
@@ -281,6 +328,20 @@ impl ShellTool {
         // Spawn the process with timeout
         let timeout_duration = Duration::from_secs(timeout_secs);
         let mut child = cmd.spawn().map_err(ShellError::Io)?;
+        #[cfg(all(test, unix))]
+        let mut process_group =
+            if let Some(config) = self.foreground_process_group_test_config.as_ref() {
+                OwnedProcessGroup::with_control(
+                    &child,
+                    Arc::clone(&config.control),
+                    config.term_grace,
+                    config.kill_settle_timeout,
+                )
+            } else {
+                OwnedProcessGroup::new(&child)
+            };
+        #[cfg(not(all(test, unix)))]
+        let mut process_group = OwnedProcessGroup::new(&child);
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -305,21 +366,48 @@ impl ShellTool {
         let duration_secs = start.elapsed().as_secs_f64();
 
         let mut wait_error: Option<std::io::Error> = None;
-        let (exit_code, timed_out) = match wait_result {
-            Ok(Ok(status)) => (status.code(), false),
+        let (exit_code, timed_out, containment_result) = match wait_result {
+            Ok(Ok(status)) => {
+                let containment = process_group.terminate(&mut child).await;
+                (status.code(), false, containment)
+            }
             Ok(Err(e)) => {
+                let containment = process_group.terminate(&mut child).await;
                 wait_error = Some(e);
-                (None, false)
+                (None, false, containment)
             }
             Err(_) => {
-                let _ = graceful_kill(&mut child).await;
-                (None, true)
+                let containment = process_group.terminate(&mut child).await;
+                (None, true, containment)
             }
         };
 
-        let stdout_bytes = join_output(stdout_handle, "stdout").await;
-        let stderr_bytes = join_output(stderr_handle, "stderr").await;
+        let containment_error = containment_result.err();
+        if containment_error.is_some() {
+            // Returning an error must not drop the only ownership proof for a
+            // still-live process group. Move the armed guard and child handle
+            // into a runtime-managed retry owner before any return path.
+            self.retain_foreground_containment_retry(child, process_group)
+                .await;
+        }
 
+        let (stdout_bytes, stderr_bytes) = tokio::join!(
+            join_output_bounded(stdout_handle, "stdout"),
+            join_output_bounded(stderr_handle, "stderr")
+        );
+
+        if let Some(containment_error) = containment_error {
+            let wait_context = wait_error
+                .as_ref()
+                .map(|error| format!("; process wait also failed: {error}"))
+                .unwrap_or_default();
+            return Err(ShellError::Io(std::io::Error::new(
+                containment_error.kind(),
+                format!(
+                    "foreground shell containment remains unproven; managed retry ownership retained: {containment_error}{wait_context}"
+                ),
+            )));
+        }
         if let Some(err) = wait_error {
             return Err(ShellError::Io(err));
         }
@@ -385,7 +473,9 @@ struct ShellInput {
     timeout_secs: Option<u64>,
     /// Run in background (optional, default false)
     #[serde(default)]
-    #[schemars(description = "If true, run in background and return job ID immediately")]
+    #[schemars(
+        description = "If true, run in the process-local background and return a job ID immediately; current background jobs are volatile and do not survive a process restart"
+    )]
     background: bool,
 }
 
@@ -413,12 +503,51 @@ impl BuiltinTool for ShellTool {
         false
     }
 
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let input: ShellInput = serde_json::from_str(call.args.get()).map_err(|error| {
+            meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                tool_name: call.name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        let timeout_secs = self.validated_timeout_secs(&input).map_err(|reason| {
+            meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                tool_name: call.name.to_string(),
+                reason,
+            }
+        })?;
+        let resolved_context = if input.background {
+            resolution_context.clone()
+        } else {
+            resolution_context.with_deadline(meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::ToolInternal,
+                Duration::from_secs(timeout_secs),
+            ))?
+        };
+        self.execution_contract()
+            .resolve_default(resolved_context.deadlines().clone())
+            .map_err(Into::into)
+    }
+
     #[instrument(skip(self, args), fields(tool = "shell"))]
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let input: ShellInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
+        let timeout_secs = self
+            .validated_timeout_secs(&input)
+            .map_err(BuiltinToolError::invalid_args)?;
 
-        info!(command = %input.command, background = %input.background, "Executing shell command");
+        info!(
+            background = input.background,
+            timeout_secs,
+            has_working_dir = input.working_dir.is_some(),
+            "Executing shell command"
+        );
 
         // Security validation: check policy (mode + patterns)
         // We validate the command but execute the original to preserve shell syntax (pipes, redirections).
@@ -429,7 +558,7 @@ impl BuiltinTool for ShellTool {
 
         // Validate and resolve working directory
         let working_dir = if let Some(ref dir) = input.working_dir {
-            debug!(working_dir = %dir, "Validating working directory");
+            debug!("Validating configured working directory");
             let path = std::path::Path::new(dir);
             let resolved = self
                 .config
@@ -450,13 +579,7 @@ impl BuiltinTool for ShellTool {
             }
             let job_id = self
                 .job_manager
-                .spawn_job(
-                    &input.command,
-                    working_dir.as_deref(),
-                    input
-                        .timeout_secs
-                        .unwrap_or(self.config.default_timeout_secs),
-                )
+                .spawn_job(&input.command, working_dir.as_deref(), timeout_secs)
                 .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
@@ -468,9 +591,6 @@ impl BuiltinTool for ShellTool {
         }
 
         // Get timeout (use provided or config default)
-        let timeout_secs = input
-            .timeout_secs
-            .unwrap_or(self.config.default_timeout_secs);
         debug!(timeout_secs = %timeout_secs, "Using timeout");
 
         // Execute the ORIGINAL command (not re-quoted) to preserve shell syntax (pipes, redirections)
@@ -634,6 +754,387 @@ mod tests {
         // Check required fields
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("command")));
+    }
+
+    #[test]
+    fn shell_tool_source_does_not_trace_raw_command_content() {
+        let source = include_str!("tool.rs");
+        let raw_command_field = ["info!(command", " ="].concat();
+        assert!(
+            !source.contains(&raw_command_field),
+            "shell tracing must record only safe metadata, never raw command content"
+        );
+    }
+
+    #[test]
+    fn foreground_argument_timeout_contributes_tool_internal_deadline() {
+        let tool = ShellTool::new(ShellConfig::default());
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"command":"echo test","timeout_secs":7}"#.to_string(),
+        )
+        .unwrap();
+        let call = meerkat_core::ToolCallView {
+            id: "foreground",
+            name: "shell",
+            args: &args,
+        };
+        let deadlines = meerkat_core::ToolDeadlineChain::new(vec![
+            meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            ),
+        ])
+        .unwrap();
+
+        let plan = tool
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolExecutionResolutionContext::new(deadlines),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(7))
+        );
+        assert!(plan.deadlines().contributors().iter().any(|contributor| {
+            contributor.owner() == meerkat_core::ToolDeadlineOwner::ToolInternal
+                && contributor.timeout() == Some(Duration::from_secs(7))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_foreground_shell_future_leaves_no_process_group_alive() {
+        use nix::errno::Errno;
+        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::unistd::Pid;
+
+        let temp_dir = TempDir::new().unwrap();
+        let leader_pid_file = temp_dir.path().join("foreground-shell.pid");
+        let child_pid_file = temp_dir.path().join("foreground-child.pid");
+        let config = ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let tool = ShellTool::new(config);
+        let command = format!(
+            "echo $$ > '{}'; sleep 30 & echo $! > '{}'",
+            leader_pid_file.display(),
+            child_pid_file.display()
+        );
+
+        let task = tokio::spawn(async move {
+            tool.call(json!({
+                "command": command,
+                "timeout_secs": 30
+            }))
+            .await
+        });
+
+        for _ in 0..100 {
+            if leader_pid_file.exists() && child_pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let leader_pid: i32 = std::fs::read_to_string(&leader_pid_file)
+            .expect("shell must publish its process-group leader before cancellation")
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .expect("shell must publish its child pid before cancellation")
+            .trim()
+            .parse()
+            .unwrap();
+
+        task.abort();
+        let _ = task.await;
+
+        let process_exists = |pid| match kill(Pid::from_raw(pid), None) {
+            Ok(()) => true,
+            Err(Errno::ESRCH) => false,
+            Err(_) => true,
+        };
+        let mut survived_cancellation = false;
+        for _ in 0..50 {
+            survived_cancellation = process_exists(child_pid);
+            if !survived_cancellation {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        if survived_cancellation {
+            // A red regression must still clean up after itself.
+            let _ = killpg(Pid::from_raw(leader_pid), Signal::SIGKILL);
+        }
+        assert!(
+            !survived_cancellation,
+            "dropping the foreground execution future must contain its process group"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_foreground_shell_reaps_descendant_that_closed_output_pipes() {
+        use nix::errno::Errno;
+        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::unistd::Pid;
+
+        let temp_dir = TempDir::new().unwrap();
+        let leader_pid_file = temp_dir.path().join("foreground-leader.pid");
+        let child_pid_file = temp_dir.path().join("foreground-detached-child.pid");
+        let config = ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let tool = ShellTool::new(config);
+        let command = format!(
+            "echo $$ > '{}'; (exec >/dev/null 2>&1; trap '' TERM; while :; do sleep 1; done) & echo $! > '{}'; exit 0",
+            leader_pid_file.display(),
+            child_pid_file.display()
+        );
+
+        let call_result = tokio::time::timeout(
+            Duration::from_secs(4),
+            tool.call(json!({"command": command, "timeout_secs": 30})),
+        )
+        .await
+        .expect("foreground waiter must finish");
+        let leader_pid: i32 = std::fs::read_to_string(&leader_pid_file)
+            .expect("shell must publish its process-group leader")
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .expect("shell must publish its child pid")
+            .trim()
+            .parse()
+            .unwrap();
+        let mut descendant_survived = match kill(Pid::from_raw(child_pid), None) {
+            Ok(()) => true,
+            Err(Errno::ESRCH) => false,
+            Err(_) => true,
+        };
+
+        match call_result {
+            Ok(result) => {
+                let output: ShellOutput =
+                    serde_json::from_value(result.into_json().expect("shell JSON output")).unwrap();
+                assert_eq!(output.exit_code, Some(0));
+                assert!(!output.timed_out);
+                assert!(
+                    !descendant_survived,
+                    "successful foreground completion requires proven descendant containment"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("containment"),
+                    "unproven containment must surface explicitly: {error}"
+                );
+                assert_eq!(
+                    tool.pending_foreground_containment_count_for_test().await,
+                    1,
+                    "an error may return only after managed containment ownership is retained"
+                );
+            }
+        }
+
+        if descendant_survived {
+            let _ = kill(Pid::from_raw(child_pid), Some(Signal::SIGKILL));
+            let _ = killpg(Pid::from_raw(leader_pid), Signal::SIGKILL);
+            for _ in 0..100 {
+                descendant_survived = match kill(Pid::from_raw(child_pid), None) {
+                    Ok(()) => true,
+                    Err(Errno::ESRCH) => false,
+                    Err(_) => true,
+                };
+                if !descendant_survived {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert!(!descendant_survived, "test cleanup must contain descendant");
+        let mut containment_owner_retired = false;
+        for _ in 0..100 {
+            if tool.pending_foreground_containment_count_for_test().await == 0 {
+                containment_owner_retired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            containment_owner_retired,
+            "managed foreground containment owner did not retire after cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_containment_failure_hands_armed_group_to_managed_retry_owner() {
+        use crate::builtin::shell::process_lifecycle::{ProcessGroupControl, ProcessGroupSignal};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct HeldLiveControl {
+            live: AtomicBool,
+            signal_count: AtomicUsize,
+        }
+
+        impl ProcessGroupControl for HeldLiveControl {
+            fn signal(&self, _pgid: i32, _signal: ProcessGroupSignal) -> std::io::Result<bool> {
+                self.signal_count.fetch_add(1, Ordering::SeqCst);
+                Ok(self.live.load(Ordering::SeqCst))
+            }
+
+            fn exists(&self, _pgid: i32) -> std::io::Result<bool> {
+                Ok(self.live.load(Ordering::SeqCst))
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let control = Arc::new(HeldLiveControl {
+            live: AtomicBool::new(true),
+            signal_count: AtomicUsize::new(0),
+        });
+        let config = ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let tool = ShellTool::new(config).with_foreground_process_control_for_test(
+            control.clone(),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            tool.execute_command("exit 0", None, 30),
+        )
+        .await
+        .expect("foreground containment refusal must not hang the caller")
+        .expect_err("unproven containment must not return successful output");
+
+        assert!(
+            error.to_string().contains("containment"),
+            "the caller should receive an explicit containment failure: {error}"
+        );
+        assert_eq!(
+            tool.pending_foreground_containment_count_for_test().await,
+            1,
+            "return is allowed only after a managed retry owner retains child and armed group"
+        );
+        assert!(
+            control.signal_count.load(Ordering::SeqCst) >= 2,
+            "foreground containment must attempt TERM and KILL before quarantine handoff"
+        );
+
+        control.live.store(false, Ordering::SeqCst);
+        let mut containment_owner_retired = false;
+        for _ in 0..100 {
+            if tool.pending_foreground_containment_count_for_test().await == 0 {
+                containment_owner_retired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            containment_owner_retired,
+            "managed containment retry owner did not retire after absence proof"
+        );
+    }
+
+    #[test]
+    fn background_child_runtime_timeout_is_not_a_submission_deadline() {
+        let tool = ShellTool::new(ShellConfig::default());
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"command":"echo test","timeout_secs":7,"background":true}"#.to_string(),
+        )
+        .unwrap();
+        let call = meerkat_core::ToolCallView {
+            id: "background",
+            name: "shell",
+            args: &args,
+        };
+        let deadlines = meerkat_core::ToolDeadlineChain::new(vec![
+            meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            ),
+        ])
+        .unwrap();
+
+        let plan = tool
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolExecutionResolutionContext::new(deadlines),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.deadlines().contributors().len(),
+            1,
+            "the child runtime limit must not shorten detached submission"
+        );
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_shell_timeout_is_rejected_as_invalid_arguments() {
+        let tool = ShellTool::new(ShellConfig::default());
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"command":"echo test","timeout_secs":0}"#.to_string(),
+        )
+        .unwrap();
+        let call = meerkat_core::ToolCallView {
+            id: "zero",
+            name: "shell",
+            args: &args,
+        };
+        let deadlines = meerkat_core::ToolDeadlineChain::new(vec![
+            meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            ),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            tool.resolve_execution_plan(
+                call,
+                &meerkat_core::ToolExecutionResolutionContext::new(deadlines),
+            ),
+            Err(meerkat_core::ToolExecutionResolutionError::InvalidArguments { .. })
+        ));
+        assert!(matches!(
+            tool.call(json!({"command": "echo test", "timeout_secs": 0}))
+                .await,
+            Err(BuiltinToolError::InvalidArgs(_))
+        ));
     }
 
     // ==================== Shell Detection Tests ====================

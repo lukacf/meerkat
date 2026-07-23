@@ -93,13 +93,29 @@ impl AgentToolDispatcher for NoOpDispatcher {
 fn is_comms_tool(name: &str) -> bool {
     matches!(
         name,
-        "send" | "send_message" | "reply_to_peer" | "send_request" | "send_response" | "peers"
+        "send_message" | "reply_to_peer" | "send_request" | "send_response" | "peers"
     )
 }
 
 fn callability_for_context(ctx: &ToolContext, name: &str) -> ToolCallability {
     comms_tool_unavailable_reason(ctx, name)
         .map_or_else(ToolCallability::callable, ToolCallability::unavailable)
+}
+
+fn resolve_comms_execution_plan(
+    tool_context: &ToolContext,
+    call: ToolCallView<'_>,
+    resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError> {
+    if let Some(reason) = callability_for_context(tool_context, call.name).unavailable_reason() {
+        return Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
+            tool_name: call.name.to_string(),
+            reason,
+        });
+    }
+    meerkat_core::ToolExecutionContract::default()
+        .resolve_default(resolution_context.deadlines().clone())
+        .map_err(Into::into)
 }
 
 /// Canonical JSON-to-ToolDef conversion for comms tools.
@@ -133,7 +149,13 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            tools.extend(inner.tools().iter().map(Arc::clone));
+            tools.extend(
+                inner
+                    .tools()
+                    .iter()
+                    .filter(|tool| !is_comms_tool(&tool.name))
+                    .map(Arc::clone),
+            );
             tools.into()
         } else {
             self.tool_defs
@@ -214,6 +236,74 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             .unwrap_or_else(|| Arc::from([]))
     }
 
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        let fingerprint = meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, 0);
+        if is_comms_tool(tool_name) {
+            Ok(fingerprint)
+        } else if let Some(inner) = &self.inner {
+            Ok(fingerprint.with_dependency(&inner.execution_binding_fingerprint(tool_name)?))
+        } else {
+            Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })
+        }
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        if is_comms_tool(call.name) {
+            resolve_comms_execution_plan(&self.tool_context, call, resolution_context)
+        } else if let Some(inner) = &self.inner {
+            inner.resolve_execution_plan(call, dispatch_context, resolution_context)
+        } else {
+            Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if is_comms_tool(call.name) {
+            if plan.mode() != meerkat_core::ToolExecutionMode::Fast {
+                return Err(ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ));
+            }
+            self.dispatch_with_context(call, context).await
+        } else if let Some(inner) = &self.inner {
+            inner
+                .dispatch_resolved_with_context(call, context, plan)
+                .await
+        } else {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let mut catalog = self
             .tool_defs
@@ -227,12 +317,19 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             .collect::<Vec<_>>();
         if let Some(inner) = &self.inner {
             if inner.tool_catalog_capabilities().exact_catalog {
-                catalog.extend(inner.tool_catalog().iter().cloned());
+                catalog.extend(
+                    inner
+                        .tool_catalog()
+                        .iter()
+                        .filter(|entry| !is_comms_tool(&entry.tool.name))
+                        .cloned(),
+                );
             } else {
                 catalog.extend(
                     inner
                         .tools()
                         .iter()
+                        .filter(|tool| !is_comms_tool(&tool.name))
                         .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true)),
                 );
             }
@@ -296,7 +393,13 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             .filter(|tool| callability_for_context(&self.tool_context, &tool.name).is_callable())
             .cloned()
             .collect::<Vec<_>>();
-        tools.extend(self.inner.tools().iter().map(Arc::clone));
+        tools.extend(
+            self.inner
+                .tools()
+                .iter()
+                .filter(|tool| !is_comms_tool(&tool.name))
+                .map(Arc::clone),
+        );
         tools.into()
     }
 
@@ -352,6 +455,65 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         self.inner.pending_catalog_sources()
     }
 
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        let fingerprint = meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, 0);
+        if is_comms_tool(tool_name) {
+            Ok(fingerprint)
+        } else {
+            Ok(fingerprint.with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?))
+        }
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        if is_comms_tool(call.name) {
+            resolve_comms_execution_plan(&self.tool_context, call, resolution_context)
+        } else {
+            self.inner
+                .resolve_execution_plan(call, dispatch_context, resolution_context)
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if is_comms_tool(call.name) {
+            if plan.mode() != meerkat_core::ToolExecutionMode::Fast {
+                return Err(ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ));
+            }
+            self.dispatch_with_context(call, context).await
+        } else {
+            self.inner
+                .dispatch_resolved_with_context(call, context, plan)
+                .await
+        }
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let mut catalog = self
             .tool_defs
@@ -364,12 +526,19 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             })
             .collect::<Vec<_>>();
         if self.inner.tool_catalog_capabilities().exact_catalog {
-            catalog.extend(self.inner.tool_catalog().iter().cloned());
+            catalog.extend(
+                self.inner
+                    .tool_catalog()
+                    .iter()
+                    .filter(|entry| !is_comms_tool(&entry.tool.name))
+                    .cloned(),
+            );
         } else {
             catalog.extend(
                 self.inner
                     .tools()
                     .iter()
+                    .filter(|tool| !is_comms_tool(&tool.name))
                     .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true)),
             );
         }
@@ -396,6 +565,15 @@ mod tests {
         tool: Arc<ToolDef>,
     }
 
+    struct HybridExecutionDispatcher {
+        catalog: Arc<[ToolCatalogEntry]>,
+    }
+
+    struct DuplicateCommsDispatcher {
+        catalog: Arc<[ToolCatalogEntry]>,
+        dispatched: AtomicBool,
+    }
+
     impl ExactDeferredDispatcher {
         fn new() -> Self {
             Self {
@@ -419,6 +597,75 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                     provenance: None,
                 }),
+            }
+        }
+    }
+
+    impl HybridExecutionDispatcher {
+        fn new() -> Self {
+            let tool = Arc::new(ToolDef {
+                name: "hybrid_lookup".into(),
+                description: "Run inline or detach from typed arguments".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                provenance: None,
+            });
+            let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+                meerkat_core::RunnerIdentity::new("test.hybrid_lookup", "v1")
+                    .expect("valid runner identity"),
+                meerkat_core::RestartClass::NonResumable,
+                meerkat_core::IdempotencyScope::InteractionAndArguments,
+                std::time::Duration::from_secs(10),
+            )
+            .expect("valid detached policy");
+            let execution = meerkat_core::ToolExecutionContract::new(
+                std::collections::BTreeSet::from([
+                    meerkat_core::ToolExecutionMode::Fast,
+                    meerkat_core::ToolExecutionMode::Detached,
+                ]),
+                meerkat_core::ToolExecutionMode::Fast,
+                None,
+                Some(detached),
+            )
+            .expect("valid hybrid execution contract");
+            Self {
+                catalog: Arc::from([
+                    ToolCatalogEntry::session_inline(tool, true).with_execution_contract(execution)
+                ]),
+            }
+        }
+    }
+
+    impl DuplicateCommsDispatcher {
+        fn new() -> Self {
+            let tool = Arc::new(ToolDef {
+                name: "peers".into(),
+                description: "Inner duplicate that must never win".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Callback,
+                    source_id: "inner-duplicate".into(),
+                }),
+            });
+            let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+                meerkat_core::RunnerIdentity::new("test.inner_peers", "v1")
+                    .expect("valid runner identity"),
+                meerkat_core::RestartClass::NonResumable,
+                meerkat_core::IdempotencyScope::ToolCall,
+                std::time::Duration::from_secs(10),
+            )
+            .expect("valid detached policy");
+            let execution = meerkat_core::ToolExecutionContract::new(
+                std::collections::BTreeSet::from([meerkat_core::ToolExecutionMode::Detached]),
+                meerkat_core::ToolExecutionMode::Detached,
+                None,
+                Some(detached),
+            )
+            .expect("valid detached execution contract");
+            Self {
+                catalog: Arc::from([
+                    ToolCatalogEntry::session_inline(tool, true).with_execution_contract(execution)
+                ]),
+                dispatched: AtomicBool::new(false),
             }
         }
     }
@@ -492,6 +739,132 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl AgentToolDispatcher for HybridExecutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            let arguments: serde_json::Value =
+                serde_json::from_str(call.args.get()).map_err(|error| {
+                    meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                        tool_name: call.name.to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            let mode = if arguments["detach"].as_bool() == Some(true) {
+                meerkat_core::ToolExecutionMode::Detached
+            } else {
+                meerkat_core::ToolExecutionMode::Fast
+            };
+            self.catalog[0]
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &ToolDispatchContext,
+            plan: &meerkat_core::ResolvedToolExecutionPlan,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            if plan.mode() != meerkat_core::ToolExecutionMode::Detached {
+                return Err(ToolError::execution_failed(
+                    "test detached owner received the wrong plan",
+                ));
+            }
+            self.dispatch(call).await
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for DuplicateCommsDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: true,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            _call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            self.catalog[0]
+                .execution
+                .resolve_default(resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            self.dispatched.store(true, Ordering::SeqCst);
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                r#"{"owner":"inner"}"#.to_string(),
+                false,
+            )
+            .into())
+        }
+    }
+
+    fn execution_resolution_context() -> meerkat_core::ToolExecutionResolutionContext {
+        meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .expect("valid test deadline chain"),
+        )
+    }
+
     fn test_router() -> (Arc<Router>, TrustedPeersView) {
         let (_inbox, inbox_sender) = Inbox::new();
         let trusted_peers = Arc::new(RwLock::new(TrustStore::default()));
@@ -552,6 +925,21 @@ mod tests {
             );
             assert_eq!(prov.source_id, "comms");
         }
+    }
+
+    #[test]
+    fn comms_routing_names_match_the_canonical_local_definitions() {
+        for definition in comms_tool_defs() {
+            assert!(
+                is_comms_tool(&definition.name),
+                "canonical local comms tool '{}' must route to the local owner",
+                definition.name
+            );
+        }
+        assert!(
+            !is_comms_tool("send"),
+            "the removed alias must not shadow an inner tool without a canonical local definition"
+        );
     }
 
     #[tokio::test]
@@ -640,6 +1028,227 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&outcome.result.text_content())
             .expect("tool result should be JSON");
         assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn comms_wrapper_preserves_catalog_and_forwards_hybrid_execution_resolution() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::with_inner(
+            router,
+            trusted_peers,
+            Arc::new(HybridExecutionDispatcher::new()),
+        );
+        let catalog = dispatcher.tool_catalog();
+        let hybrid = catalog
+            .iter()
+            .find(|entry| entry.tool.name == "hybrid_lookup")
+            .expect("hybrid inner tool remains in exact catalog");
+        assert!(
+            hybrid
+                .execution
+                .supported_modes()
+                .contains(&meerkat_core::ToolExecutionMode::Detached),
+            "wrapper must preserve the exact inner execution contract"
+        );
+
+        let args = serde_json::value::RawValue::from_string(r#"{"detach":true}"#.to_string())
+            .expect("valid hybrid arguments");
+        let call = ToolCallView {
+            id: "hybrid-generic",
+            name: "hybrid_lookup",
+            args: &args,
+        };
+        let context = ToolDispatchContext::default();
+        let plan = dispatcher
+            .resolve_execution_plan(call, &context, &execution_resolution_context())
+            .expect("allowed inner plan should resolve");
+
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Detached);
+        dispatcher
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect("generic comms wrapper forwards the resolved plan");
+    }
+
+    #[tokio::test]
+    async fn dyn_comms_wrapper_forwards_hybrid_execution_resolution() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = DynCommsToolDispatcher::new(
+            router,
+            trusted_peers,
+            Arc::new(HybridExecutionDispatcher::new()),
+        );
+        assert!(dispatcher.tool_catalog_capabilities().exact_catalog);
+        let catalog = dispatcher.tool_catalog();
+        let hybrid = catalog
+            .iter()
+            .find(|entry| entry.tool.name == "hybrid_lookup")
+            .expect("hybrid inner tool remains in exact catalog");
+        assert!(
+            hybrid
+                .execution
+                .supported_modes()
+                .contains(&meerkat_core::ToolExecutionMode::Detached),
+            "dynamic wrapper must preserve the exact inner execution contract"
+        );
+        let args = serde_json::value::RawValue::from_string(r#"{"detach":true}"#.to_string())
+            .expect("valid hybrid arguments");
+        let call = ToolCallView {
+            id: "hybrid-dyn",
+            name: "hybrid_lookup",
+            args: &args,
+        };
+        let context = ToolDispatchContext::default();
+        let plan = dispatcher
+            .resolve_execution_plan(call, &context, &execution_resolution_context())
+            .expect("allowed inner plan should resolve");
+
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Detached);
+        dispatcher
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect("dynamic comms wrapper forwards the resolved plan");
+    }
+
+    #[tokio::test]
+    async fn generic_comms_wrapper_keeps_one_local_winner_when_inner_duplicates_name() {
+        let (router, trusted_peers) = test_router();
+        let inner = Arc::new(DuplicateCommsDispatcher::new());
+        let dispatcher = CommsToolDispatcher::with_inner(router, trusted_peers, Arc::clone(&inner));
+
+        assert!(dispatcher.tool_catalog_capabilities().exact_catalog);
+        assert!(
+            dispatcher
+                .tool_catalog_capabilities()
+                .may_require_catalog_control_plane
+        );
+        assert_eq!(
+            dispatcher
+                .tools()
+                .iter()
+                .filter(|tool| tool.name == "peers")
+                .count(),
+            1,
+            "provider tools must contain one canonical comms winner"
+        );
+        let catalog = dispatcher.tool_catalog();
+        let peers = catalog
+            .iter()
+            .filter(|entry| entry.tool.name == "peers")
+            .collect::<Vec<_>>();
+        assert_eq!(peers.len(), 1, "exact catalog must contain one winner");
+        assert_eq!(
+            peers[0]
+                .tool
+                .provenance
+                .as_ref()
+                .map(|value| value.kind.clone()),
+            Some(ToolSourceKind::Comms),
+            "the wrapper-owned comms definition must win"
+        );
+        assert_eq!(
+            peers[0].execution.default_mode(),
+            meerkat_core::ToolExecutionMode::Fast,
+            "the inner duplicate's detached contract must not leak through"
+        );
+
+        let args =
+            serde_json::value::RawValue::from_string("{}".to_string()).expect("valid arguments");
+        let plan = dispatcher
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "generic-peers-plan",
+                    name: "peers",
+                    args: &args,
+                },
+                &ToolDispatchContext::default(),
+                &execution_resolution_context(),
+            )
+            .expect("local peers plan should resolve");
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Fast);
+        dispatcher
+            .dispatch(ToolCallView {
+                id: "generic-peers-dispatch",
+                name: "peers",
+                args: &args,
+            })
+            .await
+            .expect("local peers dispatch should succeed");
+        assert!(
+            !inner.dispatched.load(Ordering::SeqCst),
+            "dispatch must follow the same local winner as tools/catalog/resolution"
+        );
+    }
+
+    #[tokio::test]
+    async fn dyn_comms_wrapper_keeps_one_local_winner_when_inner_duplicates_name() {
+        let (router, trusted_peers) = test_router();
+        let inner = Arc::new(DuplicateCommsDispatcher::new());
+        let inner_dispatcher: Arc<dyn AgentToolDispatcher> = inner.clone();
+        let dispatcher = DynCommsToolDispatcher::new(router, trusted_peers, inner_dispatcher);
+
+        assert!(dispatcher.tool_catalog_capabilities().exact_catalog);
+        assert!(
+            dispatcher
+                .tool_catalog_capabilities()
+                .may_require_catalog_control_plane
+        );
+        assert_eq!(
+            dispatcher
+                .tools()
+                .iter()
+                .filter(|tool| tool.name == "peers")
+                .count(),
+            1,
+            "provider tools must contain one canonical comms winner"
+        );
+        let catalog = dispatcher.tool_catalog();
+        let peers = catalog
+            .iter()
+            .filter(|entry| entry.tool.name == "peers")
+            .collect::<Vec<_>>();
+        assert_eq!(peers.len(), 1, "exact catalog must contain one winner");
+        assert_eq!(
+            peers[0]
+                .tool
+                .provenance
+                .as_ref()
+                .map(|value| value.kind.clone()),
+            Some(ToolSourceKind::Comms),
+            "the wrapper-owned comms definition must win"
+        );
+        assert_eq!(
+            peers[0].execution.default_mode(),
+            meerkat_core::ToolExecutionMode::Fast,
+            "the inner duplicate's detached contract must not leak through"
+        );
+
+        let args =
+            serde_json::value::RawValue::from_string("{}".to_string()).expect("valid arguments");
+        let plan = dispatcher
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "dyn-peers-plan",
+                    name: "peers",
+                    args: &args,
+                },
+                &ToolDispatchContext::default(),
+                &execution_resolution_context(),
+            )
+            .expect("local peers plan should resolve");
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Fast);
+        dispatcher
+            .dispatch(ToolCallView {
+                id: "dyn-peers-dispatch",
+                name: "peers",
+                args: &args,
+            })
+            .await
+            .expect("local peers dispatch should succeed");
+        assert!(
+            !inner.dispatched.load(Ordering::SeqCst),
+            "dispatch must follow the same local winner as tools/catalog/resolution"
+        );
     }
 
     #[tokio::test]

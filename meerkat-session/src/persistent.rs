@@ -55,8 +55,8 @@ use meerkat_core::service::{
     SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
     SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
-    SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
-    StageToolResultsResult, StartTurnRequest,
+    SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
     LegacyCheckpointMigrationDisposition, LegacyCheckpointTranscriptRelation,
@@ -8743,10 +8743,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
         match error {
-            SessionError::Agent(AgentError::CallbackPending { tool_name, args }) => {
-                Some(CoreApplyTerminal::CallbackPending {
-                    tool_name: tool_name.clone(),
-                    args: args.clone(),
+            SessionError::Agent(AgentError::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }),
+            SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
+                Some(CoreApplyTerminal::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
                 })
             }
             _ => None,
@@ -8879,12 +8887,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(CoreApplyTerminal::RunResult(run_result)) => {
                 CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), *run_result)
             }
-            Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-                CoreApplyOutput::with_callback_pending(
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => CoreApplyOutput::with_callback_pending(
+                receipt,
+                Some(session_snapshot),
+                tool_use_id,
+                tool_name,
+                args,
+            ),
+            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
+                CoreApplyOutput::with_callback_batch_pending(
                     receipt,
                     Some(session_snapshot),
-                    tool_name,
-                    args,
+                    pending_tool_calls,
                 )
             }
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
@@ -11155,14 +11173,31 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     };
                     let snapshot_state = guard.clone();
                     let mut candidate = snapshot_state.clone();
-                    let accepted = candidate.stage_tool_results(req.results.clone(), accepted_at);
+                    let accepted = candidate
+                        .try_stage_tool_results(req.results.clone(), accepted_at)
+                        .map_err(|error| {
+                            SessionError::Agent(AgentError::ConfigError(error.to_string()))
+                        })?;
                     (accepted, snapshot_state, candidate)
                 };
 
                 if accepted == 0 {
+                    let disposition = match self.load_authoritative_session_base(id).await? {
+                        Some(session)
+                            if matches!(
+                                session.classify_callback_result_ingress(&req.results)?,
+                                meerkat_core::session::CallbackResultIngress::AlreadyApplied
+                            ) =>
+                        {
+                            StageToolResultsDisposition::AlreadyApplied
+                        }
+                        Some(_) => StageToolResultsDisposition::AlreadyStaged,
+                        None => return Err(SessionError::NotFound { id: id.clone() }),
+                    };
                     drop(gate_guard);
                     return Ok(StageToolResultsResult {
                         accepted_result_count: accepted,
+                        disposition,
                     });
                 }
 
@@ -11185,6 +11220,16 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 self.reject_if_archived_session(id, &session)
                     .await
                     .map_err(crate::control_error_into_session_error)?;
+                if matches!(
+                    session.classify_callback_result_ingress(&req.results)?,
+                    meerkat_core::session::CallbackResultIngress::AlreadyApplied
+                ) {
+                    drop(gate_guard);
+                    return Ok(StageToolResultsResult {
+                        accepted_result_count: 0,
+                        disposition: StageToolResultsDisposition::AlreadyApplied,
+                    });
+                }
                 write_deferred_turn_state(&mut session, persisted_state)
                     .map_err(crate::control_error_into_session_error)?;
                 self.save_normalized_session(session).await?;
@@ -11201,7 +11246,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         }
                     };
                     if *guard == snapshot_state {
-                        Some(guard.stage_tool_results(req.results.clone(), accepted_at))
+                        Some(
+                            guard
+                                .try_stage_tool_results(req.results.clone(), accepted_at)
+                                .map_err(|error| {
+                                    SessionError::Agent(AgentError::ConfigError(error.to_string()))
+                                })?,
+                        )
                     } else {
                         None
                     }
@@ -11212,6 +11263,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     drop(gate_guard);
                     return Ok(StageToolResultsResult {
                         accepted_result_count: accepted,
+                        disposition: StageToolResultsDisposition::Staged,
                     });
                 }
 
@@ -11224,6 +11276,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     let _ = self.discard_live_session_unfenced(id).await;
                     return Ok(StageToolResultsResult {
                         accepted_result_count: accepted,
+                        disposition: StageToolResultsDisposition::Staged,
                     });
                 }
             }
@@ -11250,14 +11303,29 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         self.reject_if_archived_session(id, &session)
             .await
             .map_err(crate::control_error_into_session_error)?;
+        if matches!(
+            session.classify_callback_result_ingress(&req.results)?,
+            meerkat_core::session::CallbackResultIngress::AlreadyApplied
+        ) {
+            return Ok(StageToolResultsResult {
+                accepted_result_count: 0,
+                disposition: StageToolResultsDisposition::AlreadyApplied,
+            });
+        }
         let mut state = session.deferred_turn_state().unwrap_or_default();
-        let accepted =
-            state.stage_tool_results(req.results, meerkat_core::time_compat::SystemTime::now());
+        let accepted = state
+            .try_stage_tool_results(req.results, meerkat_core::time_compat::SystemTime::now())
+            .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))?;
         write_deferred_turn_state(&mut session, state)
             .map_err(crate::control_error_into_session_error)?;
         self.save_normalized_session(session).await?;
         Ok(StageToolResultsResult {
             accepted_result_count: accepted,
+            disposition: if accepted == 0 {
+                StageToolResultsDisposition::AlreadyStaged
+            } else {
+                StageToolResultsDisposition::Staged
+            },
         })
     }
 }
@@ -14252,6 +14320,7 @@ mod tests {
             };
             if self.callback_pending_after_run {
                 return Err(meerkat_core::error::AgentError::CallbackPending {
+                    tool_use_id: "test-call".to_string(),
                     tool_name: "test_callback".to_string(),
                     args: serde_json::json!({}),
                 });
@@ -26775,6 +26844,7 @@ mod tests {
             .await
             .expect("stage_tool_results should update runtime authority");
         assert_eq!(staged.accepted_result_count, 1);
+        assert_eq!(staged.disposition, StageToolResultsDisposition::Staged);
 
         let authoritative = service
             .load_authoritative_session(&result.session_id)
@@ -26844,6 +26914,85 @@ mod tests {
             .deferred_turn_state()
             .expect("resumed session should preserve staged tool results");
         assert_eq!(resumed_deferred.pending_tool_results().len(), 1);
+
+        let before_redelivery = serde_json::to_value(
+            restarted
+                .load_authoritative_session(&result.session_id)
+                .await
+                .expect("authoritative replay load should succeed")
+                .expect("authoritative replay session should exist"),
+        )
+        .expect("serialize replayed authoritative session");
+        let duplicate = restarted
+            .stage_tool_results(
+                &result.session_id,
+                StageToolResultsRequest {
+                    results: vec![ToolResult::new(
+                        "tool-call-1".to_string(),
+                        "callback result".to_string(),
+                        false,
+                    )],
+                },
+            )
+            .await
+            .expect("identical persistent redelivery should coalesce");
+        assert_eq!(duplicate.accepted_result_count, 0);
+        assert_eq!(
+            duplicate.disposition,
+            StageToolResultsDisposition::AlreadyStaged,
+            "a crash after durable stage but before run must remain a runnable continuation"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                restarted
+                    .load_authoritative_session(&result.session_id)
+                    .await
+                    .expect("authoritative duplicate load should succeed")
+                    .expect("authoritative duplicate session should exist"),
+            )
+            .unwrap(),
+            before_redelivery,
+            "identical persistent redelivery must be a byte-noop"
+        );
+
+        for rejected in [
+            ToolResult::new(
+                "tool-call-1".to_string(),
+                "conflicting callback result".to_string(),
+                false,
+            ),
+            ToolResult::new(
+                "wrong-tool-call".to_string(),
+                "callback result".to_string(),
+                false,
+            ),
+        ] {
+            let error = restarted
+                .stage_tool_results(
+                    &result.session_id,
+                    StageToolResultsRequest {
+                        results: vec![rejected],
+                    },
+                )
+                .await
+                .expect_err("conflicting or wrong-id redelivery must fail typed");
+            assert!(matches!(
+                error,
+                SessionError::Agent(AgentError::ConfigError(_))
+            ));
+            assert_eq!(
+                serde_json::to_value(
+                    restarted
+                        .load_authoritative_session(&result.session_id)
+                        .await
+                        .expect("authoritative rejection load should succeed")
+                        .expect("authoritative rejection session should exist"),
+                )
+                .unwrap(),
+                before_redelivery,
+                "rejected persistent redelivery must not poison the pending continuation"
+            );
+        }
     }
 
     #[tokio::test]
@@ -29743,6 +29892,7 @@ mod tests {
                 interaction_id: ids[1],
                 tool_name: "external".to_string(),
                 args: serde_json::json!({"value": 1}),
+                pending_tool_calls: Vec::new(),
             },
             AgentEvent::InteractionFailed {
                 interaction_id: ids[2],

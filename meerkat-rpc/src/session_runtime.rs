@@ -1758,8 +1758,8 @@ pub struct SessionRuntime {
     callback_request_tx: StdRwLock<Option<mpsc::Sender<CallbackRequestEnvelope>>>,
     /// Counter for generating unique server-originated callback request IDs.
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
-    /// Globally registered callback tool definitions (via `tools/register`).
-    registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
+    /// Callback tool definitions and their inseparable live generation.
+    registered_tools_slot: StdRwLock<Arc<crate::callback_dispatcher::CallbackToolRegistry>>,
     /// Handle to the builder's mob tools slot inside the session service.
     /// Captured before the builder is consumed so `set_mob_tools` can write
     /// through to the actual builder that creates agents.
@@ -2307,7 +2307,9 @@ impl SessionRuntime {
             callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
             ))),
-            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            registered_tools_slot: StdRwLock::new(Arc::new(
+                crate::callback_dispatcher::CallbackToolRegistry::default(),
+            )),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
@@ -2448,7 +2450,9 @@ impl SessionRuntime {
             callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
             ))),
-            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            registered_tools_slot: StdRwLock::new(Arc::new(
+                crate::callback_dispatcher::CallbackToolRegistry::default(),
+            )),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
@@ -4065,14 +4069,14 @@ impl SessionRuntime {
 
     fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
         let tx = self.callback_request_tx()?;
-        Some(
-            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                self.registered_tools(),
+        Some(Arc::new(
+            crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
+                self.callback_tool_registry(),
                 tx,
                 self.callback_id_counter(),
                 vec![],
-            )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
-        )
+            ),
+        ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
     }
 
     /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
@@ -4998,8 +5002,7 @@ impl SessionRuntime {
     pub fn init_callback_channel(&self) -> mpsc::Receiver<CallbackRequestEnvelope> {
         let (tx, rx) = mpsc::channel(crate::NOTIFICATION_CHANNEL_CAPACITY);
         let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let registered_tools = Arc::new(StdRwLock::new(Vec::new()));
-        self.set_callback_channel(tx, id_counter, registered_tools);
+        self.set_callback_channel(tx, id_counter);
         rx
     }
 
@@ -5011,19 +5014,15 @@ impl SessionRuntime {
         &self,
         tx: mpsc::Sender<CallbackRequestEnvelope>,
         id_counter: Arc<std::sync::atomic::AtomicU64>,
-        registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
     ) {
         if let Ok(mut slot) = self.callback_request_tx.write() {
             *slot = Some(tx);
         }
-        // id_counter and registered_tools are already Arc-shared — the server
-        // passes its own Arcs into the runtime at construction time. When using
-        // the &self path (after Arc wrapping), we store them atomically.
         if let Ok(mut c) = self.callback_id_counter_slot.write() {
             *c = id_counter;
         }
         if let Ok(mut t) = self.registered_tools_slot.write() {
-            *t = registered_tools;
+            *t = Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default());
         }
     }
 
@@ -5044,13 +5043,15 @@ impl SessionRuntime {
             .unwrap_or_default()
     }
 
-    /// Get the globally registered callback tool definitions.
-    pub fn registered_tools(&self) -> Arc<StdRwLock<Vec<meerkat_core::ToolDef>>> {
+    /// Get the inseparable callback registry mutation/epoch authority.
+    pub fn callback_tool_registry(&self) -> Arc<crate::callback_dispatcher::CallbackToolRegistry> {
         self.registered_tools_slot
             .read()
             .ok()
             .map(|g| g.clone())
-            .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+            .unwrap_or_else(
+                || Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default()),
+            )
     }
 
     /// P1#5: attach the live adapter host so the runtime can fan out
@@ -9771,16 +9772,36 @@ fn completion_outcome_to_rpc_result(
             message: "turn completed without result".to_string(),
             data: None,
         }),
-        CompletionOutcome::CallbackPending { tool_name, args } => Err(RpcError {
+        CompletionOutcome::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("callback pending for tool '{tool_name}'"),
             data: Some(serde_json::json!({
                 "session_id": session_id.to_string(),
                 "resumable": true,
+                "tool_use_id": tool_use_id,
                 "tool_name": tool_name,
                 "args": args,
             })),
         }),
+        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+            let first = pending_tool_calls.first();
+            let tool_name = first
+                .map(|call| call.tool_name.as_str())
+                .unwrap_or("callback_batch");
+            Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("callback pending for tool '{tool_name}'"),
+                data: Some(serde_json::json!({
+                    "session_id": session_id.to_string(),
+                    "resumable": true,
+                    "pending_tool_calls": pending_tool_calls,
+                })),
+            })
+        }
         CompletionOutcome::Cancelled => Err(RpcError {
             code: error::REQUEST_CANCELLED,
             message: "request cancelled".to_string(),
@@ -25057,6 +25078,7 @@ mod tests {
         let session_id = SessionId::new();
         let err = completion_outcome_to_rpc_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({ "value": "browser" }),
             },
@@ -25069,6 +25091,7 @@ mod tests {
         let data = err.data.expect("callback pending error data");
         assert_eq!(data["session_id"], session_id.to_string());
         assert_eq!(data["resumable"], true);
+        assert_eq!(data["tool_use_id"], "call-1");
         assert_eq!(data["tool_name"], "external_mock");
         assert_eq!(data["args"], serde_json::json!({ "value": "browser" }));
     }

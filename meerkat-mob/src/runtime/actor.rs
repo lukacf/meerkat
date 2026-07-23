@@ -1527,7 +1527,8 @@ fn kickoff_resolution_input(
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             mob_dsl::MobMachineInput::KickoffResolveStarted { member_id }
         }
-        meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }
+        | meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending { .. } => {
             mob_dsl::MobMachineInput::KickoffResolveCallbackPending { member_id }
         }
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
@@ -13282,8 +13283,11 @@ impl MobActor {
             }
         };
 
-        if let meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } =
-            &outcome
+        if let meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+            tool_name,
+            args,
+            ..
+        } = &outcome
         {
             tracing::debug!(
                 agent_identity = %agent_identity,

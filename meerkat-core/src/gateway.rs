@@ -27,6 +27,15 @@ use crate::types::{ToolCallView, ToolDef, ToolName};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Process-local namespace for turn-local resolution witnesses. These IDs are
+// deliberately neither serialized nor recovered.
+static NEXT_EXECUTION_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_execution_authority_id() -> u64 {
+    NEXT_EXECUTION_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Entry for a dispatcher in the gateway.
 struct DispatcherEntry {
@@ -50,7 +59,7 @@ enum EntryRouting {
 /// dispatch to, a typed unavailability, or no owner at all. Collisions are not
 /// representable here — they fail closed as typed errors during resolution.
 enum GatewayRouting<'a> {
-    Dispatch(&'a DispatcherEntry),
+    Dispatch(usize, &'a DispatcherEntry),
     Unavailable(ToolUnavailableReason),
     NotFound,
 }
@@ -59,7 +68,7 @@ enum GatewayRouting<'a> {
 /// because the dynamic compositor deliberately does not freeze ownership in a
 /// build-time routing table.
 enum DynamicRouting<'a> {
-    Dispatch(&'a dyn AgentToolDispatcher),
+    Dispatch(usize, &'a dyn AgentToolDispatcher),
     Unavailable(ToolUnavailableReason),
     NotFound,
 }
@@ -90,6 +99,7 @@ pub struct ToolGateway {
     /// guaranteed by the collision check), so routing for build-known tools is
     /// a typed lookup, not first-wins iteration re-derived on every call.
     routing: HashMap<ToolName, usize>,
+    execution_authority_id: u64,
 }
 
 impl std::fmt::Debug for ToolGateway {
@@ -108,6 +118,23 @@ impl std::fmt::Debug for ToolGateway {
 }
 
 impl ToolGateway {
+    fn execution_authority_key(&self) -> String {
+        format!("tool-gateway:{}", self.execution_authority_id)
+    }
+
+    fn owner_witness(
+        &self,
+        owner_index: usize,
+        binding_fingerprint: crate::EphemeralToolBindingFingerprint,
+    ) -> Result<crate::ToolExecutionOwnerWitness, crate::ToolExecutionResolutionError> {
+        crate::ToolExecutionOwnerWitness::new(
+            self.execution_authority_key(),
+            owner_index.to_string(),
+            binding_fingerprint,
+        )
+        .map_err(crate::ToolExecutionResolutionError::from)
+    }
+
     /// Create a new gateway with a base dispatcher and optional overlay.
     ///
     pub fn new(
@@ -135,12 +162,41 @@ impl ToolGateway {
             .into()
     }
 
+    fn binding_fingerprint(
+        dispatcher: &dyn AgentToolDispatcher,
+        name: &str,
+    ) -> Option<crate::EphemeralToolBindingFingerprint> {
+        dispatcher.execution_binding_fingerprint(name).ok()
+    }
+
     fn route_not_found_as_unavailable(name: &str, err: ToolError) -> ToolError {
         match err {
             ToolError::NotFound { name: err_name } if err_name == name => {
                 ToolError::unavailable(name, ToolUnavailableReason::NotCurrentlyCallable)
             }
             other => other,
+        }
+    }
+
+    fn resolution_not_found_as_unavailable(
+        name: &str,
+        error: crate::ToolExecutionResolutionError,
+    ) -> crate::ToolExecutionResolutionError {
+        match error {
+            crate::ToolExecutionResolutionError::NotFound { tool_name } if tool_name == name => {
+                crate::ToolExecutionResolutionError::Unavailable {
+                    tool_name,
+                    reason: ToolUnavailableReason::NotCurrentlyCallable,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn collision_resolution_error(name: &str) -> crate::ToolExecutionResolutionError {
+        crate::ToolExecutionResolutionError::Unavailable {
+            tool_name: name.to_string(),
+            reason: ToolUnavailableReason::TemporarilyUnavailable,
         }
     }
 
@@ -159,7 +215,7 @@ impl ToolGateway {
                 return Ok(GatewayRouting::NotFound);
             };
             return match Self::entry_routing(owner, name) {
-                EntryRouting::Callable => Ok(GatewayRouting::Dispatch(owner)),
+                EntryRouting::Callable => Ok(GatewayRouting::Dispatch(owner_index, owner)),
                 EntryRouting::Unavailable(reason) => Ok(GatewayRouting::Unavailable(reason)),
                 EntryRouting::NotSurfaced => {
                     let surfaced_elsewhere = self.entries.iter().enumerate().any(|(idx, other)| {
@@ -180,8 +236,8 @@ impl ToolGateway {
                 }
             };
         }
-        let mut surfaced: Option<(&DispatcherEntry, EntryRouting)> = None;
-        for entry in &self.entries {
+        let mut surfaced: Option<(usize, &DispatcherEntry, EntryRouting)> = None;
+        for (entry_index, entry) in self.entries.iter().enumerate() {
             match Self::entry_routing(entry, name) {
                 EntryRouting::NotSurfaced => {}
                 routing => {
@@ -191,14 +247,16 @@ impl ToolGateway {
                              multiple dispatchers)"
                         )));
                     }
-                    surfaced = Some((entry, routing));
+                    surfaced = Some((entry_index, entry, routing));
                 }
             }
         }
         Ok(match surfaced {
-            Some((entry, EntryRouting::Callable)) => GatewayRouting::Dispatch(entry),
-            Some((_, EntryRouting::Unavailable(reason))) => GatewayRouting::Unavailable(reason),
-            Some((_, EntryRouting::NotSurfaced)) | None => GatewayRouting::NotFound,
+            Some((entry_index, entry, EntryRouting::Callable)) => {
+                GatewayRouting::Dispatch(entry_index, entry)
+            }
+            Some((_, _, EntryRouting::Unavailable(reason))) => GatewayRouting::Unavailable(reason),
+            Some((_, _, EntryRouting::NotSurfaced)) | None => GatewayRouting::NotFound,
         })
     }
 
@@ -289,7 +347,11 @@ impl ToolGatewayBuilder {
             entries.push(DispatcherEntry { dispatcher });
         }
 
-        Ok(ToolGateway { entries, routing })
+        Ok(ToolGateway {
+            entries,
+            routing,
+            execution_authority_id: next_execution_authority_id(),
+        })
     }
 }
 
@@ -306,6 +368,47 @@ impl AgentToolDispatcher for ToolGateway {
             .into()
     }
 
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &crate::ToolDispatchContext,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+    ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+        match self
+            .resolve_routing(call.name)
+            .map_err(|_| Self::collision_resolution_error(call.name))?
+        {
+            GatewayRouting::Dispatch(owner_index, entry) => {
+                let before = Self::binding_fingerprint(entry.dispatcher.as_ref(), call.name)
+                    .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                        tool_name: call.name.to_string(),
+                    })?;
+                let plan = entry
+                    .dispatcher
+                    .resolve_execution_plan(call, dispatch_context, resolution_context)
+                    .map_err(|error| Self::resolution_not_found_as_unavailable(call.name, error))?;
+                if Self::binding_fingerprint(entry.dispatcher.as_ref(), call.name).as_ref()
+                    != Some(&before)
+                {
+                    return Err(crate::ToolExecutionResolutionError::Unavailable {
+                        tool_name: call.name.to_string(),
+                        reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                    });
+                }
+                plan.with_owner_witness(self.owner_witness(owner_index, before)?)
+            }
+            GatewayRouting::Unavailable(reason) => {
+                Err(crate::ToolExecutionResolutionError::Unavailable {
+                    tool_name: call.name.to_string(),
+                    reason,
+                })
+            }
+            GatewayRouting::NotFound => Err(crate::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            }),
+        }
+    }
+
     /// Dispatch a tool call.
     ///
     /// Returns:
@@ -318,7 +421,7 @@ impl AgentToolDispatcher for ToolGateway {
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
         match self.resolve_routing(call.name)? {
-            GatewayRouting::Dispatch(entry) => entry
+            GatewayRouting::Dispatch(_, entry) => entry
                 .dispatcher
                 .dispatch(call)
                 .await
@@ -334,13 +437,50 @@ impl AgentToolDispatcher for ToolGateway {
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
         match self.resolve_routing(call.name)? {
-            GatewayRouting::Dispatch(entry) => entry
+            GatewayRouting::Dispatch(_, entry) => entry
                 .dispatcher
                 .dispatch_with_context(call, context)
                 .await
                 .map_err(|err| Self::route_not_found_as_unavailable(call.name, err)),
             GatewayRouting::Unavailable(reason) => Err(ToolError::unavailable(call.name, reason)),
             GatewayRouting::NotFound => Err(ToolError::not_found(call.name)),
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &crate::ToolDispatchContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        let authority_key = self.execution_authority_key();
+        let Some(witness) = plan.owner_witness(&authority_key) else {
+            return Err(ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::ExecutionOwnerChanged,
+            ));
+        };
+        let routing = self.resolve_routing(call.name).map_err(|_| {
+            ToolError::unavailable(call.name, ToolUnavailableReason::ExecutionOwnerChanged)
+        })?;
+        match routing {
+            GatewayRouting::Dispatch(owner_index, entry)
+                if witness.owner_key() == owner_index.to_string()
+                    && Self::binding_fingerprint(entry.dispatcher.as_ref(), call.name).as_ref()
+                        == Some(witness.binding_fingerprint()) =>
+            {
+                entry
+                    .dispatcher
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await
+                    .map_err(|error| Self::route_not_found_as_unavailable(call.name, error))
+            }
+            GatewayRouting::Dispatch(_, _)
+            | GatewayRouting::Unavailable(_)
+            | GatewayRouting::NotFound => Err(ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::ExecutionOwnerChanged,
+            )),
         }
     }
 
@@ -531,11 +671,32 @@ impl AgentToolDispatcher for ToolGateway {
 /// dynamic compositor is not a first-child ownership authority.
 pub struct DynamicToolComposite {
     dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
+    execution_authority_id: u64,
 }
 
 impl DynamicToolComposite {
     pub fn new(dispatchers: Vec<Arc<dyn AgentToolDispatcher>>) -> Self {
-        Self { dispatchers }
+        Self {
+            dispatchers,
+            execution_authority_id: next_execution_authority_id(),
+        }
+    }
+
+    fn execution_authority_key(&self) -> String {
+        format!("dynamic-tool-composite:{}", self.execution_authority_id)
+    }
+
+    fn owner_witness(
+        &self,
+        owner_index: usize,
+        binding_fingerprint: crate::EphemeralToolBindingFingerprint,
+    ) -> Result<crate::ToolExecutionOwnerWitness, crate::ToolExecutionResolutionError> {
+        crate::ToolExecutionOwnerWitness::new(
+            self.execution_authority_key(),
+            owner_index.to_string(),
+            binding_fingerprint,
+        )
+        .map_err(crate::ToolExecutionResolutionError::from)
     }
 
     fn duplicate_tool_error(name: &str) -> ToolError {
@@ -564,22 +725,24 @@ impl DynamicToolComposite {
     }
 
     fn resolve_live_routing(&self, name: &str) -> Result<DynamicRouting<'_>, ToolError> {
-        let mut surfaced: Option<(&dyn AgentToolDispatcher, EntryRouting)> = None;
-        for dispatcher in &self.dispatchers {
+        let mut surfaced: Option<(usize, &dyn AgentToolDispatcher, EntryRouting)> = None;
+        for (owner_index, dispatcher) in self.dispatchers.iter().enumerate() {
             match Self::entry_routing(dispatcher.as_ref(), name) {
                 EntryRouting::NotSurfaced => {}
                 routing => {
                     if surfaced.is_some() {
                         return Err(Self::duplicate_tool_error(name));
                     }
-                    surfaced = Some((dispatcher.as_ref(), routing));
+                    surfaced = Some((owner_index, dispatcher.as_ref(), routing));
                 }
             }
         }
         Ok(match surfaced {
-            Some((dispatcher, EntryRouting::Callable)) => DynamicRouting::Dispatch(dispatcher),
-            Some((_, EntryRouting::Unavailable(reason))) => DynamicRouting::Unavailable(reason),
-            Some((_, EntryRouting::NotSurfaced)) | None => DynamicRouting::NotFound,
+            Some((owner_index, dispatcher, EntryRouting::Callable)) => {
+                DynamicRouting::Dispatch(owner_index, dispatcher)
+            }
+            Some((_, _, EntryRouting::Unavailable(reason))) => DynamicRouting::Unavailable(reason),
+            Some((_, _, EntryRouting::NotSurfaced)) | None => DynamicRouting::NotFound,
         })
     }
 
@@ -609,12 +772,55 @@ impl AgentToolDispatcher for DynamicToolComposite {
             .into()
     }
 
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &crate::ToolDispatchContext,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+    ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+        match self
+            .resolve_live_routing(call.name)
+            .map_err(|_| ToolGateway::collision_resolution_error(call.name))?
+        {
+            DynamicRouting::Dispatch(owner_index, dispatcher) => {
+                let before =
+                    ToolGateway::binding_fingerprint(dispatcher, call.name).ok_or_else(|| {
+                        crate::ToolExecutionResolutionError::NotFound {
+                            tool_name: call.name.to_string(),
+                        }
+                    })?;
+                let plan = dispatcher
+                    .resolve_execution_plan(call, dispatch_context, resolution_context)
+                    .map_err(|error| {
+                        ToolGateway::resolution_not_found_as_unavailable(call.name, error)
+                    })?;
+                if ToolGateway::binding_fingerprint(dispatcher, call.name).as_ref() != Some(&before)
+                {
+                    return Err(crate::ToolExecutionResolutionError::Unavailable {
+                        tool_name: call.name.to_string(),
+                        reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                    });
+                }
+                plan.with_owner_witness(self.owner_witness(owner_index, before)?)
+            }
+            DynamicRouting::Unavailable(reason) => {
+                Err(crate::ToolExecutionResolutionError::Unavailable {
+                    tool_name: call.name.to_string(),
+                    reason,
+                })
+            }
+            DynamicRouting::NotFound => Err(crate::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            }),
+        }
+    }
+
     async fn dispatch(
         &self,
         call: crate::types::ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         match self.resolve_live_routing(call.name)? {
-            DynamicRouting::Dispatch(dispatcher) => dispatcher
+            DynamicRouting::Dispatch(_, dispatcher) => dispatcher
                 .dispatch(call)
                 .await
                 .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err)),
@@ -631,7 +837,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         match self.resolve_live_routing(call.name)? {
-            DynamicRouting::Dispatch(dispatcher) => dispatcher
+            DynamicRouting::Dispatch(_, dispatcher) => dispatcher
                 .dispatch_with_context(call, context)
                 .await
                 .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err)),
@@ -639,6 +845,45 @@ impl AgentToolDispatcher for DynamicToolComposite {
                 Err(crate::error::ToolError::unavailable(call.name, reason))
             }
             DynamicRouting::NotFound => Err(crate::error::ToolError::not_found(call.name)),
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: crate::types::ToolCallView<'_>,
+        context: &crate::ToolDispatchContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        let authority_key = self.execution_authority_key();
+        let Some(witness) = plan.owner_witness(&authority_key) else {
+            return Err(crate::error::ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::ExecutionOwnerChanged,
+            ));
+        };
+        let routing = self.resolve_live_routing(call.name).map_err(|_| {
+            crate::error::ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::ExecutionOwnerChanged,
+            )
+        })?;
+        match routing {
+            DynamicRouting::Dispatch(owner_index, dispatcher)
+                if witness.owner_key() == owner_index.to_string()
+                    && ToolGateway::binding_fingerprint(dispatcher, call.name).as_ref()
+                        == Some(witness.binding_fingerprint()) =>
+            {
+                dispatcher
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await
+                    .map_err(|error| ToolGateway::route_not_found_as_unavailable(call.name, error))
+            }
+            DynamicRouting::Dispatch(_, _)
+            | DynamicRouting::Unavailable(_)
+            | DynamicRouting::NotFound => Err(crate::error::ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::ExecutionOwnerChanged,
+            )),
         }
     }
 
@@ -755,7 +1000,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::tool_catalog::ToolCallability;
@@ -897,6 +1142,18 @@ mod tests {
         exact_catalog: bool,
     }
 
+    struct HybridExecutionDispatcher {
+        tool: Arc<ToolDef>,
+        owner: String,
+        contract: crate::ToolExecutionContract,
+    }
+
+    struct MutatingResolutionDispatcher {
+        current: std::sync::Mutex<Arc<ToolDef>>,
+        replacement: Arc<ToolDef>,
+        epoch: AtomicU64,
+    }
+
     impl ContextAwareDispatcher {
         fn new(tool_name: &str, exact_catalog: bool) -> Self {
             Self {
@@ -907,6 +1164,60 @@ mod tests {
                     provenance: None,
                 }),
                 exact_catalog,
+            }
+        }
+    }
+
+    impl MutatingResolutionDispatcher {
+        fn new(name: &str) -> Self {
+            Self {
+                current: std::sync::Mutex::new(Arc::new(ToolDef::new(
+                    name,
+                    "binding before resolution",
+                    empty_object_schema(),
+                ))),
+                replacement: Arc::new(ToolDef::new(
+                    name,
+                    "binding before resolution",
+                    empty_object_schema(),
+                )),
+                epoch: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl HybridExecutionDispatcher {
+        fn new(owner: &str, tool_name: &str) -> Self {
+            use crate::{
+                DetachedToolExecutionPolicy, IdempotencyScope, RestartClass, RunnerIdentity,
+                ToolExecutionMode,
+            };
+            use std::collections::BTreeSet;
+            use std::time::Duration;
+
+            let detached = DetachedToolExecutionPolicy::new(
+                RunnerIdentity::new(owner, "v1").unwrap(),
+                RestartClass::NonResumable,
+                IdempotencyScope::InteractionAndArguments,
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            let contract = crate::ToolExecutionContract::new(
+                BTreeSet::from([ToolExecutionMode::Fast, ToolExecutionMode::Detached]),
+                ToolExecutionMode::Fast,
+                None,
+                Some(detached),
+            )
+            .unwrap();
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: tool_name.into(),
+                    description: format!("{owner} catalog"),
+                    input_schema: empty_object_schema(),
+                    provenance: None,
+                }),
+                owner: owner.to_string(),
+                contract,
             }
         }
     }
@@ -954,9 +1265,13 @@ mod tests {
         }
 
         fn add_tool(&self, name: &str) {
+            self.add_tool_with_description(name, format!("{} tool: {}", self.prefix, name));
+        }
+
+        fn add_tool_with_description(&self, name: &str, description: impl Into<String>) {
             self.tools.lock().unwrap().push(Arc::new(ToolDef {
                 name: name.into(),
-                description: format!("{} tool: {}", self.prefix, name),
+                description: description.into(),
                 input_schema: empty_object_schema(),
                 provenance: None,
             }));
@@ -1197,6 +1512,122 @@ mod tests {
                 false,
             )
             .into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for HybridExecutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::clone(&self.tool)])
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([
+                crate::ToolCatalogEntry::session_inline(Arc::clone(&self.tool), true)
+                    .with_execution_contract(self.contract.clone()),
+            ])
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &crate::ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            if call.name != self.tool.name {
+                return Err(crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                });
+            }
+            let arguments: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+                crate::ToolExecutionResolutionError::InvalidArguments {
+                    tool_name: call.name.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let mode = if arguments["run_detached"] == true {
+                crate::ToolExecutionMode::Detached
+            } else {
+                crate::ToolExecutionMode::Fast
+            };
+            self.contract
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(crate::ToolExecutionResolutionError::from)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            if call.name != self.tool.name {
+                return Err(ToolError::not_found(call.name));
+            }
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"source": self.owner, "tool": call.name}).to_string(),
+                false,
+            )
+            .into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for MutatingResolutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::clone(&self.current.lock().unwrap())])
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::clone(&self.current.lock().unwrap()),
+                true,
+            )])
+        }
+
+        fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+            self.epoch.load(Ordering::SeqCst)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &crate::ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            let plan = crate::ToolExecutionContract::default()
+                .resolve_default(resolution_context.deadlines().clone())
+                .map_err(crate::ToolExecutionResolutionError::from)?;
+            *self.current.lock().unwrap() = Arc::clone(&self.replacement);
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            if call.name != self.replacement.name {
+                return Err(crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                });
+            }
+            Ok(plan)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
         }
     }
 
@@ -1671,6 +2102,438 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_forwards_hybrid_resolution_to_catalog_and_dispatch_owner() {
+        use crate::{ResolvedExecutionKind, ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let owner = Arc::new(HybridExecutionDispatcher::new(
+            "gateway-hybrid-owner",
+            "hybrid_scan",
+        ));
+        let interloper = Arc::new(MutableMockDispatcher::new("interloper", &["other"]));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(owner)
+            .add_dispatcher(interloper.clone())
+            .build()
+            .expect("unique build-time catalogs should compose");
+        interloper.add_tool("hybrid_scan");
+
+        let catalog = gateway.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == "hybrid_scan")
+            .expect("build-known owner stays in catalog");
+        assert_eq!(entry.tool.description, "gateway-hybrid-owner catalog");
+        assert_eq!(
+            entry.execution.default_mode(),
+            crate::ToolExecutionMode::Fast
+        );
+
+        let args = serde_json::value::RawValue::from_string(r#"{"run_detached":true}"#.to_string())
+            .unwrap();
+        let call = ToolCallView {
+            id: "gateway-hybrid",
+            name: "hybrid_scan",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = gateway
+            .resolve_execution_plan(call, &crate::ToolDispatchContext::default(), &resolution)
+            .expect("gateway should delegate to its build-known owner");
+        let ResolvedExecutionKind::Detached(policy) = plan.kind() else {
+            panic!("hybrid owner should select its non-default detached mode");
+        };
+        assert_eq!(policy.runner().name(), "gateway-hybrid-owner");
+
+        let outcome = gateway
+            .dispatch(call)
+            .await
+            .expect("dispatch should use the same build-known owner");
+        let payload: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(payload["source"], "gateway-hybrid-owner");
+    }
+
+    #[tokio::test]
+    async fn dynamic_composite_forwards_hybrid_resolution_to_unique_live_owner() {
+        use crate::{ResolvedExecutionKind, ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let owner = Arc::new(HybridExecutionDispatcher::new(
+            "dynamic-hybrid-owner",
+            "hybrid_scan",
+        ));
+        let other = Arc::new(ExactMockDispatcher::with_callability(
+            "other",
+            &[("other", true)],
+        ));
+        let composite = DynamicToolComposite::new(vec![owner, other]);
+
+        let catalog = composite.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == "hybrid_scan")
+            .expect("unique live owner stays in catalog");
+        assert_eq!(entry.tool.description, "dynamic-hybrid-owner catalog");
+        assert_eq!(
+            entry.execution.default_mode(),
+            crate::ToolExecutionMode::Fast
+        );
+
+        let args = serde_json::value::RawValue::from_string(r#"{"run_detached":true}"#.to_string())
+            .unwrap();
+        let call = ToolCallView {
+            id: "dynamic-hybrid",
+            name: "hybrid_scan",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = composite
+            .resolve_execution_plan(call, &crate::ToolDispatchContext::default(), &resolution)
+            .expect("dynamic composite should delegate to its unique live owner");
+        let ResolvedExecutionKind::Detached(policy) = plan.kind() else {
+            panic!("hybrid owner should select its non-default detached mode");
+        };
+        assert_eq!(policy.runner().name(), "dynamic-hybrid-owner");
+
+        let outcome = composite
+            .dispatch(call)
+            .await
+            .expect("dispatch should use the same unique live owner");
+        let payload: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(payload["source"], "dynamic-hybrid-owner");
+    }
+
+    #[tokio::test]
+    async fn dynamic_resolved_dispatch_refuses_owner_swap_after_resolution() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let first = Arc::new(MutableMockDispatcher::new("first", &["moving"]));
+        let second = Arc::new(MutableMockDispatcher::new("second", &[]));
+        let composite = DynamicToolComposite::new(vec![first.clone(), second.clone()]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "owner-swap",
+            name: "moving",
+            args: &args,
+        };
+        let context = crate::ToolDispatchContext::default();
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = composite
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("first owner resolves");
+
+        first.remove_tool("moving");
+        second.add_tool("moving");
+
+        let error = composite
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect_err("a different live owner must not execute under the first owner's plan");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dynamic_resolved_dispatch_refuses_same_slot_changed_binding() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let owner = Arc::new(MutableMockDispatcher::new("owner", &["moving"]));
+        let composite = DynamicToolComposite::new(vec![owner.clone()]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "same-slot-reregistration",
+            name: "moving",
+            args: &args,
+        };
+        let context = crate::ToolDispatchContext::default();
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = composite
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("initial binding resolves");
+
+        owner.remove_tool("moving");
+        owner.add_tool_with_description("moving", "replacement binding");
+
+        let error = composite
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect_err("same-slot changed binding must not inherit an old resolved plan");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn gateway_resolved_dispatch_refuses_same_slot_changed_binding() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let owner = Arc::new(MutableMockDispatcher::new("owner", &["moving"]));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(owner.clone())
+            .build()
+            .expect("gateway builds");
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "gateway-same-slot-reregistration",
+            name: "moving",
+            args: &args,
+        };
+        let context = crate::ToolDispatchContext::default();
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = gateway
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("initial binding resolves");
+
+        owner.remove_tool("moving");
+        owner.add_tool_with_description("moving", "replacement binding");
+
+        let error = gateway
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect_err("same-slot changed binding must not inherit an old resolved plan");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dynamic_accepts_unchanged_rebuilt_arc_projection() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let owner = Arc::new(MutableMockDispatcher::new("owner", &["moving"]));
+        let composite = DynamicToolComposite::new(vec![owner.clone()]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "reconstructed-identical-binding",
+            name: "moving",
+            args: &args,
+        };
+        let context = crate::ToolDispatchContext::default();
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = composite
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("initial binding resolves");
+
+        owner.remove_tool("moving");
+        owner.add_tool("moving");
+
+        composite
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect("projection allocation churn must not replace the live logical binding");
+    }
+
+    #[tokio::test]
+    async fn dynamic_dispatcher_reconstruction_requires_fresh_resolution() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let first_owner = Arc::new(MutableMockDispatcher::new("owner", &["moving"]));
+        let first = DynamicToolComposite::new(vec![first_owner]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "dispatcher-reconstruction",
+            name: "moving",
+            args: &args,
+        };
+        let context = crate::ToolDispatchContext::default();
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let old_plan = first
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("first dispatcher resolves");
+
+        let reconstructed = DynamicToolComposite::new(vec![Arc::new(MutableMockDispatcher::new(
+            "owner",
+            &["moving"],
+        ))]);
+        let error = reconstructed
+            .dispatch_resolved_with_context(call, &context, &old_plan)
+            .await
+            .expect_err("a reconstructed authority cannot consume an old turn-local witness");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+        let fresh = reconstructed
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("reconstructed dispatcher resolves afresh");
+        reconstructed
+            .dispatch_resolved_with_context(call, &context, &fresh)
+            .await
+            .expect("fresh resolution succeeds after reconstruction");
+    }
+
+    #[test]
+    fn dynamic_resolution_rejects_binding_mutation_during_child_resolution() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let composite =
+            DynamicToolComposite::new(vec![Arc::new(MutatingResolutionDispatcher::new("moving"))]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "dynamic-mutation-during-resolve",
+            name: "moving",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert!(matches!(
+            composite.resolve_execution_plan(
+                call,
+                &crate::ToolDispatchContext::default(),
+                &resolution,
+            ),
+            Err(crate::ToolExecutionResolutionError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn gateway_resolution_rejects_binding_mutation_during_child_resolution() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(Arc::new(MutatingResolutionDispatcher::new("moving")))
+            .build()
+            .unwrap();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "gateway-mutation-during-resolve",
+            name: "moving",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert!(matches!(
+            gateway.resolve_execution_plan(
+                call,
+                &crate::ToolDispatchContext::default(),
+                &resolution,
+            ),
+            Err(crate::ToolExecutionResolutionError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn gateway_execution_plan_rejects_unavailable_tool_with_catalog_reason() {
+        use crate::{ToolDeadlineChain, ToolDeadlineContributor};
+        use std::time::Duration;
+
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(Arc::new(ExactMockDispatcher::with_unavailable_reason(
+                "hidden",
+                "peers",
+                ToolUnavailableReason::NoPeersConfigured,
+            )))
+            .build()
+            .unwrap();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "gateway-hidden",
+            name: "peers",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert_eq!(
+            gateway
+                .resolve_execution_plan(call, &crate::ToolDispatchContext::default(), &resolution)
+                .expect_err("unavailable catalog winner must not resolve"),
+            crate::ToolExecutionResolutionError::Unavailable {
+                tool_name: "peers".to_string(),
+                reason: ToolUnavailableReason::NoPeersConfigured,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn dynamic_tool_composite_fails_closed_on_duplicate_dispatch() {
         let first = Arc::new(MockDispatcher::new("first", &["shared"]));
         let second = Arc::new(MockDispatcher::new("second", &["shared"]));
@@ -1681,6 +2544,23 @@ mod tests {
             name: "shared",
             args: &args_raw,
         };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                std::time::Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert_eq!(
+            composite
+                .resolve_execution_plan(call, &crate::ToolDispatchContext::default(), &resolution,)
+                .expect_err("duplicate dynamic tool names must not resolve"),
+            crate::ToolExecutionResolutionError::Unavailable {
+                tool_name: "shared".to_string(),
+                reason: ToolUnavailableReason::TemporarilyUnavailable,
+            }
+        );
 
         let err = composite
             .dispatch(call)
@@ -1723,7 +2603,7 @@ mod tests {
         for name in ["alpha", "beta"] {
             let owner_tools = |gateway: &ToolGateway| -> Vec<String> {
                 match gateway.resolve_routing(name) {
-                    Ok(GatewayRouting::Dispatch(entry)) => entry
+                    Ok(GatewayRouting::Dispatch(_, entry)) => entry
                         .dispatcher
                         .tools()
                         .iter()

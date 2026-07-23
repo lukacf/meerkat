@@ -1120,11 +1120,30 @@ fn delivery_terminal_from_completion_outcome(
                 None,
             )
         }
-        CompletionOutcome::CallbackPending { tool_name, args } => {
+        CompletionOutcome::CallbackPending {
+            tool_name, args, ..
+        } => {
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionCallbackPending {
                     tool_name,
                     payload: args,
+                };
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::CallbackPending,
+                runtime_outcome,
+            )
+        }
+        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+            let first = pending_tool_calls.first();
+            let tool_name = first
+                .map(|call| call.tool_name.clone())
+                .unwrap_or_else(|| "callback_batch".to_string());
+            let runtime_outcome =
+                meerkat_schedule::RuntimeDeliveryOutcome::CompletionCallbackPending {
+                    tool_name,
+                    payload: serde_json::json!({
+                        "pending_tool_calls": pending_tool_calls,
+                    }),
                 };
             terminal_from_runtime_completion_outcome(
                 meerkat_schedule::RuntimeCompletionOutcome::CallbackPending,
@@ -1708,6 +1727,7 @@ mod tests {
     async fn accepted_schedule_dispatch_waits_for_runtime_completion_failure() {
         let terminal = delivery_terminal_from_completion_outcome(
             CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_approval".to_string(),
                 args: serde_json::json!({"ticket": "INC-1"}),
             },

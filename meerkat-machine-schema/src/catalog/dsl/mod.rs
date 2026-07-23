@@ -2436,6 +2436,7 @@ runtime_internal_inputs!(
         RetryRequested,
         RevokeSupervisor,
         RollbackRun,
+        RollbackUnreturnedOp,
         RollbackStaged,
         RunCancelled,
         RunCompleted,

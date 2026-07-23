@@ -23,7 +23,9 @@ use meerkat_contracts::{RequestLifecycle, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
-    SessionBuildOptions, SessionError, SessionService, SessionServiceHistoryExt, StartTurnRequest,
+    SessionBuildOptions, SessionError, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, StageToolResultsDisposition, StageToolResultsRequest,
+    StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy,
@@ -2163,7 +2165,11 @@ fn format_agent_result(
             });
             wrap_tool_payload(payload)
         }
-        Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
+        Err(SessionError::Agent(meerkat::AgentError::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        })) => {
             // Pending state is a typed terminal-control fact, not a success
             // envelope. Serialize the canonical `WireCallbackPending` contract
             // rather than hand-building a success-looking JSON object so the
@@ -2175,8 +2181,39 @@ fn format_agent_result(
                 None,
                 false,
                 true,
+                tool_use_id,
                 tool_name,
                 args,
+            );
+            let mut payload = serde_json::to_value(&pending)
+                .map_err(|err| format!("Failed to serialize callback pending contract: {err}"))?;
+            if let Value::Object(map) = &mut payload {
+                map.insert(
+                    "content".to_string(),
+                    json!([{
+                        "type": "text",
+                        "text": "Agent is waiting for tool results"
+                    }]),
+                );
+            }
+            wrap_tool_payload(payload)
+        }
+        Err(SessionError::Agent(meerkat::AgentError::CallbackBatchPending {
+            pending_tool_calls,
+        })) => {
+            let pending = meerkat_contracts::WireCallbackPending::many(
+                session_id.clone(),
+                None,
+                false,
+                true,
+                pending_tool_calls
+                    .into_iter()
+                    .map(|call| meerkat_contracts::WirePendingToolCall {
+                        tool_use_id: call.tool_use_id,
+                        tool_name: call.tool_name,
+                        args: call.args,
+                    })
+                    .collect(),
             );
             let mut payload = serde_json::to_value(&pending)
                 .map_err(|err| format!("Failed to serialize callback pending contract: {err}"))?;
@@ -4237,7 +4274,7 @@ async fn handle_meerkat_resume(
         }
     }
 
-    let mut session = state
+    let session = state
         .service
         .load_authoritative_session(&session_id)
         .await
@@ -4268,14 +4305,28 @@ async fn handle_meerkat_resume(
         ));
     }
 
-    // Inject tool results into the session before resuming
+    // Admit callback results through the session service's exact durable
+    // callback-batch authority. Direct transcript append bypasses ID-set,
+    // idempotency, and replay validation.
     if !input.tool_results.is_empty() {
         let results: Vec<ToolResult> = input
             .tool_results
             .iter()
             .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
             .collect();
-        session.push(Message::tool_results(results));
+        let staged = state
+            .service
+            .stage_tool_results(&session_id, StageToolResultsRequest { results })
+            .await
+            .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
+        if callback_resume_is_already_applied(staged.disposition) {
+            return wrap_tool_payload(json!({
+                "status": "callback_results_already_accepted",
+                "session_id": session_id.to_string(),
+                "resumable": true,
+            }))
+            .map_err(ToolCallError::internal);
+        }
     }
 
     // Resolve settings from stored metadata, failing closed when the durable
@@ -4845,6 +4896,10 @@ async fn handle_meerkat_resume(
     }
 
     format_agent_result_tool(result, &session_id)
+}
+
+fn callback_resume_is_already_applied(disposition: StageToolResultsDisposition) -> bool {
+    matches!(disposition, StageToolResultsDisposition::AlreadyApplied)
 }
 
 /// Wrap a structured payload in the MCP text-content envelope.
@@ -6745,6 +6800,63 @@ mod tests {
         assert_eq!(
             decoded["skill_diagnostics"]["source_health"]["state"],
             "unhealthy"
+        );
+    }
+
+    #[test]
+    fn test_format_agent_result_preserves_callback_batch_as_resumable_full_set() {
+        let session_id = meerkat::SessionId::new();
+        let pending_tool_calls = vec![
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "callback-a".to_string(),
+                tool_name: "ask_a".to_string(),
+                args: json!({"question": "a"}),
+            },
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "callback-b".to_string(),
+                tool_name: "ask_b".to_string(),
+                args: json!({"question": "b"}),
+            },
+        ];
+        let payload = format_agent_result(
+            Err(SessionError::Agent(
+                meerkat::AgentError::CallbackBatchPending { pending_tool_calls },
+            )),
+            &session_id,
+        )
+        .expect("callback batch should remain a resumable MCP result");
+        let raw = payload["content"][0]["text"]
+            .as_str()
+            .expect("wrapped MCP payload text");
+        let decoded: Value = serde_json::from_str(raw).expect("valid wrapped JSON");
+        assert_eq!(decoded["status"], "pending_tool_call");
+        assert_eq!(decoded["resumable"], true);
+        assert_eq!(decoded["pending_tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            decoded["pending_tool_calls"][0]["tool_use_id"],
+            "callback-a"
+        );
+        assert_eq!(
+            decoded["pending_tool_calls"][1]["tool_use_id"],
+            "callback-b"
+        );
+        assert!(
+            decoded["pending_tool_calls"][0]["args"]
+                .get("tool_use_id")
+                .is_none(),
+            "tool_use_id must not be smuggled into callback args"
+        );
+    }
+
+    #[test]
+    fn callback_resume_retries_after_stage_before_run_crash() {
+        assert!(
+            !callback_resume_is_already_applied(StageToolResultsDisposition::AlreadyStaged),
+            "durably staged replay must continue through actor ensure and run_pending"
+        );
+        assert!(
+            callback_resume_is_already_applied(StageToolResultsDisposition::AlreadyApplied),
+            "only an applied receipt may short-circuit callback resume"
         );
     }
 

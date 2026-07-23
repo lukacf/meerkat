@@ -82,13 +82,25 @@ pub struct CompletionEnrichmentData {
     pub detail: String,
 }
 
+/// Result of a best-effort completion-enrichment lookup.
+///
+/// `Busy` is intentionally distinct from `Missing`: a consumer may fall back
+/// for a genuinely missing process-local record, but must retry a contended
+/// lookup before advancing its durable delivery cursor.
+#[derive(Debug, Clone)]
+pub enum CompletionEnrichment {
+    Found(CompletionEnrichmentData),
+    Missing,
+    Busy,
+}
+
 /// Provider of shell-level enrichment for completed operations.
 ///
 /// The shell `JobManager` implements this trait. The agent boundary
 /// calls [`enrich`](CompletionEnrichmentProvider::enrich) to look up
 /// display details by operation ID.
 pub trait CompletionEnrichmentProvider: Send + Sync {
-    fn enrich(&self, operation_id: &OperationId) -> Option<CompletionEnrichmentData>;
+    fn enrich(&self, operation_id: &OperationId) -> CompletionEnrichment;
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,16 @@ use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
 use serde::{Deserialize, Serialize};
 
+/// One externally routed callback tool call inside a suspended assistant
+/// tool-use batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PendingCallbackToolCall {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum LlmFailureReason {
@@ -378,8 +388,18 @@ pub enum AgentError {
     /// A tool call must be routed externally (callback pending)
     #[error("Callback pending for tool '{tool_name}'")]
     CallbackPending {
+        tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+    },
+
+    /// Multiple callback tools from one assistant batch are pending together.
+    ///
+    /// The complete typed set is surfaced so callers can supply one exact
+    /// result set; no callback is silently selected or dropped.
+    #[error("Callback batch pending for {} tools", pending_tool_calls.len())]
+    CallbackBatchPending {
+        pending_tool_calls: Vec<PendingCallbackToolCall>,
     },
 
     /// Structured output validation failed after retries

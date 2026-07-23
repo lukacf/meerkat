@@ -197,6 +197,12 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         results: Vec<meerkat_core::ToolResult>,
     ) -> Result<(), meerkat_core::error::AgentError> {
+        if self
+            .agent
+            .apply_pending_callback_tool_results(results.clone())?
+        {
+            return Ok(());
+        }
         if results.is_empty() {
             return Ok(());
         }

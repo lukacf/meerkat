@@ -1,3 +1,4 @@
+use crate::tool_execution::ToolExecutionContract;
 use crate::types::{ToolDef, ToolProvenance, ToolSourceKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub struct ToolCatalogEntry {
     pub plane: ToolPlaneClass,
     pub callability: ToolCallability,
     pub deferred_eligibility: ToolCatalogDeferredEligibility,
+    pub execution: ToolExecutionContract,
 }
 
 impl ToolCatalogEntry {
@@ -58,6 +60,7 @@ impl ToolCatalogEntry {
             plane: ToolPlaneClass::Session,
             callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
+            execution: ToolExecutionContract::default(),
         }
     }
 
@@ -74,6 +77,7 @@ impl ToolCatalogEntry {
             plane: ToolPlaneClass::Control,
             callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
+            execution: ToolExecutionContract::default(),
         }
     }
 
@@ -99,7 +103,14 @@ impl ToolCatalogEntry {
             plane: ToolPlaneClass::Session,
             callability,
             deferred_eligibility: ToolCatalogDeferredEligibility::DeferredEligible { provenance },
+            execution: ToolExecutionContract::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_execution_contract(mut self, execution: ToolExecutionContract) -> Self {
+        self.execution = execution;
+        self
     }
 
     pub fn currently_callable(&self) -> bool {
@@ -114,6 +125,12 @@ pub enum ToolUnavailableReason {
     NotCurrentlyCallable,
     NoPeersConfigured,
     RuntimeCommandAuthorityUnavailable,
+    /// No dispatcher in this ownership chain implements the resolved
+    /// Streaming or Detached execution mode.
+    ExecutionModeOwnerUnavailable,
+    /// The live routing owner no longer matches the owner captured during
+    /// execution-plan resolution.
+    ExecutionOwnerChanged,
     TemporarilyUnavailable,
 }
 
@@ -126,6 +143,12 @@ impl std::fmt::Display for ToolUnavailableReason {
             ToolUnavailableReason::NoPeersConfigured => f.write_str("no peers configured"),
             ToolUnavailableReason::RuntimeCommandAuthorityUnavailable => {
                 f.write_str("runtime command authority unavailable")
+            }
+            ToolUnavailableReason::ExecutionModeOwnerUnavailable => {
+                f.write_str("resolved execution mode owner unavailable")
+            }
+            ToolUnavailableReason::ExecutionOwnerChanged => {
+                f.write_str("tool execution owner changed after plan resolution")
             }
             ToolUnavailableReason::TemporarilyUnavailable => {
                 f.write_str("tool is temporarily unavailable")
@@ -308,6 +331,12 @@ pub struct ToolCatalogLoadResolution {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::{
+        DetachedToolExecutionPolicy, IdempotencyScope, RestartClass, RunnerIdentity,
+        ToolExecutionContract, ToolExecutionMode,
+    };
+    use std::collections::BTreeSet;
+    use std::time::Duration;
 
     #[test]
     fn deferred_eligibility_owner_is_typed_provenance_with_projected_key() {
@@ -334,5 +363,58 @@ mod tests {
             stable_owner_key_from_provenance(&stored),
             "callback:owner-a"
         );
+    }
+
+    #[test]
+    fn every_catalog_constructor_declares_fast_execution_by_default() {
+        let tool = Arc::new(ToolDef::new(
+            "fast",
+            "fast tool",
+            serde_json::json!({ "type": "object" }),
+        ));
+
+        for entry in [
+            ToolCatalogEntry::session_inline(Arc::clone(&tool), true),
+            ToolCatalogEntry::control_inline(Arc::clone(&tool), true),
+            ToolCatalogEntry::session_deferred(
+                tool,
+                true,
+                ToolProvenance {
+                    kind: ToolSourceKind::Callback,
+                    source_id: "owner".into(),
+                },
+            ),
+        ] {
+            assert_eq!(entry.execution, ToolExecutionContract::default());
+        }
+    }
+
+    #[test]
+    fn catalog_entry_preserves_non_default_execution_contract() {
+        let detached = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("homecore.security_scan", "v1").unwrap(),
+            RestartClass::NonResumable,
+            IdempotencyScope::InteractionAndArguments,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Detached]),
+            ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .unwrap();
+        let entry = ToolCatalogEntry::session_inline(
+            Arc::new(ToolDef::new(
+                "security_scan",
+                "scan",
+                serde_json::json!({ "type": "object" }),
+            )),
+            true,
+        )
+        .with_execution_contract(contract.clone());
+
+        assert_eq!(entry.execution, contract);
     }
 }

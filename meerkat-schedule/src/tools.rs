@@ -197,7 +197,6 @@ pub struct CurrentSessionScheduleToolDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
     current_session_id: SessionId,
     target_resolver: Arc<dyn CurrentSessionScheduleTargetResolver>,
-    tool_defs: Arc<[Arc<ToolDef>]>,
     /// The CREATING session's effective tool access policy.
     ///
     /// Scheduled spawn/fork-helper targets fire later under host authority,
@@ -224,17 +223,10 @@ impl CurrentSessionScheduleToolDispatcher {
         current_session_id: SessionId,
         target_resolver: Arc<dyn CurrentSessionScheduleTargetResolver>,
     ) -> Self {
-        let tool_defs = inner
-            .tools()
-            .iter()
-            .map(|tool| Arc::new(current_session_tool_def(tool)))
-            .collect::<Vec<_>>()
-            .into();
         Self {
             inner,
             current_session_id,
             target_resolver,
-            tool_defs,
             creator_tool_access_policy: None,
         }
     }
@@ -248,6 +240,35 @@ impl CurrentSessionScheduleToolDispatcher {
     ) -> Self {
         self.creator_tool_access_policy = policy;
         self
+    }
+
+    fn rewrite_call_arguments(
+        &self,
+        call: &ToolCallView<'_>,
+    ) -> Result<Box<serde_json::value::RawValue>, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("invalid schedule tool-call arguments JSON: {error}"),
+            )
+        })?;
+        let rewritten = rewrite_current_session_target(
+            args,
+            &self.current_session_id,
+            self.target_resolver.as_ref(),
+        )
+        .map_err(|error| ToolError::invalid_arguments(call.name, error))?;
+        let rewritten = enforce_creator_tool_access_policy(
+            rewritten,
+            self.creator_tool_access_policy.as_ref(),
+            call.name,
+        )?;
+        serde_json::value::RawValue::from_string(rewritten.to_string()).map_err(|error| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("failed to encode rewritten schedule arguments: {error}"),
+            )
+        })
     }
 }
 
@@ -330,52 +351,202 @@ fn enforce_creator_tool_access_policy(
     Ok(args)
 }
 
+fn map_schedule_plan_rewrite_error(
+    tool_name: &str,
+    error: ToolError,
+) -> meerkat_core::ToolExecutionResolutionError {
+    match error {
+        ToolError::NotFound { .. } => meerkat_core::ToolExecutionResolutionError::NotFound {
+            tool_name: tool_name.to_string(),
+        },
+        ToolError::Unavailable { reason, .. } => {
+            meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name: tool_name.to_string(),
+                reason,
+            }
+        }
+        ToolError::AccessDenied { .. } => {
+            meerkat_core::ToolExecutionResolutionError::AccessDenied {
+                tool_name: tool_name.to_string(),
+            }
+        }
+        ToolError::InvalidArguments { reason, .. } => {
+            meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                tool_name: tool_name.to_string(),
+                reason,
+            }
+        }
+        other => meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+            tool_name: tool_name.to_string(),
+            reason: format!("schedule call rewrite failed before dispatch: {other}"),
+        },
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tool_defs)
+        self.tool_catalog()
+            .iter()
+            .filter(|entry| entry.callability.is_callable())
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>()
+            .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        if !self.tool_defs.iter().any(|tool| tool.name == call.name) {
-            return Err(ToolError::not_found(call.name));
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.inner
+            .tool_catalog()
+            .iter()
+            .map(|entry| {
+                let mut rewritten = entry.clone();
+                rewritten.tool = Arc::new(current_session_tool_def(entry.tool.as_ref()));
+                rewritten
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(
+            meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+                .with_live_authority(0, 0)
+                .with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?),
+        )
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &meerkat_core::ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason,
+            });
         }
 
         if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
-            return self.inner.dispatch(call).await;
+            return self
+                .inner
+                .resolve_execution_plan(call, dispatch_context, resolution_context);
         }
 
-        let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
-            ToolError::invalid_arguments(
-                call.name,
-                format!("invalid schedule tool-call arguments JSON: {error}"),
-            )
-        })?;
-        let rewritten = rewrite_current_session_target(
-            args,
-            &self.current_session_id,
-            self.target_resolver.as_ref(),
-        )
-        .map_err(|error| ToolError::invalid_arguments(call.name, error))?;
-        let rewritten = enforce_creator_tool_access_policy(
-            rewritten,
-            self.creator_tool_access_policy.as_ref(),
-            call.name,
-        )?;
-        let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
-            .map_err(|error| {
-                ToolError::invalid_arguments(
-                    call.name,
-                    format!("failed to encode rewritten schedule arguments: {error}"),
-                )
-            })?;
-        self.inner
-            .dispatch(ToolCallView {
+        let rewritten_raw = self
+            .rewrite_call_arguments(&call)
+            .map_err(|error| map_schedule_plan_rewrite_error(call.name, error))?;
+        self.inner.resolve_execution_plan(
+            ToolCallView {
                 id: call.id,
                 name: call.name,
                 args: &rewritten_raw,
-            })
+            },
+            dispatch_context,
+            resolution_context,
+        )
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| ToolError::not_found(call.name))?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(ToolError::unavailable(call.name, reason));
+        }
+
+        if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
+            return self.inner.dispatch_with_context(call, context).await;
+        }
+
+        let rewritten_raw = self.rewrite_call_arguments(&call)?;
+        self.inner
+            .dispatch_with_context(
+                ToolCallView {
+                    id: call.id,
+                    name: call.name,
+                    args: &rewritten_raw,
+                },
+                context,
+            )
+            .await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| ToolError::not_found(call.name))?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(ToolError::unavailable(call.name, reason));
+        }
+
+        if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
+            return self
+                .inner
+                .dispatch_resolved_with_context(call, context, plan)
+                .await;
+        }
+
+        let rewritten_raw = self.rewrite_call_arguments(&call)?;
+        self.inner
+            .dispatch_resolved_with_context(
+                ToolCallView {
+                    id: call.id,
+                    name: call.name,
+                    args: &rewritten_raw,
+                },
+                context,
+                plan,
+            )
             .await
     }
 }
@@ -1137,10 +1308,215 @@ mod tests {
     use meerkat_core::{AgentToolDispatcher, ToolError};
     use meerkat_core::{ContentInput, SessionId};
     use serde_json::value::RawValue;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct IdentityCurrentSessionResolver;
+
+    struct HybridScheduleDispatcher {
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
+    struct LiveScheduleDispatcher {
+        callable: AtomicBool,
+        saw_context_image: AtomicBool,
+        rewritten_target_type: Mutex<Option<String>>,
+        tool: Arc<ToolDef>,
+    }
+
+    impl HybridScheduleDispatcher {
+        fn new() -> Self {
+            let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+                meerkat_core::RunnerIdentity::new("test.schedule", "v1")
+                    .expect("runner declaration"),
+                meerkat_core::RestartClass::NonResumable,
+                meerkat_core::IdempotencyScope::ToolCall,
+                std::time::Duration::from_secs(10),
+            )
+            .expect("detached policy");
+            let contract = meerkat_core::ToolExecutionContract::new(
+                BTreeSet::from([
+                    meerkat_core::ToolExecutionMode::Fast,
+                    meerkat_core::ToolExecutionMode::Detached,
+                ]),
+                meerkat_core::ToolExecutionMode::Fast,
+                None,
+                Some(detached),
+            )
+            .expect("hybrid execution contract");
+            let tool = Arc::new(ToolDef {
+                name: "meerkat_schedule_create".into(),
+                description: "Create a schedule.".to_string(),
+                input_schema: create_schedule_schema(),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Schedule,
+                    source_id: "schedule".into(),
+                }),
+            });
+            Self {
+                catalog: vec![
+                    meerkat_core::ToolCatalogEntry::session_inline(tool, true)
+                        .with_execution_contract(contract),
+                ]
+                .into(),
+            }
+        }
+    }
+
+    impl LiveScheduleDispatcher {
+        fn new() -> Self {
+            Self {
+                callable: AtomicBool::new(true),
+                saw_context_image: AtomicBool::new(false),
+                rewritten_target_type: Mutex::new(None),
+                tool: Arc::new(ToolDef {
+                    name: "meerkat_schedule_create".into(),
+                    description: "Create a schedule.".to_string(),
+                    input_schema: create_schedule_schema(),
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Schedule,
+                        source_id: "schedule".into(),
+                    }),
+                }),
+            }
+        }
+
+        fn entry(&self) -> meerkat_core::ToolCatalogEntry {
+            meerkat_core::ToolCatalogEntry::session_inline_with_callability(
+                Arc::clone(&self.tool),
+                if self.callable.load(Ordering::SeqCst) {
+                    meerkat_core::ToolCallability::callable()
+                } else {
+                    meerkat_core::ToolCallability::unavailable(
+                        meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+                    )
+                },
+            )
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for HybridScheduleDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &meerkat_core::ToolDispatchContext,
+            resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+                meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                    tool_name: call.name.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let mode = if args["target"]["type"] == "resumable_session" {
+                meerkat_core::ToolExecutionMode::Detached
+            } else {
+                meerkat_core::ToolExecutionMode::Fast
+            };
+            self.catalog[0]
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &meerkat_core::ToolDispatchContext,
+            plan: &meerkat_core::ResolvedToolExecutionPlan,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            let args: Value = serde_json::from_str(call.args.get())
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+            if plan.mode() != meerkat_core::ToolExecutionMode::Detached
+                || args["target"]["type"] != "resumable_session"
+            {
+                return Err(ToolError::execution_failed(
+                    "rewritten detached schedule plan was not preserved",
+                ));
+            }
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for LiveScheduleDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            if self.callable.load(Ordering::SeqCst) {
+                vec![Arc::clone(&self.tool)].into()
+            } else {
+                Arc::from([])
+            }
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: true,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            vec![self.entry()].into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+                .await
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &meerkat_core::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            let arguments: Value = serde_json::from_str(call.args.get())
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+            *self
+                .rewritten_target_type
+                .lock()
+                .expect("rewritten target recorder lock") =
+                arguments["target"]["type"].as_str().map(str::to_string);
+            self.saw_context_image.store(
+                context
+                    .current_turn()
+                    .and_then(|turn| turn.image_ref(0))
+                    .and_then(|image_ref| context.current_turn_image(image_ref))
+                    .is_some(),
+                Ordering::SeqCst,
+            );
+            Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+        }
+    }
 
     impl CurrentSessionScheduleTargetResolver for IdentityCurrentSessionResolver {
         fn resolve_current_session_target(
@@ -1493,6 +1869,159 @@ mod tests {
             Some("identity")
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_dispatcher_preserves_contract_and_forwards_rewritten_hybrid_call()
+     {
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(HybridScheduleDispatcher::new()),
+            SessionId::new(),
+        );
+        let request = json!({
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "continue"
+                }
+            }
+        });
+        let raw = RawValue::from_string(request.to_string()).expect("raw schedule arguments");
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+
+        let plan = dispatcher
+            .resolve_execution_plan(
+                tool_call("schedule-hybrid", "meerkat_schedule_create", raw.as_ref()),
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("rewritten hybrid call should resolve through the inner owner");
+
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Detached);
+        let catalog = dispatcher.tool_catalog();
+        assert!(
+            dispatcher.tool_catalog_capabilities().exact_catalog,
+            "the wrapper must preserve exact catalog authority"
+        );
+        assert_eq!(
+            catalog[0].execution.default_mode(),
+            meerkat_core::ToolExecutionMode::Fast,
+            "rewriting the provider definition must not replace internal execution metadata"
+        );
+        assert!(
+            catalog[0]
+                .execution
+                .supported_modes()
+                .contains(&meerkat_core::ToolExecutionMode::Detached)
+        );
+        let provider_def = serde_json::to_value(catalog[0].tool.as_ref())
+            .expect("provider-facing tool definition serializes");
+        assert!(
+            provider_def.get("execution").is_none(),
+            "internal execution metadata must not leak into ToolDef serialization"
+        );
+        dispatcher
+            .dispatch_resolved_with_context(
+                tool_call("schedule-hybrid", "meerkat_schedule_create", raw.as_ref()),
+                &meerkat_core::ToolDispatchContext::default(),
+                &plan,
+            )
+            .await
+            .expect("resolved dispatch must apply the identical target rewrite");
+    }
+
+    #[test]
+    fn current_session_schedule_tools_follow_live_exact_catalog_callability() {
+        let inner = Arc::new(LiveScheduleDispatcher::new());
+        let inner_dispatcher: Arc<dyn AgentToolDispatcher> = inner.clone();
+        let dispatcher =
+            CurrentSessionScheduleToolDispatcher::new(inner_dispatcher, SessionId::new());
+
+        assert_eq!(
+            dispatcher
+                .tools()
+                .iter()
+                .filter(|tool| tool.name == "meerkat_schedule_create")
+                .count(),
+            1,
+            "the live callable exact-catalog entry should be provider-visible"
+        );
+
+        inner.callable.store(false, Ordering::SeqCst);
+
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .all(|tool| tool.name != "meerkat_schedule_create"),
+            "tools() must not retain the construction-time callable snapshot"
+        );
+        let catalog = dispatcher.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == "meerkat_schedule_create")
+            .expect("exact catalog keeps the temporarily unavailable identity");
+        assert_eq!(
+            entry.callability.unavailable_reason(),
+            Some(meerkat_core::ToolUnavailableReason::TemporarilyUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_dispatch_preserves_context_after_argument_rewrite() {
+        let inner = Arc::new(LiveScheduleDispatcher::new());
+        let inner_dispatcher: Arc<dyn AgentToolDispatcher> = inner.clone();
+        let dispatcher =
+            CurrentSessionScheduleToolDispatcher::new(inner_dispatcher, SessionId::new());
+        let request = json!({
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "continue"
+                }
+            }
+        });
+        let raw = RawValue::from_string(request.to_string()).expect("raw schedule arguments");
+        let context = meerkat_core::ToolDispatchContext::from_current_turn_input(
+            &ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            }]),
+        );
+
+        dispatcher
+            .dispatch_with_context(
+                tool_call("schedule-context", "meerkat_schedule_create", raw.as_ref()),
+                &context,
+            )
+            .await
+            .expect("rewritten schedule call should dispatch");
+
+        assert!(
+            inner.saw_context_image.load(Ordering::SeqCst),
+            "the wrapper must forward the caller's original dispatch context"
+        );
+        assert_eq!(
+            inner
+                .rewritten_target_type
+                .lock()
+                .expect("rewritten target recorder lock")
+                .as_deref(),
+            Some("resumable_session"),
+            "the same forwarded call must carry the rewritten durable target"
+        );
     }
 
     #[tokio::test]

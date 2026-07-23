@@ -149,6 +149,54 @@ impl CallbackRequestEnvelope {
 /// Timeout for waiting on a client tool response.
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Live callback-tool registry whose semantic mutation and epoch advancement
+/// share one lock/authority boundary.
+pub struct CallbackToolRegistry {
+    tools: Arc<StdRwLock<Vec<ToolDef>>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl Default for CallbackToolRegistry {
+    fn default() -> Self {
+        Self {
+            tools: Arc::new(StdRwLock::new(Vec::new())),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl CallbackToolRegistry {
+    pub(crate) fn replace_or_add(&self, replacements: Vec<ToolDef>) -> Result<usize, ()> {
+        let mut tools = self.tools.write().map_err(|_| ())?;
+        let count = replacements.len();
+        for replacement in replacements {
+            if let Some(existing) = tools.iter_mut().find(|tool| tool.name == replacement.name) {
+                *existing = replacement;
+            } else {
+                tools.push(replacement);
+            }
+        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        Ok(count)
+    }
+
+    pub fn snapshot(&self) -> Vec<ToolDef> {
+        self.tools
+            .read()
+            .map(|tools| tools.clone())
+            .unwrap_or_default()
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn from_test_parts(tools: Arc<StdRwLock<Vec<ToolDef>>>, generation: Arc<AtomicU64>) -> Self {
+        Self { tools, generation }
+    }
+}
+
 /// Dispatches tool calls to an external client via the RPC callback protocol.
 ///
 /// Holds a shared reference to the global registered-tools list so that tools
@@ -160,7 +208,7 @@ const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// no inline tools (the field is empty).
 pub struct CallbackToolDispatcher {
     /// Live tool definitions — shared with `SessionRuntime::registered_tools_slot`.
-    registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
+    registered_tools: Arc<CallbackToolRegistry>,
     /// Per-session inline tools (static, usually empty). Win on name collision.
     inline_tools: Vec<ToolDef>,
     /// Inline tool names cached for fast collision lookup.
@@ -177,8 +225,46 @@ impl CallbackToolDispatcher {
     ///
     /// `inline_tools` are per-session static tools (from `session/create`
     /// `external_tools` param). Pass empty vec for most sessions.
-    pub fn new(
+    #[cfg(test)]
+    fn new(
         registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
+        callback_tx: mpsc::Sender<CallbackRequestEnvelope>,
+        id_counter: Arc<AtomicU64>,
+        inline_tools: Vec<ToolDef>,
+    ) -> Self {
+        Self::new_with_generation(
+            registered_tools,
+            Arc::new(AtomicU64::new(0)),
+            callback_tx,
+            id_counter,
+            inline_tools,
+        )
+    }
+
+    /// Create a callback dispatcher bound to the production registry epoch.
+    #[cfg(test)]
+    fn new_with_generation(
+        registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
+        registered_tools_generation: Arc<AtomicU64>,
+        callback_tx: mpsc::Sender<CallbackRequestEnvelope>,
+        id_counter: Arc<AtomicU64>,
+        inline_tools: Vec<ToolDef>,
+    ) -> Self {
+        Self::from_registry(
+            Arc::new(CallbackToolRegistry::from_test_parts(
+                registered_tools,
+                registered_tools_generation,
+            )),
+            callback_tx,
+            id_counter,
+            inline_tools,
+        )
+    }
+
+    /// Create a callback dispatcher bound to the inseparable production
+    /// registry mutation/epoch authority.
+    pub fn from_registry(
+        registered_tools: Arc<CallbackToolRegistry>,
         callback_tx: mpsc::Sender<CallbackRequestEnvelope>,
         id_counter: Arc<AtomicU64>,
         inline_tools: Vec<ToolDef>,
@@ -186,9 +272,11 @@ impl CallbackToolDispatcher {
         let inline_names: HashSet<String> =
             inline_tools.iter().map(|t| t.name.to_string()).collect();
         let last_seen_globals = registered_tools
+            .tools
             .read()
-            .map(|g| {
-                g.iter()
+            .map(|tools| {
+                tools
+                    .iter()
                     .filter(|t| !inline_names.contains(t.name.as_str()))
                     .map(|t| t.name.to_string())
                     .collect()
@@ -212,9 +300,11 @@ impl CallbackToolDispatcher {
     /// Current global tool names excluding inline collisions.
     fn current_global_names(&self) -> HashSet<String> {
         self.registered_tools
+            .tools
             .read()
-            .map(|g| {
-                g.iter()
+            .map(|tools| {
+                tools
+                    .iter()
                     .filter(|t| !self.inline_names.contains(t.name.as_str()))
                     .map(|t| t.name.to_string())
                     .collect()
@@ -227,8 +317,9 @@ impl CallbackToolDispatcher {
             return true;
         }
         self.registered_tools
+            .tools
             .read()
-            .map(|g| g.iter().any(|t| t.name == name))
+            .map(|tools| tools.iter().any(|tool| tool.name == name))
             .unwrap_or(false)
     }
 }
@@ -241,7 +332,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             .iter()
             .map(|t| Arc::new(t.clone()))
             .collect();
-        if let Ok(global) = self.registered_tools.read() {
+        if let Ok(global) = self.registered_tools.tools.read() {
             for t in global.iter() {
                 if !self.inline_names.contains(t.name.as_str()) {
                     result.push(Arc::new(t.clone()));
@@ -262,9 +353,12 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         let mut result: Vec<ToolCatalogEntry> = self
             .inline_tools
             .iter()
-            .map(|tool| ToolCatalogEntry::session_inline(Arc::new(tool.clone()), true))
+            .map(|tool| {
+                ToolCatalogEntry::session_inline(Arc::new(tool.clone()), true)
+                    .with_execution_contract(meerkat_core::ToolExecutionContract::default())
+            })
             .collect();
-        if let Ok(global) = self.registered_tools.read() {
+        if let Ok(global) = self.registered_tools.tools.read() {
             for tool in global.iter() {
                 if !self.inline_names.contains(tool.name.as_str()) {
                     result.push(callback_catalog_entry(tool.clone()));
@@ -272,6 +366,35 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             }
         }
         result.into()
+    }
+
+    fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+        self.registered_tools.generation()
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        _dispatch_context: &meerkat_core::ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        let resolved_context =
+            resolution_context.with_deadline(meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::ToolInternal,
+                CALLBACK_TIMEOUT,
+            ))?;
+        entry
+            .execution
+            .resolve_default(resolved_context.deadlines().clone())
+            .map_err(Into::into)
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -353,13 +476,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 
         let response_handoff = tokio::time::timeout(CALLBACK_TIMEOUT, response_rx)
             .await
-            .map_err(|_| {
-                ToolError::execution_failed(format!(
-                    "Callback tool '{}' timed out after {}s",
-                    call.name,
-                    CALLBACK_TIMEOUT.as_secs()
-                ))
-            })?
+            .map_err(|_| callback_timeout_error(call.name))?
             .map_err(|_| {
                 ToolError::execution_failed("Callback response channel dropped".to_string())
             })?;
@@ -440,11 +557,19 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 
 fn callback_catalog_entry(tool: ToolDef) -> ToolCatalogEntry {
     let tool = Arc::new(tool);
-    if let Some(provenance) = tool.provenance.clone() {
+    let entry = if let Some(provenance) = tool.provenance.clone() {
         ToolCatalogEntry::session_deferred(tool, true, provenance)
     } else {
         ToolCatalogEntry::session_inline(tool, true)
-    }
+    };
+    entry.with_execution_contract(meerkat_core::ToolExecutionContract::default())
+}
+
+fn callback_timeout_error(name: &str) -> ToolError {
+    ToolError::timeout(
+        name,
+        u64::try_from(CALLBACK_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+    )
 }
 
 #[cfg(test)]
@@ -539,6 +664,118 @@ mod tests {
         .await;
 
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[test]
+    fn callback_catalog_and_resolver_declare_actual_internal_timeout() {
+        let (callback_tx, _callback_rx) = mpsc::channel(10);
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("slow")]));
+        let dispatcher =
+            CallbackToolDispatcher::new(tools, callback_tx, Arc::new(AtomicU64::new(0)), vec![]);
+        let catalog = dispatcher.tool_catalog();
+        assert_eq!(
+            catalog[0].execution.default_mode(),
+            meerkat_core::ToolExecutionMode::Fast
+        );
+        let args = RawValue::from_string("{}".to_string()).unwrap();
+        let deadlines = meerkat_core::ToolDeadlineChain::new(vec![
+            meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                std::time::Duration::from_secs(600),
+            ),
+        ])
+        .unwrap();
+        let plan = dispatcher
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "tc-resolve",
+                    name: "slow",
+                    args: &args,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+                &meerkat_core::ToolExecutionResolutionContext::new(deadlines),
+            )
+            .unwrap();
+
+        assert_eq!(plan.deadlines().effective_timeout(), Some(CALLBACK_TIMEOUT));
+        assert!(plan.deadlines().contributors().iter().any(|contributor| {
+            contributor.owner() == meerkat_core::ToolDeadlineOwner::ToolInternal
+                && contributor.timeout() == Some(CALLBACK_TIMEOUT)
+        }));
+    }
+
+    #[test]
+    fn callback_internal_expiry_is_typed_timeout() {
+        assert!(matches!(
+            callback_timeout_error("slow"),
+            ToolError::Timeout {
+                name,
+                timeout_ms: 30_000,
+            } if name == "slow"
+        ));
+    }
+
+    #[tokio::test]
+    async fn callback_identical_metadata_reregistration_requires_fresh_resolution() {
+        let (callback_tx, mut callback_rx) = mpsc::channel(1);
+        let registry = Arc::new(CallbackToolRegistry::default());
+        registry
+            .replace_or_add(vec![make_tool_def("replaceable")])
+            .unwrap();
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(CallbackToolDispatcher::from_registry(
+                Arc::clone(&registry),
+                callback_tx,
+                Arc::new(AtomicU64::new(0)),
+                vec![],
+            ));
+        let args = RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "tc-reregister",
+            name: "replaceable",
+            args: &args,
+        };
+        let resolution_context = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .unwrap(),
+        );
+        let dispatch_context = meerkat_core::ToolDispatchContext::default();
+        let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &dispatch_context,
+            &resolution_context,
+        )
+        .unwrap();
+
+        registry
+            .replace_or_add(vec![make_tool_def("replaceable")])
+            .unwrap();
+
+        let error = meerkat_core::dispatch_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &dispatch_context,
+            &plan,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: meerkat_core::ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+        assert!(
+            callback_rx.try_recv().is_err(),
+            "a stale plan must be rejected before callback delivery"
+        );
     }
 
     #[test]

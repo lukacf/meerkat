@@ -393,7 +393,16 @@ pub enum CoreApplyTerminal {
     MachineTerminalFailure { error: TurnErrorMetadata },
     /// The run committed a continuation boundary and is waiting for external
     /// tool results before it can continue.
-    CallbackPending { tool_name: String, args: Value },
+    CallbackPending {
+        tool_use_id: String,
+        tool_name: String,
+        args: Value,
+    },
+    /// The run committed one assistant batch containing multiple external
+    /// callback calls. All results must be supplied as one exact set.
+    CallbackBatchPending {
+        pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -600,6 +609,7 @@ impl CoreApplyOutput {
     pub fn with_callback_pending(
         receipt: RunBoundaryReceiptDraft,
         session_snapshot: Option<Vec<u8>>,
+        tool_use_id: impl Into<String>,
         tool_name: impl Into<String>,
         args: Value,
     ) -> Self {
@@ -607,9 +617,22 @@ impl CoreApplyOutput {
             receipt,
             session_snapshot,
             terminal: Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id: tool_use_id.into(),
                 tool_name: tool_name.into(),
                 args,
             }),
+        }
+    }
+
+    pub fn with_callback_batch_pending(
+        receipt: RunBoundaryReceiptDraft,
+        session_snapshot: Option<Vec<u8>>,
+        pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
+    ) -> Self {
+        Self {
+            receipt,
+            session_snapshot,
+            terminal: Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }),
         }
     }
 

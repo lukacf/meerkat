@@ -318,6 +318,7 @@ pub enum AgentErrorReason {
         message: String,
     },
     CallbackPending {
+        tool_use_id: String,
         tool_name: String,
         args: Value,
     },
@@ -408,7 +409,12 @@ impl AgentErrorReason {
                 binding_key: binding_key.clone(),
                 message: message.clone(),
             }),
-            AgentError::CallbackPending { tool_name, args } => Some(Self::CallbackPending {
+            AgentError::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => Some(Self::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
             }),
@@ -457,7 +463,9 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::StickyModelFallbackAuthorityUnknown { .. } => Self::Internal,
             AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
-            AgentError::CallbackPending { .. } => Self::CallbackPending,
+            AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
+                Self::CallbackPending
+            }
             AgentError::StructuredOutputValidationFailed { .. } => Self::StructuredOutput,
             AgentError::InvalidOutputSchema(_) => Self::InvalidOutputSchema,
             AgentError::HookDenied { .. }
@@ -1884,6 +1892,10 @@ pub enum AgentEvent {
         interaction_id: crate::interaction::InteractionId,
         tool_name: String,
         args: Value,
+        /// Complete pending callback set. Empty on legacy/single-call event
+        /// producers; canonical runtime producers always populate it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
     },
 
     /// An interaction failed (terminal event for tap subscribers).
@@ -2793,6 +2805,7 @@ mod tests {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({"value": "browser"}),
+                pending_tool_calls: Vec::new(),
             },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -3395,6 +3408,7 @@ mod tests {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({"value": "browser"}),
+                pending_tool_calls: Vec::new(),
             },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),

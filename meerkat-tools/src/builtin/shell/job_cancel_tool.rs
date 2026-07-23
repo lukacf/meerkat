@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use super::job_manager::JobManager;
+use super::job_manager::{CancelJobDisposition, JobManager};
 use super::types::JobId;
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
@@ -28,6 +28,13 @@ impl ShellJobCancelTool {
     /// Create a new ShellJobCancelTool with the given job manager
     pub fn new(job_manager: Arc<JobManager>) -> Self {
         Self { job_manager }
+    }
+
+    fn status_label(disposition: CancelJobDisposition) -> &'static str {
+        match disposition {
+            CancelJobDisposition::CancellationRequested => "cancellation_requested",
+            CancelJobDisposition::Cancelled => "cancelled",
+        }
     }
 }
 
@@ -48,7 +55,7 @@ impl BuiltinTool for ShellJobCancelTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "shell_job_cancel".into(),
-            description: "Cancel a running background shell job".into(),
+            description: "Request cancellation of a running background shell job; live processes acknowledge terminal cancellation only after containment".into(),
             input_schema: crate::schema::schema_for::<JobCancelInput>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Shell,
@@ -67,14 +74,15 @@ impl BuiltinTool for ShellJobCancelTool {
 
         let job_id = JobId::from_string(&input.job_id);
 
-        self.job_manager
+        let disposition = self
+            .job_manager
             .cancel_job(&job_id)
             .await
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
         Ok(ToolOutput::Json(json!({
             "job_id": input.job_id,
-            "status": "cancelled"
+            "status": Self::status_label(disposition)
         })))
     }
 }
@@ -146,6 +154,18 @@ mod tests {
         assert!(required.contains(&json!("job_id")));
     }
 
+    #[test]
+    fn cancellation_request_is_not_reported_as_terminal_acknowledgement() {
+        assert_eq!(
+            ShellJobCancelTool::status_label(CancelJobDisposition::CancellationRequested),
+            "cancellation_requested"
+        );
+        assert_eq!(
+            ShellJobCancelTool::status_label(CancelJobDisposition::Cancelled),
+            "cancelled"
+        );
+    }
+
     // ==================== Output Tests ====================
 
     #[tokio::test]
@@ -176,7 +196,7 @@ mod tests {
         // Verify output
         let result = result.into_json().unwrap();
         assert_eq!(result["job_id"], job_id.0);
-        assert_eq!(result["status"], "cancelled");
+        assert_eq!(result["status"], "cancellation_requested");
     }
 
     // ==================== Error Tests ====================

@@ -512,6 +512,32 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
             .into()
     }
 
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        _dispatch_context: &meerkat_core::ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason,
+            });
+        }
+        entry
+            .execution
+            .resolve_default(resolution_context.deadlines().clone())
+            .map_err(Into::into)
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             SEARCH_TOOL_NAME => {
@@ -675,6 +701,10 @@ mod tests {
         may_require_control_plane: bool,
     }
 
+    struct HybridSessionDispatcher {
+        catalog: Arc<[ToolCatalogEntry]>,
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for ExactCatalogDispatcher {
@@ -704,11 +734,148 @@ mod tests {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for HybridSessionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &meerkat_core::ToolDispatchContext,
+            resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            let args: serde_json::Value =
+                serde_json::from_str(call.args.get()).map_err(|error| {
+                    meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                        tool_name: call.name.to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            let mode = if args["detached"] == true {
+                meerkat_core::ToolExecutionMode::Detached
+            } else {
+                meerkat_core::ToolExecutionMode::Fast
+            };
+            self.catalog[0]
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
     fn callback_provenance(source_id: &str) -> ToolProvenance {
         ToolProvenance {
             kind: ToolSourceKind::Callback,
             source_id: source_id.into(),
         }
+    }
+
+    fn hybrid_session_dispatcher() -> Arc<dyn AgentToolDispatcher> {
+        let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+            meerkat_core::RunnerIdentity::new("test.catalog-session", "v1")
+                .expect("runner declaration"),
+            meerkat_core::RestartClass::NonResumable,
+            meerkat_core::IdempotencyScope::ToolCall,
+            std::time::Duration::from_secs(10),
+        )
+        .expect("detached policy");
+        let contract = meerkat_core::ToolExecutionContract::new(
+            BTreeSet::from([
+                meerkat_core::ToolExecutionMode::Fast,
+                meerkat_core::ToolExecutionMode::Detached,
+            ]),
+            meerkat_core::ToolExecutionMode::Fast,
+            None,
+            Some(detached),
+        )
+        .expect("hybrid execution contract");
+        Arc::new(HybridSessionDispatcher {
+            catalog: vec![
+                ToolCatalogEntry::session_inline(
+                    session_tool("hybrid_session_tool", "Hybrid session tool"),
+                    true,
+                )
+                .with_execution_contract(contract),
+            ]
+            .into(),
+        })
+    }
+
+    #[test]
+    fn control_dispatcher_resolves_only_control_owned_names() {
+        let control = CatalogControlDispatcher::new(
+            hybrid_session_dispatcher(),
+            Arc::new(CatalogControlVisibilityProvider::new()),
+        );
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+        let raw = RawValue::from_string(r#"{"detached":true}"#.to_string())
+            .expect("raw control arguments");
+
+        let control_plan = control
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "control-plan",
+                    name: LOAD_TOOL_NAME,
+                    args: raw.as_ref(),
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("control-owned name should resolve locally");
+        assert_eq!(
+            control_plan.mode(),
+            meerkat_core::ToolExecutionMode::Fast,
+            "control arguments must not be interpreted by the hybrid session resolver"
+        );
+
+        let session_error = control
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "session-plan",
+                    name: "hybrid_session_tool",
+                    args: raw.as_ref(),
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect_err("the control dispatcher does not dispatch session-owned names");
+        assert!(matches!(
+            session_error,
+            meerkat_core::ToolExecutionResolutionError::NotFound { .. }
+        ));
     }
 
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {

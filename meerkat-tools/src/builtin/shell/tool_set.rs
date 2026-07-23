@@ -83,8 +83,8 @@ You have access to tools for executing shell commands. Use these carefully and r
 - Check command exit codes in the response to verify success
 
 ### Background Jobs
-- Use `background: true` for long-running commands (builds, tests, downloads)
-- Background jobs continue running while you do other work
+- Use `background: true` only for work that may safely be lost or restarted
+- Background jobs are process-local: they continue while the current Meerkat process is alive and do not survive a process restart
 - Check `shell_job_status` to get results when done
 - Don't poll job status too frequently - wait at least 5-10 seconds between checks
 
@@ -214,5 +214,17 @@ mod tests {
         assert_eq!(tools[1].name(), "shell_job_status");
         assert_eq!(tools[2].name(), "shell_jobs");
         assert_eq!(tools[3].name(), "shell_job_cancel");
+    }
+
+    #[test]
+    fn background_usage_instructions_state_process_local_volatility() {
+        let instructions = ShellToolSet::usage_instructions();
+
+        assert!(instructions.contains("process-local"));
+        assert!(instructions.contains("do not survive a process restart"));
+        assert!(
+            !instructions.contains("Background jobs continue running while you do other work\n"),
+            "unqualified continuation wording hides the current volatility contract"
+        );
     }
 }

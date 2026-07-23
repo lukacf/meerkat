@@ -49299,6 +49299,131 @@ impl AgentToolDispatcher for MultiToolDispatcher {
     }
 }
 
+struct ExactHybridExecutionDispatcher {
+    catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+}
+
+impl ExactHybridExecutionDispatcher {
+    fn new(defs: Vec<Arc<ToolDef>>) -> Self {
+        let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+            meerkat_core::RunnerIdentity::new("test.hybrid", "v1").expect("valid runner identity"),
+            meerkat_core::RestartClass::NonResumable,
+            meerkat_core::IdempotencyScope::InteractionAndArguments,
+            Duration::from_secs(10),
+        )
+        .expect("valid detached policy");
+        let execution = meerkat_core::ToolExecutionContract::new(
+            BTreeSet::from([
+                meerkat_core::ToolExecutionMode::Fast,
+                meerkat_core::ToolExecutionMode::Detached,
+            ]),
+            meerkat_core::ToolExecutionMode::Fast,
+            None,
+            Some(detached),
+        )
+        .expect("valid hybrid execution contract");
+        let catalog = defs
+            .into_iter()
+            .map(|tool| {
+                meerkat_core::ToolCatalogEntry::session_inline(tool, true)
+                    .with_execution_contract(execution.clone())
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self { catalog }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for ExactHybridExecutionDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.catalog
+            .iter()
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        Arc::clone(&self.catalog)
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        _dispatch_context: &meerkat_core::ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let entry = self
+            .catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        let arguments: serde_json::Value =
+            serde_json::from_str(call.args.get()).map_err(|error| {
+                meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                    tool_name: call.name.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let mode = if arguments["detach"].as_bool() == Some(true) {
+            meerkat_core::ToolExecutionMode::Detached
+        } else {
+            meerkat_core::ToolExecutionMode::Fast
+        };
+        entry
+            .execution
+            .resolve(mode, resolution_context.deadlines().clone())
+            .map_err(Into::into)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if self
+            .catalog
+            .iter()
+            .any(|entry| entry.tool.name == call.name)
+        {
+            Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+        } else {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        _context: &meerkat_core::ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        if plan.mode() != meerkat_core::ToolExecutionMode::Detached {
+            return Err(ToolError::execution_failed(
+                "test detached owner received the wrong plan",
+            ));
+        }
+        self.dispatch(call).await
+    }
+}
+
+fn hybrid_execution_resolution_context() -> meerkat_core::ToolExecutionResolutionContext {
+    meerkat_core::ToolExecutionResolutionContext::new(
+        meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
+            meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+            Duration::from_secs(600),
+        )])
+        .expect("valid test deadline chain"),
+    )
+}
+
 struct ContextRecordingDispatcher {
     defs: Arc<[Arc<ToolDef>]>,
     saw_context_image: Arc<AtomicBool>,
@@ -49433,6 +49558,77 @@ async fn name_filtered_dispatcher_preserves_dispatch_context() {
     assert!(
         saw_context_image.load(Ordering::SeqCst),
         "name filter must forward ToolDispatchContext to inner dispatcher"
+    );
+}
+
+#[tokio::test]
+async fn name_filtered_dispatcher_preserves_exact_catalog_and_hybrid_resolution() {
+    use super::tools::NameFilteredDispatcher;
+
+    let inner = Arc::new(ExactHybridExecutionDispatcher::new(vec![
+        context_recording_tool("visible", None),
+        context_recording_tool("hidden", None),
+    ]));
+    let excluded: HashSet<String> = ["hidden".to_string()].into_iter().collect();
+    let filtered = NameFilteredDispatcher::new(inner, excluded);
+
+    assert!(
+        filtered.tool_catalog_capabilities().exact_catalog,
+        "an exact inner catalog remains exact after deterministic name filtering"
+    );
+    let catalog = filtered.tool_catalog();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].tool.name, "visible");
+    assert!(
+        catalog[0]
+            .execution
+            .supported_modes()
+            .contains(&meerkat_core::ToolExecutionMode::Detached),
+        "filter must preserve the exact inner execution contract"
+    );
+
+    let args = RawValue::from_string(r#"{"detach":true}"#.to_string()).unwrap();
+    let visible = filtered
+        .resolve_execution_plan(
+            ToolCallView {
+                id: "resolve-visible",
+                name: "visible",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &hybrid_execution_resolution_context(),
+        )
+        .expect("visible execution resolution reaches the hybrid inner resolver");
+    assert_eq!(visible.mode(), meerkat_core::ToolExecutionMode::Detached);
+    filtered
+        .dispatch_resolved_with_context(
+            ToolCallView {
+                id: "resolve-visible",
+                name: "visible",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &visible,
+        )
+        .await
+        .expect("name filter forwards the resolved plan");
+
+    let hidden = filtered
+        .resolve_execution_plan(
+            ToolCallView {
+                id: "resolve-hidden",
+                name: "hidden",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &hybrid_execution_resolution_context(),
+        )
+        .expect_err("excluded names must not resolve an execution plan");
+    assert_eq!(
+        hidden,
+        meerkat_core::ToolExecutionResolutionError::NotFound {
+            tool_name: "hidden".to_string(),
+        }
     );
 }
 
@@ -49592,6 +49788,90 @@ async fn mcp_provenance_filter_preserves_dispatch_context() {
     assert!(
         saw_context_image.load(Ordering::SeqCst),
         "MCP provenance filter must forward ToolDispatchContext to inner dispatcher"
+    );
+}
+
+#[tokio::test]
+async fn mcp_provenance_filter_preserves_exact_catalog_and_gates_hybrid_resolution() {
+    use super::tools::McpProvenanceFilter;
+    use meerkat_core::types::{ToolSourceId, ToolSourceKind};
+
+    let inner = Arc::new(ExactHybridExecutionDispatcher::new(vec![
+        context_recording_tool(
+            "allowed",
+            Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: ToolSourceId::new("linear"),
+            }),
+        ),
+        context_recording_tool(
+            "blocked",
+            Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: ToolSourceId::new("github"),
+            }),
+        ),
+    ])) as Arc<dyn AgentToolDispatcher>;
+    let allowlist: HashSet<String> = ["linear".to_string()].into_iter().collect();
+    let filter = McpProvenanceFilter::new(inner, allowlist);
+
+    assert!(
+        filter.tool_catalog_capabilities().exact_catalog,
+        "an exact inner catalog remains exact after provenance filtering"
+    );
+    let catalog = filter.tool_catalog();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].tool.name, "allowed");
+    assert!(
+        catalog[0]
+            .execution
+            .supported_modes()
+            .contains(&meerkat_core::ToolExecutionMode::Detached),
+        "filter must preserve the exact inner execution contract"
+    );
+
+    let args = RawValue::from_string(r#"{"detach":true}"#.to_string()).unwrap();
+    let allowed = filter
+        .resolve_execution_plan(
+            ToolCallView {
+                id: "resolve-allowed",
+                name: "allowed",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &hybrid_execution_resolution_context(),
+        )
+        .expect("allowed MCP tool reaches the hybrid inner resolver");
+    assert_eq!(allowed.mode(), meerkat_core::ToolExecutionMode::Detached);
+    filter
+        .dispatch_resolved_with_context(
+            ToolCallView {
+                id: "resolve-allowed",
+                name: "allowed",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &allowed,
+        )
+        .await
+        .expect("provenance filter forwards the resolved plan");
+
+    let blocked = filter
+        .resolve_execution_plan(
+            ToolCallView {
+                id: "resolve-blocked",
+                name: "blocked",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+            &hybrid_execution_resolution_context(),
+        )
+        .expect_err("blocked MCP provenance must not resolve an execution plan");
+    assert_eq!(
+        blocked,
+        meerkat_core::ToolExecutionResolutionError::NotFound {
+            tool_name: "blocked".to_string(),
+        }
     );
 }
 
@@ -56933,7 +57213,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StorageError(_) => "storage_error".to_string(),
         MobError::SessionError(_) => "session_error".to_string(),
         MobError::CommsError(_) => "comms_error".to_string(),
-        MobError::CallbackPending { .. } => "callback_pending".to_string(),
+        MobError::CallbackPending { .. } | MobError::CallbackBatchPending { .. } => {
+            "callback_pending".to_string()
+        }
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
         MobError::StaleMemberOperatorAuthority { .. } => {
             "stale_member_operator_authority".to_string()

@@ -362,6 +362,7 @@ mod tests {
                 interaction_id: InteractionId(uuid::Uuid::new_v4()),
                 tool_name: "ask_user".to_string(),
                 args: serde_json::json!({"q": 1}),
+                pending_tool_calls: Vec::new(),
             })
             .expect("terminal");
         assert_eq!(terminal.kind, TurnTerminalKind::InteractionCallbackPending);

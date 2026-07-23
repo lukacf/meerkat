@@ -10317,6 +10317,7 @@ mod tests {
         let event = interaction_terminal_event(
             interaction_id,
             CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
             },
@@ -10330,6 +10331,7 @@ mod tests {
             interaction_id: actual_id,
             tool_name,
             args,
+            ..
         } = event
         {
             assert_eq!(actual_id, interaction_id);

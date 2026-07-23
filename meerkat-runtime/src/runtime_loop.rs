@@ -290,9 +290,10 @@ fn completion_terminal_observation(
         Some(CoreApplyTerminal::RunResult(_)) => {
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RunResult
         }
-        Some(CoreApplyTerminal::CallbackPending { .. }) => {
-            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending
-        }
+        Some(
+            CoreApplyTerminal::CallbackPending { .. }
+            | CoreApplyTerminal::CallbackBatchPending { .. },
+        ) => crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending,
         Some(CoreApplyTerminal::MachineTerminalFailure { .. }) => {
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal
         }
@@ -3968,7 +3969,9 @@ async fn maybe_inject_feed_wake(
 
     if !has_new_wake_completion {
         // No generated wake-worthy completions: advance to prevent hot-spin
-        // on observe-only entries.
+        // on observe-only entries. RuntimeInjected records that a one-shot
+        // continuation was accepted; AgentApplied may lag while that accepted
+        // continuation performs its own boundary-level delivery retry.
         let advanced = match advance_runtime_completion_cursor(
             Some(registry),
             meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
@@ -8013,6 +8016,7 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
         let terminal = Some(CoreApplyTerminal::CallbackPending {
+            tool_use_id: "call-1".to_string(),
             tool_name: "external_mock".to_string(),
             args: serde_json::json!({ "value": "browser" }),
         });
@@ -8028,7 +8032,12 @@ mod tests {
         );
 
         match handle.wait_authorized().await {
-            crate::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+            crate::completion::CompletionOutcome::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "external_mock");
                 assert_eq!(args, serde_json::json!({ "value": "browser" }));
             }
@@ -8147,6 +8156,94 @@ mod tests {
             }
             other => panic!("expected inline continuation injection, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_does_not_duplicate_an_accepted_one_shot_completion() {
+        let driver = make_shared_ephemeral_driver("feed-one-shot");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("feed-one-shot");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+        let binding = RuntimeLoopAuthorityBinding::detached_for_test();
+
+        assert_eq!(
+            maybe_inject_feed_wake(
+                &driver,
+                Some(feed.as_ref()),
+                &mut observed_seq,
+                &mut last_injected_seq,
+                None,
+                Some(&registry),
+                &binding,
+            )
+            .await,
+            FeedWakeOutcome::Injected
+        );
+
+        {
+            let mut guard = driver.lock().await;
+            let crate::meerkat_machine::DriverEntry::Ephemeral(ephemeral) = &mut *guard else {
+                panic!("test uses an ephemeral driver");
+            };
+            ephemeral
+                .dequeue_next()
+                .expect("first continuation should be accepted");
+        }
+        let second_driver = make_shared_ephemeral_driver("feed-one-shot-second-wake");
+
+        assert_eq!(
+            maybe_inject_feed_wake(
+                &second_driver,
+                Some(feed.as_ref()),
+                &mut observed_seq,
+                &mut last_injected_seq,
+                None,
+                Some(&registry),
+                &binding,
+            )
+            .await,
+            FeedWakeOutcome::Noop,
+            "an accepted one-shot continuation must not be reinjected while AgentApplied catches up"
+        );
+        let guard = second_driver.lock().await;
+        assert!(guard.as_driver().active_input_ids().is_empty());
+        drop(guard);
+
+        registry
+            .advance_completion_cursor(
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                feed.watermark(),
+                None,
+            )
+            .expect("model successful exactly-once agent application");
+        let applied_driver = make_shared_ephemeral_driver("feed-enrichment-applied");
+
+        assert_eq!(
+            maybe_inject_feed_wake(
+                &applied_driver,
+                Some(feed.as_ref()),
+                &mut observed_seq,
+                &mut last_injected_seq,
+                None,
+                Some(&registry),
+                &binding,
+            )
+            .await,
+            FeedWakeOutcome::Noop,
+            "applied completion must remain consumed"
+        );
+        let guard = applied_driver.lock().await;
+        assert!(guard.as_driver().active_input_ids().is_empty());
     }
 
     #[tokio::test]

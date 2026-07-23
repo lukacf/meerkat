@@ -163,12 +163,14 @@ pub fn compose_rpc_mob_state(
         let runtime = Arc::clone(runtime);
         move || {
             runtime.callback_request_tx().map(|tx| {
-                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    runtime.registered_tools(),
-                    tx,
-                    runtime.callback_id_counter(),
-                    vec![],
-                )) as Arc<dyn AgentToolDispatcher>
+                Arc::new(
+                    crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
+                        runtime.callback_tool_registry(),
+                        tx,
+                        runtime.callback_id_counter(),
+                        vec![],
+                    ),
+                ) as Arc<dyn AgentToolDispatcher>
             })
         }
     });
@@ -2420,27 +2422,24 @@ impl MethodRouter {
             }
         };
 
-        let registered_tools = self.runtime.registered_tools();
-        match registered_tools.write() {
-            Ok(mut tools) => {
-                let count = params.tools.len();
-                for new_tool in params.tools {
-                    let stamped = meerkat_core::ToolDef {
-                        provenance: Some(meerkat_core::types::ToolProvenance {
-                            kind: meerkat_core::types::ToolSourceKind::Callback,
-                            source_id: "callback".into(),
-                        }),
-                        ..new_tool.into()
-                    };
-                    if let Some(existing) = tools.iter_mut().find(|t| t.name == stamped.name) {
-                        *existing = stamped;
-                    } else {
-                        tools.push(stamped);
-                    }
-                }
-                RpcResponse::success(id, ToolsRegisterResult { registered: count })
-            }
-            Err(_) => RpcResponse::error(
+        let replacements = params
+            .tools
+            .into_iter()
+            .map(|new_tool| meerkat_core::ToolDef {
+                provenance: Some(meerkat_core::types::ToolProvenance {
+                    kind: meerkat_core::types::ToolSourceKind::Callback,
+                    source_id: "callback".into(),
+                }),
+                ..new_tool.into()
+            })
+            .collect();
+        match self
+            .runtime
+            .callback_tool_registry()
+            .replace_or_add(replacements)
+        {
+            Ok(count) => RpcResponse::success(id, ToolsRegisterResult { registered: count }),
+            Err(()) => RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
                 "Failed to acquire tool registry lock",

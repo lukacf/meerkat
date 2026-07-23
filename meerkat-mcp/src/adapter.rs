@@ -16,12 +16,16 @@ use meerkat_core::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
 use crate::{McpApplyResult, McpError, McpReloadTarget, McpRouter};
 use meerkat_core::McpServerConfig;
+
+// Process-local namespace for pre-dispatch witnesses only. Router recovery or
+// reconstruction must resolve a new plan rather than restore this identity.
+static NEXT_MCP_EXECUTION_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Typed fail-closed outcome of [`McpRouterAdapter::wait_until_ready`] when
 /// MCP servers are still pending at the deadline (K14).
@@ -95,6 +99,8 @@ pub struct McpRouterAdapter {
     /// runtime-backed session builds replace the slot with the session-owned
     /// handle.
     external_surface_handle: Option<Arc<StdRwLock<Arc<dyn ExternalToolSurfaceHandle>>>>,
+    execution_authority_id: u64,
+    execution_binding_epoch: AtomicU64,
 }
 
 /// Fail-closed MCP server-lifecycle mirror installed when the pre-bind seed
@@ -358,7 +364,62 @@ impl McpRouterAdapter {
             surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
             mcp_lifecycle_handle,
             external_surface_handle,
+            execution_authority_id: NEXT_MCP_EXECUTION_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed),
+            execution_binding_epoch: AtomicU64::new(0),
         }
+    }
+
+    fn execution_authority_key(&self) -> String {
+        format!("mcp-router-adapter:{}", self.execution_authority_id)
+    }
+
+    fn live_binding_fingerprint(
+        &self,
+        router: &McpRouter,
+        tool_name: &str,
+    ) -> Option<meerkat_core::EphemeralToolBindingFingerprint> {
+        AgentToolDispatcher::tool_catalog(router)
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .map(meerkat_core::ephemeral_tool_catalog_binding_fingerprint)
+            .map(|fingerprint| {
+                fingerprint.with_live_authority(
+                    self.execution_authority_id as usize,
+                    self.execution_binding_epoch.load(Ordering::Acquire),
+                )
+            })
+    }
+
+    fn owner_witness(
+        &self,
+        router: &McpRouter,
+        tool_name: &str,
+    ) -> Result<meerkat_core::ToolExecutionOwnerWitness, meerkat_core::ToolExecutionResolutionError>
+    {
+        let fingerprint = self
+            .live_binding_fingerprint(router, tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        meerkat_core::ToolExecutionOwnerWitness::new(
+            self.execution_authority_key(),
+            tool_name,
+            fingerprint,
+        )
+        .map_err(meerkat_core::ToolExecutionResolutionError::from)
+    }
+
+    fn binding_witness_matches(
+        &self,
+        tool_name: &str,
+        live_fingerprint: Option<meerkat_core::EphemeralToolBindingFingerprint>,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> bool {
+        plan.owner_witness(&self.execution_authority_key())
+            .is_some_and(|witness| {
+                witness.owner_key() == tool_name
+                    && live_fingerprint.as_ref() == Some(witness.binding_fingerprint())
+            })
     }
 
     fn set_tools_cache(&self, tools: Arc<[Arc<ToolDef>]>) {
@@ -454,6 +515,7 @@ impl McpRouterAdapter {
     pub async fn shutdown(&self) {
         let mut router = self.router.write().await;
         if let Some(router) = router.take() {
+            self.execution_binding_epoch.fetch_add(1, Ordering::AcqRel);
             router.shutdown().await;
         }
         self.has_pending.store(false, Ordering::Release);
@@ -523,6 +585,7 @@ impl McpRouterAdapter {
             .apply_staged()
             .await
             .map_err(|error| error.to_string())?;
+        self.execution_binding_epoch.fetch_add(1, Ordering::AcqRel);
         self.sync_router_projection(router);
         Ok(result)
     }
@@ -534,6 +597,9 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         let actions = router.take_lifecycle_actions();
+        if !actions.is_empty() {
+            self.execution_binding_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         self.sync_router_projection(router);
         Ok(actions)
     }
@@ -862,6 +928,35 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        let guard = self.router.read().await;
+        match &*guard {
+            Some(router) => {
+                if !self.binding_witness_matches(
+                    call.name,
+                    self.live_binding_fingerprint(router, call.name),
+                    plan,
+                ) {
+                    return Err(ToolError::unavailable(
+                        call.name,
+                        meerkat_core::ToolUnavailableReason::ExecutionOwnerChanged,
+                    ));
+                }
+                AgentToolDispatcher::dispatch_resolved_with_context(router, call, context, plan)
+                    .await
+            }
+            None => Err(ToolError::unavailable(
+                call.name,
+                meerkat_core::ToolUnavailableReason::ExecutionOwnerChanged,
+            )),
+        }
+    }
+
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         // Fast path: skip write lock if nothing is pending.
         if !self.has_pending.load(Ordering::Acquire) {
@@ -874,6 +969,9 @@ impl AgentToolDispatcher for McpRouterAdapter {
         };
 
         let update = router.take_external_updates();
+        if !update.notices.is_empty() {
+            self.execution_binding_epoch.fetch_add(1, Ordering::AcqRel);
+        }
 
         self.sync_router_projection(router);
         update
@@ -884,6 +982,10 @@ impl AgentToolDispatcher for McpRouterAdapter {
             exact_catalog: true,
             may_require_catalog_control_plane: true,
         }
+    }
+
+    fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+        self.execution_binding_epoch.load(Ordering::Acquire)
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
@@ -897,6 +999,34 @@ impl AgentToolDispatcher for McpRouterAdapter {
                 None => self.cached_catalog(),
             },
             Err(_) => self.cached_catalog(),
+        }
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &meerkat_core::ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        match self.router.try_read() {
+            Ok(router) => match router.as_ref() {
+                Some(router) => AgentToolDispatcher::resolve_execution_plan(
+                    router,
+                    call,
+                    dispatch_context,
+                    resolution_context,
+                )?
+                .with_owner_witness(self.owner_witness(router, call.name)?),
+                None => Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
+                    tool_name: call.name.to_string(),
+                    reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+                }),
+            },
+            Err(_) => Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            }),
         }
     }
 
@@ -1249,6 +1379,86 @@ mod tests {
             "empty MCP adapters should preserve exact deferred catalogs on other tool planes"
         );
         assert!(adapter.tools().is_empty());
+    }
+
+    #[test]
+    fn adapter_accepts_equivalent_projection_rebuilds_and_rejects_semantic_change() {
+        let adapter = McpRouterAdapter::new(McpRouter::new());
+        let entry = |description: &str| {
+            ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "echo",
+                    description,
+                    serde_json::json!({"type": "object"}),
+                )),
+                true,
+            )
+        };
+        let original = entry("stable MCP binding");
+        let rebuilt = entry("stable MCP binding");
+        let changed = entry("replacement MCP binding");
+        let plan = meerkat_core::ToolExecutionContract::default()
+            .resolve_default(
+                meerkat_core::ToolDeadlineChain::new(vec![
+                    meerkat_core::ToolDeadlineContributor::finite(
+                        meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(600),
+                    ),
+                ])
+                .expect("deadline chain"),
+            )
+            .expect("fast plan")
+            .with_owner_witness(
+                meerkat_core::ToolExecutionOwnerWitness::new(
+                    adapter.execution_authority_key(),
+                    "echo",
+                    meerkat_core::ephemeral_tool_catalog_binding_fingerprint(&original),
+                )
+                .expect("owner witness"),
+            )
+            .expect("attach witness");
+
+        assert!(adapter.binding_witness_matches(
+            "echo",
+            Some(meerkat_core::ephemeral_tool_catalog_binding_fingerprint(
+                &rebuilt,
+            )),
+            &plan,
+        ));
+        let refreshed_plan = meerkat_core::ToolExecutionContract::default()
+            .resolve_default(
+                meerkat_core::ToolDeadlineChain::new(vec![
+                    meerkat_core::ToolDeadlineContributor::finite(
+                        meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(600),
+                    ),
+                ])
+                .expect("deadline chain"),
+            )
+            .expect("fast plan")
+            .with_owner_witness(
+                meerkat_core::ToolExecutionOwnerWitness::new(
+                    adapter.execution_authority_key(),
+                    "echo",
+                    meerkat_core::ephemeral_tool_catalog_binding_fingerprint(&rebuilt),
+                )
+                .expect("fresh owner witness"),
+            )
+            .expect("attach fresh witness");
+        assert!(adapter.binding_witness_matches(
+            "echo",
+            Some(meerkat_core::ephemeral_tool_catalog_binding_fingerprint(
+                &rebuilt,
+            )),
+            &refreshed_plan,
+        ));
+        assert!(!adapter.binding_witness_matches(
+            "echo",
+            Some(meerkat_core::ephemeral_tool_catalog_binding_fingerprint(
+                &changed,
+            )),
+            &plan,
+        ));
     }
 
     #[tokio::test]
@@ -1960,6 +2170,270 @@ mod tests {
         );
 
         adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_reload_rebuild_requires_fresh_live_resolution() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = generated_surface_router();
+        router
+            .stage_add(test_server_config("stable-reload", &server_path))
+            .expect("stage server");
+        router.apply_staged().await.expect("apply server");
+        let adapter = McpRouterAdapter::new(router);
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("server connects");
+        adapter.refresh_tools().await.expect("refresh tools");
+
+        let tool_name = adapter
+            .tools()
+            .iter()
+            .find(|tool| tool.name.as_str() == "echo")
+            .expect("test server exposes echo")
+            .name
+            .to_string();
+        let args =
+            serde_json::value::RawValue::from_string(r#"{"message":"same-binding"}"#.to_string())
+                .expect("raw arguments");
+        let call = ToolCallView {
+            id: "stable-mcp-binding",
+            name: &tool_name,
+            args: &args,
+        };
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    Duration::from_secs(600),
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+        let plan = adapter
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("initial projection resolves");
+
+        adapter
+            .stage_reload("stable-reload")
+            .await
+            .expect("stage reload");
+        adapter.apply_staged().await.expect("apply reload");
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("reloaded server connects");
+        adapter
+            .refresh_tools()
+            .await
+            .expect("refresh reloaded tools");
+
+        let error = adapter
+            .dispatch_resolved_with_context(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &plan,
+            )
+            .await
+            .expect_err("turn-local MCP witnesses must not survive a router reload");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: meerkat_core::ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+        let refreshed = adapter
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("reload path re-resolves against the live router");
+        adapter
+            .dispatch_resolved_with_context(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &refreshed,
+            )
+            .await
+            .expect("fresh resolution must allow the reconstructed MCP binding");
+
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_action_reload_invalidates_plan_resolved_while_connection_was_pending() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = generated_surface_router();
+        router
+            .add_server(test_server_config("lifecycle-reload", &server_path))
+            .await
+            .expect("initial server connects");
+        let adapter = McpRouterAdapter::new(router);
+        adapter
+            .poll_lifecycle_actions()
+            .await
+            .expect("drain initial add lifecycle action");
+        let args =
+            serde_json::value::RawValue::from_string(r#"{"message":"lifecycle"}"#.to_string())
+                .expect("raw arguments");
+        let call = ToolCallView {
+            id: "lifecycle-reload-binding",
+            name: "echo",
+            args: &args,
+        };
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    Duration::from_secs(600),
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+
+        adapter
+            .stage_reload("lifecycle-reload")
+            .await
+            .expect("stage reload");
+        adapter.apply_staged().await.expect("start pending reload");
+        let pending_plan = adapter
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("old live connection remains resolvable while reload is pending");
+
+        let actions = tokio::time::timeout(async_connect_test_timeout(), async {
+            loop {
+                let actions = adapter
+                    .poll_lifecycle_actions()
+                    .await
+                    .expect("poll lifecycle actions");
+                if !actions.is_empty() {
+                    break actions;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("reload lifecycle action arrives");
+        assert!(actions.iter().any(|action| {
+            action.target == "lifecycle-reload"
+                && action.operation == meerkat_core::ToolConfigChangeOperation::Reload
+                && action.phase == meerkat_core::ExternalToolDeltaPhase::Applied
+        }));
+
+        let error = adapter
+            .dispatch_resolved_with_context(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &pending_plan,
+            )
+            .await
+            .expect_err("lifecycle installation must invalidate the pending-era plan");
+        assert!(matches!(
+            error,
+            ToolError::Unavailable {
+                reason: meerkat_core::ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+
+        let fresh = adapter
+            .resolve_execution_plan(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect("fresh connection resolves after lifecycle installation");
+        adapter
+            .dispatch_resolved_with_context(
+                call,
+                &meerkat_core::ToolDispatchContext::default(),
+                &fresh,
+            )
+            .await
+            .expect("fresh connection dispatches");
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn adapter_fails_closed_instead_of_authorizing_cached_contract_under_router_contention() {
+        let adapter = McpRouterAdapter::new(generated_surface_router());
+        let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+            meerkat_core::RunnerIdentity::new("test.mcp", "v1").expect("runner declaration"),
+            meerkat_core::RestartClass::NonResumable,
+            meerkat_core::IdempotencyScope::ToolCall,
+            Duration::from_secs(10),
+        )
+        .expect("detached policy");
+        let contract = meerkat_core::ToolExecutionContract::new(
+            BTreeSet::from([meerkat_core::ToolExecutionMode::Detached]),
+            meerkat_core::ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .expect("detached execution contract");
+        adapter.set_catalog_cache(
+            vec![
+                ToolCatalogEntry::session_inline(
+                    Arc::new(ToolDef::new(
+                        "cached_detached_mcp",
+                        "cached detached MCP tool",
+                        serde_json::json!({"type": "object"}),
+                    )),
+                    true,
+                )
+                .with_execution_contract(contract),
+            ]
+            .into(),
+        );
+        let raw =
+            serde_json::value::RawValue::from_string("{}".to_string()).expect("raw arguments");
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    Duration::from_secs(600),
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+        let _router_write_guard = adapter.router.write().await;
+
+        let error = adapter
+            .resolve_execution_plan(
+                ToolCallView {
+                    id: "mcp-cached-plan",
+                    name: "cached_detached_mcp",
+                    args: raw.as_ref(),
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+                &resolution,
+            )
+            .expect_err("a stale cache must never authorize while live routing is contended");
+
+        assert!(matches!(
+            error,
+            meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name,
+                reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            } if tool_name == "cached_detached_mcp"
+        ));
     }
 
     #[tokio::test]

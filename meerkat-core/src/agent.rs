@@ -628,6 +628,94 @@ pub trait AgentToolDispatcher: Send + Sync {
             .into()
     }
 
+    /// Live generation for one logical tool binding.
+    ///
+    /// Static dispatchers keep the default zero epoch. Mutable authorities
+    /// must override this and advance it for every replacement, including an
+    /// identical-metadata A→B replacement.
+    fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+        0
+    }
+
+    /// Snapshot the current live logical binding advertised for `tool_name`.
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<crate::EphemeralToolBindingFingerprint, crate::ToolExecutionResolutionError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(crate::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, self.execution_binding_epoch(tool_name)))
+    }
+
+    /// Resolve the exact execution class and deadline chain before dispatch.
+    ///
+    /// The default uses this dispatcher's effective catalog, so wrappers that
+    /// filter or select winners apply the same decision to declaration and
+    /// resolution. Hybrid tools may override this method to inspect typed
+    /// arguments while preserving the catalog contract as the upper bound.
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        _dispatch_context: &ToolDispatchContext,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+    ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(crate::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason,
+            });
+        }
+        entry
+            .execution
+            .resolve_default(resolution_context.deadlines().clone())
+            .map_err(crate::ToolExecutionResolutionError::from)
+    }
+
+    /// Validate a resolved plan against both the caller-owned deadline prefix
+    /// and this dispatcher's live advertised catalog contract.
+    ///
+    /// This is the mandatory root seam after argument-sensitive resolution:
+    /// hybrid tools may select any advertised mode, while an override cannot
+    /// return a mode or mode-derived facet absent from the effective catalog.
+    fn validate_resolved_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<(), crate::ToolExecutionResolutionError> {
+        resolution_context.validate_resolved_plan(plan)?;
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(crate::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason,
+            });
+        }
+        entry
+            .execution
+            .validate_resolved_plan(plan)
+            .map_err(crate::ToolExecutionResolutionError::from)
+    }
+
     /// Return non-draining pending source names for exact-catalog discovery.
     ///
     /// Pending sources are catalog-level discovery metadata rather than
@@ -657,6 +745,29 @@ pub trait AgentToolDispatcher: Send + Sync {
         _context: &ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         self.dispatch(call).await
+    }
+
+    /// Execute a previously resolved plan without re-selecting its mode.
+    ///
+    /// The default is deliberately a one-way lowering for Fast calls only.
+    /// Streaming and Detached require an explicit mode owner; silently sending
+    /// either through ordinary dispatch would erase their liveness, output,
+    /// restart, and idempotency contracts.
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        match plan.mode() {
+            crate::ToolExecutionMode::Fast => self.dispatch_with_context(call, context).await,
+            crate::ToolExecutionMode::Streaming | crate::ToolExecutionMode::Detached => {
+                Err(crate::error::ToolError::unavailable(
+                    call.name,
+                    crate::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ))
+            }
+        }
     }
 
     /// Poll for external tool updates from background operations (e.g. async MCP loading).
@@ -730,6 +841,58 @@ pub trait AgentToolDispatcher: Send + Sync {
         _handle: Arc<dyn crate::handles::ExternalToolSurfaceHandle>,
     ) {
     }
+}
+
+/// Resolve a plan against the exact live root dispatcher allocation.
+///
+/// The returned plan retains an ephemeral `Arc` lease to that allocation.
+/// This makes reconstruction and allocator address reuse unforgeable without
+/// serializing process-local authority or conflating it with durable job
+/// fencing.
+pub fn resolve_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized + 'static>(
+    dispatcher: &Arc<T>,
+    call: ToolCallView<'_>,
+    dispatch_context: &ToolDispatchContext,
+    resolution_context: &crate::ToolExecutionResolutionContext,
+) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+    let before = dispatcher.execution_binding_fingerprint(call.name)?;
+    let plan = dispatcher.resolve_execution_plan(call, dispatch_context, resolution_context)?;
+    if dispatcher.execution_binding_fingerprint(call.name)? != before {
+        return Err(crate::ToolExecutionResolutionError::Unavailable {
+            tool_name: call.name.to_string(),
+            reason: crate::ToolUnavailableReason::ExecutionOwnerChanged,
+        });
+    }
+    let witness = crate::ToolExecutionOwnerWitness::new("root-dispatcher", call.name, before)
+        .map_err(crate::ToolExecutionResolutionError::from)?;
+    plan.with_owner_witness(witness)?
+        .bind_root_dispatch(Arc::clone(dispatcher), call)
+}
+
+/// Dispatch a plan only through the exact root allocation and exact canonical
+/// call identity used during resolution.
+pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized + 'static>(
+    dispatcher: &Arc<T>,
+    call: ToolCallView<'_>,
+    context: &ToolDispatchContext,
+    plan: &crate::ResolvedToolExecutionPlan,
+) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+    plan.validate_root_dispatch(dispatcher, call)?;
+    let witness = plan.owner_witness("root-dispatcher").ok_or_else(|| {
+        crate::error::ToolError::unavailable(
+            call.name,
+            crate::ToolUnavailableReason::ExecutionOwnerChanged,
+        )
+    })?;
+    if witness.binding_fingerprint() != &dispatcher.execution_binding_fingerprint(call.name)? {
+        return Err(crate::error::ToolError::unavailable(
+            call.name,
+            crate::ToolUnavailableReason::ExecutionOwnerChanged,
+        ));
+    }
+    dispatcher
+        .dispatch_resolved_with_context(call, context, plan)
+        .await
 }
 
 /// Compute whether the current exact catalog should stay inline or switch to deferred mode.
@@ -879,6 +1042,31 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.dispatch_with_context(call, context).await
     }
 
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        if !self.allowed_tools.contains(call.name) {
+            let inner_knows_tool = if self.inner.tool_catalog_capabilities().exact_catalog {
+                self.inner
+                    .tool_catalog()
+                    .iter()
+                    .any(|entry| entry.tool.name == call.name)
+            } else {
+                self.inner.tools().iter().any(|tool| tool.name == call.name)
+            };
+            if !inner_knows_tool {
+                return Err(crate::error::ToolError::not_found(call.name));
+            }
+            return Err(crate::error::ToolError::access_denied(call.name));
+        }
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
     }
@@ -899,6 +1087,67 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
             .cloned()
             .collect::<Vec<_>>()
             .into()
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<crate::EphemeralToolBindingFingerprint, crate::ToolExecutionResolutionError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        let child = self.inner.execution_binding_fingerprint(tool_name)?;
+        Ok(crate::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, 0)
+            .with_dependency(&child))
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+    ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+        if !self.allowed_tools.contains(call.name) {
+            let inner_knows_tool = if self.inner.tool_catalog_capabilities().exact_catalog {
+                self.inner
+                    .tool_catalog()
+                    .iter()
+                    .any(|entry| entry.tool.name == call.name)
+            } else {
+                self.inner.tools().iter().any(|tool| tool.name == call.name)
+            };
+            return Err(if inner_knows_tool {
+                crate::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: call.name.to_string(),
+                }
+            } else {
+                crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                }
+            });
+        }
+
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == call.name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            })?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(crate::ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.to_string(),
+                reason,
+            });
+        }
+
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
     }
 
     fn pending_catalog_sources(&self) -> Arc<[String]> {
@@ -1645,6 +1894,10 @@ where
     /// sticky-fallback transaction is in flight.
     pub(crate) pending_sticky_model_fallback_activation:
         Option<state::PendingStickyModelFallbackActivation>,
+    /// Async operation references staged behind an external callback boundary.
+    /// They are registered with the fresh continuation run before it can call
+    /// the provider, preserving Barrier versus Detached semantics.
+    pub(crate) pending_callback_async_ops: Option<Vec<crate::ops::AsyncOpRef>>,
     /// Effective model registry captured by the construction pipeline.
     /// Fallback profile and limit truth is freshly resolved through this exact
     /// registry before it can reach the routing machine.
@@ -1760,6 +2013,20 @@ mod tests {
 
     struct ContextAwareToolDispatcher;
 
+    struct ExactExecutionDispatcher {
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+    }
+
+    struct HybridExecutionDispatcher {
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+    }
+
+    struct IdenticalMutationDispatcher {
+        tool: ToolDef,
+        epoch: std::sync::atomic::AtomicU64,
+        mutate_on_resolve: bool,
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for ContextAwareToolDispatcher {
@@ -1800,6 +2067,166 @@ mod tests {
                 false,
             )
             .into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ExactExecutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for HybridExecutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            let entry = self
+                .catalog
+                .iter()
+                .find(|entry| entry.tool.name == call.name)
+                .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                })?;
+            let arguments: serde_json::Value =
+                serde_json::from_str(call.args.get()).map_err(|error| {
+                    crate::ToolExecutionResolutionError::InvalidArguments {
+                        tool_name: call.name.to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            let mode = if arguments["run_detached"] == true {
+                crate::ToolExecutionMode::Detached
+            } else {
+                crate::ToolExecutionMode::Fast
+            };
+            entry
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(crate::ToolExecutionResolutionError::from)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"owner": "filtered-hybrid-owner"}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &ToolDispatchContext,
+            plan: &crate::ResolvedToolExecutionPlan,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            if plan.mode() != crate::ToolExecutionMode::Detached {
+                return Err(crate::ToolError::execution_failed(
+                    "test detached owner received the wrong plan",
+                ));
+            }
+            self.dispatch(call).await
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for IdenticalMutationDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(self.tool.clone())])
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(self.tool.clone()),
+                true,
+            )])
+        }
+
+        fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+            self.epoch.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            _call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            let plan = crate::ToolExecutionContract::default()
+                .resolve_default(resolution_context.deadlines().clone())
+                .map_err(crate::ToolExecutionResolutionError::from)?;
+            if self.mutate_on_resolve {
+                self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(plan)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
         }
     }
 
@@ -1887,6 +2314,567 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&outcome.result.text_content()).expect("tool result JSON");
         assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[test]
+    fn default_execution_plan_resolver_uses_exact_catalog_contract() {
+        use crate::{
+            DetachedToolExecutionPolicy, IdempotencyScope, RestartClass, RunnerIdentity,
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionContract,
+            ToolExecutionMode, ToolExecutionResolutionContext,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let detached = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("homecore.security_scan", "v1").unwrap(),
+            RestartClass::NonResumable,
+            IdempotencyScope::InteractionAndArguments,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Detached]),
+            ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .unwrap();
+        let dispatcher = ExactExecutionDispatcher {
+            catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "security_scan",
+                    "scan",
+                    json!({"type": "object"}),
+                )),
+                true,
+            )
+            .with_execution_contract(contract)]),
+        };
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "call-1",
+            name: "security_scan",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let plan = dispatcher
+            .resolve_execution_plan(call, &ToolDispatchContext::default(), &resolution)
+            .expect("declared plan resolves");
+
+        assert_eq!(plan.mode(), ToolExecutionMode::Detached);
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            plan.deadlines().winner().map(|winner| winner.owner()),
+            Some(ToolDeadlineOwner::DetachedSubmission)
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolved_dispatch_refuses_detached_plan_before_ordinary_dispatch() {
+        use crate::{
+            DetachedToolExecutionPolicy, IdempotencyScope, RestartClass, RunnerIdentity,
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionContract,
+            ToolExecutionMode, ToolExecutionResolutionContext,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let detached = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("detached.owner", "v1").unwrap(),
+            RestartClass::NonResumable,
+            IdempotencyScope::ToolCall,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Detached]),
+            ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .unwrap();
+        let dispatcher = ExactExecutionDispatcher {
+            catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "security_scan",
+                    "scan",
+                    json!({"type": "object"}),
+                )),
+                true,
+            )
+            .with_execution_contract(contract)]),
+        };
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "detached-call",
+            name: "security_scan",
+            args: &args,
+        };
+        let context = ToolDispatchContext::default();
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = dispatcher
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("detached plan resolves");
+
+        let error = dispatcher
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect_err("the default dispatcher must not lower detached work to dispatch()");
+
+        assert!(matches!(
+            error,
+            crate::ToolError::Unavailable {
+                reason: crate::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn filtered_execution_plan_resolver_rejects_policy_denied_tool() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolExecutionResolutionError,
+        };
+        use std::time::Duration;
+
+        let dispatcher =
+            FilteredToolDispatcher::new(Arc::new(ContextAwareToolDispatcher), Vec::<String>::new());
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "call-hidden",
+            name: "inspect_context",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let error = dispatcher
+            .resolve_execution_plan(call, &ToolDispatchContext::default(), &resolution)
+            .expect_err("hidden tools must not resolve");
+
+        assert_eq!(
+            error,
+            ToolExecutionResolutionError::AccessDenied {
+                tool_name: "inspect_context".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_execution_plan_forwards_hybrid_resolution_to_visible_owner() {
+        use crate::{
+            DetachedToolExecutionPolicy, IdempotencyScope, ResolvedExecutionKind, RestartClass,
+            RunnerIdentity, ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionContract, ToolExecutionMode, ToolExecutionResolutionContext,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let detached = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("filtered-hybrid-owner", "v1").unwrap(),
+            RestartClass::NonResumable,
+            IdempotencyScope::InteractionAndArguments,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Fast, ToolExecutionMode::Detached]),
+            ToolExecutionMode::Fast,
+            None,
+            Some(detached),
+        )
+        .unwrap();
+        let dispatcher = FilteredToolDispatcher::new(
+            Arc::new(HybridExecutionDispatcher {
+                catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                    Arc::new(ToolDef::new(
+                        "hybrid_scan",
+                        "filtered-hybrid-owner catalog",
+                        json!({"type": "object"}),
+                    )),
+                    true,
+                )
+                .with_execution_contract(contract)]),
+            }),
+            ["hybrid_scan"],
+        );
+        let args = serde_json::value::RawValue::from_string(r#"{"run_detached":true}"#.to_string())
+            .unwrap();
+        let call = ToolCallView {
+            id: "call-hybrid",
+            name: "hybrid_scan",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let catalog = dispatcher.tool_catalog();
+        assert_eq!(catalog[0].execution.default_mode(), ToolExecutionMode::Fast);
+        assert_eq!(catalog[0].tool.description, "filtered-hybrid-owner catalog");
+
+        let plan = dispatcher
+            .resolve_execution_plan(call, &ToolDispatchContext::default(), &resolution)
+            .expect("visible hybrid tool should delegate plan resolution");
+        dispatcher
+            .validate_resolved_execution_plan(call, &resolution, &plan)
+            .expect("hybrid-selected advertised mode must validate");
+        let ResolvedExecutionKind::Detached(policy) = plan.kind() else {
+            panic!("hybrid resolver should select its non-default detached mode");
+        };
+        assert_eq!(policy.runner().name(), "filtered-hybrid-owner");
+
+        let outcome = dispatcher
+            .dispatch_resolved_with_context(call, &ToolDispatchContext::default(), &plan)
+            .await
+            .expect("visible hybrid tool should preserve resolved dispatch");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(payload["owner"], "filtered-hybrid-owner");
+    }
+
+    #[test]
+    fn root_validation_rejects_plan_outside_live_advertised_contract() {
+        use crate::{
+            DetachedToolExecutionPolicy, IdempotencyScope, RestartClass, RunnerIdentity,
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionContract,
+            ToolExecutionContractError, ToolExecutionMode, ToolExecutionResolutionContext,
+            ToolExecutionResolutionError,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let dispatcher = ExactExecutionDispatcher {
+            catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "fast_only",
+                    "fast only",
+                    json!({"type": "object"}),
+                )),
+                true,
+            )]),
+        };
+        let detached = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("dishonest.owner", "v1").unwrap(),
+            RestartClass::NonResumable,
+            IdempotencyScope::ToolCall,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let dishonest_contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Detached]),
+            ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .unwrap();
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = dishonest_contract
+            .resolve_default(resolution.deadlines().clone())
+            .unwrap();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "dishonest-plan",
+            name: "fast_only",
+            args: &args,
+        };
+
+        assert_eq!(
+            dispatcher.validate_resolved_execution_plan(call, &resolution, &plan),
+            Err(ToolExecutionResolutionError::Contract(
+                ToolExecutionContractError::RequestedModeUnsupported {
+                    requested_mode: ToolExecutionMode::Detached,
+                }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn universal_root_fence_accepts_rebuilt_equivalent_catalog_arcs() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext,
+        };
+        use std::time::Duration;
+
+        let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(IdenticalMutationDispatcher {
+            tool: ToolDef::new("rebuilt", "rebuilt", json!({"type": "object"})),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            mutate_on_resolve: false,
+        });
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "rebuilt-arcs",
+            name: "rebuilt",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let plan = crate::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &ToolDispatchContext::default(),
+            &resolution,
+        )
+        .expect("equivalent rebuilt catalog projections resolve");
+        crate::dispatch_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &ToolDispatchContext::default(),
+            &plan,
+        )
+        .await
+        .expect("equivalent rebuilt catalog projections dispatch");
+    }
+
+    #[tokio::test]
+    async fn universal_root_fence_binds_canonical_call_identity() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolUnavailableReason,
+        };
+        use std::time::Duration;
+
+        let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(IdenticalMutationDispatcher {
+            tool: ToolDef::new("bound", "bound", json!({"type": "object"})),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            mutate_on_resolve: false,
+        });
+        let resolved_args =
+            serde_json::value::RawValue::from_string(r#"{"a":1,"b":2}"#.to_string()).unwrap();
+        let equivalent_args =
+            serde_json::value::RawValue::from_string(r#"{ "b": 2, "a": 1 }"#.to_string()).unwrap();
+        let changed_args =
+            serde_json::value::RawValue::from_string(r#"{"a":1,"b":3}"#.to_string()).unwrap();
+        let resolved_call = ToolCallView {
+            id: "bound-call",
+            name: "bound",
+            args: &resolved_args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = crate::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            resolved_call,
+            &ToolDispatchContext::default(),
+            &resolution,
+        )
+        .unwrap();
+
+        crate::dispatch_tool_execution_plan_fenced(
+            &dispatcher,
+            ToolCallView {
+                args: &equivalent_args,
+                ..resolved_call
+            },
+            &ToolDispatchContext::default(),
+            &plan,
+        )
+        .await
+        .expect("canonical JSON-equivalent arguments preserve call identity");
+
+        let error = crate::dispatch_tool_execution_plan_fenced(
+            &dispatcher,
+            ToolCallView {
+                args: &changed_args,
+                ..resolved_call
+            },
+            &ToolDispatchContext::default(),
+            &plan,
+        )
+        .await
+        .expect_err("different arguments must not dispatch under the old plan");
+        assert!(matches!(
+            error,
+            crate::ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn universal_root_fence_rejects_fresh_dispatcher_reconstruction() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolUnavailableReason,
+        };
+        use std::time::Duration;
+
+        let make_dispatcher = || -> Arc<dyn AgentToolDispatcher> {
+            Arc::new(IdenticalMutationDispatcher {
+                tool: ToolDef::new("bound", "bound", json!({"type": "object"})),
+                epoch: std::sync::atomic::AtomicU64::new(0),
+                mutate_on_resolve: false,
+            })
+        };
+        let original = make_dispatcher();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "reconstructed",
+            name: "bound",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+        let plan = crate::resolve_tool_execution_plan_fenced(
+            &original,
+            call,
+            &ToolDispatchContext::default(),
+            &resolution,
+        )
+        .unwrap();
+        let reconstructed = make_dispatcher();
+
+        let error = crate::dispatch_tool_execution_plan_fenced(
+            &reconstructed,
+            call,
+            &ToolDispatchContext::default(),
+            &plan,
+        )
+        .await
+        .expect_err("fresh reconstruction must never reproduce ephemeral root authority");
+        assert!(matches!(
+            error,
+            crate::ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn universal_root_fence_rejects_direct_identical_metadata_replacement() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolExecutionResolutionError, ToolUnavailableReason,
+        };
+        use std::time::Duration;
+
+        let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(IdenticalMutationDispatcher {
+            tool: ToolDef::new("moving", "identical metadata", json!({"type": "object"})),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            mutate_on_resolve: true,
+        });
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "direct-identical-replacement",
+            name: "moving",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert!(matches!(
+            crate::resolve_tool_execution_plan_fenced(
+                &dispatcher,
+                call,
+                &ToolDispatchContext::default(),
+                &resolution,
+            ),
+            Err(ToolExecutionResolutionError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn filtered_wrapper_composes_inner_live_binding_epoch() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolExecutionResolutionError, ToolUnavailableReason,
+        };
+        use std::time::Duration;
+
+        let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(FilteredToolDispatcher::new(
+            Arc::new(IdenticalMutationDispatcher {
+                tool: ToolDef::new("moving", "identical metadata", json!({"type": "object"})),
+                epoch: std::sync::atomic::AtomicU64::new(0),
+                mutate_on_resolve: true,
+            }),
+            ["moving"],
+        ));
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "filtered-identical-replacement",
+            name: "moving",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        assert!(matches!(
+            crate::resolve_tool_execution_plan_fenced(
+                &dispatcher,
+                call,
+                &ToolDispatchContext::default(),
+                &resolution,
+            ),
+            Err(ToolExecutionResolutionError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
     }
 
     #[test]

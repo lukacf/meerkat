@@ -76,6 +76,7 @@ impl SessionAgent for MockAgent {
 
         if self.callback_pending {
             return Err(meerkat_core::error::AgentError::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".into(),
                 args: json!({ "value": "browser" }),
             });
@@ -1621,9 +1622,15 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         contributing_input_ids
     );
     assert!(output.session_snapshot.is_some());
-    let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = output.terminal else {
+    let Some(CoreApplyTerminal::CallbackPending {
+        tool_use_id,
+        tool_name,
+        args,
+    }) = output.terminal
+    else {
         return Err("expected callback pending terminal".to_string());
     };
+    assert_eq!(tool_use_id, "call-1");
     assert_eq!(tool_name, "external_mock");
     assert_eq!(args, json!({ "value": "browser" }));
     Ok(())

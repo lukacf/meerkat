@@ -761,6 +761,7 @@ meerkat_machine_runtime_internal_inputs!(
         RequestWaitAll,
         RetireCompletedOp,
         RetireRequestedOp,
+        RollbackUnreturnedOp,
         SatisfyWaitAll,
         StartOp,
         TerminateOp,

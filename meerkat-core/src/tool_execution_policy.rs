@@ -183,6 +183,52 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         self.inner.pending_catalog_sources()
     }
 
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<crate::EphemeralToolBindingFingerprint, crate::ToolExecutionResolutionError> {
+        if !self.policy.permits(tool_name) {
+            return Err(match self.denial_error(tool_name) {
+                ToolError::NotFound { .. } => crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: tool_name.to_string(),
+                },
+                _ => crate::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: tool_name.to_string(),
+                },
+            });
+        }
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(crate::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, 0)
+            .with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?))
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+    ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+        if !self.policy.permits(call.name) {
+            return Err(match self.denial_error(call.name) {
+                ToolError::NotFound { .. } => crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                },
+                _ => crate::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: call.name.to_string(),
+                },
+            });
+        }
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
@@ -202,6 +248,20 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
             return Err(self.denial_error(call.name));
         }
         self.inner.dispatch_with_context(call, context).await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        if !self.policy.permits(call.name) {
+            return Err(self.denial_error(call.name));
+        }
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
@@ -734,6 +794,45 @@ mod tests {
             inner.tool_catalog_capabilities()
         );
         assert_eq!(gated.capabilities(), inner.capabilities());
+    }
+
+    #[tokio::test]
+    async fn gated_dispatcher_denies_plan_resolution_and_resolved_dispatch() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha", "beta"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), allow_list(&["alpha"]));
+        let args = empty_args();
+        let call = ToolCallView {
+            id: "call-plan",
+            name: "beta",
+            args: &args,
+        };
+        let resolution = crate::ToolExecutionResolutionContext::new(
+            crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                crate::ToolDeadlineOwner::CoreToolDispatch,
+                std::time::Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let error = gated
+            .resolve_execution_plan(call, &ToolDispatchContext::default(), &resolution)
+            .expect_err("policy-denied tools must not resolve execution preparation");
+
+        assert_eq!(
+            error,
+            crate::ToolExecutionResolutionError::AccessDenied {
+                tool_name: "beta".to_string(),
+            }
+        );
+        let bypass_plan = crate::ToolExecutionContract::default()
+            .resolve_default(resolution.deadlines().clone())
+            .expect("test fast plan resolves");
+        let dispatch_error = gated
+            .dispatch_resolved_with_context(call, &ToolDispatchContext::default(), &bypass_plan)
+            .await
+            .expect_err("policy gate must be rechecked at resolved dispatch");
+        assert!(matches!(dispatch_error, ToolError::AccessDenied { .. }));
+        assert!(inner.dispatched().is_empty());
     }
 
     // ── Allow/deny matrices ──────────────────────────────────────────────

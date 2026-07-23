@@ -72,6 +72,7 @@ impl ReservedMetadataKey {
                 | crate::session::SESSION_BUILD_STATE_KEY
                 | crate::session::SESSION_SYSTEM_CONTEXT_STATE_KEY
                 | crate::session::SESSION_DEFERRED_TURN_STATE_KEY
+                | crate::session::SESSION_PENDING_CALLBACK_BATCH_KEY
                 | crate::session::SESSION_TOOL_VISIBILITY_STATE_KEY
                 | crate::session::SESSION_LIFECYCLE_TERMINAL_KEY
                 | crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY

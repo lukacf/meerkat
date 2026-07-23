@@ -295,6 +295,7 @@ struct CliCallbackPending {
     resumable: bool,
     tool_name: String,
     args: serde_json::Value,
+    pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -317,7 +318,16 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
         }
-        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        } => {
+            let pending_tool_calls = vec![meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id,
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }];
             Ok(CliRuntimeTurnResult::CallbackPending(CliCallbackPending {
                 session_id: session_id.clone(),
                 session_ref: format_session_ref(realm_id, session_id),
@@ -325,6 +335,23 @@ fn completion_outcome_to_cli_runtime_turn_result(
                 resumable: true,
                 tool_name,
                 args,
+                pending_tool_calls,
+            }))
+        }
+        meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls,
+        } => {
+            let first = pending_tool_calls.first().ok_or_else(|| {
+                anyhow::anyhow!("callback pending batch contained no pending tool calls")
+            })?;
+            Ok(CliRuntimeTurnResult::CallbackPending(CliCallbackPending {
+                session_id: session_id.clone(),
+                session_ref: format_session_ref(realm_id, session_id),
+                session_created,
+                resumable: true,
+                tool_name: first.tool_name.clone(),
+                args: first.args.clone(),
+                pending_tool_calls,
             }))
         }
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
@@ -362,13 +389,20 @@ fn completion_outcome_to_cli_runtime_turn_result(
 fn callback_pending_contract(
     pending: &CliCallbackPending,
 ) -> meerkat_contracts::WireCallbackPending {
-    meerkat_contracts::WireCallbackPending::single(
+    meerkat_contracts::WireCallbackPending::many(
         pending.session_id.clone(),
         Some(pending.session_ref.clone()),
         pending.session_created,
         pending.resumable,
-        pending.tool_name.clone(),
-        pending.args.clone(),
+        pending
+            .pending_tool_calls
+            .iter()
+            .map(|call| meerkat_contracts::WirePendingToolCall {
+                tool_use_id: call.tool_use_id.clone(),
+                tool_name: call.tool_name.clone(),
+                args: call.args.clone(),
+            })
+            .collect(),
     )
 }
 
@@ -16958,17 +16992,12 @@ where
         let mcp_external_tools = mcp_external_tools.clone();
         move || {
             let tx = runtime.callback_request_tx()?;
-            // RPC-host: `CallbackToolDispatcher::new` takes a callback request
-            // channel typed as `mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>`
-            // plus an `RpcId` counter (see `meerkat-rpc/src/callback_dispatcher.rs`).
-            // Both are JSON-RPC wire types — the dispatcher round-trips tool
-            // calls back through the hosted RpcServer's connected client.
-            // Lifting would require rebuilding the JSON-RPC request/response
-            // pair on a non-RPC channel; this site legitimately owns the
-            // RPC-host role.
+            // This CLI deployment is an RPC host: callback delivery and the
+            // live registration generation both come from the same runtime
+            // authority used by tools/register.
             let callback_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(
-                meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::new(
-                    runtime.registered_tools(),
+                meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::from_registry(
+                    runtime.callback_tool_registry(),
                     tx,
                     runtime.callback_id_counter(),
                     vec![],
@@ -19024,6 +19053,7 @@ default_model = "gemma"
             .expect("test-realm is a valid realm id");
         let result = completion_outcome_to_cli_runtime_turn_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".into(),
                 args: serde_json::json!({ "value": "browser" }),
             },

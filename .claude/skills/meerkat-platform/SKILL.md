@@ -916,7 +916,7 @@ Real-time events include `text_delta`, tool lifecycle events, hook events, and t
 
 ### Background work and recovery
 
-Background shell jobs (shell tool with `&` or `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. Each completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands.
+Background shell jobs (shell tool with `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. A shell `&` metacharacter only backgrounds work inside the foreground shell invocation; it does not create a typed Meerkat background job or return a job ID. Each typed completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands. Current shell background jobs are process-local and volatile: they do not survive a Meerkat process restart, even though already-persisted terminal completion notices can be recovered.
 
 If the runtime is backed by persistent storage, completion state and cursors survive process restarts (bounded-loss; you may see one duplicate notice on the seam). Without persistence, conversation history resumes but pending background work doesn't.
 

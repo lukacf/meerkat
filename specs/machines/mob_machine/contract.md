@@ -10937,6 +10937,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `FlowTerminalized`
 - To: `Running`
 
+### `ForceCancelRunningRuntimeNotLive`
+- From: `Running`
+- On: `ForceCancel`(agent_identity)
+- Guards:
+  - `identity_known`
+  - `runtime_not_live`
+- To: `Running`
+
+### `ForceCancelRunningAlreadyRetiring`
+- From: `Running`
+- On: `ForceCancel`(agent_identity)
+- Guards:
+  - `identity_known`
+  - `runtime_live`
+  - `member_retiring`
+- To: `Running`
+
 ### `SubscribeAgentEventsRunning`
 - From: `Running`
 - On: `SubscribeAgentEvents`(agent_identity)

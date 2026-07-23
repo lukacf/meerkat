@@ -15508,6 +15508,37 @@ macro_rules! mob_catalog_machine_dsl {
             emit FlowTerminalized
         }
 
+        // Force-cancel is the operator remedy for a wedged member, so a KNOWN
+        // member identity must never be refused from Running. When the
+        // member's current runtime is no longer live (e.g. the runtime retired
+        // out from under the identity binding via ObserveRuntimeRetired),
+        // there is no executor to interrupt: the cancel converges as an
+        // idempotent no-op instead of an admission rejection (which the shell
+        // surfaced as `invalid state transition: Running -> Running`). No
+        // emit: `FlowTerminalized` on the active arm above is the sole
+        // ForceCancel emission, and the shell dispatches the mechanical
+        // interrupt only when it is present.
+        transition ForceCancelRunningRuntimeNotLive {
+            on input ForceCancel { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_known" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { !self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            update {}
+            to Running
+        }
+
+        // A retiring member is already draining under cancel authority; a
+        // repeated cancel converges as a no-op success, never an error.
+        transition ForceCancelRunningAlreadyRetiring {
+            on input ForceCancel { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_known" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring) }
+            update {}
+            to Running
+        }
+
         // =====================================================================
         // Subscribe commands
         // =====================================================================

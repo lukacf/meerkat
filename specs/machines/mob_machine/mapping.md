@@ -3165,6 +3165,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ForceCancelRunning`
   - anchors: (unclaimed)
   - scenarios: `flow-and-run-lifecycle`
+- `ForceCancelRunningRuntimeNotLive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ForceCancelRunningAlreadyRetiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SubscribeAgentEventsRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

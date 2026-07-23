@@ -26633,6 +26633,15 @@ impl MobActor {
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
     async fn handle_force_cancel(&mut self, agent_identity: AgentIdentity) -> Result<(), MobError> {
+        // An identity the roster has never seen must answer MemberNotFound;
+        // letting it reach machine admission collapses into the operator-
+        // hostile "invalid state transition: Running -> Running".
+        {
+            let roster = self.roster.read().await;
+            if roster.get(&agent_identity).is_none() {
+                return Err(MobError::MemberNotFound(agent_identity));
+            }
+        }
         let placed = self
             .ensure_placed_carrier_binding_active(&agent_identity, "force cancel")?
             .is_some();
@@ -26645,28 +26654,47 @@ impl MobActor {
             MobState::Running,
             "force_cancel",
         )?;
-        let entry = {
-            let roster = self.roster.read().await;
-            roster.get(&agent_identity).cloned()
-        };
-
-        if let Some(entry) = entry {
-            let member_ref = self.machine_member_ref_for_behavior(&entry, "force cancel")?;
-            let expected_member = placed
-                .then(|| self.placed_member_incarnation(&entry))
-                .transpose()?;
-            self.provisioner
-                .interrupt_member(&member_ref, expected_member.as_ref())
-                .await?;
+        if Self::force_cancel_interrupt_authorized(&prepared) {
+            let entry = {
+                let roster = self.roster.read().await;
+                roster.get(&agent_identity).cloned()
+            };
+            if let Some(entry) = entry {
+                let member_ref = self.machine_member_ref_for_behavior(&entry, "force cancel")?;
+                let expected_member = placed
+                    .then(|| self.placed_member_incarnation(&entry))
+                    .transpose()?;
+                self.provisioner
+                    .interrupt_member(&member_ref, expected_member.as_ref())
+                    .await?;
+            } else {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    "MobMachine admitted force-cancel without a roster projection; committing machine authority without mechanical interrupt"
+                );
+            }
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
-                "MobMachine admitted force-cancel without a roster projection; committing machine authority without mechanical interrupt"
+                "MobMachine converged force-cancel as an idempotent no-op (no live runtime or member already retiring)"
             );
         }
         self.commit_prepared_dsl_input(prepared)?;
         Ok(())
+    }
+
+    /// Machine-owned interrupt authority for the Cancel-class verbs: the
+    /// active `ForceCancelRunning` arm is the only ForceCancel arm that emits
+    /// (`FlowTerminalized`); the wedge arms (`ForceCancelRunningRuntimeNotLive`,
+    /// `ForceCancelRunningAlreadyRetiring`) admit as idempotent no-ops with no
+    /// emission and therefore authorize no mechanical interrupt dispatch.
+    fn force_cancel_interrupt_authorized(prepared: &PreparedDslInput) -> bool {
+        prepared
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::FlowTerminalized))
     }
 
     /// Phase 6 (DEC-P6E-8): the explicit HARD cancel verb — the immediate
@@ -26702,6 +26730,14 @@ impl MobActor {
                 return;
             }
         };
+        // Cancel-class no-op admission (runtime not live / already retiring):
+        // nothing is running to hard-cancel, so the level-triggered verb
+        // converges idempotently without any bridge or runtime dispatch.
+        if !Self::force_cancel_interrupt_authorized(&prepared) {
+            let result = self.commit_prepared_dsl_input(prepared);
+            let _ = reply_tx.send(result);
+            return;
+        }
         let entry = {
             let roster = self.roster.read().await;
             roster.get(&agent_identity).cloned()

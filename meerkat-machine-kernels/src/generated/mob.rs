@@ -11516,6 +11516,8 @@ pub enum TransitionId {
     ClearSupervisorAuthorityForDestroy,
     RestoreSupervisorAuthorityAfterDestroyRollback,
     ForceCancelRunning,
+    ForceCancelRunningRuntimeNotLive,
+    ForceCancelRunningAlreadyRetiring,
     SubscribeAgentEventsRunning,
     SubscribeAgentEventsStopped,
     SubscribeAgentEventsCompleted,

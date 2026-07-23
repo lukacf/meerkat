@@ -7392,7 +7392,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Some(runtime));
         }
         Err(SessionError::Agent(AgentError::InternalError(format!(
-            "cannot prepare {role} for session {id}: RuntimeStore and SessionStore checkpoint authorities conflict"
+            "cannot prepare {role} for session {id}: RuntimeStore and SessionStore checkpoint \
+             authorities conflict (runtime stamp {runtime_stamp:?} with base \
+             {runtime_base:?}; store stamp {store_stamp:?} with base {store_base:?})",
+            runtime_stamp = runtime.stamp,
+            runtime_base = runtime.stamp.authority_base(),
+            store_stamp = store.stamp,
+            store_base = store.stamp.authority_base(),
         ))))
     }
 
@@ -7889,7 +7895,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let gate = self.gate_for_session(id).await;
         let guard = gate.cancelled.lock().await;
         if *guard {
-            return Ok(());
+            // The RuntimeStore has already committed this boundary. Reporting
+            // success here without projecting would durably record the
+            // finalization as succeeded while the SessionStore projection
+            // silently lags; two skipped boundaries put the projection more
+            // than one revision behind the runtime authority, a state the
+            // resume-side reconciler refuses forever (the mob-shutdown
+            // restart wedge). Honor the gate's no-write-after-cancel
+            // contract, but fail retryable so the terminal-recovery drain
+            // re-projects the committed snapshot instead of losing it.
+            drop(guard);
+            let store_error = SessionStoreError::Internal(format!(
+                "checkpointer gate for session {id} is cancelled; committed runtime checkpoint \
+                 projection deferred to terminal recovery"
+            ));
+            tracing::warn!(
+                session_id = %id,
+                "checkpointer gate cancelled after committed runtime checkpoint; retaining \
+                 runtime snapshot authority for projection retry"
+            );
+            match self.discard_live_session_unfenced(id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                Err(discard_error) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %discard_error,
+                        "failed to discard live session after gate-cancelled committed runtime \
+                         projection deferral"
+                    );
+                }
+            }
+            return Err(SessionError::Store(Box::new(store_error)));
         }
         let projection_result = if let Some(incremental) = self.incremental.clone() {
             save_session_projection_incremental(

@@ -36,11 +36,17 @@ fn non_literal_amount_compile_error(field: &str, update_kind: &str) -> TokenStre
     quote! { compile_error!(#msg) }
 }
 
-/// Generate `fn schema() -> meerkat_machine_schema::MachineSchema`.
+/// Generate the schema accessors:
+/// - `fn schema_uncached() -> MachineSchema` (hidden, the actual constructor)
+/// - `fn schema_static() -> &'static MachineSchema` (cached behind `LazyLock`)
+/// - `fn schema() -> MachineSchema` (owned clone of the cached value)
 ///
 /// This is the backward-compatibility bridge: codegen, RMAT, validation, and
 /// xtask all work with MachineSchema. The invoking crate must depend on
-/// `meerkat-machine-schema` — we just emit the constructor tokens.
+/// `meerkat-machine-schema` — we just emit the constructor tokens. The
+/// `LazyLock` cache is load-bearing: schema construction re-parses every
+/// identifier slug and rebuilds every IndexMap, which is far too expensive
+/// to run per call on store-recovery hot paths.
 /// A schema list emitted as per-element helper functions plus an assembly
 /// expression, instead of one inline `vec![...]` literal.
 ///
@@ -226,7 +232,12 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             #(#transition_fns)*
             #(#disposition_fns)*
 
-            pub fn schema() -> #schema_crate::MachineSchema {
+            /// Construct the schema from scratch. Every typed identifier in
+            /// the machine re-validates through `identity::parse` and every
+            /// list re-allocates, so this walk must run at most once per
+            /// process — all reads go through [`Self::schema_static`].
+            #[doc(hidden)]
+            fn schema_uncached() -> #schema_crate::MachineSchema {
                 use #schema_crate::*;
                 use #schema_crate::identity::*;
 
@@ -278,6 +289,28 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     ci_step_limit: None,
                     deep_domain_overrides: Default::default(),
                 }
+            }
+
+            /// Cached canonical schema for this machine.
+            ///
+            /// A generated machine's schema is immutable for the life of the
+            /// binary; construction happens exactly once (first call) and
+            /// every subsequent call returns the same `&'static` allocation.
+            /// Hot paths (wire-header validation, per-row store recovery)
+            /// must use this handle instead of [`Self::schema`].
+            pub fn schema_static() -> &'static #schema_crate::MachineSchema {
+                static SCHEMA: ::std::sync::LazyLock<#schema_crate::MachineSchema> =
+                    ::std::sync::LazyLock::new(#state_name::schema_uncached);
+                ::std::sync::LazyLock::force(&SCHEMA)
+            }
+
+            /// Owned copy of the cached schema.
+            ///
+            /// Kept for callers that mutate the returned value (catalog
+            /// metadata attachment). This clones the cached construction; it
+            /// never re-parses the machine definition.
+            pub fn schema() -> #schema_crate::MachineSchema {
+                ::std::clone::Clone::clone(Self::schema_static())
             }
         }
     }

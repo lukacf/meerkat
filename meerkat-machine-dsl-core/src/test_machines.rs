@@ -477,6 +477,35 @@ mod tests {
         );
     }
 
+    // Idle-CPU regression gate at the generator level: the expanded machine
+    // must construct its schema at most once per process. `schema_static`
+    // caches the construction behind a `LazyLock`, and the owned `schema()`
+    // accessor clones that cached value instead of re-running the
+    // constructor (which re-parses every identifier slug).
+    #[test]
+    fn schema_accessor_is_cached_behind_lazylock() {
+        let tokens: proc_macro2::TokenStream = ORDER_LIFECYCLE.parse().expect("tokenize");
+        let expanded = crate::expand_machine(tokens).expect("expand machine");
+        let rendered = expanded.to_string();
+
+        assert!(
+            rendered.contains("fn schema_static"),
+            "generated impl must expose the cached schema_static accessor"
+        );
+        assert!(
+            rendered.contains("LazyLock"),
+            "schema construction must be cached behind a LazyLock static"
+        );
+        assert!(
+            rendered.contains("fn schema_uncached"),
+            "the raw constructor must be split out so only the cache runs it"
+        );
+        assert!(
+            rendered.contains("Clone :: clone"),
+            "the owned schema() accessor must clone the cached construction"
+        );
+    }
+
     #[test]
     fn parse_counter() {
         let def = parse(COUNTER);

@@ -985,7 +985,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LegacyCheckpointMigrationResolved`
 - To: `Ready`
 
-### `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
+### `ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationTypedProjectionExtension`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationDivergentFromTypedProjection`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationTypedProjectionNotComparable`
 - From: `Ready`
 - On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
 - Guards:

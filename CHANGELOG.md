@@ -264,6 +264,24 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- **Upgraded fleets whose continuity rows were adopted while runtime
+  snapshots stayed legacy are no longer refused on every resume.** In
+  mobkit identity-first fleets, sanctioned adoption (lazy-at-restore or the
+  operator migrate tool's bulk sweep) stamps the continuity session-store
+  row with typed checkpoint authority while the RuntimeStore still holds
+  the pre-adoption legacy session snapshot. The one-time legacy checkpoint
+  migration mapped that shape to a blanket fail-closed refusal that falsely
+  blamed transcript divergence and pointed at an operator tool that cannot
+  heal it — bricking every such session on resume. The machine now resolves
+  the shape relation-aware: when the typed authority's transcript contains
+  the legacy snapshot's (identical or prefix extension), the new
+  `ConvergeSnapshotOntoTypedProjection` disposition overwrites the stale
+  snapshot with the typed authority bytes under the existing guarded
+  commit (nothing is re-stamped); only a legacy snapshot carrying
+  transcript content the typed authority lacks still refuses, with an
+  error that names the actual shape and the computed relation. The
+  `only_cursor_free` bulk-adoption guard also keeps this stamp-free
+  convergence shape eligible instead of skipping it as cursor-ambiguous.
 - **Idle busy-loop: machine schemas are constructed once per process.** The
   `machine!` macro now emits a `LazyLock`-cached `schema_static()` (with
   `schema()` cloning the cache), and the schedule/occurrence wire-header

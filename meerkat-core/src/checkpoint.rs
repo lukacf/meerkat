@@ -1107,6 +1107,62 @@ pub fn legacy_session_transcript_relation(
             )));
         }
     }
+    transcript_prefix_relation(snapshot, projection)
+}
+
+/// Classify the transcript relation between a pre-typed (legacy-unverified)
+/// committed runtime snapshot copy and the TYPED (verified) session-store
+/// projection copy of one session document, observed during one-time
+/// recovery migration.
+///
+/// This is the sanctioned-adoption shape: downstream adoption (for example
+/// MobKit lazy-at-restore or the bulk operator sweep) stamps the continuity
+/// store row while the runtime store still holds the pre-adoption legacy
+/// snapshot. The snapshot must decode as `LegacyUnverified` and the
+/// projection must carry verified typed checkpoint authority; both-legacy
+/// pairs use [`legacy_session_transcript_relation`] and typed pairs use
+/// [`session_checkpoint_relation`]. The comparison itself is identical to
+/// the both-legacy classifier: per-message canonical-JSON equality over the
+/// shared prefix, then length ordering. Non-transcript fields are
+/// deliberately not compared: adoption stamps the row without touching
+/// conversation content, and save-time bookkeeping (for example
+/// `metadata.session_build_state`) routinely differs between the copies
+/// without diverging conversation content.
+pub fn legacy_snapshot_vs_typed_projection_transcript_relation(
+    snapshot: &Session,
+    projection: &Session,
+) -> Result<LegacySessionTranscriptRelation, SessionCheckpointError> {
+    if !matches!(
+        snapshot.try_checkpoint_state()?,
+        SessionCheckpointState::LegacyUnverified { .. }
+    ) {
+        return Err(SessionCheckpointError::AuthorityBaseConflict(
+            "legacy-snapshot-vs-typed-projection transcript relation requires an \
+             untyped legacy snapshot document"
+                .to_string(),
+        ));
+    }
+    if !matches!(
+        projection.try_checkpoint_state()?,
+        SessionCheckpointState::Verified(_)
+    ) {
+        return Err(SessionCheckpointError::AuthorityBaseConflict(
+            "legacy-snapshot-vs-typed-projection transcript relation requires a \
+             verified typed projection document"
+                .to_string(),
+        ));
+    }
+    transcript_prefix_relation(snapshot, projection)
+}
+
+/// Shared mechanical core of the migration-time transcript classifiers:
+/// exact session identity, per-message canonical-JSON equality over the
+/// shared prefix, then message-count ordering. Callers own the
+/// checkpoint-state admission; this helper compares transcripts only.
+fn transcript_prefix_relation(
+    snapshot: &Session,
+    projection: &Session,
+) -> Result<LegacySessionTranscriptRelation, SessionCheckpointError> {
     if snapshot.id() != projection.id() {
         return Err(SessionCheckpointError::SessionIdMismatch {
             expected: snapshot.id().clone(),
@@ -1799,6 +1855,71 @@ mod tests {
             legacy_session_transcript_relation(&snapshot, &divergent).expect("divergent relation"),
             LegacySessionTranscriptRelation::Divergent
         );
+    }
+
+    #[test]
+    fn legacy_snapshot_vs_typed_projection_relation_classifies_prefix_extension_and_divergence() {
+        let snapshot = session_with_text("turn one");
+
+        let identical = stamped_root(&snapshot);
+        assert_eq!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&snapshot, &identical)
+                .expect("identical relation"),
+            LegacySessionTranscriptRelation::Identical
+        );
+
+        let mut extended = snapshot.clone();
+        extended.push(Message::User(UserMessage::text("turn two".to_string())));
+        let typed_extended = stamped_root(&extended);
+        assert_eq!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&snapshot, &typed_extended)
+                .expect("extension relation"),
+            LegacySessionTranscriptRelation::ProjectionExtendsSnapshot
+        );
+
+        let typed_prefix = stamped_root(&snapshot);
+        assert_eq!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&extended, &typed_prefix)
+                .expect("stale typed projection relation"),
+            LegacySessionTranscriptRelation::SnapshotExtendsProjection
+        );
+
+        let mut divergent = snapshot.clone();
+        std::sync::Arc::make_mut(&mut divergent.messages).clear();
+        divergent.push(Message::User(UserMessage::text(
+            "a different turn one".to_string(),
+        )));
+        let typed_divergent = stamped_root(&divergent);
+        assert_eq!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&snapshot, &typed_divergent)
+                .expect("divergent relation"),
+            LegacySessionTranscriptRelation::Divergent
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_vs_typed_projection_relation_refuses_wrong_checkpoint_states() {
+        let legacy = session_with_text("legacy copy");
+        let typed = stamped_root(&legacy);
+
+        // A typed snapshot side is refused: that shape belongs to
+        // session_checkpoint_relation (typed pairs) or the rebuild arm.
+        assert!(matches!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&typed, &typed),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+        // A legacy projection side is refused: both-legacy pairs use
+        // legacy_session_transcript_relation.
+        assert!(matches!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&legacy, &legacy),
+            Err(SessionCheckpointError::AuthorityBaseConflict(_))
+        ));
+
+        let foreign = stamped_root(&session_with_text("legacy copy"));
+        assert!(matches!(
+            legacy_snapshot_vs_typed_projection_transcript_relation(&legacy, &foreign),
+            Err(SessionCheckpointError::SessionIdMismatch { .. })
+        ));
     }
 
     #[test]

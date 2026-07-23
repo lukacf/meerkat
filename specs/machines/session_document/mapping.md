@@ -346,7 +346,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
-- `ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped`
+- `ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationTypedProjectionExtension`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationDivergentFromTypedProjection`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationTypedProjectionNotComparable`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `ApplyPendingToolResults`

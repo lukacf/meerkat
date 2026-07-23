@@ -474,10 +474,12 @@ pub enum LegacyCheckpointTranscriptRelation {
 /// pre-typed (legacy-unverified) session document into typed checkpoint
 /// authority.
 ///
-/// `RefuseDivergent` is the fail-closed default: two legacy copies whose
-/// transcripts are not related by prefix extension carry no mechanical
-/// proof of which conversation is authoritative, so migration is refused
-/// and the divergence surfaces as typed evidence for the operator tool.
+/// `RefuseDivergent` is the fail-closed default: copies whose transcripts
+/// are not related by prefix extension — or whose only mechanical proof
+/// would require trusting extra transcript content held solely by an
+/// unverified legacy copy — carry no proof of which conversation is
+/// authoritative, so migration is refused and the conflict surfaces as
+/// typed evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LegacyCheckpointMigrationDisposition {
     #[default]
@@ -490,6 +492,15 @@ pub enum LegacyCheckpointMigrationDisposition {
     /// a pre-existing partial adoption). The shell rebuilds the projection
     /// from the verified runtime authority; nothing is re-stamped.
     RebuildProjectionFromTypedSnapshot,
+    /// The session-store row is already typed (sanctioned downstream
+    /// adoption stamped the continuity row — for example MobKit
+    /// lazy-at-restore or the bulk operator sweep) while the runtime
+    /// snapshot is still the pre-adoption legacy copy, and the typed
+    /// transcript contains the legacy transcript (identical or prefix
+    /// extension). The typed store row IS the authority; the shell
+    /// overwrites the stale legacy snapshot with the typed authority
+    /// bytes. Nothing is re-stamped.
+    ConvergeSnapshotOntoTypedProjection,
 }
 
 // ---------------------------------------------------------------------------
@@ -3938,7 +3949,9 @@ machine! {
         // Legacy-checkpoint recovery-migration region. Total over the legal
         // observation shapes the shell can emit: the runtime snapshot copy
         // is legacy (with the projection absent, legacy-related by prefix,
-        // or already typed), or the runtime snapshot is absent and the
+        // already typed — the partial-adoption rebuild — or typed with the
+        // legacy snapshot related by prefix — the sanctioned-adoption
+        // convergence), or the runtime snapshot is absent and the
         // session-store row is the sole legacy copy. Content custody is
         // lifecycle-independent: migration stamps the exact observed
         // conversation and never alters the document's lifecycle terminal.
@@ -4107,7 +4120,7 @@ machine! {
             }
         }
 
-        transition ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped {
+        transition ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection {
             on input ResolveLegacyCheckpointMigration {
                 session_id,
                 runtime_snapshot_present,
@@ -4122,6 +4135,103 @@ machine! {
                 && runtime_snapshot_legacy == true
                 && store_row_present == true
                 && store_row_legacy == false
+                && transcript_relation == LegacyCheckpointTranscriptRelation::Identical
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationResolved {
+                disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationTypedProjectionExtension {
+            on input ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_snapshot_present == true
+                && runtime_snapshot_legacy == true
+                && store_row_present == true
+                && store_row_legacy == false
+                && transcript_relation == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationResolved {
+                disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection {
+            on input ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_snapshot_present == true
+                && runtime_snapshot_legacy == true
+                && store_row_present == true
+                && store_row_legacy == false
+                && transcript_relation == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationResolved {
+                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationDivergentFromTypedProjection {
+            on input ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_snapshot_present == true
+                && runtime_snapshot_legacy == true
+                && store_row_present == true
+                && store_row_legacy == false
+                && transcript_relation == LegacyCheckpointTranscriptRelation::Divergent
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationResolved {
+                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationTypedProjectionNotComparable {
+            on input ResolveLegacyCheckpointMigration {
+                session_id,
+                runtime_snapshot_present,
+                runtime_snapshot_legacy,
+                store_row_present,
+                store_row_legacy,
+                transcript_relation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_snapshot_present == true
+                && runtime_snapshot_legacy == true
+                && store_row_present == true
+                && store_row_legacy == false
+                && transcript_relation == LegacyCheckpointTranscriptRelation::NotComparable
             }
             update {}
             to Ready

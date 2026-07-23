@@ -39,6 +39,8 @@ pub enum LegacyCheckpointMigrationDisposition {
     MigrateStoreProjection,
     #[serde(rename = "RebuildProjectionFromTypedSnapshot")]
     RebuildProjectionFromTypedSnapshot,
+    #[serde(rename = "ConvergeSnapshotOntoTypedProjection")]
+    ConvergeSnapshotOntoTypedProjection,
 }
 impl LegacyCheckpointMigrationDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -48,6 +50,7 @@ impl LegacyCheckpointMigrationDisposition {
             Self::AdoptProjectionExtension => "AdoptProjectionExtension",
             Self::MigrateStoreProjection => "MigrateStoreProjection",
             Self::RebuildProjectionFromTypedSnapshot => "RebuildProjectionFromTypedSnapshot",
+            Self::ConvergeSnapshotOntoTypedProjection => "ConvergeSnapshotOntoTypedProjection",
         }
     }
 }
@@ -60,6 +63,7 @@ impl std::convert::TryFrom<&str> for LegacyCheckpointMigrationDisposition {
             "AdoptProjectionExtension" => Ok(Self::AdoptProjectionExtension),
             "MigrateStoreProjection" => Ok(Self::MigrateStoreProjection),
             "RebuildProjectionFromTypedSnapshot" => Ok(Self::RebuildProjectionFromTypedSnapshot),
+            "ConvergeSnapshotOntoTypedProjection" => Ok(Self::ConvergeSnapshotOntoTypedProjection),
             other => Err(format!(
                 "invalid LegacyCheckpointMigrationDisposition value `{other}`"
             )),
@@ -2560,7 +2564,11 @@ pub enum TransitionId {
     ResolveLegacyCheckpointMigrationSnapshotOnly,
     ResolveLegacyCheckpointMigrationStoreRowOnly,
     ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
-    ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
+    ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection,
+    ResolveLegacyCheckpointMigrationTypedProjectionExtension,
+    ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
+    ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
+    ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

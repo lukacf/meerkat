@@ -242,6 +242,7 @@ pub enum LegacyCheckpointMigrationDisposition {
     AdoptProjectionExtension,
     MigrateStoreProjection,
     RebuildProjectionFromTypedSnapshot,
+    ConvergeSnapshotOntoTypedProjection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -787,7 +788,11 @@ enum SessionDocumentTransition {
     ResolveLegacyCheckpointMigrationSnapshotOnly,
     ResolveLegacyCheckpointMigrationStoreRowOnly,
     ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
-    ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped,
+    ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection,
+    ResolveLegacyCheckpointMigrationTypedProjectionExtension,
+    ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
+    ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
+    ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -3386,9 +3391,49 @@ impl SessionDocumentMachineAuthority {
                     && ((runtime_snapshot_present == true)
                         && (runtime_snapshot_legacy == true)
                         && (store_row_present == true)
-                        && (store_row_legacy == false))
+                        && (store_row_legacy == false)
+                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Identical))
                 {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped);
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == false)
+                        && (transcript_relation
+                            == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionExtension);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == false)
+                        && (transcript_relation
+                            == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == false)
+                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Divergent))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentFromTypedProjection);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_snapshot_present == true)
+                        && (runtime_snapshot_legacy == true)
+                        && (store_row_present == true)
+                        && (store_row_legacy == false)
+                        && (transcript_relation
+                            == LegacyCheckpointTranscriptRelation::NotComparable))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionNotComparable);
                 }
                 let transition =
                     Self::single_transition(matches, "ResolveLegacyCheckpointMigration")?;
@@ -3435,7 +3480,31 @@ impl SessionDocumentMachineAuthority {
                             SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot, },
                         ])
                     }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped => {
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionExtension => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentFromTypedProjection => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionNotComparable => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },

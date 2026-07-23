@@ -1270,7 +1270,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ResolveLegacyCheckpointMigrationSnapshotOnly",
                         "ResolveLegacyCheckpointMigrationStoreRowOnly",
                         "ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection",
-                        "ResolveLegacyCheckpointMigrationSnapshotLegacyProjectionTyped",
+                        "ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection",
+                        "ResolveLegacyCheckpointMigrationTypedProjectionExtension",
+                        "ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection",
+                        "ResolveLegacyCheckpointMigrationDivergentFromTypedProjection",
+                        "ResolveLegacyCheckpointMigrationTypedProjectionNotComparable",
                     ])
                     .effects(&[
                         "SessionFirstTurnPhaseResolved",

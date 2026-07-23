@@ -1007,8 +1007,9 @@ pub struct LegacyCheckpointAdoptionOptions {
     /// records the pre-typed intra-turn checkpointer marker, is skipped
     /// (reported in
     /// [`LegacyCheckpointAdoptionReport::skipped_cursor_ambiguous`]) instead
-    /// of being stamped at `INITIAL`. The partial-adoption shape (a verified
-    /// runtime snapshot over a still-legacy row) stays eligible: its
+    /// of being stamped at `INITIAL`. Both partial-adoption shapes (a
+    /// verified runtime snapshot over a still-legacy row, and a legacy
+    /// runtime snapshot under an already-typed row) stay eligible: their
     /// convergence mints no new stamp.
     ///
     /// Enable this on fleets whose external continuity rows may record a
@@ -1076,6 +1077,27 @@ async fn load_runtime_checkpoint_copy(
     }
     VerifiedCheckpointAuthority::from_session_with_serialized(session, serialized, session_id, role)
         .map(CommittedCheckpointCopy::Verified)
+}
+
+/// Mirror the core transcript-relation vocabulary onto the machine's typed
+/// carrier. Pure vocabulary transport: the shell never reclassifies.
+fn machine_transcript_relation(
+    relation: meerkat_core::LegacySessionTranscriptRelation,
+) -> LegacyCheckpointTranscriptRelation {
+    match relation {
+        meerkat_core::LegacySessionTranscriptRelation::Identical => {
+            LegacyCheckpointTranscriptRelation::Identical
+        }
+        meerkat_core::LegacySessionTranscriptRelation::ProjectionExtendsSnapshot => {
+            LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
+        }
+        meerkat_core::LegacySessionTranscriptRelation::SnapshotExtendsProjection => {
+            LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
+        }
+        meerkat_core::LegacySessionTranscriptRelation::Divergent => {
+            LegacyCheckpointTranscriptRelation::Divergent
+        }
+    }
 }
 
 fn session_materialized_at_transcript_revision(
@@ -6947,6 +6969,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// between the two leaves a verified runtime authority over a legacy
     /// row, which the machine's `RebuildProjectionFromTypedSnapshot`
     /// disposition converges on the next read.
+    ///
+    /// The opposite partial shape also occurs in the field: sanctioned
+    /// downstream adoption (MobKit lazy-at-restore or the bulk operator
+    /// sweep) stamps the continuity store row while the runtime store still
+    /// holds the pre-adoption legacy snapshot. When the typed authority's
+    /// transcript contains the legacy transcript, the machine's
+    /// `ConvergeSnapshotOntoTypedProjection` disposition overwrites the
+    /// stale snapshot with the typed authority bytes; a legacy snapshot
+    /// whose transcript the typed authority does NOT contain is refused
+    /// fail-closed, because the unverified copy is the only witness of the
+    /// extra content.
     async fn migrate_legacy_checkpoint_authority(
         &self,
         id: &SessionId,
@@ -6971,24 +7004,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             _ => None,
         };
         let transcript_relation = match (legacy_snapshot, store_row.as_ref()) {
-            (Some(snapshot), Some(row)) if store_row_legacy => {
-                match meerkat_core::legacy_session_transcript_relation(snapshot, row)
-                    .map_err(session_checkpoint_read_error)?
-                {
-                    meerkat_core::LegacySessionTranscriptRelation::Identical => {
-                        LegacyCheckpointTranscriptRelation::Identical
-                    }
-                    meerkat_core::LegacySessionTranscriptRelation::ProjectionExtendsSnapshot => {
-                        LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
-                    }
-                    meerkat_core::LegacySessionTranscriptRelation::SnapshotExtendsProjection => {
-                        LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
-                    }
-                    meerkat_core::LegacySessionTranscriptRelation::Divergent => {
-                        LegacyCheckpointTranscriptRelation::Divergent
-                    }
-                }
-            }
+            (Some(snapshot), Some(row)) if store_row_legacy => machine_transcript_relation(
+                meerkat_core::legacy_session_transcript_relation(snapshot, row)
+                    .map_err(session_checkpoint_read_error)?,
+            ),
+            // Sanctioned-adoption shape: the store row is already typed
+            // while the runtime store kept the pre-adoption legacy
+            // snapshot. The machine needs the transcript relation to
+            // distinguish a stale snapshot to converge from legacy
+            // transcript content the typed authority lacks.
+            (Some(snapshot), Some(row)) => machine_transcript_relation(
+                meerkat_core::legacy_snapshot_vs_typed_projection_transcript_relation(
+                    snapshot, row,
+                )
+                .map_err(session_checkpoint_read_error)?,
+            ),
             _ => LegacyCheckpointTranscriptRelation::NotComparable,
         };
 
@@ -7022,19 +7052,89 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             })?;
 
         if disposition == LegacyCheckpointMigrationDisposition::RefuseDivergent {
+            // Name the refused shape honestly: the two shapes carry
+            // different evidence and different remediation. The operator
+            // migration tool drives this same machine, so it is named only
+            // for the shape it can actually heal (both copies legacy).
+            let detail = if runtime_snapshot_legacy && store_row_present && !store_row_legacy {
+                format!(
+                    "the session-store row carries verified typed checkpoint authority \
+                     while the committed runtime snapshot is still a pre-typed legacy \
+                     document, and the legacy snapshot's transcript is not contained by \
+                     the typed authority (relation: {transcript_relation:?}); the \
+                     unverified legacy copy is the only witness of the extra transcript \
+                     content, so migration is refused fail-closed (the operator \
+                     migration tool drives this same resolution and cannot heal this \
+                     shape)"
+                )
+            } else {
+                "legacy checkpoint copies are divergent (the committed runtime \
+                 snapshot and the session-store projection are both pre-typed legacy \
+                 documents and are not related by transcript prefix extension); \
+                 one-time recovery migration is refused fail-closed and requires the \
+                 explicit operator migration tool"
+                    .to_string()
+            };
             tracing::warn!(
                 session_id = %id,
                 role,
-                "legacy checkpoint copies are divergent; one-time recovery migration \
-                 refused fail-closed and requires the explicit operator migration tool"
+                runtime_snapshot_legacy,
+                store_row_legacy,
+                ?transcript_relation,
+                "one-time legacy checkpoint recovery migration refused fail-closed"
             );
             return Err(SessionError::Agent(AgentError::InternalError(format!(
-                "cannot prepare {role} for session {id}: legacy checkpoint copies are \
-                 divergent (the committed runtime snapshot and the session-store \
-                 projection are not related by transcript prefix extension); one-time \
-                 recovery migration is refused fail-closed and requires the explicit \
-                 operator migration tool"
+                "cannot prepare {role} for session {id}: {detail}"
             ))));
+        }
+        if disposition == LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection
+        {
+            // Sanctioned adoption stamped the continuity store row (MobKit
+            // lazy-at-restore or the bulk operator sweep) while the runtime
+            // store kept the pre-adoption legacy snapshot. The typed store
+            // row IS the authority and its transcript contains the legacy
+            // transcript; nothing is re-stamped. The snapshot converges
+            // onto the typed authority bytes through the same guarded
+            // runtime-snapshot commit the stamping dispositions use, so a
+            // concurrent writer that already advanced the snapshot is never
+            // overwritten.
+            let CommittedCheckpointCopy::Legacy {
+                serialized: observed_snapshot_bytes,
+                ..
+            } = &runtime_copy
+            else {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority resolved a snapshot \
+                     convergence without a legacy runtime snapshot for session {id}"
+                ))));
+            };
+            let row = store_row.ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority resolved a snapshot \
+                     convergence without a session-store row for session {id}"
+                )))
+            })?;
+            let authority = VerifiedCheckpointAuthority::from_session(
+                row,
+                id,
+                "committed session-store projection",
+            )?;
+            self.commit_migrated_runtime_snapshot(
+                id,
+                Some(observed_snapshot_bytes.as_slice()),
+                &authority.serialized,
+            )
+            .await?;
+            tracing::info!(
+                session_id = %id,
+                role,
+                disposition = "converge_snapshot_onto_typed_projection",
+                source_bytes = authority.serialized.len(),
+                wrote_runtime_snapshot = true,
+                "one-time legacy checkpoint recovery migration converged a stale \
+                 legacy runtime snapshot onto the verified session-store authority"
+            );
+            return Ok(authority);
         }
         if disposition == LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot {
             // Partial adoption (a crash between the migration's two durable
@@ -7103,7 +7203,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 (blob, write_runtime, label)
             }
             LegacyCheckpointMigrationDisposition::RefuseDivergent
-            | LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot => {
+            | LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot
+            | LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection => {
                 return Err(SessionError::Agent(AgentError::InternalError(format!(
                     "unreachable legacy checkpoint migration disposition for session {id}"
                 ))));
@@ -7336,11 +7437,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 continue;
             }
             if options.only_cursor_free {
-                // Every stamping disposition requires a legacy source copy;
-                // the verified-snapshot-over-legacy-row shape converges via
-                // projection rebuild without minting a stamp, so only
-                // runtime-checkpoint provenance blocks stamping here.
-                if runtime_legacy {
+                // Every stamping disposition requires a legacy source copy
+                // AND no typed copy on the other side: the two partial
+                // shapes (verified snapshot over a legacy row, and legacy
+                // snapshot under a typed row) converge onto the existing
+                // typed authority without minting a stamp, so they stay
+                // eligible; only shapes that could stamp at INITIAL are
+                // cursor-ambiguous.
+                let store_row_typed = store_session.is_some() && !store_row_legacy;
+                if runtime_legacy && !store_row_typed {
                     report.skipped_cursor_ambiguous.push((
                         id,
                         "a committed legacy runtime snapshot exists; the lineage was \
@@ -30939,6 +31044,27 @@ mod tests {
         }
     }
 
+    /// Stamp `session` through the sanctioned adoption seam and save the
+    /// typed document as the session-store row (the downstream-adoption
+    /// shape: MobKit lazy-at-restore or the bulk operator sweep).
+    async fn save_adopted_store_row(
+        store: &Arc<dyn SessionStore>,
+        session: &Session,
+    ) -> meerkat_core::SessionCheckpointStamp {
+        let bytes = serde_json::to_vec(session).expect("session should serialize");
+        let adopted = meerkat_core::adopt_legacy_session(
+            &bytes,
+            meerkat_core::SessionGeneration::INITIAL,
+            meerkat_core::SessionCheckpointRevision::INITIAL,
+        )
+        .expect("legacy session should adopt");
+        store
+            .save(&adopted.session)
+            .await
+            .expect("adopted row should save");
+        adopted.stamp
+    }
+
     #[tokio::test]
     async fn legacy_runtime_snapshot_with_identical_projection_auto_migrates() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -31233,6 +31359,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_legacy_runtime_snapshot_converges_onto_typed_store_authority() {
+        // The mobkit identity-first fleet brick: sanctioned adoption stamped
+        // the continuity store row while the runtime store kept the
+        // pre-adoption legacy snapshot, whose transcript is a strict prefix
+        // of the typed authority. Resume must converge, not refuse.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let mut adopted_source = snapshot.clone();
+        adopted_source.push(Message::User(UserMessage::text(
+            "post-adoption trailing turn".to_string(),
+        )));
+        let adopted_stamp = save_adopted_store_row(&store, &adopted_source).await;
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+
+        let session = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("resume read must converge the stale legacy snapshot")
+            .expect("session should exist");
+        assert_eq!(
+            session.messages().len(),
+            3,
+            "the typed store authority wins; no transcript content is lost"
+        );
+
+        // Both durable copies now carry the SAME typed authority; no legacy
+        // remnant survives for the next load.
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(snapshot_stamp, adopted_stamp);
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, adopted_stamp);
+        let again = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("verified authority load should succeed")
+            .expect("verified authority should exist");
+        assert_eq!(again.stamp, adopted_stamp);
+    }
+
+    #[tokio::test]
+    async fn identical_legacy_runtime_snapshot_converges_onto_typed_store_authority() {
+        // Second verified fleet shape: transcripts identical message for
+        // message, the copies differing only in save-time metadata
+        // bookkeeping. The typed row is the authority and the pre-adoption
+        // snapshot converges.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let adopted_stamp = save_adopted_store_row(&store, &snapshot).await;
+        // Metadata-only drift between the copies must not read as
+        // transcript divergence.
+        seed_legacy_runtime_snapshot(
+            &runtime_store,
+            &with_legacy_checkpoint_marker(&snapshot, true),
+        )
+        .await;
+
+        let session = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("resume read must converge the identical legacy snapshot")
+            .expect("session should exist");
+        assert_eq!(session.messages().len(), 2);
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(snapshot_stamp, adopted_stamp);
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, adopted_stamp);
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_snapshot_extending_typed_store_authority_refuses_typed() {
+        // The legacy snapshot carries transcript content the typed
+        // authority lacks: the unverified copy is the only witness of the
+        // extra turns, so migration refuses fail-closed and names the
+        // actual shape instead of blaming transcript divergence.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let adopted_stamp =
+            save_adopted_store_row(&store, &with_transcript_truncated(&snapshot, 1)).await;
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+
+        let error = match service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a legacy snapshot extending the typed authority must refuse"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("verified typed checkpoint authority"),
+            "refusal must name the typed store side: {message}"
+        );
+        assert!(
+            message.contains("pre-typed legacy"),
+            "refusal must name the legacy snapshot side: {message}"
+        );
+        assert!(
+            message.contains("SnapshotExtendsProjection"),
+            "refusal must name the computed transcript relation: {message}"
+        );
+
+        // Fail-closed: neither durable copy was mutated.
+        let bytes = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let untouched: Session =
+            serde_json::from_slice(&bytes).expect("runtime snapshot should decode");
+        assert!(matches!(
+            untouched
+                .try_checkpoint_state()
+                .expect("checkpoint state should decode"),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+        ));
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, adopted_stamp);
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_snapshot_divergent_from_typed_store_authority_refuses() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "snapshot tail"]);
+        let id = snapshot.id().clone();
+        let mut adopted_source = with_transcript_truncated(&snapshot, 1);
+        adopted_source.push(Message::User(UserMessage::text(
+            "conflicting adopted tail".to_string(),
+        )));
+        let adopted_stamp = save_adopted_store_row(&store, &adopted_source).await;
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+
+        let error = match service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a legacy snapshot divergent from the typed authority must refuse"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("Divergent"),
+            "refusal must name the computed transcript relation: {message}"
+        );
+
+        // Fail-closed: the typed row is untouched.
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, adopted_stamp);
+    }
+
+    #[tokio::test]
     async fn legacy_runtime_snapshot_heals_ordinary_authoritative_resume_read() {
         // The production brick: an upgraded binary resuming a pre-typed
         // session through the ordinary read path must migrate, not refuse.
@@ -31432,6 +31725,51 @@ mod tests {
         assert_eq!(
             row_stamp, adopted.stamp,
             "the row converges onto the existing authority; no INITIAL stamp is minted"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_free_guard_still_converges_snapshot_under_typed_row() {
+        // The mirror partial shape: a legacy runtime snapshot under an
+        // already-typed row converges onto the existing typed authority
+        // without minting a stamp, so the conservative guard must not
+        // strand it — and the existing nonzero cursor is preserved.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let snapshot = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = snapshot.id().clone();
+        let mut adopted_source = snapshot.clone();
+        adopted_source.push(Message::User(UserMessage::text(
+            "post-adoption trailing turn".to_string(),
+        )));
+        let adopted_bytes =
+            serde_json::to_vec(&adopted_source).expect("legacy session should serialize");
+        let adopted = meerkat_core::adopt_legacy_session(
+            &adopted_bytes,
+            meerkat_core::SessionGeneration::new(3),
+            meerkat_core::SessionCheckpointRevision::new(4),
+        )
+        .expect("legacy session should adopt");
+        store
+            .save(&adopted.session)
+            .await
+            .expect("adopted row should save");
+        seed_legacy_runtime_snapshot(&runtime_store, &snapshot).await;
+
+        let report = service
+            .adopt_legacy_checkpoints_with(LegacyCheckpointAdoptionOptions {
+                only_cursor_free: true,
+            })
+            .await
+            .expect("guarded sweep should succeed");
+        assert_eq!(report.adopted, 1);
+        assert!(report.skipped_cursor_ambiguous.is_empty());
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(
+            snapshot_stamp, adopted.stamp,
+            "the snapshot converges onto the existing authority; no INITIAL stamp is minted"
         );
     }
 }

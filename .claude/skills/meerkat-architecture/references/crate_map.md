@@ -6,7 +6,7 @@
 meerkat-sqlite            (shared SQLite mechanics: connection profiles, meerkat_schema migration
                            ledger, JsonColumnBytes codec, per-operation maintenance-fence guards,
                            error classification — rusqlite only, no meerkat deps; consumed by
-                           store/runtime/tools/memory/workgraph/mob)
+                           store/runtime/tools/memory/workgraph/jobs/mob)
 meerkat-models            (canonical provider model catalog/capabilities data; core stays provider-free)
 meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
 meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
@@ -31,6 +31,8 @@ meerkat-core              (pure types, traits, agent loop, session-store contrac
   ├── meerkat-session         (session service: Ephemeral, Persistent)
   ├── meerkat-runtime         (runtime control plane, policy engine, completion-feed wake,
                                 DSL handle impls)
+  ├── meerkat-jobs            (generated DetachedJobMachine authority, fenced attempts,
+                                typed terminal results, atomic outbox, memory/disk stores)
   ├── meerkat-workgraph       (realm-scoped durable WorkGraph service, stores, tools, read surface)
   ├── meerkat-live            (LiveAdapterHost, live projection sink, WebSocket transport)
   ├── meerkat-comms           (inter-agent: inproc, TCP, UDS, Ed25519)
@@ -125,6 +127,12 @@ profiles; the in-repo stores run the same suite in
 |-------|---------|-------------|
 | `RuntimeControlPlane` | Multi-session runtime control (ingest, retire, respawn, reset, recover, destroy) | `MeerkatMachine` |
 | `RuntimeDriver` | Per-session input lifecycle (accept, run events, control, recover, retire, destroy) | `EphemeralRuntimeDriver`, `PersistentRuntimeDriver` |
+
+### Durable job traits (defined in meerkat-jobs)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
+| `DetachedJobStore` | Atomic durable job insertion, realm-scoped submission deduplication, revision CAS, and terminal outbox persistence; lifecycle meaning remains generated-machine-owned | `MemoryDetachedJobStore` (SQLite implementation follows in Phase 2B) |
 
 ### Session traits (defined in meerkat-session)
 

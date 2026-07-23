@@ -46,6 +46,8 @@ rust_library(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -91,6 +93,8 @@ rust_library(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -144,6 +148,8 @@ rust_library(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -191,6 +197,8 @@ rust_library(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -244,6 +252,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -308,6 +318,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = [
         "tests/browse_load_surface.rs",
@@ -375,6 +387,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = [
         "tests/builtin_skill_canonical_key.rs",
@@ -442,6 +456,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = [
         "tests/integration_shell_jobs.rs",
@@ -506,6 +522,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = [
         "tests/rct_contracts.rs",
@@ -576,6 +594,8 @@ rust_test(
         "skills/shell-patterns/SKILL.md",
         "skills/skill-discovery-workflow/SKILL.md",
         "skills/task-workflow/SKILL.md",
+        "src/builtin/shell/job_manager.rs",
+        "src/builtin/shell/tool.rs",
     ],
     srcs = [
         "tests/schema_snapshot.rs",

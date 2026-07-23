@@ -1,0 +1,210 @@
+# DetachedJobMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `DetachedJobMachine`
+
+### Code Anchors
+- `detached_job_authority` (machine `DetachedJobMachine`): `meerkat-jobs/src/service.rs` — generated detached-job lifecycle authority with mechanical CAS and typed projection
+
+### Scenarios
+- `detached_job_reopen_preserves_committed_authority` — recovery rehydrates the committed attempt, fence, lease, checkpoint, and runner handle without minting new authority
+- `detached_job_terminal_outbox_is_atomic` — all terminal kinds commit typed result delivery and acknowledge it through generated authority
+
+### Transitions
+- `SubmitQueued`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ClaimQueued`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `ClaimRetryScheduled`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `RenewRunningLease`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RenewExternalWaitLease`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ReportRunningProgress`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ReportExternalWaitProgress`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RecordRunningCheckpoint`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `RecordExternalWaitCheckpoint`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `WaitExternalFromRunning`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ResumeRunningFromExternal`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelRunning`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelWaitingExternal`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelAlreadyRequestedRunning`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelAlreadyRequestedWaitingExternal`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelAlreadyCancelled`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelQueued`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelRetryScheduled`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RequestCancelLossObserved`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `LeaseExpiresRunning`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `LeaseExpiresWaitingExternal`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ScheduleRetryAfterLoss`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `ClassifyNonResumableWorkerLoss`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `CompleteRunningAttempt`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `CompleteWaitingExternalAttempt`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `FailRunningAttempt`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `FailWaitingExternalAttempt`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `AcknowledgeRunningCancel`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `AcknowledgeWaitingExternalCancel`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `MarkQueuedNeedsAttention`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `MarkRunningNeedsAttention`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `MarkWaitingExternalNeedsAttention`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `MarkLossObservedNeedsAttention`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `MarkRetryScheduledNeedsAttention`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplySucceededDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyFailedDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyCancelledDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyWorkerLostDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyNeedsAttentionDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveSucceededDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveFailedDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveCancelledDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveWorkerLostDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveNeedsAttentionDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+
+### Effects
+- `JobSubmitted`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `AttemptClaimed`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `LeaseRenewed`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ProgressAccepted`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `CheckpointAccepted`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `ExternalWaitAccepted`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `RunningResumed`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `CancelRequested`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `LeaseExpiryRecorded`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `RetryScheduled`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_reopen_preserves_committed_authority`
+- `TerminalCommitted`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_terminal_outbox_is_atomic`
+- `DeliveryApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: `detached_job_terminal_outbox_is_atomic`
+
+### Invariants
+- `fence_tracks_claim_count`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `no_attempt_has_no_attempt_authority`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `checkpoint_requires_attempt`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `active_execution_requires_attempt_authority`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `terminal_requires_delivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `nonterminal_has_no_terminal_delivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+
+
+<!-- GENERATED_COVERAGE_END -->

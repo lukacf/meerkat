@@ -31,6 +31,7 @@ ENTRIES=(
   "meerkat-openai=${ROOT}/meerkat-openai"
   "meerkat-gemini=${ROOT}/meerkat-gemini"
   "meerkat-schedule=${ROOT}/meerkat-schedule"
+  "meerkat-jobs=${ROOT}/meerkat-jobs"
   "meerkat-workgraph=${ROOT}/meerkat-workgraph"
   "meerkat-client=${ROOT}/meerkat-client"
   "meerkat-providers=${ROOT}/meerkat-providers"

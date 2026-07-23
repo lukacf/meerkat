@@ -12093,6 +12093,10 @@ pub mod inputs {
         pub payload: OpTerminalPayload,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RollbackUnreturnedOp {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerReadyOp {
         pub operation_id: String,
     }
@@ -12956,6 +12960,7 @@ pub enum Input {
     FailOp(inputs::FailOp),
     CancelOp(inputs::CancelOp),
     AbortOp(inputs::AbortOp),
+    RollbackUnreturnedOp(inputs::RollbackUnreturnedOp),
     PeerReadyOp(inputs::PeerReadyOp),
     ProgressReportedOp(inputs::ProgressReportedOp),
     RetireRequestedOp(inputs::RetireRequestedOp),
@@ -13306,6 +13311,7 @@ impl Input {
             Self::FailOp(_) => InputKind::FailOp,
             Self::CancelOp(_) => InputKind::CancelOp,
             Self::AbortOp(_) => InputKind::AbortOp,
+            Self::RollbackUnreturnedOp(_) => InputKind::RollbackUnreturnedOp,
             Self::PeerReadyOp(_) => InputKind::PeerReadyOp,
             Self::ProgressReportedOp(_) => InputKind::ProgressReportedOp,
             Self::RetireRequestedOp(_) => InputKind::RetireRequestedOp,
@@ -13649,6 +13655,7 @@ pub enum InputKind {
     FailOp,
     CancelOp,
     AbortOp,
+    RollbackUnreturnedOp,
     PeerReadyOp,
     ProgressReportedOp,
     RetireRequestedOp,
@@ -14180,6 +14187,10 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct NotifyOpWatcher {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnreturnedOpRolledBack {
         pub operation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14797,6 +14808,7 @@ pub enum Effect {
     RecordBoundarySequence(effects::RecordBoundarySequence),
     SubmitOpEvent(effects::SubmitOpEvent),
     NotifyOpWatcher(effects::NotifyOpWatcher),
+    UnreturnedOpRolledBack(effects::UnreturnedOpRolledBack),
     ExposeOperationPeer(effects::ExposeOperationPeer),
     RetainTerminalRecord(effects::RetainTerminalRecord),
     DiscardRecoveredOperationRecord(effects::DiscardRecoveredOperationRecord),
@@ -14966,6 +14978,7 @@ pub enum EffectKind {
     RecordBoundarySequence,
     SubmitOpEvent,
     NotifyOpWatcher,
+    UnreturnedOpRolledBack,
     ExposeOperationPeer,
     RetainTerminalRecord,
     DiscardRecoveredOperationRecord,
@@ -16513,6 +16526,11 @@ pub enum TransitionId {
     StartOpRunning,
     StartOpRetired,
     StartOpStopped,
+    RollbackUnreturnedOpIdle,
+    RollbackUnreturnedOpAttached,
+    RollbackUnreturnedOpRunning,
+    RollbackUnreturnedOpRetired,
+    RollbackUnreturnedOpStopped,
     CompleteOpIdle,
     CompleteOpAttached,
     CompleteOpRunning,

@@ -74,6 +74,7 @@ fn canonical_machine_slug_snapshot() {
         vec![
             "ApprovalLifecycleMachine".to_string(),
             "AuthMachine".to_string(),
+            "DetachedJobMachine".to_string(),
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),

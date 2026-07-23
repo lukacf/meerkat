@@ -15,6 +15,7 @@ members = [
     "meerkat-openai",
     "meerkat-gemini",
     "meerkat-schedule",
+    "meerkat-jobs",
     "meerkat-workgraph",
     "meerkat-store",
     "meerkat-store-conformance",
@@ -149,6 +150,7 @@ meerkat-anthropic = { version = "0.8.7", path = "meerkat-anthropic", default-fea
 meerkat-openai = { version = "0.8.7", path = "meerkat-openai", default-features = false }
 meerkat-gemini = { version = "0.8.7", path = "meerkat-gemini", default-features = false }
 meerkat-schedule = { version = "0.8.7", path = "meerkat-schedule" }
+meerkat-jobs = { version = "0.8.7", path = "meerkat-jobs" }
 meerkat-workgraph = { version = "0.8.7", path = "meerkat-workgraph" }
 meerkat-tools = { version = "0.8.7", path = "meerkat-tools", default-features = false }
 meerkat-mcp = { version = "0.8.7", path = "meerkat-mcp" }

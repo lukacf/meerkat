@@ -3175,6 +3175,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-jobs"
+version = "0.8.4"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "meerkat-core",
+ "meerkat-machine-schema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-live"
 version = "0.8.7"
 dependencies = [

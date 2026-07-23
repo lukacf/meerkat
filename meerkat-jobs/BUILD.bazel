@@ -1,0 +1,313 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_jobs",
+    aliases = aliases(package_name = "meerkat-jobs"),
+    crate_name = "meerkat_jobs",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_jobs_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_jobs",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "machine_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "machine_contract",
+    crate_root = "tests/machine_contract.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/machine_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "machine_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-jobs:meerkat_jobs",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "recovery_fencing_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "recovery_fencing",
+    crate_root = "tests/recovery_fencing.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/recovery_fencing.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "recovery_fencing",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-jobs:meerkat_jobs",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "store_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "store_contract",
+    crate_root = "tests/store_contract.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/store_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "store_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-jobs:meerkat_jobs",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "terminal_outbox_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "terminal_outbox",
+    crate_root = "tests/terminal_outbox.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/terminal_outbox.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "terminal_outbox",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-jobs:meerkat_jobs",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":machine_contract_test",
+        ":meerkat_jobs_unit_test",
+        ":recovery_fencing_test",
+        ":store_contract_test",
+        ":terminal_outbox_test",
+    ],
+)

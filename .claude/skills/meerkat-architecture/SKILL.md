@@ -219,6 +219,73 @@ Since the Ask 9/10 follow-ups (post-0.7.12):
   the host's `HostRunnableRegistry` into the runtime-backed occurrence
   driver (Ask 7's primitives were previously unreachable from this spawner).
 
+Since 0.8.4 (PR #912, the storage unification arc):
+
+- **`StorageLayout` path authority** (meerkat-core/src/storage_layout.rs) —
+  resolved once at bootstrap, carried through composition; the
+  `storage-ambient-gate` CI gate bans ambient root resolution (`dirs::*`,
+  `HOME`/`XDG`) outside the bootstrap/layout modules. Realm state roots
+  resolve realm-id-first across the project-local and user-global
+  candidates (`RealmConfig::resolve_locator_dual_root`): explicit root wins,
+  a single existing candidate is used where it lies, both is a typed
+  `RealmSplitBrain` refusal, neither goes to the surface default. Probing
+  fails closed (typed `RootProbeFailed` / `RealmDirectoryCollision` /
+  `ManifestUnreadable`); `DualRootResolution.candidate_roots` arms the
+  cross-candidate first-start reservation
+  (`ensure_realm_manifest_pin_with_candidates`) so racing first starts
+  cannot mint twins.
+- **`meerkat-sqlite`** — new leaf crate owning the shared SQLite mechanics
+  (profiles, ledger, fences, `JsonColumnBytes`, error classification; see
+  crate table). Opens are DDL-free; every database gains a `meerkat_schema`
+  ledger and a sibling `<file>.mfence` fence-lock; a future-schema file
+  refuses typed (`SchemaFromTheFuture`) preflight, before WAL.
+- **`RealmStorageProvider` seam** (meerkat/src/storage_provider.rs) — one
+  provider supplies all durable stores for a realm; store-only by design
+  (mob storage stays mob-owned to avoid the facade↔mob cycle). Realm
+  manifest v2 adds `provider` / `ephemeral_domains`; future formats and
+  provider-pin mismatches refuse typed. Fail-closed durability: exactly one
+  `DurabilityDeclaration` per required domain (sessions, runtime, schedule,
+  workgraph, blobs, artifacts); an undeclared non-persistent `Durable` slot
+  is a startup `DurabilityViolation`, never a silent in-memory fallback.
+- **`meerkat-store-conformance`** — published per-trait conformance
+  chapters any backend runs by supplying store factories; the in-repo
+  stores run the same suite (meerkat-store/tests/conformance.rs).
+- **`rkat storage doctor|migrate|prune`** — CLI storage verbs dispatch
+  BEFORE runtime-scope resolution (no leases, no realm creation;
+  `--isolated`/`--default-model` are usage errors; only `migrate --apply`
+  opens a realm's persistence bundle, under the exclusive fence). Doctor
+  renders the shape-stable `StorageMigrator::diagnose` seam
+  (meerkat-core/src/storage_diagnostics.rs; disk impl
+  meerkat-store/src/doctor.rs). Migrate is dry-run by default, fenced under
+  `--apply`, refuses split-brain without `--adopt-root`, and adopts legacy
+  checkpoints in bulk (`PersistentSessionService::adopt_legacy_checkpoints`).
+  Prune deletes registered `*.pre-<version>-<timestamp>` /
+  `*.corrupt-<timestamp>` artifacts only, aged by the name's embedded
+  timestamp.
+- **Machine schemas are constructed once per process** — the `machine!`
+  macro emits a `LazyLock`-cached `schema_static()`; `schema()` clones the
+  cache (meerkat-machine-dsl-core/src/gen_schema.rs; pointer-identity
+  pinned by meerkat-machine-schema/tests/schema_construction_cache.rs).
+  Previously every schedule-host tick re-parsed machine DSLs per persisted
+  row — an idle busy-loop that escalated to restart availability loss.
+- **Stream-inactivity watchdog** — `RetryPolicy::stream_inactivity_timeout`
+  (`[retry] stream_inactivity_timeout`; default ON at 300s, `"disabled"`
+  opts out). A silent provider stream aborts with the retryable
+  `LlmFailureReason::StreamStalled`; stream events re-arm the window, the
+  hard call timeout stays fixed at call start; applies only to
+  liveness-reporting clients (`stream_activity_count`).
+- **Force-cancel is legal from `Running`** — MobMachine gained wedge arms
+  (`ForceCancelRunningRuntimeNotLive`, `ForceCancelRunningAlreadyRetiring`)
+  that admit as idempotent no-ops with no emission; only the active
+  `ForceCancelRunning` arm emits `FlowTerminalized` and authorizes the
+  mechanical interrupt. A roster-unknown identity answers `MemberNotFound`
+  before machine admission.
+- **Checkpointer-gate wedge fix** — a cancelled per-session checkpointer
+  gate now fails the SessionStore projection with a retryable error instead
+  of silently skipping it, so the terminal-recovery drain re-projects the
+  committed RuntimeStore snapshot on restart and the two checkpoint
+  authorities reconverge (the authority-conflict error names both stamps).
+
 ## Runtime Dogma (first review lens)
 
 Canonical doctrine: `docs/architecture/meerkat-dogma.md` (nine rules; mirrored
@@ -396,14 +463,16 @@ DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
+| `meerkat-sqlite` | Shared SQLite mechanics: named connection profiles (DDL-free opens), `meerkat_schema` migration ledger (pinned concurrent-open protocol, typed `SchemaFromTheFuture` refusal), `JsonColumnBytes`, per-operation maintenance-fence guards, error classification (rusqlite only, no meerkat deps) | — |
 | `meerkat-models` | Canonical provider model catalog/capabilities data; exposes `canonical()` `ModelCatalog` (core stays provider-free) | meerkat-core |
-| `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
+| `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits, `StorageLayout` path authority + realm-id-first dual-root resolution, `DurabilityClass` vocabulary, `StorageMigrator` diagnose seam | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `StorageMigrator`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
+| `meerkat-store-conformance` | Published storage conformance harness: per-trait capability profiles (baseline / incremental / guarded-projection), capability-discovery, append-only media, legacy-data, blob/artifact chapters | Consumes meerkat-core contracts |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
 | `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
 | `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh, cloud authorizers | — |
 | `meerkat-providers` | Compatibility provider-runtime/auth shim surface | — |
 | `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Implements `AgentLlmClient` via provider-specific crates |
-| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory) | Implements `SessionStore` |
+| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory), realm manifest v2 pinning + cross-candidate first-start reservation, disk doctor/migrate (`doctor.rs`, `migrate.rs`) | Implements `SessionStore`, `StorageMigrator` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router mechanics (routes to `ExternalToolSurfaceHandle`; asks injected auth resolver for bearer tokens but does not own OAuth lifecycle) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
@@ -422,7 +491,7 @@ DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
 | `meerkat-machine-schema` | Rust-native machine/composition catalog DSL — the formal authority | — |
 | `meerkat-machine-kernels` | Generated kernel interpreter for all machines/compositions | `GeneratedMachineKernel` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
-| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports | Wires everything together |
+| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports, `RealmStorageProvider` seam + `DiskStorageProvider` + fail-closed durability enforcement | Wires everything together |
 
 **Rule: `meerkat-core` has zero I/O dependencies.** All I/O happens in satellite crates.
 
@@ -451,6 +520,12 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
 - `meerkat-core/src/handles.rs` — DSL handle trait definitions
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
+- `meerkat-core/src/storage_layout.rs` — `StorageLayout` path authority (dual-root resolution lives in `runtime_bootstrap.rs`)
+- `meerkat-core/src/storage_durability.rs`, `meerkat-core/src/storage_diagnostics.rs` — `DurabilityClass`/`DurabilityDeclaration`, `StorageDiagnosis`/`StorageMigrator`
+- `meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` — shared SQLite mechanics
+- `meerkat/src/storage_provider.rs` — `RealmStorageProvider`, `DiskStorageProvider`, `enforce_fail_closed_durability`
+- `meerkat-store/src/{doctor,migrate,realm}.rs` — disk diagnosis, offline migration mechanics, realm manifest v2 pinning
+- `meerkat-cli/src/storage_migrate.rs` — `rkat storage migrate`/`prune` orchestration
 - `meerkat-live/src/host.rs`, `meerkat-live/src/transport.rs` — live channel host and WebSocket transport
 - `meerkat-rpc/src/handlers/live.rs` — `live/*` JSON-RPC handlers
 - `meerkat-core/src/agent.rs`, `meerkat-core/src/agent/*.rs` — agent loop

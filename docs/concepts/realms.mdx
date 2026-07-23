@@ -49,10 +49,24 @@ specific realm under both candidate state roots — the project-local
   pointing at `rkat storage doctor` — no surface will silently pick one and
   deepen the split;
 - a realm that exists nowhere is created under the surface's documented
-  default root (CLI: project-local; servers: user-global).
+  default root (CLI: project-local; servers: user-global). First
+  materialization reserves a marker in **every** candidate root before
+  writing the manifest (the cross-candidate first-start reservation), so
+  two surfaces with different default roots racing the same fresh realm
+  cannot each mint a copy: exactly one manifest materializes, and a racer
+  whose realm appeared under a *different* candidate refuses typed instead
+  of manufacturing a twin — its next resolution finds the winner's copy and
+  uses it where it lies.
 
 Server surfaces probe the project-local candidate only when started with an
 explicit `--context-root`, which keeps their no-flags behavior unchanged.
+
+An existing split heals offline: `rkat storage doctor` reports the realm's
+twin locations, `rkat storage migrate` (dry-run) computes their per-domain
+divergence under held fences, and `rkat storage migrate --apply
+--adopt-root <path>` adopts one root while archiving the other copy
+read-only under the registered backup naming — nothing is merged or
+discarded. See [CLI commands](/cli/commands#storage).
 
 ## Explicit sharing
 
@@ -88,6 +102,14 @@ On first use, a realm writes a manifest with backend choice. Later opens must ho
 | No hint | `sqlite` when compiled, otherwise `jsonl` |
 
 After pinning, all surfaces use the manifest backend for that realm.
+
+Realms opened through an external `RealmStorageProvider` pin the provider
+the same way: the manifest records the provider name (manifest format 2,
+which also adds `ephemeral_domains`) and the backend as `external:<name>`.
+A realm pinned to an external provider refuses opens through the built-in
+disk composition — and vice versa — with a typed provider mismatch, and
+readers refuse manifest formats newer than they support instead of
+silently ignoring fields they do not understand.
 
 ## Default backend and same-realm sharing
 

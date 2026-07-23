@@ -80,6 +80,9 @@ rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickof
 rkat config get|set|patch ...
 rkat capabilities
 rkat doctor
+rkat storage doctor [--json] [--root PATH]...       # read-only storage diagnosis
+rkat storage migrate [--apply] [--adopt-root PATH]  # offline fenced migration (dry-run default)
+rkat storage prune [--apply] [--older-than-days N]  # registered backup-artifact lifecycle
 rkat run --comms-listen-tcp 0.0.0.0:4200 --comms-advertise-tcp host.example:4200 --comms-binding-out target.binding.json --keep-alive "..."
 rkat-rpc                                # JSON-RPC stdio
 rkat-rpc --tcp 127.0.0.1:9000           # JSON-RPC over TCP (stdio is default)

@@ -172,6 +172,10 @@ Sessions are realm-scoped.
 - State roots resolve realm-id-first across the project-local and
   user-global candidates; a realm materialized under both is a typed
   split-brain refusal (see `rkat storage doctor`).
+- First materialization of a fresh realm reserves across every candidate
+  root before writing the manifest, so surfaces with different default
+  roots racing the same realm converge on one copy instead of minting
+  split-brain twins.
 
 ## Compaction contract
 
@@ -219,10 +223,13 @@ naming that `rkat storage doctor` inventories and `rkat storage prune`
 owns.
 
 Every store slot a realm composes carries a machine-readable durability
-class (`durable` / `rebuildable_cache` / `scratch`) and its resolution; a
-durable slot resolving to a non-persistent store without the realm manifest
-declaring that domain ephemeral is a startup error — never a silent
-in-memory fallback. Deployment tooling can rely on the classes (for
+class (`durable` / `rebuildable_cache` / `scratch`) and its resolution.
+Declarations are complete by construction: a storage provider must declare
+exactly one class for each of the six domains (`sessions`, `runtime`,
+`schedule`, `workgraph`, `blobs`, `artifacts`), so no slot dodges the rule
+by omission. A durable slot resolving to a non-persistent store without the
+realm manifest declaring that domain ephemeral is a startup error — never a
+silent in-memory fallback. Deployment tooling can rely on the classes (for
 example, cloning only durable domains between state generations).
 
 ### Session storage layout (0.7.25+): head-canonical strands

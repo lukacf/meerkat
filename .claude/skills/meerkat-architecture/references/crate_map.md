@@ -3,21 +3,30 @@
 ## Dependency Order (bottom to top)
 
 ```
+meerkat-sqlite            (shared SQLite mechanics: connection profiles, meerkat_schema migration
+                           ledger, JsonColumnBytes codec, per-operation maintenance-fence guards,
+                           error classification — rusqlite only, no meerkat deps; consumed by
+                           store/runtime/tools/memory/workgraph/mob)
 meerkat-models            (canonical provider model catalog/capabilities data; core stays provider-free)
 meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
 meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
                            cloud authorizers — no meerkat-core deps)
 
 meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile vocabulary + ModelCatalog mechanics,
-                           DSL handle traits)
+                           DSL handle traits, StorageLayout path authority + realm-id-first dual-root
+                           resolution, DurabilityClass vocabulary, StorageMigrator diagnose seam)
   ├── meerkat-capabilities    (typed capability vocabulary, feature-owned declaration collection)
   ├── meerkat-contracts       (wire types, error codes, generated surface schema projections)
+  ├── meerkat-store-conformance (published storage conformance harness: per-trait capability
+                                profiles, capability-discovery, append-only media, legacy-data,
+                                blob/artifact chapters — depends only on meerkat-core)
   ├── meerkat-anthropic       (Anthropic streaming client, implements AgentLlmClient through llm-core)
   ├── meerkat-openai          (OpenAI client, including realtime transport — implements AgentLlmClient)
   ├── meerkat-gemini          (Gemini client, including inline video — implements AgentLlmClient)
   ├── meerkat-providers       (compatibility shim: ProviderRuntimeRegistry surface + cloud authorizer wiring)
   ├── meerkat-client          (compatibility shim: re-exports provider crates — do NOT add new code here)
-  ├── meerkat-store           (session persistence: SQLite, Jsonl, Memory)
+  ├── meerkat-store           (session persistence: SQLite, Jsonl, Memory; realm manifest v2 pinning,
+                                disk doctor/migrate implementations — built on meerkat-sqlite)
   ├── meerkat-tools           (tool registry, builtins, shell, session-scoped task store)
   ├── meerkat-session         (session service: Ephemeral, Persistent)
   ├── meerkat-runtime         (runtime control plane, policy engine, completion-feed wake,
@@ -38,7 +47,8 @@ meerkat-machine-kernels       (generated kernel interpreter — centralized, no 
 meerkat-machine-codegen       (TLA+ generation, TLC verification, drift detection)
 
 meerkat (facade)              (AgentFactory, FactoryAgentBuilder, persistence helpers, re-exports,
-                                SessionLlmReconfigureHost wiring)
+                                SessionLlmReconfigureHost wiring, RealmStorageProvider seam +
+                                DiskStorageProvider + fail-closed durability enforcement)
   ├── meerkat-mob              (multi-agent: MobBuilder, MobActor, FlowEngine, FlowFrameEngine,
                                   member provisioning, identity-first binding, supervisor bridge)
   ├── meerkat-mob-pack         (mobpack archive: signing, trust, validation)
@@ -54,6 +64,38 @@ Surface binaries:
 ```
 
 There are no separate public reduced-surface binaries. Reduced-surface distributions are source builds of the same surface crates with a narrower Cargo feature set.
+
+## Storage Flow (0.8.4 unification arc)
+
+```
+RuntimeBootstrap (surface flags)
+  → StorageLayout::resolve (meerkat-core: path authority; realm-id-first
+     dual-root resolution — explicit --state-root wins, single existing
+     candidate is used where it lies, both = typed RealmSplitBrain refusal,
+     neither = surface default; candidate_roots feed first-start reservation)
+  → RealmStorageProvider::open (meerkat facade seam; DiskStorageProvider is
+     the built-in — realm manifest v2 pin: builtin backend or external
+     provider pin, refused typed on mismatch/future format)
+  → RealmStoreSet (one provider supplies session/runtime/schedule/workgraph/
+     blob/artifact stores + one DurabilityDeclaration per slot;
+     enforce_fail_closed_durability refuses undeclared non-persistent
+     durable slots at startup)
+  → PersistenceBundle (facade composition; store-only seam — mob storage
+     stays mob-owned to avoid the meerkat → meerkat-mob → meerkat cycle)
+```
+
+Beneath the stores, `meerkat-sqlite` owns the shared mechanics every SQLite
+store opens through: named connection profiles (DDL-free opens), the
+`meerkat_schema(domain, version)` ledger (pinned concurrent-open protocol,
+typed `SchemaFromTheFuture` refusal checked preflight before WAL), sibling
+`<file>.mfence` per-operation fence guards (offline `rkat storage migrate`
+takes the exclusive side), and `classify_sqlite_error`. The
+`meerkat_core::StorageMigrator` diagnose seam is what `rkat storage doctor`
+renders (disk implementation: `meerkat-store/src/doctor.rs`; the CLI storage
+verbs dispatch before runtime-scope resolution). Backends prove the store
+contracts against `meerkat-store-conformance` (per-trait capability
+profiles; the in-repo stores run the same suite in
+`meerkat-store/tests/conformance.rs`).
 
 ## Key Traits
 
@@ -75,6 +117,7 @@ There are no separate public reduced-surface binaries. Reduced-surface distribut
 | `OpsLifecycleRegistry` | Async operation tracking (wait_all, collect_completed, bounded retention, timestamps, concurrency, detached wake) | `RuntimeOpsLifecycleRegistry` (meerkat-runtime) |
 | `MobToolsFactory` | Late-binding session-scoped mob tool construction | `AgentMobToolSurfaceFactory` (meerkat-mob-mcp) |
 | `WorkGraphStore` | Durable realm-scoped work item, edge, claim, event, and snapshot storage | `MemoryWorkGraphStore`, `SqliteWorkGraphStore` (meerkat-workgraph) |
+| `StorageMigrator` | Shape-stable storage diagnose seam (`diagnose(&DiagnoseScope) → StorageDiagnosis`; mutation verbs arrive as defaulted methods) | `DiskStorageMigrator` (meerkat-store/src/doctor.rs) |
 
 ### Runtime traits (defined in meerkat-runtime)
 
@@ -89,6 +132,12 @@ There are no separate public reduced-surface binaries. Reduced-surface distribut
 |-------|---------|-------------|
 | `SessionAgentBuilder` | Agent construction from request | `FactoryAgentBuilder` (meerkat facade) |
 | `SessionAgent` | Running agent with session access | `FactoryAgent` (meerkat facade) |
+
+### Storage traits (defined in the meerkat facade)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
+| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the six required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
 
 ### Mob traits (defined in meerkat-mob)
 

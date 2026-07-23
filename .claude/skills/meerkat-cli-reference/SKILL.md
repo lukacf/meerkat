@@ -21,6 +21,9 @@ spelling, singular/plural forms, flags, and enum values matter.
 - `rkat blob get` has no `-o` or `--out`; use `--output <FILE>`.
 - `rkat session show` has no `--json` flag.
 - `rkat models` and `rkat capabilities` already print pretty JSON and have no `--json`/`--format` flags.
+- `rkat doctor` (setup checks, no flags) and `rkat storage doctor` (storage diagnosis, `--json`/`--root`) are different commands.
+- `rkat storage prune` deletes only registered maintenance backup artifacts; realm deletion is `rkat realm delete` / `rkat realm prune`.
+- `--isolated` and `--default-model` cannot be combined with `rkat storage`; both are usage errors.
 
 ## Root
 
@@ -69,6 +72,7 @@ rkat config get|set|patch ...
 rkat capabilities
 rkat models
 rkat doctor
+rkat storage doctor|migrate|prune ...
 rkat auth realms|profiles|profile|profile-delete|bindings|test|status|login|logout|refresh ...
 ```
 
@@ -356,7 +360,67 @@ rkat doctor
 
 No doctor-specific flags. Output is tab-delimited `ok|warn <area> <message>`.
 Hard config/MCP/self-hosted issues exit 1; missing provider env vars and missing
-`wasm-pack` are warnings.
+`wasm-pack` are warnings. Storage diagnosis is the separate `rkat storage doctor`.
+
+## Storage
+
+Offline storage administration. All three verbs dispatch BEFORE runtime-scope
+resolution: they take no realm leases and create no realm — so they run
+against split-brain realms the normal resolver refuses. Doctor, prune, and
+migrate's default dry run open no persistence bundle; `migrate --apply` does
+open each swept realm's bundle (under the exclusive maintenance fence) to
+stamp ledgers and run bulk checkpoint adoption.
+`--isolated` and `--default-model` are usage errors with `rkat storage`; scope
+the sweep with `--realm`/`--root` instead.
+
+```bash
+rkat storage doctor [--json] [--root <PATH>]...
+rkat storage migrate [--apply] [--json] [--root <PATH>]... [--adopt-root <PATH>] [--fence-wait-secs <SECS>]
+rkat storage prune [--apply] [--older-than-days <DAYS>] [--json] [--root <PATH>]...
+```
+
+Sweep roots (all three verbs): by default the invocation directory's
+project-local candidate (`<context-root>/.rkat/realms`) and the user-global
+data root. Note the runtime resolver additionally walks UP from the
+invocation context to the project root before forming its local candidate —
+run storage verbs from the project root (or pass `--root`) to sweep the
+same location the runtime resolves. When any explicit root is
+given (the global `--state-root` or one or more repeatable `--root`), ONLY
+those roots are read. The global `-r/--realm` restricts the sweep to one realm
+id (split-brain twins for it are still detected across all swept roots).
+
+`storage doctor` is read-only and safe against live realms: takes no leases,
+opens databases read-only, creates nothing. Reports per-root realm inventory,
+manifest state, schema-ledger versions per database, dual-root split-brain
+twins, a checkpoint-evidence census (verified vs legacy-unverified sessions),
+dangling session→blob references, and orphaned lock/lease/backup artifacts.
+Exit 0 = no error-severity findings; exit 1 = errors found.
+
+`storage migrate` is the offline migration framework, dry-run by default;
+`--apply` runs the fenced migration. Per realm: (1) ledger baseline — under
+the realm's exclusive maintenance fence (`--fence-wait-secs`, default 10,
+bounds the in-flight-operation drain wait), every store opens through its
+normal constructor so guarded schema-ledger migrations converge files of any
+vintage; (2) state-root adoption — report-only, realms are used where they
+lie; (3) split-brain reconciliation — a realm id under 2+ swept roots is a
+fail-closed refusal unless `--apply --adopt-root <PATH>` names the swept root
+to keep, in which case every other copy is archived read-only under the
+registered `*.pre-<version>-<timestamp>` backup naming (no merging, no
+synthesis); (4) checkpoint-evidence adoption — bulk machine-owned stamping of
+legacy pre-typed session checkpoints (sqlite realms; jsonl realms heal lazily
+and are reported as skipped); (5) deprecated leftovers — report-only.
+`--adopt-root` without `--apply` is a usage error. Credential stores are never
+read, moved, or reported. Exit 1 = errors or fail-closed refusals (including
+split-brain without `--adopt-root` and an unacquirable maintenance fence).
+
+`storage prune` manages registered maintenance artifacts ONLY:
+`*.pre-<version>-<timestamp>` migration backups (files or archived realm
+directories) and `*.corrupt-<timestamp>` index quarantines. Dry-run by default
+(lists artifacts with sizes and ages); `--apply` deletes those at least
+`--older-than-days` old (default 30; 0 = all). Age comes from the timestamp
+embedded in the registered artifact name, not filesystem mtime. Nothing
+outside the registered naming patterns is ever touched. Unrelated to
+`rkat realm prune`, which deletes live realms.
 
 ## Auth
 

@@ -202,6 +202,10 @@ let retry = RetryPolicy {
     multiplier: 2.0,
     // Hard per-call LLM timeout; `None` inherits the model-profile default.
     call_timeout: None,
+    // Per-stream inactivity watchdog (default 300s, on). A stream that
+    // reports no events for the window aborts with the retryable
+    // `StreamStalled` failure. `None` disables the watchdog.
+    stream_inactivity_timeout: Some(Duration::from_secs(300)),
 };
 ```
 

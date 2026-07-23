@@ -10823,7 +10823,10 @@ mod tests {
         service: &meerkat::ScheduleService,
         schedule_id: &ScheduleId,
     ) -> Option<meerkat::Occurrence> {
-        for _ in 0..40 {
+        // Host start -> horizon refill -> due delivery -> misfire
+        // classification spans several 250ms driver ticks; a 1s budget
+        // flakes on loaded CI shards.
+        for _ in 0..200 {
             let occurrences = service
                 .list_occurrences(schedule_id)
                 .await

@@ -333,7 +333,10 @@ Follow [Self-hosting models](/guides/self-hosting-models) for the full Gemma 4 e
 
 Storage administration verbs. All of them dispatch before realm resolution,
 so they run against the exact on-disk state they diagnose — including
-split-brain realms the normal resolver refuses.
+split-brain realms the normal resolver refuses. Because no runtime scope is
+resolved, the global `--isolated` and `--default-model` flags are rejected
+as usage errors on every storage verb rather than silently ignored; scope
+the sweep with `--realm`, `--root`, or `--state-root` instead.
 
 ```bash
 rkat storage doctor [--json] [--root PATH]...
@@ -351,18 +354,45 @@ means no error-severity findings; exit 1 means errors were found.
 
 ```bash
 rkat storage migrate [--apply] [--json] [--root PATH]... [--adopt-root PATH] [--fence-wait-secs SECS]
+```
+
+`migrate` is dry-run by default, offline, resumable, and fail-closed. It
+sweeps the same roots (and honors the same `--realm` filter) as `storage
+doctor`. The dry run reads each realm's schema-ledger baseline read-only —
+no fence, no store opens, no mutation. `--apply` acquires the realm's
+exclusive maintenance fence (`--fence-wait-secs`, default 10, bounds the
+wait for in-flight store operations to drain), then per realm: stamps
+ledgers by opening every store through its normal constructor under the
+held fence; reports state-root adoption (report-only —
+realms are used where they lie); and runs the machine-owned
+legacy-checkpoint adoption in bulk (sqlite realms; jsonl realms heal
+lazily on first authority touch and report the sweep as skipped). A realm
+materialized under multiple swept roots is a fail-closed refusal unless
+`--apply --adopt-root <path>` names the swept root whose copy to keep:
+every copy is fenced first, the divergence report is recomputed under the
+held fences, and archiving is gated on that comparison being conclusive
+(an unreadable entry poisons it and refuses) — then every other copy is
+archived read-only under the registered `*.pre-<version>-<timestamp>`
+backup naming. Divergent data is preserved and reported, never merged.
+Per-mob databases under `mobs/` are report-only, and credential stores are
+never read, moved, or reported. Exit 0 = clean; exit 1 = errors or
+fail-closed refusals (split-brain without `--adopt-root`, unacquirable
+maintenance fence).
+
+```bash
 rkat storage prune [--apply] [--older-than-days N] [--json] [--root PATH]...
 ```
 
-`migrate` is dry-run by default, offline, resumable, and fail-closed: it
-baselines schema ledgers, reports state-root adoption, refuses split-brain
-realms unless told which root to adopt (the other copy is archived
-read-only under the registered `*.pre-<version>-<timestamp>` backup naming
-— divergent data is preserved and reported, never merged), and performs the
-machine-owned legacy-checkpoint adoption in bulk under the maintenance
-fence. `prune` lists registered backup artifacts and deletes them only with
-`--apply`. Not to be confused with `rkat realm prune`, which deletes whole
-realm directories.
+`prune` owns the lifecycle of registered maintenance artifacts only —
+`*.pre-<version>-<timestamp>` migration backups and `*.corrupt-<timestamp>`
+index quarantines; nothing outside those naming patterns is ever touched.
+The default run lists artifacts with sizes and ages; `--apply` deletes
+those at least `--older-than-days` (default 30; 0 = all) days old. Age
+comes from the timestamp embedded in the registered name, not filesystem
+mtime — renames preserve mtime, so a long-idle file archived today would
+otherwise look instantly prunable. `--realm` restricts eligibility to one
+realm's artifacts. Exit 0 = clean; exit 1 = deletion failures. Not to be
+confused with `rkat realm prune`, which deletes whole realm directories.
 
 ## mcp
 

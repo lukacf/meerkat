@@ -79,6 +79,13 @@ Each realm gets a subdirectory:
 Project-local `.rkat/` also contains project-scoped files such as
 `.rkat/mcp.toml`, `.rkat/skills/`, and compatibility configuration workflows.
 
+Project-local is where the CLI *creates* fresh realms. An existing realm is
+found where it lies: resolution probes both the project-local root and the
+user-global data root for the realm id first, so an explicit `--realm`
+reaches its data no matter which surface materialized it. See
+[Realms](/concepts/realms#realm-id-first-root-resolution) for the full
+resolution rules.
+
 ## Choose An Explicit Shared Realm
 
 Use `--realm` when multiple surfaces or folders should intentionally share
@@ -157,6 +164,7 @@ so every surface opens the same backend.
 | A command creates a new `.rkat/realms` directory | No state root was supplied, so CLI used `<context-root>/.rkat/realms` | Pass `--state-root <path>` |
 | CLI and RPC do not share state | RPC defaults to an isolated opaque realm | Pass the same `--realm` to both |
 | `--realm-backend` errors on an existing realm | Backend is pinned in `realm_manifest.json`; a conflicting hint is rejected | Create a new realm or migrate state intentionally |
+| A run refuses with `realm '...' exists under both candidate state roots` | The realm was materialized under both the project-local and user-global roots (split-brain) | Inspect with `rkat storage doctor`, reconcile with `rkat storage migrate --apply --adopt-root <path>`, or pass `--state-root` to pick one explicitly |
 
 ## Recommended Defaults
 

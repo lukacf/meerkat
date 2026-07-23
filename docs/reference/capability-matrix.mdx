@@ -225,6 +225,7 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 - **Persistent**: Snapshot saved after turn completion according to the pinned realm backend.
 - Backends are pinned per realm (`realm_manifest.json`) and shared across surfaces only when `realm_id` matches.
 - SQLite-backed realms are the standard same-realm multi-process mode.
+- Every composed store slot carries a machine-readable durability class (`durable` / `rebuildable_cache` / `scratch`); a durable slot resolving to a non-persistent store without a manifest `ephemeral_domains` declaration is a typed startup error, never a silent in-memory fallback.
 
 ## See also
 

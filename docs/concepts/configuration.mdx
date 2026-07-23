@@ -162,6 +162,37 @@ min_turns_between_compactions = 3
 
 When `session-compaction` is enabled, `AgentFactory` maps these values into the runtime `CompactionConfig`.
 
+## Retry and stream watchdog settings
+
+LLM retry policy (`RetryPolicy`) is configurable in realm config:
+
+```toml
+[retry]
+max_retries = 3
+initial_delay = "500ms"
+max_delay = "30s"
+multiplier = 2.0
+call_timeout = "45s"                 # omit to inherit the model-profile default
+stream_inactivity_timeout = "300s"   # "disabled" turns the watchdog off
+```
+
+`call_timeout` is a tri-state override for the hard per-LLM-call deadline:
+omitted inherits the profile-derived default, `"disabled"` turns it off, and
+a duration sets it explicitly.
+
+`stream_inactivity_timeout` (0.8.4+) is the per-provider-stream inactivity
+watchdog. It is **on by default** with a 300-second window: an LLM call
+whose stream reports no events for the window is aborted with the retryable
+`StreamStalled` failure and flows through normal retry handling — before
+0.8.4 a silent provider stream hung the turn forever. Each received stream
+event re-arms the window, so long-but-alive responses are unaffected. Set
+`stream_inactivity_timeout = "disabled"` to opt out, or a duration
+(`"120s"`) for an explicit window. Unlike `call_timeout` it never inherits
+from the model profile; omitted means the built-in 300s default. The
+watchdog covers all built-in provider clients; a custom `AgentLlmClient`
+that does not report stream liveness fails open (no watchdog — only the
+hard call timeout applies).
+
 ## Model fallback settings
 
 The model fallback chain is realm-scoped configuration. Empty `chain` means

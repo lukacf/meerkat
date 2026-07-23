@@ -56,6 +56,76 @@ rkat-rest --realm team-alpha
 rkat-mcp --realm team-alpha
 ```
 
+## Storage architecture (0.8.4+)
+
+One `StorageLayout` path authority is resolved at bootstrap and carried through
+composition; no crate resolves ambient roots on its own (CI-gated). Realm state
+roots resolve **realm-id-first** across two candidates — the project-local
+`<project-root>/.rkat/realms` and the user-global data root:
+
+- An explicit `--state-root` wins (no probing).
+- A realm that already exists under exactly one candidate is used where it lies
+  (resolution never creates an empty twin under the other root).
+- A realm materialized under BOTH candidates is a typed split-brain refusal
+  pointing at `rkat storage doctor`; `rkat storage migrate --apply
+  --adopt-root <PATH>` reconciles it (the other copy is archived read-only,
+  never merged).
+- A realm that exists nowhere goes to the surface's documented default root,
+  and first materialization reserves the realm across all probed candidates so
+  racing processes cannot mint twins.
+
+Server surfaces (`rkat-rpc`/`rkat-rest`/`rkat-mcp`) keep their no-flags
+behavior; the project-local candidate participates in their probing only when
+they are started with an explicit context root.
+
+SQLite mechanics are shared through the `meerkat-sqlite` crate:
+
+- Named connection profiles (`Primary` / `ReadOnly` / `Maintenance`); opening a
+  connection never runs schema DDL.
+- Every database carries a `meerkat_schema(domain, version)` migration ledger;
+  stores converge their domain at open under a pinned concurrent-open
+  protocol, and a file whose ledger is ahead of the binary refuses typed
+  (`SchemaFromTheFuture`) — checked preflight, before any mutating pragma
+  (WAL) touches the file, so a rollback candidate fails cleanly instead of
+  crash-looping.
+- Each database has a sibling `<file>.mfence` fence-lock file: store
+  operations hold shared per-operation guards; offline maintenance
+  (`rkat storage migrate`) takes the exclusive side after in-flight operations
+  drain.
+- `WriteContact` types each profile's honest no-write guarantee (WAL reads may
+  still need sidecar files).
+
+Storage providers: one `RealmStorageProvider` (meerkat facade seam) supplies
+all durable stores for a realm; the built-in `DiskStorageProvider` reproduces
+sqlite/jsonl/memory realms. `realm_manifest.json` format 2 adds `provider` and
+`ephemeral_domains`; readers refuse formats newer than they support, and
+realms pinned to an external provider refuse built-in disk opens typed. Every
+store slot carries a machine-readable `DurabilityDeclaration`
+(`durable` / `rebuildable_cache` / `scratch`, plus how the slot actually
+resolved) over six required domains — sessions, runtime, schedule, workgraph,
+blobs, artifacts. Completeness is enforced (exactly one declaration per
+domain), and a durable slot resolving non-persistent without the manifest
+declaring that domain ephemeral is a startup error — never a silent in-memory
+fallback. Downstream backends validate against the published
+`meerkat-store-conformance` harness (per-trait capability profiles; the same
+suite CI runs against the in-repo stores).
+
+Checkpoint roles (runtime-backed persistent sessions): the runtime store owns
+the machine-committed checkpoint authority; the session store holds the
+committed-boundary projection of the same stamped document. Resume verifies
+both stamps and refuses conflicting authorities typed instead of guessing.
+Sessions persisted before typed stamps existed read as `LegacyUnverified`;
+`rkat storage doctor` reports the verified-vs-legacy census and
+`rkat storage migrate --apply` adopts legacy checkpoints in bulk (sqlite
+realms; jsonl realms heal lazily on the run path).
+
+Operator verbs: `rkat storage doctor` (read-only, live-realm-safe, `--json`),
+`rkat storage migrate` (dry-run by default, `--apply` for the fenced
+migration), `rkat storage prune` (registered `*.pre-<version>-<timestamp>` /
+`*.corrupt-<timestamp>` artifacts only; age from the name's embedded
+timestamp). All three dispatch before runtime-scope resolution and reject
+`--isolated`/`--default-model`. Exact flags: the meerkat-cli-reference skill.
+
 ## Runtime-backed vs standalone
 
 - **Runtime-backed** (CLI, REST, `rkat-rpc`, `rkat-mcp`): keep-alive sessions, durable comms drain, completion-feed wakeups, recovery on restart. This is the default product path for daemons and long-running agents.
@@ -202,6 +272,16 @@ surface, not the old live-adapter/docs-refresh snapshot:
   indexes lazily instead of re-embedding every session at agent build.
 - CLI runs default to project-local realms unless `--realm`, `--isolated`,
   `--context-root`, or `--state-root` says otherwise.
+- Storage (0.8.4): `StorageLayout` path authority + realm-id-first dual-root
+  resolution with typed split-brain refusals; the `meerkat-sqlite` mechanics
+  crate (profiles, `meerkat_schema` ledger, `.mfence` fences); the
+  `RealmStorageProvider` seam with manifest v2 and fail-closed durability
+  declarations; `rkat storage doctor|migrate|prune` offline verbs; the
+  published `meerkat-store-conformance` harness. See the Storage architecture
+  section above.
+- The stream-inactivity watchdog (`[retry] stream_inactivity_timeout`) is ON
+  by default at 300s; `"disabled"` opts out. Stalls surface as the retryable
+  `StreamStalled` failure.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
 - Image generation uses `generate_image` with OpenAI `gpt-image-2` and Gemini
   `gemini-3.1-flash-image-preview` as provider defaults.
@@ -671,13 +751,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.7"  # track the latest 0.7.x release
+meerkat = "0.8"  # track the latest 0.8.x release
 
 # Single provider, minimal
-meerkat = { version = "0.7", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.8", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "0.7", features = [
+meerkat = { version = "0.8", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live"
@@ -689,7 +769,7 @@ Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include the normal shipping surfaces. The default `rkat` feature set does not include `memory-store`; memory capabilities appear only in binaries built with the memory-store feature. Custom binary builds:
 
 ```bash
-cargo install rkat --version "0.7" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "0.8" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
@@ -757,6 +837,25 @@ Operational rules to remember:
   hot swap does not drop inherited bindings; each keeps its owning-realm
   provenance. Explicit chains may set `auth_binding`; missing explicit targets
   fail configuration instead of being silently skipped.
+
+### Stream-inactivity watchdog
+
+A provider stream that produces no events inside the watchdog window is
+aborted with the retryable `StreamStalled` failure: one stall retries, and
+repeated stalls exhaust the retry budget and fail the turn typed instead of
+wedging it forever. Config is the tri-state `[retry] stream_inactivity_timeout`:
+
+```toml
+[retry]
+stream_inactivity_timeout = "120s"       # explicit window
+# stream_inactivity_timeout = "disabled" # opt out
+# omitted = the built-in default window (300s) — ON by default
+```
+
+Unlike `call_timeout` (which caps the whole call), the watchdog resets on
+every stream event, so long streams that keep producing are unaffected. A call
+that previously sat silent for >5 minutes and eventually completed is now
+aborted and retried.
 
 ### Mid-session model hot-swap
 
@@ -853,6 +952,14 @@ Hosts that inject per-turn ambient context (e.g. memory recall blocks) attach it
 ### Delegated work
 
 Use mobs for all multi-agent orchestration. Mobs support `MemberLaunchMode::Fork` for seeding a member from a source member's conversation (the mob fork lane renders source history into the new member's initial prompt; CoW `Session::fork()`/`fork_at` is the library-level primitive), `spawn_helper()`/`fork_helper()` for one-call convenience, `force_cancel_member()` for cancelling in-flight turns, and `member_status()`/`wait_one()`/`wait_all()`/`collect_completed()` for monitoring.
+
+Force-cancel semantics (0.8.4+): force-cancelling a running member is legal
+from `Running` — it interrupts the in-flight work without retiring the member
+(the member stays in the roster and can take new turns). It converges
+idempotently: a repeat cancel while the member is already retiring, or a
+cancel when the member's runtime is no longer live, is a no-op success, never
+an `invalid state transition` error. Only an identity the roster has never
+seen is refused, as `MemberNotFound`.
 
 Spawned/forked members can be capability-contained without changing their model-visible tool list: pass `tool_access_policy` (`allow_list` / `deny_list` / `inherit`) on the spawn spec / `HelperOptions` / `AgentBuildConfig`. Enforcement is call-level — a denied call returns an ordinary `access_denied` tool error and the run continues. `inherit` (and omitting the policy) composes the PARENT member's effective policy, so a restricted member cannot shed its restrictions by spawning helpers. Provider-native server tools (e.g. native web search) bypass the dispatcher — disable that capability on gated builds if it matters.
 

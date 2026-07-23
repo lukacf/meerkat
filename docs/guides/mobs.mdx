@@ -537,6 +537,14 @@ Run and inspect a flow:
 The event log is append-only. For UI and service loops, prefer event cursors or
 SDK subscriptions over repeated full snapshots.
 
+`rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
+cooperatively cancels a member's in-flight turn without retiring it — the
+member stays in the roster and can take new turns. As the operator remedy for
+a wedged member it is legal whenever the mob is running and idempotent:
+cancelling a member whose runtime is no longer live, or one already retiring,
+converges as a no-op success rather than an admission error. Only an identity
+the roster has never seen is refused, with a typed `MemberNotFound`.
+
 ## Persistence
 
 Persistent mobs use SQLite/WAL-backed storage. In-memory storage is used for

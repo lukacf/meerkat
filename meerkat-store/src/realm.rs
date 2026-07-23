@@ -593,6 +593,105 @@ pub async fn ensure_realm_manifest_in(
     create_or_read_manifest_under_lock(&paths, &requested_realm, backend_hint, origin_hint).await
 }
 
+/// Provider-aware manifest ensure: the entry point for
+/// [`RealmStorageProvider`](https://docs.rkat.ai)-composed opens.
+///
+/// `provider = None` is the built-in disk composition (identical to
+/// [`ensure_realm_manifest_in`], returned as a Builtin pin — external pins
+/// refuse typed). `provider = Some(name)` accepts exactly realms pinned to
+/// that provider: an existing manifest pinned elsewhere (builtin backend or
+/// a different provider) is a typed
+/// [`StoreError::RealmProviderMismatch`]; a fresh realm writes a format-2
+/// manifest pinned to the provider (with the `external:<name>` backend
+/// string pre-v2 binaries reject typed instead of reopening a relocated
+/// realm as an empty twin).
+pub async fn ensure_realm_manifest_pin_in(
+    realms_root: &Path,
+    realm_id: &str,
+    provider: Option<&str>,
+    backend_hint: Option<RealmBackend>,
+    origin_hint: Option<RealmOrigin>,
+) -> Result<RealmManifestPin, StoreError> {
+    let Some(provider) = provider else {
+        return Ok(RealmManifestPin::Builtin(
+            ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?,
+        ));
+    };
+
+    let requested_realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+    let paths = realm_paths_in(realms_root, realm_id);
+    tokio::fs::create_dir_all(&paths.root)
+        .await
+        .map_err(StoreError::Io)?;
+
+    let read_pin = |bytes: &[u8]| parse_manifest_pin_bytes(bytes);
+    let existing = match tokio::fs::read(&paths.manifest_path).await {
+        Ok(bytes) => Some(read_pin(&bytes)?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(StoreError::Io(err)),
+    };
+    if let Some(pin) = existing {
+        if *pin.realm() != requested_realm {
+            return Err(StoreError::RealmIdentityMismatch {
+                requested: requested_realm.as_str().to_string(),
+                existing: pin.realm().as_str().to_string(),
+            });
+        }
+        return match pin.provider_name() {
+            Some(found) if found == provider => Ok(pin),
+            found => Err(StoreError::RealmProviderMismatch {
+                realm_id: realm_id.to_string(),
+                expected: provider.to_string(),
+                found: found.unwrap_or("built-in disk backend").to_string(),
+            }),
+        };
+    }
+
+    let lock_path = paths.root.join(".realm_manifest.lock");
+    let _lock = ManifestLockGuard::acquire(&lock_path, realm_id).await?;
+    // Re-check under the lock (another creator may have won the race).
+    if let Ok(bytes) = tokio::fs::read(&paths.manifest_path).await {
+        let pin = read_pin(&bytes)?;
+        if *pin.realm() != requested_realm {
+            return Err(StoreError::RealmIdentityMismatch {
+                requested: requested_realm.as_str().to_string(),
+                existing: pin.realm().as_str().to_string(),
+            });
+        }
+        return match pin.provider_name() {
+            Some(found) if found == provider => Ok(pin),
+            found => Err(StoreError::RealmProviderMismatch {
+                realm_id: realm_id.to_string(),
+                expected: provider.to_string(),
+                found: found.unwrap_or("built-in disk backend").to_string(),
+            }),
+        };
+    }
+    let manifest = ExternalRealmManifest {
+        realm: requested_realm,
+        provider: provider.to_string(),
+        manifest_format: SUPPORTED_MANIFEST_FORMAT,
+        ephemeral_domains: Vec::new(),
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string(),
+    };
+    let persisted = PersistedRealmManifest {
+        realm_id: manifest.realm.as_str().to_string(),
+        backend: format!("external:{provider}"),
+        origin: origin_hint.unwrap_or(RealmOrigin::Explicit),
+        created_at: manifest.created_at.clone(),
+        manifest_format: manifest.manifest_format,
+        provider: Some(provider.to_string()),
+        ephemeral_domains: manifest.ephemeral_domains.clone(),
+    };
+    write_persisted_manifest_atomically(&paths, &persisted).await?;
+    Ok(RealmManifestPin::External(manifest))
+}
+
 fn default_backend() -> Result<RealmBackend, StoreError> {
     #[cfg(feature = "sqlite")]
     {
@@ -691,11 +790,26 @@ async fn create_or_read_manifest_under_lock(
     Ok(manifest)
 }
 
+async fn write_persisted_manifest_atomically(
+    paths: &RealmPaths,
+    persisted: &PersistedRealmManifest,
+) -> Result<(), StoreError> {
+    let payload = serde_json::to_vec_pretty(persisted).map_err(StoreError::Serialization)?;
+    write_manifest_payload_atomically(paths, payload).await
+}
+
 async fn write_manifest_atomically(
     paths: &RealmPaths,
     manifest: &RealmManifest,
 ) -> Result<(), StoreError> {
     let payload = serde_json::to_vec_pretty(manifest).map_err(StoreError::Serialization)?;
+    write_manifest_payload_atomically(paths, payload).await
+}
+
+async fn write_manifest_payload_atomically(
+    paths: &RealmPaths,
+    payload: Vec<u8>,
+) -> Result<(), StoreError> {
     let tmp_name = format!(".realm_manifest.tmp.{}", Uuid::now_v7());
     let tmp_path = paths.root.join(tmp_name);
 
@@ -754,7 +868,59 @@ fn manifest_parse_error_may_be_transient(err: &StoreError) -> bool {
     matches!(err, StoreError::Serialization(_))
 }
 
-fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
+/// A parsed realm manifest: either a built-in disk backend or a realm
+/// pinned to an external storage provider. The disk composition refuses
+/// external pins typed; provider-aware opens
+/// ([`ensure_realm_manifest_pin_in`]) accept exactly their own provider.
+#[derive(Debug, Clone)]
+pub enum RealmManifestPin {
+    Builtin(RealmManifest),
+    External(ExternalRealmManifest),
+}
+
+/// Manifest of a realm pinned to an external storage provider (persisted
+/// with the `external:<name>` backend string pre-v2 binaries reject typed).
+#[derive(Debug, Clone)]
+pub struct ExternalRealmManifest {
+    pub realm: meerkat_core::RealmId,
+    pub provider: String,
+    pub manifest_format: u32,
+    pub ephemeral_domains: Vec<String>,
+    pub created_at: String,
+}
+
+impl RealmManifestPin {
+    pub fn realm(&self) -> &meerkat_core::RealmId {
+        match self {
+            Self::Builtin(manifest) => &manifest.realm,
+            Self::External(manifest) => &manifest.realm,
+        }
+    }
+
+    pub fn ephemeral_domains(&self) -> &[String] {
+        match self {
+            Self::Builtin(manifest) => &manifest.ephemeral_domains,
+            Self::External(manifest) => &manifest.ephemeral_domains,
+        }
+    }
+
+    pub fn provider_name(&self) -> Option<&str> {
+        match self {
+            Self::Builtin(_) => None,
+            Self::External(manifest) => Some(&manifest.provider),
+        }
+    }
+
+    pub fn as_builtin(&self) -> Option<&RealmManifest> {
+        match self {
+            Self::Builtin(manifest) => Some(manifest),
+            Self::External(_) => None,
+        }
+    }
+}
+
+/// Provider-aware manifest parse: external pins are returned, not refused.
+fn parse_manifest_pin_bytes(bytes: &[u8]) -> Result<RealmManifestPin, StoreError> {
     let persisted: PersistedRealmManifest =
         serde_json::from_slice(bytes).map_err(StoreError::Serialization)?;
     if persisted.manifest_format > SUPPORTED_MANIFEST_FORMAT {
@@ -766,26 +932,23 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
             supported: SUPPORTED_MANIFEST_FORMAT,
         });
     }
-    if let Some(name) = persisted
+    let realm = meerkat_core::RealmId::parse(&persisted.realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(persisted.realm_id.clone()))?;
+    if let Some(provider) = persisted
         .provider
         .clone()
         .or_else(|| externals_backend_provider(&persisted.backend))
     {
-        // Realm pinned to an external provider: the built-in disk
-        // composition must not open (or re-materialize) it.
-        return Err(StoreError::ExternalProviderRealm {
-            realm_id: persisted.realm_id,
-            provider: name,
-        });
+        return Ok(RealmManifestPin::External(ExternalRealmManifest {
+            realm,
+            provider,
+            manifest_format: persisted.manifest_format,
+            ephemeral_domains: persisted.ephemeral_domains,
+            created_at: persisted.created_at,
+        }));
     }
     let backend = parse_realm_backend(&persisted.realm_id, &persisted.backend)?;
-    // Wave-c C-12: lift the persisted realm slug into the typed
-    // `RealmId` atom. Validation failure at this boundary means the
-    // on-disk manifest was hand-edited to an invalid slug; surface
-    // via a dedicated typed error.
-    let realm = meerkat_core::RealmId::parse(&persisted.realm_id)
-        .map_err(|_| StoreError::InvalidRealmSlug(persisted.realm_id.clone()))?;
-    Ok(RealmManifest {
+    Ok(RealmManifestPin::Builtin(RealmManifest {
         realm,
         backend,
         origin: persisted.origin,
@@ -793,7 +956,19 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
         manifest_format: persisted.manifest_format,
         provider: None,
         ephemeral_domains: persisted.ephemeral_domains,
-    })
+    }))
+}
+
+fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
+    match parse_manifest_pin_bytes(bytes)? {
+        RealmManifestPin::Builtin(manifest) => Ok(manifest),
+        // Realm pinned to an external provider: the built-in disk
+        // composition must not open (or re-materialize) it.
+        RealmManifestPin::External(manifest) => Err(StoreError::ExternalProviderRealm {
+            realm_id: manifest.realm.as_str().to_string(),
+            provider: manifest.provider,
+        }),
+    }
 }
 
 /// `external:<name>` backend strings mark provider-pinned realms; pre-v2

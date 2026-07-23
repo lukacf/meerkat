@@ -30,15 +30,16 @@ use meerkat_workgraph::WorkGraphStore;
 
 use crate::SessionStore;
 use crate::persistence::PersistenceError;
-use meerkat_store::{RealmManifest, RealmPaths};
+use meerkat_store::{RealmManifestPin, RealmPaths};
 
 /// Everything a provider needs to open a realm's stores.
 #[derive(Clone)]
 pub struct RealmOpenContext {
     /// The resolved `(state_root, realm)` locator.
     pub locator: RealmLocator,
-    /// The realm's pinned manifest (backend, origin, v2 fields).
-    pub manifest: RealmManifest,
+    /// The realm's pinned manifest: builtin disk backend or an
+    /// external-provider pin (provider-aware opens receive their own pins).
+    pub manifest: RealmManifestPin,
     /// Canonical per-realm path fan-out under the state root.
     pub paths: RealmPaths,
     /// The bootstrap path authority, when the surface resolved one.
@@ -82,15 +83,47 @@ pub trait RealmStorageProvider: Send + Sync {
     }
 }
 
+/// The store slots every provider must declare durability for — one
+/// declaration per slot, no omissions (an omitted declaration would bypass
+/// the fail-closed rule entirely).
+pub const REQUIRED_DURABILITY_DOMAINS: [&str; 6] = [
+    "sessions",
+    "runtime",
+    "schedule",
+    "workgraph",
+    "blobs",
+    "artifacts",
+];
+
 /// Enforce the fail-closed durability rule against the realm manifest.
+///
+/// Completeness first: every slot in [`REQUIRED_DURABILITY_DOMAINS`] must
+/// carry exactly one declaration — a provider cannot dodge the rule by
+/// omitting a domain or returning an empty list. Then each declaration is
+/// checked: a `Durable` slot resolving non-persistent without the realm
+/// manifest declaring that domain ephemeral refuses startup typed.
 pub fn enforce_fail_closed_durability(
     set: &RealmStoreSet,
-    manifest: &RealmManifest,
+    ephemeral_domains: &[String],
 ) -> Result<(), PersistenceError> {
+    for required in REQUIRED_DURABILITY_DOMAINS {
+        let count = set
+            .durability
+            .iter()
+            .filter(|declaration| declaration.domain == required)
+            .count();
+        if count != 1 {
+            return Err(PersistenceError::DurabilityViolation {
+                domain: format!(
+                    "{required} (provider supplied {count} durability declarations for this \
+                     slot; exactly one is required)"
+                ),
+            });
+        }
+    }
     for declaration in &set.durability {
         if declaration.is_undeclared_nonpersistent_durable()
-            && !manifest
-                .ephemeral_domains
+            && !ephemeral_domains
                 .iter()
                 .any(|domain| domain == &declaration.domain)
         {

@@ -33,7 +33,7 @@ use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
     FsArtifactStore, FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore,
-    StoreError, ensure_realm_manifest_in, realm_paths_in,
+    StoreError, realm_paths_in,
 };
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{MemoryBlobStore, MemoryStore};
@@ -284,7 +284,7 @@ pub async fn open_realm_persistence_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
-    open_realm_persistence_with_provider(
+    let (pin, bundle) = open_realm_persistence_with_provider(
         &crate::storage_provider::DiskStorageProvider,
         realms_root,
         realm_id,
@@ -292,7 +292,18 @@ pub async fn open_realm_persistence_in(
         origin_hint,
         None,
     )
-    .await
+    .await?;
+    match pin {
+        meerkat_store::RealmManifestPin::Builtin(manifest) => Ok((manifest, bundle)),
+        meerkat_store::RealmManifestPin::External(manifest) => {
+            // Unreachable through the disk provider (its ensure refuses
+            // external pins), kept typed rather than panicking.
+            Err(PersistenceError::Store(StoreError::ExternalProviderRealm {
+                realm_id: manifest.realm.as_str().to_string(),
+                provider: manifest.provider,
+            }))
+        }
+    }
 }
 
 /// Bootstrap convergence: ensure the manifest, open the realm's stores
@@ -307,9 +318,20 @@ pub async fn open_realm_persistence_with_provider(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
     layout: Option<meerkat_core::StorageLayout>,
-) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
-    let manifest =
-        ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
+) -> Result<(meerkat_store::RealmManifestPin, PersistenceBundle), PersistenceError> {
+    // Provider-aware ensure: the disk provider keeps the historical
+    // builtin-only semantics; a named external provider accepts (and
+    // creates) exactly its own pins, so external realms are openable
+    // through the seam they were pinned for.
+    let provider_pin_name = (provider.name() != "disk").then(|| provider.name());
+    let manifest = meerkat_store::ensure_realm_manifest_pin_in(
+        realms_root,
+        realm_id,
+        provider_pin_name,
+        backend_hint,
+        origin_hint,
+    )
+    .await?;
     let paths = realm_paths_in(realms_root, realm_id);
     let realm = meerkat_core::RealmId::parse(realm_id)
         .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
@@ -323,11 +345,14 @@ pub async fn open_realm_persistence_with_provider(
         layout,
     };
     let set = provider.open(&ctx).await?;
-    crate::storage_provider::enforce_fail_closed_durability(&set, &manifest)?;
+    crate::storage_provider::enforce_fail_closed_durability(&set, manifest.ephemeral_domains())?;
 
-    let mut bundle = if let Some(projection_root) = set.projection_root.clone() {
+    let builtin_manifest = manifest.as_builtin().cloned();
+    let mut bundle = if let (Some(projection_root), Some(builtin)) =
+        (set.projection_root.clone(), builtin_manifest.clone())
+    {
         PersistenceBundle::with_realm_context(
-            manifest.clone(),
+            builtin,
             set.store_path.clone(),
             projection_root,
             RealmSubsystemStores {
@@ -346,7 +371,7 @@ pub async fn open_realm_persistence_with_provider(
             set.schedule_store.clone(),
             set.workgraph_store.clone(),
         );
-        bundle.manifest = Some(manifest.clone());
+        bundle.manifest = builtin_manifest;
         bundle.store_path = Some(set.store_path.clone());
         bundle
     };
@@ -365,7 +390,18 @@ pub(crate) fn open_disk_store_set(
     use crate::storage_provider::RealmStoreSet;
     use meerkat_core::{DurabilityDeclaration, DurabilityResolution};
     let paths = &ctx.paths;
-    let manifest = &ctx.manifest;
+    // The disk provider only ever receives builtin pins (its ensure path
+    // refuses external manifests); keep the refusal typed regardless.
+    let Some(manifest) = ctx.manifest.as_builtin() else {
+        return Err(PersistenceError::Store(StoreError::ExternalProviderRealm {
+            realm_id: ctx.locator.realm.as_str().to_string(),
+            provider: ctx
+                .manifest
+                .provider_name()
+                .unwrap_or("unknown")
+                .to_string(),
+        }));
+    };
     let durable_disk =
         |domain: &str| DurabilityDeclaration::durable(domain, DurabilityResolution::Persistent);
     let declared_ephemeral = |domain: &str| {

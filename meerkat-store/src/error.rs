@@ -110,6 +110,19 @@ pub enum StoreError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("realm '{realm_id}' is pinned to external storage provider '{provider}'")]
     ExternalProviderRealm { realm_id: String, provider: String },
+
+    /// A provider-aware open found the realm pinned to a different storage
+    /// provider (or to a built-in disk backend).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "realm '{realm_id}' is pinned to '{found}', not to storage provider '{expected}'; \
+         refusing to open"
+    )]
+    RealmProviderMismatch {
+        realm_id: String,
+        expected: String,
+        found: String,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]

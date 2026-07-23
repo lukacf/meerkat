@@ -69,6 +69,9 @@ pub use realm::FilesystemRealmConfigSource;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]
 // the ambient no-`_in` wrappers stay exported through their deprecation window
+pub use realm::{ExternalRealmManifest, RealmManifestPin, ensure_realm_manifest_pin_in};
+#[allow(deprecated)]
+// the ambient no-`_in` wrappers stay exported through their deprecation window
 pub use realm::{
     REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
     RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,

@@ -166,15 +166,59 @@ pub fn backup_artifact_name(original: &str, purpose: &str) -> String {
 }
 
 /// True when a file/directory name matches the registered backup-artifact
-/// naming ([`backup_artifact_name`]).
+/// naming ([`backup_artifact_name`]): `<original>.pre-<version>-<unix-ts>`
+/// with an optional trailing `.<purpose>` segment.
+///
+/// The full suffix shape is validated — a mere `.pre-` substring (for
+/// example `notes.pre-release`) is NOT a registered artifact, so prune can
+/// never sweep unrelated files.
 pub fn is_backup_artifact_name(name: &str) -> bool {
-    name.contains(".pre-")
+    let Some(idx) = name.rfind(".pre-") else {
+        return false;
+    };
+    if idx == 0 {
+        // No original name before the marker.
+        return false;
+    }
+    // suffix = <version>-<unix-ts>[.<purpose>]; the version contains no '-'
+    // (plain x.y.z workspace versions), so the first '-' ends it.
+    let suffix = &name[idx + ".pre-".len()..];
+    let Some((version, rest)) = suffix.split_once('-') else {
+        return false;
+    };
+    let version_ok = !version.is_empty()
+        && version.split('.').count() >= 2
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    if !version_ok {
+        return false;
+    }
+    let (timestamp, purpose) = match rest.split_once('.') {
+        Some((timestamp, purpose)) => (timestamp, Some(purpose)),
+        None => (rest, None),
+    };
+    let timestamp_ok = !timestamp.is_empty() && timestamp.chars().all(|c| c.is_ascii_digit());
+    let purpose_ok = purpose.is_none_or(|p| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
+    timestamp_ok && purpose_ok
 }
 
 /// True when a file name matches the registered index-quarantine naming
-/// (`*.corrupt-<timestamp>`).
+/// (`*.corrupt-<timestamp>`): the suffix after `.corrupt-` must be all
+/// digits, and something must precede the marker.
 pub fn is_quarantine_artifact_name(name: &str) -> bool {
-    name.contains(".corrupt-")
+    let Some(idx) = name.rfind(".corrupt-") else {
+        return false;
+    };
+    if idx == 0 {
+        return false;
+    }
+    let timestamp = &name[idx + ".corrupt-".len()..];
+    !timestamp.is_empty() && timestamp.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Rename `path` (file or directory) to its registered backup-artifact name
@@ -1159,6 +1203,35 @@ pub fn remove_maintenance_artifact(path: &Path) -> Result<(), StoreError> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn artifact_name_validation_rejects_lookalikes() {
+        // Full-shape validation: a mere ".pre-" substring is not registered.
+        for lookalike in [
+            "notes.pre-release",
+            "config.pre-prod",
+            ".pre-0.8.3-1700000000",
+            "db.pre-0.8.3-notadigit",
+            "db.pre-083-1700000000",
+            "db.pre-0.8.3-1700000000.",
+            "db.pre-0.8.3-1700000000.bad purpose",
+        ] {
+            assert!(!is_backup_artifact_name(lookalike), "{lookalike}");
+        }
+        for valid in [
+            "sessions.sqlite3.pre-0.8.3-1700000000",
+            "sessions.sqlite3.pre-0.8.3-1700000000.split-brain",
+            "realm-dir.pre-10.20.30-1.adopt_other",
+        ] {
+            assert!(is_backup_artifact_name(valid), "{valid}");
+        }
+        for lookalike in ["notes.corrupt-ish", ".corrupt-123", "x.corrupt-12a"] {
+            assert!(!is_quarantine_artifact_name(lookalike), "{lookalike}");
+        }
+        assert!(is_quarantine_artifact_name(
+            "session_index.sqlite3.corrupt-1700000000"
+        ));
+    }
     use super::*;
     use rusqlite::Connection;
 

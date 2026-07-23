@@ -36,6 +36,12 @@ pub struct JsonlStore {
     /// Whether to use pretty-printed JSON (default: true for readability)
     pretty_print: bool,
     index: RwLock<Option<Arc<SqliteSessionIndex>>>,
+    /// `Some(<realm_dir>/realm)` when `dir` sits inside a realm directory:
+    /// write operations take the shared realm write-admission guard on it,
+    /// so the realm maintenance fence quiesces this store's canonical
+    /// `.jsonl` writes exactly like the SQLite per-file fences quiesce the
+    /// databases. Derived once at construction (cheap hot path).
+    realm_admission: Option<PathBuf>,
 }
 
 /// Builder for configuring JsonlStore
@@ -65,6 +71,7 @@ impl JsonlStoreBuilder {
     /// Build the JsonlStore
     pub fn build(self) -> JsonlStore {
         JsonlStore {
+            realm_admission: crate::migrate::store_realm_admission_target(&self.dir),
             dir: self.dir,
             pretty_print: self.pretty_print,
             index: RwLock::new(None),
@@ -76,6 +83,7 @@ impl JsonlStore {
     /// Create a new JSONL store in the given directory with default settings
     pub fn new(dir: PathBuf) -> Self {
         Self {
+            realm_admission: crate::migrate::store_realm_admission_target(&dir),
             dir,
             pretty_print: true,
             index: RwLock::new(None),
@@ -300,6 +308,23 @@ impl JsonlStore {
 // Private methods return StoreError (preserves internal ? chains).
 // Trait methods convert at the boundary via into_session_store_error().
 impl JsonlStore {
+    /// Take the realm write-admission guard for one write operation, when
+    /// this store sits inside a realm directory. Fails typed
+    /// ([`StoreError::MaintenanceFenceHeld`]) while the realm is under
+    /// offline maintenance; the maintenance holder's own in-process
+    /// operations self-admit (see `meerkat_sqlite::fence`).
+    fn realm_admission_guard(&self) -> Result<Option<meerkat_sqlite::OperationGuard>, StoreError> {
+        self.realm_admission
+            .as_deref()
+            .map(meerkat_sqlite::OperationGuard::for_database)
+            .transpose()
+            .map_err(StoreError::from)
+    }
+
+    /// Callers (the trait methods) hold the realm write-admission guard
+    /// across this whole durable write (temp file, rename, index) — taken
+    /// BEFORE the per-session `.lock` file so a fenced realm is never
+    /// touched.
     async fn save_impl(&self, session: &Session) -> Result<(), StoreError> {
         // Ensure directory exists
         self.init().await?;
@@ -382,6 +407,8 @@ impl JsonlStore {
         }
     }
 
+    /// Callers (the trait methods) hold the realm write-admission guard
+    /// across the file removal and the index update.
     async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.session_path(id);
 
@@ -408,6 +435,12 @@ impl JsonlStore {
 #[async_trait]
 impl SessionStore for JsonlStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        // Realm write admission precedes the per-session lock: acquiring the
+        // `.lock` file truncates and rewrites it, which must not happen
+        // inside a fenced realm.
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
         // boundary before the JSONL row is rewritten on disk.
         let _write_lock = self
@@ -429,6 +462,9 @@ impl SessionStore for JsonlStore {
         session: &Session,
         commit: &meerkat_core::TranscriptRewriteCommit,
     ) -> Result<(), SessionStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         let _write_lock = self
             .acquire_session_write_lock(session.id())
             .await
@@ -451,6 +487,9 @@ impl SessionStore for JsonlStore {
         &self,
         session: &Session,
     ) -> Result<(), SessionStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         let _write_lock = self
             .acquire_session_write_lock(session.id())
             .await
@@ -465,6 +504,9 @@ impl SessionStore for JsonlStore {
         session: &Session,
         expected_current_revision: Option<String>,
     ) -> Result<(), SessionStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         let _write_lock = self
             .acquire_session_write_lock(session.id())
             .await
@@ -494,6 +536,9 @@ impl SessionStore for JsonlStore {
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         self.delete_impl(id).await.map_err(into_session_store_error)
     }
 
@@ -502,6 +547,9 @@ impl SessionStore for JsonlStore {
         id: &SessionId,
         expected_current_revision: &str,
     ) -> Result<bool, SessionStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(into_session_store_error)?;
         let _write_lock = self
             .acquire_session_write_lock(id)
             .await
@@ -998,6 +1046,107 @@ mod tests {
                 .await?
         );
         assert!(first.load(session.id()).await?.is_none());
+        Ok(())
+    }
+
+    /// Realm-scoped stores must honor the realm write-admission fence: a
+    /// foreign maintenance holder excludes canonical `.jsonl` writes, and
+    /// standalone stores (no realm manifest above them) are unaffected.
+    #[tokio::test]
+    async fn test_jsonl_writes_respect_realm_write_admission_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let realm_dir = temp_dir.path().join("team");
+        std::fs::create_dir_all(&realm_dir)?;
+        std::fs::write(
+            realm_dir.join(meerkat_core::REALM_MANIFEST_FILE_NAME),
+            b"{\"realm_id\":\"team\",\"backend\":\"jsonl\"}",
+        )?;
+        let store = JsonlStore::new(realm_dir.join("sessions_jsonl"));
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        store.save(&session).await?;
+
+        // A FOREIGN process holding the realm write-admission fence (raw
+        // exclusive lock, no in-process holder registry entry).
+        let admission_lock = meerkat_sqlite::fence_lock_path(
+            &crate::migrate::realm_write_admission_target(&realm_dir),
+        );
+        let foreign = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&admission_lock)?;
+        foreign.try_lock().expect("foreign exclusive lock");
+
+        session.push(Message::User(UserMessage::text("again".to_string())));
+        let error = store
+            .save(&session)
+            .await
+            .expect_err("writes must fail typed while the fence is held");
+        assert!(
+            error.to_string().contains("maintenance"),
+            "unexpected error: {error}"
+        );
+        let error = store
+            .delete(session.id())
+            .await
+            .expect_err("deletes must fail typed while the fence is held");
+        assert!(
+            error.to_string().contains("maintenance"),
+            "unexpected error: {error}"
+        );
+
+        drop(foreign);
+        store.save(&session).await?;
+        let loaded = store.load(session.id()).await?.expect("session persists");
+        assert_eq!(loaded.messages().len(), 2);
+        Ok(())
+    }
+
+    /// Lock ordering: the realm write-admission guard is taken BEFORE the
+    /// per-session `.lock` file, so a foreign jsonl writer never creates or
+    /// truncates lock state inside a fenced realm.
+    #[tokio::test]
+    async fn test_jsonl_fence_precedes_session_lock_file_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let realm_dir = temp_dir.path().join("team");
+        std::fs::create_dir_all(&realm_dir)?;
+        std::fs::write(
+            realm_dir.join(meerkat_core::REALM_MANIFEST_FILE_NAME),
+            b"{\"realm_id\":\"team\",\"backend\":\"jsonl\"}",
+        )?;
+        let store = JsonlStore::new(realm_dir.join("sessions_jsonl"));
+        store.init().await?;
+
+        let admission_lock = meerkat_sqlite::fence_lock_path(
+            &crate::migrate::realm_write_admission_target(&realm_dir),
+        );
+        let foreign = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&admission_lock)?;
+        foreign.try_lock().expect("foreign exclusive lock");
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        store
+            .save(&session)
+            .await
+            .expect_err("save must fail typed while the fence is held");
+        assert!(
+            !store.session_lock_path(session.id()).exists(),
+            "the per-session lock file must not be created while the realm fence is held"
+        );
+        assert!(
+            !store.session_path(session.id()).exists(),
+            "no session bytes may land while the realm fence is held"
+        );
         Ok(())
     }
 }

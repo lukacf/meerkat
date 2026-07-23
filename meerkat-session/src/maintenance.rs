@@ -7,6 +7,14 @@
 //! refusing construction typed, which keeps maintenance compositions honest:
 //! any code path that would materialize an agent under the maintenance
 //! fence is a bug and surfaces as one.
+//!
+//! Ordering caution for bulk adoption: the sweep stamps `INITIAL` migration
+//! roots, so on fleets whose external continuity rows record a nonzero
+//! generation floor, observed-cursor adoption must run first — see the
+//! cursor ordering contract on
+//! `PersistentSessionService::adopt_legacy_checkpoints` and the conservative
+//! `LegacyCheckpointAdoptionOptions::only_cursor_free` guard (both in
+//! `crate::persistent`, gated behind the `session-store` feature).
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::mpsc;

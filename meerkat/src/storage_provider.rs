@@ -135,6 +135,31 @@ pub fn enforce_fail_closed_durability(
     Ok(())
 }
 
+/// Open realm persistence through an externally resolved [`StorageLayout`]
+/// (built-in disk composition).
+///
+/// The layout is the single path authority: its state root is the realm
+/// root, and its realm-root candidates arm the cross-candidate first-start
+/// reservation (`meerkat_store::realm::ensure_realm_manifest_pin_with_candidates`),
+/// so a surface that resolved dual roots at bootstrap gets race-safe first
+/// materialization without resolving twice. Surfaces without a resolved
+/// layout keep using [`crate::open_realm_persistence_in`], which builds a
+/// single-candidate layout from its explicit root.
+pub async fn open_realm_persistence_with_layout(
+    layout: StorageLayout,
+    realm_id: &str,
+    backend_hint: Option<meerkat_store::RealmBackend>,
+    origin_hint: Option<meerkat_store::RealmOrigin>,
+) -> Result<(meerkat_store::RealmManifest, crate::PersistenceBundle), PersistenceError> {
+    crate::persistence::open_realm_persistence_builtin_with_layout(
+        layout,
+        realm_id,
+        backend_hint,
+        origin_hint,
+    )
+    .await
+}
+
 /// The built-in disk provider: sqlite / jsonl / memory realms exactly as
 /// before the seam existed.
 #[derive(Debug, Clone, Copy, Default)]

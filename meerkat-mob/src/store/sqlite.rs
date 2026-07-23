@@ -921,8 +921,17 @@ impl std::ops::DerefMut for MobConn {
 
 fn open_connection(path: &Path) -> Result<MobConn, MobStoreError> {
     let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(se)?;
-    let mut conn =
-        meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::PRIMARY).map_err(se)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&MOB_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(se)?;
     meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).map_err(se)?;
     // Data reconciliation (not schema): reconcile the durable cursor
     // allocator with MAX(cursor) and heal NULL event routes on every open.
@@ -942,7 +951,8 @@ fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreErro
     // Deliberately unguarded: passive observation may hold this connection
     // across long watch windows, and readers must not stall the exclusive
     // maintenance fence; reader quiescence during maintenance happens at the
-    // SQLite layer.
+    // SQLite layer. No schema preflight either: a read-only open never
+    // mutates the file, and refusal belongs to the write-capable openers.
     meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::ReadOnly).map_err(se)
 }
 
@@ -1001,9 +1011,15 @@ fn open_existing_identity_write_connection(
     _expected_store_instance_id: &str,
 ) -> Result<MobConn, MobStoreError> {
     let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(se)?;
-    let conn = meerkat_sqlite::open(
+    let conn = meerkat_sqlite::open_with(
         path,
         meerkat_sqlite::ConnectionProfile::Primary { create: false },
+        meerkat_sqlite::OpenOptions {
+            // Identity authority lives in the mob database: a future file
+            // is refused before the profile's WAL conversion.
+            schema_preflight: &[&MOB_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
     )
     .map_err(|error| {
         MobStoreError::WriteFailed(format!("identity store database is unavailable: {error}"))
@@ -1509,7 +1525,10 @@ impl meerkat_runtime::RuntimeStoreWriteFence for SqliteIdentityRuntimeWriteFence
             }
         };
         // Maintenance profile: read-write on the existing file, zero busy
-        // timeout for nonblocking admission, no pragma mutation.
+        // timeout for nonblocking admission, no pragma mutation. No schema
+        // preflight: a preflight refusal here would surface as an endlessly
+        // retried Backoff instead of a typed error, and the fence probe's
+        // SQL fails typed on a restructured file anyway.
         let mut conn = match meerkat_sqlite::open(
             &self.path,
             meerkat_sqlite::ConnectionProfile::Maintenance { write: true },

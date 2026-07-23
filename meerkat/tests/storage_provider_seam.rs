@@ -5,15 +5,15 @@
 #![cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use meerkat::storage_provider::{
     DiskStorageProvider, RealmOpenContext, RealmStorageProvider, RealmStoreSet,
-    enforce_fail_closed_durability,
+    enforce_fail_closed_durability, open_realm_persistence_with_layout,
 };
 use meerkat::{PersistenceError, open_realm_persistence_with_provider};
-use meerkat_core::{DurabilityDeclaration, DurabilityResolution};
+use meerkat_core::{DurabilityDeclaration, DurabilityResolution, StorageLayout};
 use meerkat_store::RealmBackend;
 
 #[tokio::test]
@@ -72,6 +72,176 @@ async fn memory_realm_is_declared_ephemeral_not_silently_nonpersistent() {
         pin.as_builtin().expect("builtin").backend,
         RealmBackend::Memory
     );
+}
+
+fn memory_store_set() -> RealmStoreSet {
+    RealmStoreSet {
+        session_store: Arc::new(meerkat_store::MemoryStore::new()),
+        runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
+        schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
+        workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+        blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
+        artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
+        store_path: std::path::PathBuf::from("."),
+        projection_root: None,
+        durability: [
+            "sessions",
+            "runtime",
+            "schedule",
+            "workgraph",
+            "blobs",
+            "artifacts",
+        ]
+        .iter()
+        .map(|domain| {
+            DurabilityDeclaration::durable(domain, DurabilityResolution::DeclaredEphemeral)
+        })
+        .collect(),
+    }
+}
+
+/// A disk-named provider that records the open context, so the tests can
+/// assert what the bootstrap path threads through the seam.
+struct LayoutCapturingProvider {
+    seen_layout: Mutex<Option<StorageLayout>>,
+}
+
+#[async_trait]
+impl RealmStorageProvider for LayoutCapturingProvider {
+    fn name(&self) -> &'static str {
+        // Named "disk" so the ensure path keeps builtin-pin semantics.
+        "disk"
+    }
+
+    async fn open(&self, ctx: &RealmOpenContext) -> Result<RealmStoreSet, PersistenceError> {
+        *self.seen_layout.lock().expect("mutex") = ctx.layout.clone();
+        Ok(memory_store_set())
+    }
+}
+
+#[tokio::test]
+async fn resolved_layout_threads_into_the_provider_context() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_root = tmp.path().join("realms");
+    let layout = StorageLayout::with_injected_roots(
+        tmp.path().to_path_buf(),
+        None,
+        Some(tmp.path().join("home")),
+        state_root.clone(),
+    );
+    let provider = LayoutCapturingProvider {
+        seen_layout: Mutex::new(None),
+    };
+    open_realm_persistence_with_provider(
+        &provider,
+        &state_root,
+        "team",
+        None,
+        None,
+        Some(layout.clone()),
+    )
+    .await
+    .expect("open");
+    let seen = provider
+        .seen_layout
+        .lock()
+        .expect("mutex")
+        .clone()
+        .expect("the provider must receive the bootstrap layout, not None");
+    assert_eq!(seen, layout);
+    assert_eq!(seen.state_root(), state_root.as_path());
+}
+
+#[tokio::test]
+async fn open_realm_persistence_with_layout_uses_the_layout_state_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_root = tmp.path().join("realms");
+    let layout = StorageLayout::with_injected_roots(
+        tmp.path().to_path_buf(),
+        None,
+        None,
+        state_root.clone(),
+    );
+    let (manifest, bundle) =
+        open_realm_persistence_with_layout(layout, "team", Some(RealmBackend::Sqlite), None)
+            .await
+            .expect("open through the layout");
+    assert_eq!(manifest.backend, RealmBackend::Sqlite);
+    assert!(
+        state_root
+            .join("team")
+            .join("realm_manifest.json")
+            .is_file(),
+        "the realm must materialize under the layout's state root"
+    );
+    assert!(bundle.manifest().is_some());
+}
+
+#[tokio::test]
+async fn first_start_race_across_candidate_roots_is_a_typed_refusal() {
+    // Bootstrap-resolved dual-root layout: project-local default, global
+    // candidate empty. Between resolution and open, a concurrent surface
+    // (different default) materializes the realm under the OTHER candidate.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let context = tmp.path().join("proj");
+    std::fs::create_dir_all(&context).expect("mkdir");
+    let global = tmp.path().join("global");
+    let inputs = meerkat_core::StorageLayoutInputs {
+        invocation_context: context.clone(),
+        explicit_state_root: None,
+        user_config_root: None,
+        default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+        probe_local_candidate: true,
+    };
+    let realm = meerkat_core::RealmConfig {
+        selection: meerkat_core::RealmSelection::Explicit {
+            realm_id: "team".into(),
+        },
+        ..meerkat_core::RealmConfig::default()
+    };
+    let resolved =
+        StorageLayout::resolve_with_global_candidate(inputs, &realm, &global).expect("resolve");
+    let local_root = resolved.layout.state_root().to_path_buf();
+    assert_ne!(local_root, global);
+
+    // The concurrent first start wins under the global candidate.
+    meerkat::open_realm_persistence_in(&global, "team", Some(RealmBackend::Sqlite), None)
+        .await
+        .expect("concurrent first start");
+
+    let err = match open_realm_persistence_with_layout(resolved.layout, "team", None, None).await {
+        Err(err) => err,
+        Ok(_) => panic!("racing first start must refuse, not manufacture a twin"),
+    };
+    match &err {
+        PersistenceError::FirstStart(
+            meerkat_store::realm::RealmFirstStartError::MaterializedElsewhere {
+                realm_id,
+                existing_root,
+                ..
+            },
+        ) => {
+            assert_eq!(realm_id, "team");
+            assert_eq!(existing_root, &global);
+        }
+        other => panic!("wrong error: {other}"),
+    }
+    assert!(
+        !local_root.join("team").join("realm_manifest.json").exists(),
+        "the losing root must not gain a manifest"
+    );
+
+    // Re-resolution now routes to the existing copy where it lies.
+    let re_inputs = meerkat_core::StorageLayoutInputs {
+        invocation_context: context,
+        explicit_state_root: None,
+        user_config_root: None,
+        default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+        probe_local_candidate: true,
+    };
+    let re_resolved = StorageLayout::resolve_with_global_candidate(re_inputs, &realm, &global)
+        .expect("re-resolve");
+    assert_eq!(re_resolved.layout.state_root(), global.as_path());
 }
 
 /// A provider that supplies a durable slot backed by a non-persistent store

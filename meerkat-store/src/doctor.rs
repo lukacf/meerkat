@@ -9,7 +9,9 @@
 //! - never takes realm leases;
 //! - never opens `Primary`-profile connections (those set pragmas and create
 //!   files) — only [`meerkat_sqlite::ConnectionProfile::ReadOnly`] opens and
-//!   raw `SELECT`s;
+//!   raw `SELECT`s (the session-view queries grouped under one deferred read
+//!   snapshot per database, so a live migration cannot hide a session
+//!   between them);
 //! - never creates files or directories;
 //! - never runs the schema ledger (versions are read with
 //!   [`meerkat_sqlite::domain_version`], nothing is applied);
@@ -23,7 +25,7 @@
 //! `list_realm_manifests_in`, which fails the whole listing on one corrupt
 //! manifest).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,9 +39,14 @@ use meerkat_core::{
     SessionCheckpointMetadataState, SessionId, SystemNoticeBlock, sanitize_realm_id,
     session_checkpoint_metadata_state,
 };
+use meerkat_sqlite::JsonColumnBytes;
 use rusqlite::{Connection, OptionalExtension};
+use serde::Deserialize;
 
-use crate::realm::{MANIFEST_LOCK_STALE_AFTER, REALM_LEASE_STALE_TTL_SECS, RealmLeaseRecord};
+use crate::realm::{
+    MANIFEST_LOCK_STALE_AFTER, REALM_LEASE_STALE_TTL_SECS, RealmLeaseRecord,
+    SUPPORTED_MANIFEST_FORMAT,
+};
 
 // Stable kebab-case finding codes (shape-stable: never renamed).
 /// Same realm id materialized under more than one swept root.
@@ -77,19 +84,55 @@ pub const FINDING_CENSUS_SKIPPED_JSONL: &str = "census-skipped-jsonl";
 /// Session checkpoint metadata that is present but malformed (never
 /// laundered into "legacy").
 pub const FINDING_CHECKPOINT_METADATA_INVALID: &str = "checkpoint-metadata-invalid";
-/// Persisted session/message documents that do not decode (blob sweep only).
+/// Persisted session/message documents that do not decode (blob sweep;
+/// error severity — an undecodable canonical document is one the runtime
+/// cannot load either).
 pub const FINDING_SESSION_DOCUMENT_UNDECODABLE: &str = "session-document-undecodable";
 /// Internal doctor failure (the sweep task itself failed).
 pub const FINDING_DOCTOR_INTERNAL: &str = "doctor-internal";
+/// A realm manifest whose `manifest_format` is newer than this binary
+/// understands. Normal startup refuses it typed; doctor reports it and does
+/// not sweep the fixed disk layout a future format may have relocated.
+pub const FINDING_MANIFEST_FROM_THE_FUTURE: &str = "manifest-from-the-future";
+/// A realm pinned to an external storage provider; its storage is diagnosed
+/// by that provider's migrator, never by the disk sweep.
+pub const FINDING_EXTERNAL_PROVIDER_REALM: &str = "external-provider-realm";
+/// A required storage path occupied by the wrong file type (directory,
+/// FIFO, socket, broken symlink, ...): the artifact exists but must never
+/// census as merely absent.
+pub const FINDING_STORAGE_PATH_WRONG_TYPE: &str = "storage-path-wrong-type";
+/// A ledger domain name outside this binary's domain registry
+/// ([`KNOWN_LEDGER_DOMAINS`]) — likely stamped by a newer or foreign binary.
+pub const FINDING_UNKNOWN_LEDGER_DOMAIN: &str = "unknown-ledger-domain";
+/// A candidate realms root that exists but cannot be listed (permissions)
+/// or is occupied by a non-directory: nothing under it was diagnosed, so a
+/// clean report would be a lie.
+pub const FINDING_STATE_ROOT_UNREADABLE: &str = "state-root-unreadable";
+/// A cross-candidate first-start reservation marker
+/// (`.realm-first-start.<sanitized>.lock`) in a candidate root. Recent
+/// markers are normal first-start coordination; stale ones are crash
+/// leftovers, removed by age-based takeover on the next first start.
+pub const FINDING_FIRST_START_MARKER: &str = "first-start-marker";
 
 /// Cap on individually reported dangling blob references per database; the
 /// remainder is summarized in one finding so doctor stays usable on huge
 /// realms.
 const DANGLING_BLOB_REPORT_CAP: usize = 50;
 
+/// Doctor's staleness horizon for first-start reservation markers: younger
+/// markers are live coordination (info), older ones are crash leftovers
+/// (warning). Deliberately far above the store's own takeover window so a
+/// marker mid-takeover is never flagged.
+const FIRST_START_MARKER_STALE_AFTER: Duration = Duration::from_secs(600);
+
+const FIRST_START_MARKER_PREFIX: &str = ".realm-first-start.";
+const FIRST_START_MARKER_SUFFIX: &str = ".lock";
+
 /// Database files probed per realm directory, with the ledger domains their
 /// owning stores stamp there. Shared with the Phase 6 migration framework
-/// (`rkat storage migrate` reports the same file × domain matrix).
+/// (`rkat storage migrate` reports the same file × domain matrix). Per-mob
+/// databases (`mobs/<name>.db`, domain `mob`) are enumerated dynamically,
+/// mirroring `enumerate_realm_sqlite_files` in `migrate.rs`.
 pub const REALM_DATABASE_FILES: &[(&str, &[&str])] = &[
     (
         "sessions.sqlite3",
@@ -102,22 +145,27 @@ pub const REALM_DATABASE_FILES: &[(&str, &[&str])] = &[
     ("sessions_jsonl/session_index.sqlite3", &["jsonl-index"]),
 ];
 
-/// Highest ledger version this binary supports for domains whose store
-/// crates are visible from `meerkat-store`. Other domains (runtime-store,
-/// workgraph, memory, mob, tools-tasks) live in crates above this one in the
-/// dependency order: their versions are reported without judgment.
-fn supported_domain_version(domain: &str) -> Option<i64> {
-    match domain {
-        #[cfg(feature = "sqlite")]
-        "session-store" => Some(crate::sqlite_store::SESSION_STORE_DOMAIN.supported_version()),
-        #[cfg(feature = "sqlite")]
-        "schedule-store" => {
-            Some(crate::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN.supported_version())
-        }
-        "jsonl-index" => Some(crate::index::JSONL_INDEX_DOMAIN.supported_version()),
-        _ => None,
-    }
-}
+/// Every ledger domain name a meerkat store stamps, across the whole crate
+/// graph. Domains owned by crates above `meerkat-store` cannot have their
+/// supported versions imported here without inverting the dependency order,
+/// but their *names* are doctor vocabulary: a ledger row outside this
+/// registry is reported as [`FINDING_UNKNOWN_LEDGER_DOMAIN`] instead of
+/// being silently inventoried.
+pub const KNOWN_LEDGER_DOMAINS: &[&str] = &[
+    "session-store",
+    "schedule-store",
+    "runtime-store",
+    "workgraph",
+    "memory",
+    "mob",
+    "tools-tasks",
+    "jsonl-index",
+];
+
+// The supported-version registry is shared with the migration framework:
+// one authority for "which domains this binary can judge, and up to what
+// version" (see `migrate::supported_domain_version`).
+use crate::migrate::supported_domain_version;
 
 /// Read-only diagnosis over exactly the roots in `scope` (see the module
 /// docs for the safety contract).
@@ -210,23 +258,95 @@ fn diagnose_blocking(scope: &DiagnoseScope) -> StorageDiagnosis {
     diagnosis
 }
 
-/// Lenient manifest read: raw JSON, no backend/feature validation, so doctor
-/// can report backends this build does not support.
-fn read_manifest_lenient(path: &Path) -> Result<(String, String), String> {
+/// Doctor's lenient typed view of a persisted realm manifest.
+///
+/// Deliberately parsed doctor-side instead of through the store's
+/// fail-closed pin parse (`realm::parse_manifest_pin_bytes`): that parse
+/// refuses future formats, external pins (in the disk composition), and
+/// backends this build's features exclude — all states doctor must *report*
+/// without aborting. The format ceiling is still judged against the one
+/// authoritative [`SUPPORTED_MANIFEST_FORMAT`].
+#[derive(Debug, Deserialize)]
+struct ManifestSummary {
+    realm_id: String,
+    backend: String,
+    /// Format 1 predates the field and is never serialized (mirrors
+    /// `realm::default_manifest_format`).
+    #[serde(default = "manifest_format_v1")]
+    manifest_format: u32,
+    /// External storage-provider pin; pre-field manifests carry it only in
+    /// the `external:<name>` backend string.
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+fn manifest_format_v1() -> u32 {
+    1
+}
+
+impl ManifestSummary {
+    /// Explicit `provider` field, with the `external:<name>` backend-string
+    /// fallback older external pins used (mirrors `realm.rs`).
+    fn provider_name(&self) -> Option<&str> {
+        self.provider
+            .as_deref()
+            .or_else(|| self.backend.strip_prefix("external:"))
+    }
+}
+
+/// Why a manifest could not be read into a [`ManifestSummary`].
+enum ManifestFault {
+    /// Unreadable or unparseable content
+    /// ([`FINDING_REALM_MANIFEST_UNREADABLE`]).
+    Unreadable(String),
+    /// The manifest path is occupied by the wrong file type
+    /// ([`FINDING_STORAGE_PATH_WRONG_TYPE`]).
+    WrongType(String),
+}
+
+fn read_manifest_summary(path: &Path) -> Result<ManifestSummary, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("manifest unreadable: {err}"))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("manifest is not valid JSON: {err}"))?;
-    let realm_id = value
-        .get("realm_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "manifest has no string 'realm_id' field".to_string())?
-        .to_string();
-    let backend = value
-        .get("backend")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "manifest has no string 'backend' field".to_string())?
-        .to_string();
-    Ok((realm_id, backend))
+    serde_json::from_slice(&bytes).map_err(|err| format!("manifest does not parse: {err}"))
+}
+
+/// What actually occupies a required storage path. `is_file()` alone folds
+/// a directory, FIFO, broken symlink, or failing metadata probe into
+/// "absent" and lets a damaged realm produce a clean report; doctor keeps
+/// the three states distinct.
+enum PathProbe {
+    Absent,
+    File,
+    /// Path exists but is not a regular file (description of what it is).
+    WrongType(&'static str),
+    /// Metadata probe failed for a reason other than absence.
+    Unreadable(std::io::Error),
+}
+
+fn probe_required_file(path: &Path) -> PathProbe {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return PathProbe::Absent,
+        Err(err) => return PathProbe::Unreadable(err),
+    };
+    if metadata.file_type().is_symlink() {
+        // Follow the link: a symlink to a regular file is a valid layout.
+        return match std::fs::metadata(path) {
+            Ok(target) if target.is_file() => PathProbe::File,
+            Ok(target) if target.is_dir() => PathProbe::WrongType("a symlink to a directory"),
+            Ok(_) => PathProbe::WrongType("a symlink to a non-regular file"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                PathProbe::WrongType("a broken symlink")
+            }
+            Err(err) => PathProbe::Unreadable(err),
+        };
+    }
+    if metadata.is_file() {
+        PathProbe::File
+    } else if metadata.is_dir() {
+        PathProbe::WrongType("a directory")
+    } else {
+        PathProbe::WrongType("a non-regular file (fifo/socket/device)")
+    }
 }
 
 fn sweep_root(
@@ -235,16 +355,43 @@ fn sweep_root(
     diagnosis: &mut StorageDiagnosis,
     twin_map: &mut BTreeMap<String, Vec<(PathBuf, PathBuf)>>,
 ) {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
         // An absent candidate root is a normal state, not a finding.
-        return;
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        // An unreadable or wrong-typed root must never fold into a clean
+        // report: nothing under it was diagnosed.
+        Err(err) => {
+            let (code, message) = match std::fs::metadata(root) {
+                Ok(metadata) if !metadata.is_dir() => (
+                    FINDING_STORAGE_PATH_WRONG_TYPE,
+                    format!("realms root is not a directory: {err}"),
+                ),
+                _ => (
+                    FINDING_STATE_ROOT_UNREADABLE,
+                    format!("cannot list realms root: {err}"),
+                ),
+            };
+            diagnosis.findings.push(
+                StorageFinding::new(FindingSeverity::Error, code, message)
+                    .with_path(root.to_path_buf()),
+            );
+            return;
+        }
     };
-    let mut realm_dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
+    let mut realm_dirs: Vec<PathBuf> = Vec::new();
+    let mut first_start_markers: Vec<PathBuf> = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            realm_dirs.push(path);
+        } else if first_start_marker_slug(&path).is_some() {
+            first_start_markers.push(path);
+        }
+    }
     realm_dirs.sort();
+    first_start_markers.sort();
+    sweep_first_start_markers(&first_start_markers, realm_filter, diagnosis);
 
     for dir in realm_dirs {
         let dir_name = dir
@@ -269,12 +416,22 @@ fn sweep_root(
             continue;
         }
         let manifest_path = dir.join(REALM_MANIFEST_FILE_NAME);
-        if !manifest_path.is_file() {
-            continue; // not a materialized realm directory
-        }
-        let manifest = read_manifest_lenient(&manifest_path);
+        let manifest: Result<ManifestSummary, ManifestFault> =
+            match probe_required_file(&manifest_path) {
+                // No manifest at all: not a materialized realm directory.
+                PathProbe::Absent => continue,
+                PathProbe::File => {
+                    read_manifest_summary(&manifest_path).map_err(ManifestFault::Unreadable)
+                }
+                PathProbe::WrongType(kind) => Err(ManifestFault::WrongType(format!(
+                    "manifest path is {kind}, not a regular file"
+                ))),
+                PathProbe::Unreadable(err) => Err(ManifestFault::Unreadable(format!(
+                    "manifest metadata unreadable: {err}"
+                ))),
+            };
         let (realm_label, backend) = match &manifest {
-            Ok((realm_id, backend)) => (realm_id.clone(), Some(backend.clone())),
+            Ok(summary) => (summary.realm_id.clone(), Some(summary.backend.clone())),
             Err(_) => (dir_name.clone(), None),
         };
         if let Some(filter) = realm_filter {
@@ -284,16 +441,30 @@ fn sweep_root(
                 continue;
             }
         }
-        if let Err(detail) = &manifest {
-            diagnosis.findings.push(
-                StorageFinding::new(
-                    FindingSeverity::Error,
-                    FINDING_REALM_MANIFEST_UNREADABLE,
-                    detail.clone(),
-                )
-                .with_path(manifest_path.clone())
-                .with_realm(realm_label.clone()),
-            );
+        match &manifest {
+            Err(ManifestFault::Unreadable(detail)) => {
+                diagnosis.findings.push(
+                    StorageFinding::new(
+                        FindingSeverity::Error,
+                        FINDING_REALM_MANIFEST_UNREADABLE,
+                        detail.clone(),
+                    )
+                    .with_path(manifest_path.clone())
+                    .with_realm(realm_label.clone()),
+                );
+            }
+            Err(ManifestFault::WrongType(detail)) => {
+                diagnosis.findings.push(
+                    StorageFinding::new(
+                        FindingSeverity::Error,
+                        FINDING_STORAGE_PATH_WRONG_TYPE,
+                        detail.clone(),
+                    )
+                    .with_path(manifest_path.clone())
+                    .with_realm(realm_label.clone()),
+                );
+            }
+            Ok(_) => {}
         }
         let canonical_dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         twin_map
@@ -303,14 +474,176 @@ fn sweep_root(
 
         let mut entry = StorageInventoryEntry::new(realm_label.clone(), dir.clone());
         entry.backend = backend.clone();
-        diagnose_realm_dir(
-            &dir,
-            &realm_label,
-            backend.as_deref(),
-            &mut entry,
-            diagnosis,
-        );
+        match &manifest {
+            // A future manifest format may have relocated storage; sweeping
+            // the fixed disk layout would diagnose the wrong files while
+            // normal startup correctly refuses the realm typed.
+            Ok(summary) if summary.manifest_format > SUPPORTED_MANIFEST_FORMAT => {
+                diagnosis.findings.push(
+                    StorageFinding::new(
+                        FindingSeverity::Error,
+                        FINDING_MANIFEST_FROM_THE_FUTURE,
+                        format!(
+                            "realm manifest format {} is newer than the supported \
+                             {SUPPORTED_MANIFEST_FORMAT}; diagnose with the newer binary — the \
+                             fixed disk layout is not swept",
+                            summary.manifest_format
+                        ),
+                    )
+                    .with_path(manifest_path.clone())
+                    .with_realm(realm_label.clone()),
+                );
+            }
+            Ok(summary) => {
+                if let Some(provider) = summary.provider_name() {
+                    // Storage lives with the external provider; the disk
+                    // layout under this directory is not the realm's data.
+                    diagnosis.findings.push(
+                        StorageFinding::new(
+                            FindingSeverity::Info,
+                            FINDING_EXTERNAL_PROVIDER_REALM,
+                            format!(
+                                "realm is pinned to external storage provider '{provider}'; \
+                                 diagnosis belongs to that provider's migrator, not the disk \
+                                 sweep"
+                            ),
+                        )
+                        .with_path(manifest_path.clone())
+                        .with_realm(realm_label.clone()),
+                    );
+                } else {
+                    diagnose_realm_dir(
+                        &dir,
+                        &realm_label,
+                        backend.as_deref(),
+                        &mut entry,
+                        diagnosis,
+                    );
+                }
+            }
+            // Unreadable/wrong-typed manifest (already a finding above): the
+            // on-disk data is still real; diagnose it.
+            Err(_) => {
+                diagnose_realm_dir(&dir, &realm_label, None, &mut entry, diagnosis);
+            }
+        }
         diagnosis.inventory.push(entry);
+    }
+}
+
+/// The sanitized realm slug of a first-start reservation marker file name
+/// (`.realm-first-start.<sanitized>.lock`), `None` for anything else.
+fn first_start_marker_slug(path: &Path) -> Option<&str> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix(FIRST_START_MARKER_PREFIX)?
+        .strip_suffix(FIRST_START_MARKER_SUFFIX)
+        .filter(|slug| !slug.is_empty())
+}
+
+/// Doctor's lenient view of the marker payload (`realm.rs` writes
+/// `{realm_id, pid, created_at_unix}`); a torn write falls back to mtime.
+#[derive(Debug, Deserialize)]
+struct FirstStartMarkerSummary {
+    #[serde(default)]
+    realm_id: Option<String>,
+    #[serde(default)]
+    created_at_unix: Option<u64>,
+}
+
+/// First-start reservation census over one candidate root: a recent marker
+/// is normal cross-root first-start coordination; a stale one is a crash
+/// leftover that the next first start of the realm removes by age-based
+/// takeover.
+fn sweep_first_start_markers(
+    markers: &[PathBuf],
+    realm_filter: Option<&str>,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    for path in markers {
+        let Some(slug) = first_start_marker_slug(path) else {
+            continue;
+        };
+        let payload = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FirstStartMarkerSummary>(&bytes).ok());
+        let realm_label = payload
+            .as_ref()
+            .and_then(|marker| marker.realm_id.clone())
+            .unwrap_or_else(|| slug.to_string());
+        if let Some(filter) = realm_filter
+            && slug != sanitize_realm_id(filter)
+            && realm_label != filter
+        {
+            continue;
+        }
+        // Payload timestamp first, mtime as the torn-write fallback
+        // (mirrors the store's own takeover check). Unknown age reports
+        // stale: freshness that cannot be certified is not assumed.
+        let age = payload
+            .as_ref()
+            .and_then(|marker| marker.created_at_unix)
+            .map(|created| Duration::from_secs(now_unix_secs().saturating_sub(created)))
+            .or_else(|| {
+                std::fs::metadata(path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            });
+        let finding = match age {
+            Some(age) if age <= FIRST_START_MARKER_STALE_AFTER => StorageFinding::new(
+                FindingSeverity::Info,
+                FINDING_FIRST_START_MARKER,
+                "recent first-start reservation marker (a realm first start is in flight or \
+                 just completed)",
+            ),
+            _ => StorageFinding::new(
+                FindingSeverity::Warning,
+                FINDING_FIRST_START_MARKER,
+                format!(
+                    "stale first-start reservation marker (older than {}s; the holder likely \
+                     crashed mid-first-start); the next first start of this realm removes it \
+                     by age-based takeover",
+                    FIRST_START_MARKER_STALE_AFTER.as_secs()
+                ),
+            ),
+        };
+        diagnosis
+            .findings
+            .push(finding.with_path(path.clone()).with_realm(realm_label));
+    }
+}
+
+/// Probe a candidate database path; absent is normal, wrong-typed or
+/// unprobeable paths are findings. Returns whether a regular file is there.
+fn probe_database_file(db_path: &Path, realm: &str, diagnosis: &mut StorageDiagnosis) -> bool {
+    match probe_required_file(db_path) {
+        PathProbe::File => true,
+        PathProbe::Absent => false,
+        PathProbe::WrongType(kind) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Error,
+                    FINDING_STORAGE_PATH_WRONG_TYPE,
+                    format!("database path is {kind}, not a regular file"),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            false
+        }
+        PathProbe::Unreadable(err) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Error,
+                    FINDING_DATABASE_UNREADABLE,
+                    format!("cannot probe database file metadata: {err}"),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            false
+        }
     }
 }
 
@@ -321,10 +654,14 @@ fn diagnose_realm_dir(
     entry: &mut StorageInventoryEntry,
     diagnosis: &mut StorageDiagnosis,
 ) {
+    let mut sessions_db_swept = false;
     for (relative, expected_domains) in REALM_DATABASE_FILES {
         let db_path = realm_dir.join(relative);
-        if !db_path.is_file() {
+        if !probe_database_file(&db_path, realm, diagnosis) {
             continue;
+        }
+        if *relative == "sessions.sqlite3" {
+            sessions_db_swept = true;
         }
         entry.databases.push(inspect_database(
             &db_path,
@@ -334,17 +671,66 @@ fn diagnose_realm_dir(
         ));
     }
 
+    // Per-mob databases are enumerated dynamically (`mobs/<name>.db`),
+    // mirroring `enumerate_realm_sqlite_files` in migrate.rs; each stamps
+    // the `mob` ledger domain.
+    if let Ok(dir_entries) = std::fs::read_dir(realm_dir.join("mobs")) {
+        let mut mob_dbs: Vec<PathBuf> = dir_entries
+            .filter_map(Result::ok)
+            .map(|dir_entry| dir_entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+            .collect();
+        mob_dbs.sort();
+        for db_path in mob_dbs {
+            if !probe_database_file(&db_path, realm, diagnosis) {
+                continue;
+            }
+            entry
+                .databases
+                .push(inspect_database(&db_path, &["mob"], realm, diagnosis));
+        }
+    }
+
     match backend {
         Some("sqlite") => {
             let sessions_db = realm_dir.join("sessions.sqlite3");
-            if sessions_db.is_file() {
+            if sessions_db_swept {
+                // No schema preflight: doctor must open future files to
+                // report them (module safety contract).
                 match meerkat_sqlite::open(
                     &sessions_db,
                     meerkat_sqlite::ConnectionProfile::ReadOnly,
                 ) {
                     Ok(conn) => {
-                        census_checkpoint_evidence(&conn, &sessions_db, realm, diagnosis);
-                        sweep_dangling_blobs(&conn, realm_dir, &sessions_db, realm, diagnosis);
+                        // One deferred read transaction so the checkpoint
+                        // census and the blob sweep observe a single SQLite
+                        // snapshot: a live legacy-to-strand migration landing
+                        // between separate autocommit queries could otherwise
+                        // move a session out of both views. The first SELECT
+                        // inside the transaction establishes the snapshot.
+                        match conn.unchecked_transaction() {
+                            Ok(tx) => {
+                                census_checkpoint_evidence(&tx, &sessions_db, realm, diagnosis);
+                                sweep_dangling_blobs(
+                                    &tx,
+                                    realm_dir,
+                                    &sessions_db,
+                                    realm,
+                                    diagnosis,
+                                );
+                            }
+                            Err(err) => {
+                                diagnosis.findings.push(
+                                    StorageFinding::new(
+                                        FindingSeverity::Error,
+                                        FINDING_DATABASE_UNREADABLE,
+                                        format!("cannot begin read-snapshot transaction: {err}"),
+                                    )
+                                    .with_path(sessions_db.clone())
+                                    .with_realm(realm),
+                                );
+                            }
+                        }
                     }
                     Err(_) => {
                         // Already reported by inspect_database above.
@@ -388,6 +774,8 @@ fn inspect_database(
     diagnosis: &mut StorageDiagnosis,
 ) -> DatabaseInventory {
     let mut inventory = DatabaseInventory::new(db_path.to_path_buf());
+    // No schema preflight: inspecting (and reporting) future-versioned
+    // ledgers is this function's job.
     let conn = match meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly) {
         Ok(conn) => conn,
         Err(err) => {
@@ -407,22 +795,42 @@ fn inspect_database(
     match read_ledger_rows(&conn) {
         Ok(Some(rows)) => {
             for (domain, version) in &rows {
-                if let Some(supported) = supported_domain_version(domain)
-                    && *version > supported
-                {
-                    diagnosis.findings.push(
-                        StorageFinding::new(
-                            FindingSeverity::Error,
-                            FINDING_SCHEMA_FROM_THE_FUTURE,
-                            format!(
-                                "ledger domain '{domain}' is at version {version} but this \
-                                 binary supports at most {supported}; refuse to open with an \
-                                 older binary (rollback candidate fails certification)"
-                            ),
-                        )
-                        .with_path(db_path.to_path_buf())
-                        .with_realm(realm),
-                    );
+                match supported_domain_version(domain) {
+                    Some(supported) if *version > supported => {
+                        diagnosis.findings.push(
+                            StorageFinding::new(
+                                FindingSeverity::Error,
+                                FINDING_SCHEMA_FROM_THE_FUTURE,
+                                format!(
+                                    "ledger domain '{domain}' is at version {version} but this \
+                                     binary supports at most {supported}; refuse to open with an \
+                                     older binary (rollback candidate fails certification)"
+                                ),
+                            )
+                            .with_path(db_path.to_path_buf())
+                            .with_realm(realm),
+                        );
+                    }
+                    Some(_) => {}
+                    // Known domain owned above this crate in the dependency
+                    // order: inventoried below, version judged only by the
+                    // owning store.
+                    None if KNOWN_LEDGER_DOMAINS.contains(&domain.as_str()) => {}
+                    None => {
+                        diagnosis.findings.push(
+                            StorageFinding::new(
+                                FindingSeverity::Warning,
+                                FINDING_UNKNOWN_LEDGER_DOMAIN,
+                                format!(
+                                    "ledger domain '{domain}' (version {version}) is not in this \
+                                     binary's domain registry — likely stamped by a newer or \
+                                     foreign binary; its schema version cannot be certified here"
+                                ),
+                            )
+                            .with_path(db_path.to_path_buf())
+                            .with_realm(realm),
+                        );
+                    }
                 }
                 inventory.domains.push((domain.clone(), Some(*version)));
             }
@@ -481,7 +889,9 @@ fn read_ledger_rows(conn: &Connection) -> Result<Option<Vec<(String, i64)>>, rus
 /// Checkpoint-evidence census over the sqlite session store: raw read-only
 /// SQL over `session_heads.metadata_json` (canonical representation) plus
 /// `sessions.metadata_json` for sessions without a head row, evaluated with
-/// the core metadata census helper.
+/// the core metadata census helper. Callers pass a connection holding the
+/// per-database read snapshot (see `diagnose_realm_dir`) so the two queries
+/// see one consistent view.
 fn census_checkpoint_evidence(
     conn: &Connection,
     db_path: &Path,
@@ -492,13 +902,13 @@ fn census_checkpoint_evidence(
     let mut legacy = 0usize;
     let mut invalid = 0usize;
 
-    let mut classify = |session_id: &str, metadata_json: &str| {
+    let mut classify = |session_id: &str, metadata_json: &[u8]| {
         let Ok(id) = SessionId::parse(session_id) else {
             invalid += 1;
             return;
         };
         let Ok(metadata) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(metadata_json)
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(metadata_json)
         else {
             invalid += 1;
             return;
@@ -514,13 +924,14 @@ fn census_checkpoint_evidence(
         let heads_exist = table_exists(conn, "session_heads")?;
         let sessions_exist = table_exists(conn, "sessions")?;
         if heads_exist {
-            let mut statement =
-                conn.prepare("SELECT session_id, metadata_json FROM session_heads")?;
+            let mut statement = conn.prepare(
+                "SELECT session_id, metadata_json FROM session_heads ORDER BY session_id",
+            )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let session_id: String = row.get(0)?;
-                let metadata_json: String = row.get(1)?;
-                classify(&session_id, &metadata_json);
+                let metadata_json: JsonColumnBytes = row.get(1)?;
+                classify(&session_id, &metadata_json.into_bytes());
             }
         }
         if sessions_exist {
@@ -528,16 +939,17 @@ fn census_checkpoint_evidence(
             // row is then a frozen migration archive and not census evidence.
             let sql = if heads_exist {
                 "SELECT session_id, metadata_json FROM sessions \
-                 WHERE session_id NOT IN (SELECT session_id FROM session_heads)"
+                 WHERE session_id NOT IN (SELECT session_id FROM session_heads) \
+                 ORDER BY session_id"
             } else {
-                "SELECT session_id, metadata_json FROM sessions"
+                "SELECT session_id, metadata_json FROM sessions ORDER BY session_id"
             };
             let mut statement = conn.prepare(sql)?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let session_id: String = row.get(0)?;
-                let metadata_json: String = row.get(1)?;
-                classify(&session_id, &metadata_json);
+                let metadata_json: JsonColumnBytes = row.get(1)?;
+                classify(&session_id, &metadata_json.into_bytes());
             }
         }
         Ok(())
@@ -629,10 +1041,64 @@ fn collect_message_blob_refs(message: &Message, refs: &mut Vec<BlobId>) {
     }
 }
 
+/// Per-database accounting for dangling blob references.
+///
+/// `seen` makes duplicate checks O(1) per reference; collection into
+/// `reported` stops at [`DANGLING_BLOB_REPORT_CAP`] and the remainder is
+/// only counted, so a hugely damaged realm costs linear time and bounded
+/// report memory instead of a quadratic scan over an unbounded list.
+struct DanglingCollector {
+    /// blob id → object file exists (each blob probed on disk once).
+    existence: HashMap<String, bool>,
+    /// Distinct (session id, blob id) pairs already accounted.
+    seen: HashSet<(String, String)>,
+    reported: Vec<(String, BlobId)>,
+    overflow: usize,
+}
+
+impl DanglingCollector {
+    fn new() -> Self {
+        Self {
+            existence: HashMap::new(),
+            seen: HashSet::new(),
+            reported: Vec::new(),
+            overflow: 0,
+        }
+    }
+
+    fn record(&mut self, blobs_root: &Path, session_id: &str, refs: Vec<BlobId>) {
+        for blob_id in refs {
+            let exists = *self
+                .existence
+                .entry(blob_id.as_str().to_string())
+                .or_insert_with(|| {
+                    blob_object_path(blobs_root, &blob_id).is_some_and(|path| path.is_file())
+                });
+            if exists {
+                continue;
+            }
+            let key = (session_id.to_string(), blob_id.as_str().to_string());
+            if !self.seen.insert(key) {
+                continue;
+            }
+            if self.reported.len() < DANGLING_BLOB_REPORT_CAP {
+                self.reported.push((session_id.to_string(), blob_id));
+            } else {
+                self.overflow += 1;
+            }
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.reported.len() + self.overflow
+    }
+}
+
 /// Dangling session→blob reference sweep (sqlite backend): decode persisted
 /// session documents and strand messages, walk them for
 /// `ImageData::Blob { blob_id }`, and probe the realm's `blobs/` directory
-/// for each referenced object.
+/// for each referenced object. Callers pass a connection holding the
+/// per-database read snapshot (see `diagnose_realm_dir`).
 fn sweep_dangling_blobs(
     conn: &Connection,
     realm_dir: &Path,
@@ -641,42 +1107,25 @@ fn sweep_dangling_blobs(
     diagnosis: &mut StorageDiagnosis,
 ) {
     let blobs_root = realm_dir.join("blobs");
-    let mut existence_cache: HashMap<String, bool> = HashMap::new();
-    let mut dangling: Vec<(String, BlobId)> = Vec::new();
+    let mut collector = DanglingCollector::new();
     let mut undecodable = 0usize;
-
-    let mut check_refs =
-        |session_id: &str, refs: Vec<BlobId>, dangling: &mut Vec<(String, BlobId)>| {
-            for blob_id in refs {
-                let exists = *existence_cache
-                    .entry(blob_id.as_str().to_string())
-                    .or_insert_with(|| {
-                        blob_object_path(&blobs_root, &blob_id).is_some_and(|path| path.is_file())
-                    });
-                if !exists
-                    && !dangling
-                        .iter()
-                        .any(|(sid, bid)| sid == session_id && *bid == blob_id)
-                {
-                    dangling.push((session_id.to_string(), blob_id));
-                }
-            }
-        };
 
     let result = (|| -> Result<(), rusqlite::Error> {
         let heads_exist = table_exists(conn, "session_heads")?;
         if table_exists(conn, "session_strand_messages")? {
-            let mut statement =
-                conn.prepare("SELECT session_id, message_json FROM session_strand_messages")?;
+            let mut statement = conn.prepare(
+                "SELECT session_id, message_json FROM session_strand_messages \
+                 ORDER BY session_id, strand, seq",
+            )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let session_id: String = row.get(0)?;
-                let message_json: Vec<u8> = row.get(1)?;
-                match serde_json::from_slice::<Message>(&message_json) {
+                let message_json: JsonColumnBytes = row.get(1)?;
+                match serde_json::from_slice::<Message>(&message_json.into_bytes()) {
                     Ok(message) => {
                         let mut refs = Vec::new();
                         collect_message_blob_refs(&message, &mut refs);
-                        check_refs(&session_id, refs, &mut dangling);
+                        collector.record(&blobs_root, &session_id, refs);
                     }
                     Err(_) => undecodable += 1,
                 }
@@ -688,22 +1137,23 @@ fn sweep_dangling_blobs(
             // already swept above.
             let sql = if heads_exist {
                 "SELECT session_id, session_json FROM sessions \
-                 WHERE session_id NOT IN (SELECT session_id FROM session_heads)"
+                 WHERE session_id NOT IN (SELECT session_id FROM session_heads) \
+                 ORDER BY session_id"
             } else {
-                "SELECT session_id, session_json FROM sessions"
+                "SELECT session_id, session_json FROM sessions ORDER BY session_id"
             };
             let mut statement = conn.prepare(sql)?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let session_id: String = row.get(0)?;
-                let session_json: Vec<u8> = row.get(1)?;
-                match serde_json::from_slice::<Session>(&session_json) {
+                let session_json: JsonColumnBytes = row.get(1)?;
+                match serde_json::from_slice::<Session>(&session_json.into_bytes()) {
                     Ok(session) => {
                         let mut refs = Vec::new();
                         for message in session.messages() {
                             collect_message_blob_refs(message, &mut refs);
                         }
-                        check_refs(&session_id, refs, &mut dangling);
+                        collector.record(&blobs_root, &session_id, refs);
                     }
                     Err(_) => undecodable += 1,
                 }
@@ -725,8 +1175,8 @@ fn sweep_dangling_blobs(
         return;
     }
 
-    let total = dangling.len();
-    for (session_id, blob_id) in dangling.iter().take(DANGLING_BLOB_REPORT_CAP) {
+    let total = collector.total();
+    for (session_id, blob_id) in &collector.reported {
         let mut finding = StorageFinding::new(
             FindingSeverity::Error,
             FINDING_DANGLING_BLOB_REFERENCE,
@@ -740,7 +1190,7 @@ fn sweep_dangling_blobs(
         }
         diagnosis.findings.push(finding);
     }
-    if total > DANGLING_BLOB_REPORT_CAP {
+    if collector.overflow > 0 {
         diagnosis.findings.push(
             StorageFinding::new(
                 FindingSeverity::Error,
@@ -748,7 +1198,7 @@ fn sweep_dangling_blobs(
                 format!(
                     "{} additional dangling blob reference(s) not listed individually \
                      ({total} total)",
-                    total - DANGLING_BLOB_REPORT_CAP
+                    collector.overflow
                 ),
             )
             .with_path(db_path.to_path_buf())
@@ -756,9 +1206,12 @@ fn sweep_dangling_blobs(
         );
     }
     if undecodable > 0 {
+        // Error severity: these are canonical representations (strand rows,
+        // or blob rows with no head); a document doctor cannot decode is one
+        // the runtime cannot load either.
         diagnosis.findings.push(
             StorageFinding::new(
-                FindingSeverity::Warning,
+                FindingSeverity::Error,
                 FINDING_SESSION_DOCUMENT_UNDECODABLE,
                 format!(
                     "{undecodable} persisted session/message document(s) did not decode during \
@@ -817,11 +1270,15 @@ fn sweep_artifacts(realm_dir: &Path, realm: &str, diagnosis: &mut StorageDiagnos
         let mut stale = 0usize;
         let mut unparseable = 0usize;
         let mut surfaces: Vec<String> = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        // Sorted so the surfaces listed in the active-lease message are
+        // stable across runs (read_dir order is not).
+        let mut lease_files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        lease_files.sort();
+        for path in lease_files {
             match std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<RealmLeaseRecord>(&bytes).ok())
@@ -1214,6 +1671,302 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn carried_text_and_blob_json_columns_are_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "carried", "sqlite");
+        {
+            let conn = Connection::open(realm_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("hello")));
+            // A carried store: metadata as BLOB, session document as TEXT —
+            // the swapped encodings an external host may have written; both
+            // are valid JsonColumnBytes payloads.
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) \
+                 VALUES (?1, 0, 0, 1, 0, CAST(?2 AS BLOB), ?3)",
+                rusqlite::params![
+                    session.id().to_string(),
+                    serde_json::to_string(session.metadata()).unwrap(),
+                    serde_json::to_string(&session).unwrap(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        assert!(
+            !codes(&diagnosis).contains(&FINDING_DATABASE_UNREADABLE),
+            "{diagnosis:?}"
+        );
+        assert!(
+            !codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE),
+            "{diagnosis:?}"
+        );
+        // The row still participates in the checkpoint census.
+        assert!(codes(&diagnosis).contains(&FINDING_LEGACY_UNVERIFIED_SESSIONS));
+    }
+
+    #[tokio::test]
+    async fn future_manifest_and_external_provider_realms_are_not_disk_swept() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        // Future manifest format over a database this binary must not judge
+        // (the format may have relocated the real storage).
+        let future_dir = root.join("future");
+        std::fs::create_dir_all(&future_dir).unwrap();
+        std::fs::write(
+            future_dir.join(REALM_MANIFEST_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "realm_id": "future",
+                "backend": "sqlite",
+                "manifest_format": SUPPORTED_MANIFEST_FORMAT + 1,
+                "created_at": "0",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(future_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+        }
+        // Realm pinned to an external storage provider.
+        let external_dir = root.join("remote");
+        std::fs::create_dir_all(&external_dir).unwrap();
+        std::fs::write(
+            external_dir.join(REALM_MANIFEST_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "realm_id": "remote",
+                "backend": "external:bigquery",
+                "provider": "bigquery",
+                "manifest_format": 2,
+                "created_at": "0",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let future = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_MANIFEST_FROM_THE_FUTURE)
+            .expect("future-manifest finding");
+        assert_eq!(future.severity, FindingSeverity::Error);
+        assert_eq!(future.realm.as_deref(), Some("future"));
+        let external = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_EXTERNAL_PROVIDER_REALM)
+            .expect("external-provider finding");
+        assert_eq!(external.severity, FindingSeverity::Info);
+        assert_eq!(external.realm.as_deref(), Some("remote"));
+        // Neither realm gets a disk-shaped sweep: no database inventory, and
+        // the future realm's sessions db is never inspected.
+        assert_eq!(diagnosis.inventory.len(), 2);
+        for entry in &diagnosis.inventory {
+            assert!(entry.databases.is_empty(), "{entry:?}");
+        }
+        assert!(!codes(&diagnosis).contains(&FINDING_NO_SCHEMA_LEDGER));
+    }
+
+    #[tokio::test]
+    async fn wrong_typed_manifest_and_database_paths_are_findings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "shapes", "sqlite");
+        // A directory squatting on a required database path must not census
+        // as merely absent.
+        std::fs::create_dir_all(realm_dir.join("sessions.sqlite3")).unwrap();
+        // A directory squatting on another realm's manifest path.
+        let squatter = root.join("squatter");
+        std::fs::create_dir_all(squatter.join(REALM_MANIFEST_FILE_NAME)).unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let wrong: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_STORAGE_PATH_WRONG_TYPE)
+            .collect();
+        assert_eq!(wrong.len(), 2, "{diagnosis:?}");
+        assert!(wrong.iter().all(|f| f.severity == FindingSeverity::Error));
+        assert!(diagnosis.has_errors());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_symlink_database_path_is_a_finding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "links", "sqlite");
+        std::os::unix::fs::symlink(
+            realm_dir.join("nowhere.sqlite3"),
+            realm_dir.join("workgraph.sqlite3"),
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let finding = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_STORAGE_PATH_WRONG_TYPE)
+            .expect("broken-symlink finding");
+        assert!(
+            finding.message.contains("broken symlink"),
+            "{}",
+            finding.message
+        );
+        assert_eq!(finding.severity, FindingSeverity::Error);
+    }
+
+    #[tokio::test]
+    async fn higher_crate_domains_are_inventoried_and_unknown_domains_flagged() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "domains", "sqlite");
+        {
+            let conn = Connection::open(realm_dir.join("workgraph.sqlite3")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema (domain, version) \
+                 VALUES ('workgraph', 9999), ('from-mars', 3)",
+                [],
+            )
+            .unwrap();
+        }
+        let mobs_dir = realm_dir.join("mobs");
+        std::fs::create_dir_all(&mobs_dir).unwrap();
+        {
+            let conn = Connection::open(mobs_dir.join("alpha.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema (domain, version) VALUES ('mob', 2)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        // `workgraph` is owned above this crate: its version is inventoried
+        // without judgment, however large.
+        assert!(
+            !codes(&diagnosis).contains(&FINDING_SCHEMA_FROM_THE_FUTURE),
+            "{diagnosis:?}"
+        );
+        let unknown = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_UNKNOWN_LEDGER_DOMAIN)
+            .expect("unknown-domain finding");
+        assert_eq!(unknown.severity, FindingSeverity::Warning);
+        assert!(unknown.message.contains("from-mars"), "{}", unknown.message);
+        let entry = &diagnosis.inventory[0];
+        let workgraph_db = entry
+            .databases
+            .iter()
+            .find(|d| d.path.ends_with("workgraph.sqlite3"))
+            .expect("workgraph db inventory");
+        assert!(
+            workgraph_db
+                .domains
+                .contains(&("workgraph".to_string(), Some(9999)))
+        );
+        let mob_db = entry
+            .databases
+            .iter()
+            .find(|d| d.path.ends_with("mobs/alpha.db"))
+            .expect("mob db inventory");
+        assert!(mob_db.domains.contains(&("mob".to_string(), Some(2))));
+    }
+
+    #[tokio::test]
+    async fn dangling_report_cap_dedups_and_counts_the_remainder() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "flood", "sqlite");
+        let over = DANGLING_BLOB_REPORT_CAP + 2;
+        {
+            let conn = Connection::open(realm_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            let mut blocks = Vec::new();
+            for i in 0..over {
+                let blob = BlobId::new(format!("sha256:{i:064x}"));
+                // Each reference twice: the report must count distinct pairs.
+                for _ in 0..2 {
+                    blocks.push(ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Blob {
+                            blob_id: blob.clone(),
+                        },
+                    });
+                }
+            }
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::with_blocks(blocks)));
+            insert_session(&conn, &session);
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let dangling: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_DANGLING_BLOB_REFERENCE)
+            .collect();
+        // CAP individual findings plus exactly one remainder summary.
+        assert_eq!(
+            dangling.len(),
+            DANGLING_BLOB_REPORT_CAP + 1,
+            "{diagnosis:?}"
+        );
+        let summary = dangling.last().unwrap();
+        assert!(
+            summary.message.contains("2 additional"),
+            "{}",
+            summary.message
+        );
+        assert!(
+            summary.message.contains(&format!("{over} total")),
+            "{}",
+            summary.message
+        );
+    }
+
+    #[tokio::test]
+    async fn undecodable_canonical_session_document_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "broken", "sqlite");
+        {
+            let conn = Connection::open(realm_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            let session = Session::new();
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 0, 0, '{}', ?2)",
+                rusqlite::params![session.id().to_string(), b"not-json".to_vec()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let finding = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_SESSION_DOCUMENT_UNDECODABLE)
+            .expect("undecodable finding");
+        assert_eq!(finding.severity, FindingSeverity::Error);
+        assert!(diagnosis.has_errors());
+    }
+
+    #[tokio::test]
     async fn artifact_and_lease_findings() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("realms");
@@ -1279,6 +2032,118 @@ mod tests {
         }
         // Artifact findings are inventory-grade or warnings, never errors.
         assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    #[tokio::test]
+    async fn wrong_typed_realms_root_is_an_error_finding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        // A file squatting on the realms root must not yield a clean report.
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let finding = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_STORAGE_PATH_WRONG_TYPE)
+            .expect("wrong-typed root finding");
+        assert_eq!(finding.severity, FindingSeverity::Error);
+        assert!(diagnosis.has_errors());
+        // An absent root stays a normal state, not a finding.
+        let absent = diagnose_disk_roots(&scope(&[&temp.path().join("missing")])).await;
+        assert!(absent.findings.is_empty(), "{absent:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_realms_root_is_an_error_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&root).is_ok() {
+            // Permission bits are not enforced here (e.g. running as root);
+            // nothing to assert.
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        // Restore before asserting so tempdir cleanup succeeds either way.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let finding = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_STATE_ROOT_UNREADABLE)
+            .expect("unreadable root finding");
+        assert_eq!(finding.severity, FindingSeverity::Error);
+        assert!(diagnosis.has_errors());
+    }
+
+    #[tokio::test]
+    async fn first_start_markers_are_info_when_recent_and_warning_when_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        std::fs::create_dir_all(&root).unwrap();
+        write_manifest(&root, "team", "sqlite");
+        // Recent marker: the payload timestamp governs.
+        std::fs::write(
+            root.join(".realm-first-start.team.lock"),
+            serde_json::to_vec(&serde_json::json!({
+                "realm_id": "team",
+                "pid": 42,
+                "created_at_unix": now_unix_secs(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Stale marker: payload timestamp far past the horizon.
+        std::fs::write(
+            root.join(".realm-first-start.old-team.lock"),
+            serde_json::to_vec(&serde_json::json!({
+                "realm_id": "old-team",
+                "pid": 42,
+                "created_at_unix": 1,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let markers: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_FIRST_START_MARKER)
+            .collect();
+        assert_eq!(markers.len(), 2, "{diagnosis:?}");
+        let recent = markers
+            .iter()
+            .find(|f| f.realm.as_deref() == Some("team"))
+            .expect("recent marker finding");
+        assert_eq!(recent.severity, FindingSeverity::Info);
+        let stale = markers
+            .iter()
+            .find(|f| f.realm.as_deref() == Some("old-team"))
+            .expect("stale marker finding");
+        assert_eq!(stale.severity, FindingSeverity::Warning);
+        assert!(
+            stale.message.contains("age-based takeover"),
+            "{}",
+            stale.message
+        );
+        // Marker findings alone never make the report an error.
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+
+        // The realm filter applies to markers like it does to realm dirs.
+        let filtered = diagnose_disk_roots(&scope(&[&root]).with_realm("old-team")).await;
+        let filtered_markers: Vec<_> = filtered
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_FIRST_START_MARKER)
+            .collect();
+        assert_eq!(filtered_markers.len(), 1, "{filtered:?}");
+        assert_eq!(filtered_markers[0].realm.as_deref(), Some("old-team"));
     }
 
     #[tokio::test]

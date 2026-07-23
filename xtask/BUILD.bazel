@@ -41,6 +41,9 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -79,6 +82,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -135,6 +141,9 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -175,6 +184,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/buildbuddy_static_lanes.rs",
@@ -267,6 +279,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/ci_gate_requires_rmat.rs",
@@ -331,6 +346,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/effect_authority.rs",
@@ -403,6 +421,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/machines_contracts.rs",
@@ -473,6 +494,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/no_provider_data_in_core.rs",
@@ -538,6 +562,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/protocol_codegen_drift.rs",
@@ -654,6 +681,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/release_workflow_asset_manifest.rs",
@@ -718,6 +748,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/rmat_audit.rs",
@@ -791,6 +824,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/rmat_strict.rs",
@@ -854,6 +890,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/runtime_authority_bypass.rs",
@@ -916,6 +955,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "hidden/frag.rs",
+        "src/...",
+        "src/literal.rs",
     ],
     srcs = [
         "tests/seam_inventory_strict.rs",

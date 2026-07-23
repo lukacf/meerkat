@@ -76,6 +76,13 @@ pub async fn blobs(factory: &dyn BlobStoreFactory) -> Result<(), ConformanceFail
 
     // Restart survival: `is_persistent` must be stable across handles, and a
     // persistent store must serve the blob through a reopened handle.
+    //
+    // Residual trust: the harness cannot restart the process, so a factory
+    // whose "reopen" shares in-process state (the correct model for pure
+    // in-memory backends) cannot expose an is_persistent() lie by itself.
+    // The cross-handle writes below at least prove the two handles address
+    // ONE backing (not a copy); genuine restart survival is only proven by
+    // factories that reopen the durable medium.
     let step = "reopen_survival_if_persistent";
     let reopened = factory.open().await?;
     steps.ensure(
@@ -89,6 +96,29 @@ pub async fn blobs(factory: &dyn BlobStoreFactory) -> Result<(), ConformanceFail
             step,
             survived.data == data,
             "a persistent blob store must serve stored blobs after reopen",
+        )?;
+
+        // Cross-handle identity: a write through the reopened handle is
+        // served by the original, and a delete through the original is
+        // observed by the reopened one.
+        let cross = steps.wrap(
+            step,
+            reopened
+                .put_image("image/png", fixtures::TINY_PNG_VARIANT_BASE64)
+                .await,
+        )?;
+        let via_original = steps.wrap(step, store.get(&cross.blob_id).await)?;
+        steps.ensure(
+            step,
+            via_original.data == fixtures::TINY_PNG_VARIANT_BASE64,
+            "a blob written through a reopened handle must be served by the original handle — \
+             the reopened handle is backed by different storage",
+        )?;
+        steps.wrap(step, store.delete(&cross.blob_id).await)?;
+        steps.ensure(
+            step,
+            !steps.wrap(step, reopened.exists(&cross.blob_id).await)?,
+            "a delete through the original handle must be observed by the reopened handle",
         )?;
     }
 

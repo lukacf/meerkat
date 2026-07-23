@@ -17,9 +17,12 @@
 //!    uses realms where they lie; the report states each realm's root.
 //! 3. **Split-brain reconciliation (manual, fail-closed):** a realm id under
 //!    2+ swept roots produces a per-domain divergence report and a typed
-//!    refusal. With `--apply --adopt-root <path>` one root is adopted where
-//!    it lies and every other copy is archived read-only under the
-//!    registered backup naming. No synthesis, no merging.
+//!    refusal. With `--apply --adopt-root <path>` every copy is fenced, the
+//!    divergence is recomputed under the held fences, the archive decision
+//!    is gated on a conclusive comparison, and then one root is adopted
+//!    where it lies while every other copy is archived read-only under the
+//!    registered backup naming (its released fence lock files ride into the
+//!    archive). No synthesis, no merging.
 //! 4. **Checkpoint-evidence adoption:** for sqlite realms, the persistent
 //!    session service (composed with the agent-refusing
 //!    `MaintenanceAgentBuilder`) runs the machine-owned bulk
@@ -147,46 +150,52 @@ pub(crate) async fn run_storage_migrate(options: MigrateOptions) -> MigrateRepor
         let Some(copies) = groups.get(realm_id).cloned() else {
             continue;
         };
-        let locations: Vec<PathBuf> = copies.iter().map(|copy| copy.dir.clone()).collect();
-        let divergence_realm = realm_id.clone();
-        let divergence_locations = locations.clone();
-        let mut split = tokio::task::spawn_blocking(move || {
-            store_migrate::compute_split_brain_report(&divergence_realm, &divergence_locations)
-        })
-        .await
-        .unwrap_or_else(|join_error| {
-            let mut failed = SplitBrainReport::new(realm_id.clone(), locations);
-            failed
-                .errors
-                .push(format!("divergence computation failed: {join_error}"));
-            failed
-        });
-
         if let (true, Some(adopt_root)) = (options.apply, options.adopt_root.as_deref()) {
-            match resolve_split_brain(&copies, adopt_root, options.fence_wait).await {
-                Ok((adopted, archived)) => {
-                    split.resolution = SplitBrainResolution::Archived {
-                        adopted: adopted.dir.clone(),
-                        archived,
-                    };
+            // Resolution path: divergence is computed and acted on under
+            // held maintenance fences (see `resolve_split_brain`).
+            let (split, adopted) =
+                resolve_split_brain(realm_id, &copies, adopt_root, options.fence_wait).await;
+            match adopted {
+                Some(adopted) => {
                     groups.insert(realm_id.clone(), vec![adopted]);
                 }
-                Err(reason) => {
+                None => {
+                    let reason = match &split.resolution {
+                        SplitBrainResolution::Refused { reason }
+                        | SplitBrainResolution::ArchiveFailed { reason, .. } => reason.clone(),
+                        _ => "split-brain resolution did not complete".to_string(),
+                    };
                     report
                         .errors
                         .push(format!("split-brain realm '{realm_id}': {reason}"));
-                    split.resolution = SplitBrainResolution::Refused { reason };
                     groups.remove(realm_id);
                 }
             }
+            report.split_brain.push(split);
         } else {
+            // Fail-closed refusal: the unfenced comparison is advisory (no
+            // archive decision rests on it) and is the whole output.
+            let locations: Vec<PathBuf> = copies.iter().map(|copy| copy.dir.clone()).collect();
+            let divergence_realm = realm_id.clone();
+            let divergence_locations = locations.clone();
+            let split = tokio::task::spawn_blocking(move || {
+                store_migrate::compute_split_brain_report(&divergence_realm, &divergence_locations)
+            })
+            .await
+            .unwrap_or_else(|join_error| {
+                let mut failed = SplitBrainReport::new(realm_id.clone(), locations);
+                failed
+                    .errors
+                    .push(format!("divergence computation failed: {join_error}"));
+                failed
+            });
             report.errors.push(format!(
                 "split-brain realm '{realm_id}' is materialized under multiple swept roots; \
                  fail-closed refusal — rerun with `--apply --adopt-root <path>` to adopt one \
                  root and archive the other copies read-only"
             ));
+            report.split_brain.push(split);
         }
-        report.split_brain.push(split);
     }
 
     if !twin_ids.is_empty() && !resolving {
@@ -236,44 +245,85 @@ pub(crate) async fn run_storage_migrate(options: MigrateOptions) -> MigrateRepor
     report
 }
 
-/// Verify the adopted root is one of the twin's swept roots, then fence
-/// every copy and archive the non-adopted copies read-only. Returns the
-/// adopted copy and the archive paths.
+/// Resolve one split-brain twin under held maintenance fences: verify the
+/// adopted root is one of the twin's swept roots, fence EVERY copy, compute
+/// the divergence report while the fences are held (the archive decision
+/// rests on a quiesced snapshot), gate archiving on a conclusive
+/// comparison, then archive the non-adopted copies read-only. Returns the
+/// finished report plus the adopted copy when — and only when — every
+/// archive completed.
 async fn resolve_split_brain(
+    realm_id: &str,
     copies: &[RealmDirEntry],
     adopt_root: &Path,
     fence_wait: Duration,
-) -> Result<(RealmDirEntry, Vec<PathBuf>), String> {
+) -> (SplitBrainReport, Option<RealmDirEntry>) {
+    let locations: Vec<PathBuf> = copies.iter().map(|copy| copy.dir.clone()).collect();
+    let refused = |reason: String| {
+        let mut split = SplitBrainReport::new(realm_id.to_string(), locations.clone());
+        split.resolution = SplitBrainResolution::Refused { reason };
+        (split, None)
+    };
+
     let adopt_canonical = canonical(adopt_root);
-    let adopted = copies
+    let Some(adopted) = copies
         .iter()
         .find(|copy| canonical(&copy.state_root) == adopt_canonical)
         .cloned()
-        .ok_or_else(|| {
-            format!(
-                "--adopt-root {} is not one of the swept roots materializing this realm \
-                 (candidates: {})",
-                adopt_root.display(),
-                copies
-                    .iter()
-                    .map(|copy| copy.state_root.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+    else {
+        return refused(format!(
+            "--adopt-root {} is not one of the swept roots materializing this realm \
+             (candidates: {})",
+            adopt_root.display(),
+            copies
+                .iter()
+                .map(|copy| copy.state_root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
 
+    let realm = realm_id.to_string();
     let adopted_dir = adopted.dir.clone();
     let copy_dirs: Vec<PathBuf> = copies.iter().map(|copy| copy.dir.clone()).collect();
-    let archived = tokio::task::spawn_blocking(move || {
-        // Fence BOTH (all) copies during the archive; copies arrive sorted,
-        // so two racing migrators acquire in the same global order.
+    let task_locations = locations.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Fence EVERY copy BEFORE the comparison and hold through the
+        // archive renames; copies arrive sorted, so two racing migrators
+        // acquire in the same global order.
         let mut fences = Vec::with_capacity(copy_dirs.len());
         for dir in &copy_dirs {
-            let fence = store_migrate::RealmMaintenanceFence::acquire(dir, fence_wait)
-                .map_err(|error| format!("maintenance fence not acquirable: {error}"))?;
-            fences.push(Some(fence));
+            match store_migrate::RealmMaintenanceFence::acquire(dir, fence_wait) {
+                Ok(fence) => fences.push(Some(fence)),
+                Err(error) => {
+                    let mut split = SplitBrainReport::new(realm, task_locations);
+                    split.resolution = SplitBrainResolution::Refused {
+                        reason: format!(
+                            "maintenance fence not acquirable for {}: {error}",
+                            dir.display()
+                        ),
+                    };
+                    return (split, None);
+                }
+            }
         }
-        let mut archived = Vec::new();
+
+        let mut split = store_migrate::compute_split_brain_report(&realm, &task_locations);
+        if !split.comparison_is_conclusive() {
+            // An unreadable side may hold the only copy of content the
+            // report cannot account for; no archive decision may rest on it.
+            split.resolution = SplitBrainResolution::Refused {
+                reason: "divergence comparison is inconclusive (unreadable entries poisoned \
+                         it); repair the read failures in the report and rerun"
+                    .to_string(),
+            };
+            return (split, None);
+        }
+
+        // Successful archives accumulate here so a later failure keeps them
+        // visible (`ArchiveFailed`) instead of discarding them.
+        let mut archived: Vec<PathBuf> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
         for (index, dir) in copy_dirs.iter().enumerate() {
             if *dir == adopted_dir {
                 continue;
@@ -281,46 +331,82 @@ async fn resolve_split_brain(
             // Release this copy's fence right before the rename: the fence
             // holds open lock-file handles inside the directory, and a
             // directory with open handles cannot be renamed on Windows.
-            // Quiescence is already established; the fences on the adopted
-            // copy stay held until every archive completes.
+            // Quiescence is already established; the fences on the other
+            // copies stay held until every archive completes. The released
+            // lock files ride into the archive.
             fences[index] = None;
-            let archive = store_migrate::archive_path_read_only(dir, "split-brain")
-                .map_err(|error| format!("archive of {} failed: {error}", dir.display()))?;
-            archived.push(archive);
-        }
-        drop(fences);
-        Ok::<_, String>(archived)
-    })
-    .await
-    .map_err(|join_error| format!("archive task failed: {join_error}"))??;
-
-    Ok((adopted, archived))
-}
-
-/// Ledger versions for every inventoried database currently on disk:
-/// `(database, domain) -> version` for ledger rows, `None` for expected
-/// domains without a row. Read-only.
-fn read_ledger_matrix(realm_dir: &Path) -> Vec<(PathBuf, String, Option<i64>)> {
-    let mut matrix = Vec::new();
-    for (relative, expected_domains) in meerkat_store::doctor::REALM_DATABASE_FILES {
-        let db_path = realm_dir.join(relative);
-        if !db_path.is_file() {
-            continue;
-        }
-        let rows = store_migrate::read_domain_versions(&db_path)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        for (domain, version) in &rows {
-            matrix.push((db_path.clone(), domain.clone(), Some(*version)));
-        }
-        for expected in *expected_domains {
-            if !rows.iter().any(|(domain, _)| domain == expected) {
-                matrix.push((db_path.clone(), (*expected).to_string(), None));
+            match store_migrate::archive_path_read_only_reported(dir, "split-brain") {
+                Ok(archive) => {
+                    warnings.extend(archive.warnings);
+                    archived.push(archive.archive);
+                }
+                Err(error) => {
+                    split.errors.extend(warnings);
+                    split.resolution = SplitBrainResolution::ArchiveFailed {
+                        adopted: adopted_dir,
+                        archived,
+                        reason: format!("archive of {} failed: {error}", dir.display()),
+                    };
+                    return (split, None);
+                }
             }
         }
+        drop(fences);
+        // Post-rename hardening/durability warnings are report-only; the
+        // report has no separate warning slot, so they ride the split-brain
+        // `errors` (which `MigrateReport::has_errors` does not count).
+        split.errors.extend(warnings);
+        split.resolution = SplitBrainResolution::Archived {
+            adopted: adopted_dir,
+            archived,
+        };
+        (split, Some(adopted))
+    })
+    .await;
+
+    match outcome {
+        Ok(result) => result,
+        Err(join_error) => refused(format!("archive task failed: {join_error}")),
     }
-    matrix
+}
+
+/// Fold a read-only ledger baseline into the per-realm report: rows become
+/// ledger entries under `action_of`, read failures become per-realm errors
+/// (a corrupt database is never laundered into a missing ledger the report
+/// could call would-stamp), and future-versioned domains become refusals
+/// exactly as `--apply`'s guarded constructors would refuse them
+/// (`SchemaFromTheFuture`) — their rows report-only, never would-stamp.
+fn fold_ledger_baseline(
+    baseline: &store_migrate::RealmLedgerBaseline,
+    entry: &mut RealmMigrateReport,
+    action_of: impl Fn(&store_migrate::LedgerDomainReading) -> LedgerBaselineAction,
+) {
+    entry.errors.extend(baseline.errors.iter().cloned());
+    for future in &baseline.future {
+        entry.errors.push(format!(
+            "refusing domain '{}' in {}: schema is from the future (file has version {}, this \
+             binary supports up to {})",
+            future.domain,
+            future.database.display(),
+            future.found,
+            future.supported
+        ));
+    }
+    for row in &baseline.rows {
+        let action = if baseline
+            .future
+            .iter()
+            .any(|future| future.database == row.database && future.domain == row.domain)
+        {
+            LedgerBaselineAction::ReportOnly
+        } else {
+            action_of(row)
+        };
+        let mut ledger_entry =
+            LedgerBaselineEntry::new(row.database.clone(), row.domain.clone(), action);
+        ledger_entry.before = row.version;
+        entry.ledger.push(ledger_entry);
+    }
 }
 
 /// Report-only entries for per-mob databases (`mobs/*.db`): their ledger
@@ -398,12 +484,8 @@ async fn migrate_realm(
             entry.notes.push(format!(
                 "backend '{other}' is not disk-migratable by this build; report-only"
             ));
-            for (database, domain, version) in read_ledger_matrix(&realm.dir) {
-                let mut ledger_entry =
-                    LedgerBaselineEntry::new(database, domain, LedgerBaselineAction::ReportOnly);
-                ledger_entry.before = version;
-                entry.ledger.push(ledger_entry);
-            }
+            let baseline = store_migrate::read_realm_ledger_baseline(&realm.dir);
+            fold_ledger_baseline(&baseline, &mut entry, |_| LedgerBaselineAction::ReportOnly);
             return entry;
         }
     }
@@ -433,22 +515,22 @@ async fn migrate_realm(
     entry
 }
 
-/// Case 1 + 4 dry-run: read-only ledger matrix and legacy census. The
+/// Case 1 + 4 dry-run: read-only ledger baseline and legacy census. The
 /// database bytes are untouched.
 async fn dry_run_realm(realm: &RealmDirEntry, backend: &str, entry: &mut RealmMigrateReport) {
     let dir = realm.dir.clone();
-    let matrix = tokio::task::spawn_blocking(move || read_ledger_matrix(&dir))
-        .await
-        .unwrap_or_default();
-    for (database, domain, before) in matrix {
-        let action = if before.is_some() {
-            LedgerBaselineAction::Recorded
-        } else {
-            LedgerBaselineAction::WouldStamp
-        };
-        let mut ledger_entry = LedgerBaselineEntry::new(database, domain, action);
-        ledger_entry.before = before;
-        entry.ledger.push(ledger_entry);
+    match tokio::task::spawn_blocking(move || store_migrate::read_realm_ledger_baseline(&dir)).await
+    {
+        Ok(baseline) => fold_ledger_baseline(&baseline, entry, |row| {
+            if row.version.is_some() {
+                LedgerBaselineAction::Recorded
+            } else {
+                LedgerBaselineAction::WouldStamp
+            }
+        }),
+        Err(join_error) => entry
+            .errors
+            .push(format!("ledger baseline read failed: {join_error}")),
     }
 
     match backend {
@@ -533,9 +615,24 @@ async fn apply_realm(
     };
 
     let before_dir = realm.dir.clone();
-    let before = tokio::task::spawn_blocking(move || read_ledger_matrix(&before_dir))
-        .await
-        .unwrap_or_default();
+    let before = match tokio::task::spawn_blocking(move || {
+        store_migrate::read_realm_ledger_baseline(&before_dir)
+    })
+    .await
+    {
+        Ok(baseline) => {
+            // Read failures surface; the guarded constructors below own the
+            // future-version refusals on apply.
+            entry.errors.extend(baseline.errors.iter().cloned());
+            baseline.rows
+        }
+        Err(join_error) => {
+            entry
+                .errors
+                .push(format!("ledger baseline read failed: {join_error}"));
+            Vec::new()
+        }
+    };
 
     // Case 1: normal constructors via the facade bundle (sessions, schedule,
     // runtime, workgraph, blobs) — plus the stores the bundle does not own.
@@ -627,11 +724,30 @@ async fn apply_realm(
                         refused.len()
                     ));
                 }
+                // Per-session load/decode failures no longer abort the
+                // sweep; each surfaces both as a per-realm error (text/JSON
+                // visibility + exit code) and in the outcome's failure slot.
+                for (session_id, reason) in &adoption.failures {
+                    entry.errors.push(format!(
+                        "checkpoint adoption failed for session {session_id}: {reason}"
+                    ));
+                }
+                for (session_id, reason) in &adoption.skipped_cursor_ambiguous {
+                    entry.notes.push(format!(
+                        "checkpoint adoption skipped for session {session_id} \
+                         (cursor-ambiguous): {reason}"
+                    ));
+                }
                 let mut outcome = CheckpointAdoptionOutcome::default();
                 outcome.scanned = adoption.scanned;
                 outcome.already_verified = adoption.already_verified;
                 outcome.adopted = adoption.adopted;
                 outcome.refused = refused;
+                outcome.failures = adoption
+                    .failures
+                    .iter()
+                    .map(|(session_id, reason)| (session_id.to_string(), reason.clone()))
+                    .collect();
                 entry.adoption = Some(outcome);
             }
             Err(error) => entry
@@ -650,25 +766,43 @@ async fn apply_realm(
 
     // Ledger entries: before → after per database × domain.
     let after_dir = realm.dir.clone();
-    let after = tokio::task::spawn_blocking(move || read_ledger_matrix(&after_dir))
-        .await
-        .unwrap_or_default();
+    let after = match tokio::task::spawn_blocking(move || {
+        store_migrate::read_realm_ledger_baseline(&after_dir)
+    })
+    .await
+    {
+        Ok(baseline) => {
+            // The before read already reported still-standing failures.
+            for error in &baseline.errors {
+                if !entry.errors.contains(error) {
+                    entry.errors.push(error.clone());
+                }
+            }
+            baseline.rows
+        }
+        Err(join_error) => {
+            entry
+                .errors
+                .push(format!("ledger baseline read failed: {join_error}"));
+            Vec::new()
+        }
+    };
     let before_of = |database: &Path, domain: &str| -> Option<i64> {
         before
             .iter()
-            .find(|(db, dom, _)| db == database && dom == domain)
-            .and_then(|(_, _, version)| *version)
+            .find(|row| row.database == database && row.domain == domain)
+            .and_then(|row| row.version)
     };
-    for (database, domain, after_version) in after {
-        let before_version = before_of(&database, &domain);
-        let action = if after_version == before_version {
+    for row in after {
+        let before_version = before_of(&row.database, &row.domain);
+        let action = if row.version == before_version {
             LedgerBaselineAction::AlreadyCurrent
         } else {
             LedgerBaselineAction::Stamped
         };
-        let mut ledger_entry = LedgerBaselineEntry::new(database, domain, action);
+        let mut ledger_entry = LedgerBaselineEntry::new(row.database, row.domain, action);
         ledger_entry.before = before_version;
-        ledger_entry.after = after_version;
+        ledger_entry.after = row.version;
         entry.ledger.push(ledger_entry);
     }
 
@@ -698,6 +832,8 @@ pub(crate) struct PruneOptions {
     pub roots: Vec<PathBuf>,
     pub apply: bool,
     pub older_than_days: u64,
+    /// `--realm` scope: only this realm's artifacts are eligible.
+    pub realm_filter: Option<String>,
 }
 
 /// Run `storage prune`: enumerate registered maintenance artifacts
@@ -706,10 +842,12 @@ pub(crate) struct PruneOptions {
 /// outside the registered naming patterns is ever touched.
 pub(crate) async fn run_storage_prune(options: PruneOptions) -> PruneReport {
     let roots = options.roots.clone();
-    let mut artifacts =
-        tokio::task::spawn_blocking(move || store_migrate::enumerate_maintenance_artifacts(&roots))
-            .await
-            .unwrap_or_default();
+    let realm_filter = options.realm_filter.clone();
+    let mut artifacts = tokio::task::spawn_blocking(move || {
+        store_migrate::enumerate_maintenance_artifacts_filtered(&roots, realm_filter.as_deref())
+    })
+    .await
+    .unwrap_or_default();
 
     let mode = if options.apply {
         MigrateMode::Apply
@@ -822,6 +960,20 @@ pub(crate) fn print_migrate_report_text(report: &MigrateReport) {
                 println!("  resolution: adopted {}", adopted.display());
                 for archive in archived {
                     println!("    archived read-only: {}", archive.display());
+                }
+            }
+            SplitBrainResolution::ArchiveFailed {
+                adopted,
+                archived,
+                reason,
+            } => {
+                println!("  resolution: ARCHIVE FAILED — {reason}");
+                println!("    adopted (untouched): {}", adopted.display());
+                for archive in archived {
+                    println!(
+                        "    archived read-only before the failure: {}",
+                        archive.display()
+                    );
                 }
             }
             _ => println!("  resolution: unknown"),

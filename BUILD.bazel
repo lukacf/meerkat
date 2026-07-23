@@ -452,6 +452,7 @@ test_suite(
         "//meerkat-machine-schema:peer_endpoint_structural_equivalence_test",
         "//meerkat-machine-schema:placed_lifecycle_origin_fence_test",
         "//meerkat-machine-schema:runtime_authority_reconciliation_totality_test",
+        "//meerkat-machine-schema:schema_construction_cache_test",
         "//meerkat-machine-schema:schema_contracts_test",
         "//meerkat-machine-schema:stopped_phase_revival_lattice_test",
         "//meerkat-mcp-server:mcp_binding_input_test",

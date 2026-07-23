@@ -20,6 +20,10 @@
 //!   token, `save_head` `Create`/`IfToken` semantics,
 //!   `TranscriptRevisionConflict` on mismatch, `load_messages`/
 //!   `load_rewrites` round-trips.
+//! - [`chapters::transcript_rewrite`] — stores implementing
+//!   `save_transcript_rewrite` (the whole-blob compaction path): the proven
+//!   rewrite round-trips and survives reopen, an unproven rewrite (plain
+//!   save of the rewritten document) is refused, a stale proof conflicts.
 //! - [`chapters::guarded_projection`] — stores implementing
 //!   `save_authoritative_projection_if_current_revision`: CAS semantics,
 //!   revision-conflict behavior, and the non-atomic projection-vs-authority
@@ -32,13 +36,17 @@
 //!   and documents the contract.
 //! - [`chapters::assert_forwards_incremental`] — `SessionStore` →
 //!   `SessionStore` delegating wrappers: fails loudly when a wrapper
-//!   swallows a `Some(as_incremental)` from its inner store. Reference
+//!   swallows a `Some(as_incremental)` from its inner store, and proves the
+//!   forwarded capability shares storage identity with the inner store
+//!   (writes through either side are served by the other). Reference
 //!   wrappers: [`ForwardingSessionStore`] (correct) and
 //!   [`SwallowingSessionStore`] (the bug class).
-//! - [`chapters::legacy_data`] — every `SessionStore`: 0.7.x-shaped
-//!   (current-envelope, unstamped) rows load and report `LegacyUnverified`,
-//!   documents round-trip preserved, adopted (stamped) sessions stay
-//!   `Verified`.
+//! - [`chapters::legacy_data`] — every `SessionStore`: byte-literal 0.7.x
+//!   fixture documents (current-envelope, unstamped, legacy string-content
+//!   form) installed via
+//!   [`SessionStoreFactory::install_session_document`] load and report
+//!   `LegacyUnverified`, documents round-trip preserved against the fixture
+//!   bytes, adopted (stamped) sessions stay `Verified`.
 //! - [`chapters::blobs`] / [`chapters::dangling_blob_reference`] /
 //!   [`chapters::artifacts`] — `BlobStore` and `ArtifactStore`: content
 //!   round-trips, restart survival when `is_persistent()`, delete/exists
@@ -48,6 +56,17 @@
 //! Chapters contain **no provider-specific code**: everything is expressed
 //! through the `meerkat-core` trait contracts, so a downstream backend runs
 //! the same assertions CI runs against the in-repo stores.
+//!
+//! # wasm32 support
+//!
+//! The crate compiles for `wasm32-unknown-unknown`: the factory traits and
+//! reference stores follow the same `async_trait(?Send)` relaxation as the
+//! `meerkat-core` store traits, tokio is a native-only dependency, and the
+//! in-crate reference store uses a `std` mutex. One honest gap remains: the
+//! baseline chapter's multi-task writer-contention step is native-only
+//! (wasm32 has no multi-threaded task spawn), so real write-race coverage
+//! for a wasm-hosted backend must come from a native run against the same
+//! backend.
 
 pub mod chapters;
 mod emulated_cas;
@@ -64,7 +83,7 @@ pub use factory::{
 pub use failure::ConformanceFailure;
 pub use wrappers::{ForwardingSessionStore, SwallowingSessionStore};
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::sync::Arc;
@@ -125,6 +144,13 @@ mod tests {
         chapters::legacy_data(&SharedEmulatedCas::correct())
             .await
             .expect("reference emulated-CAS store must satisfy the legacy-data chapter");
+    }
+
+    #[tokio::test]
+    async fn emulated_cas_reference_store_passes_transcript_rewrite() {
+        chapters::transcript_rewrite(&SharedEmulatedCas::correct())
+            .await
+            .expect("reference emulated-CAS store must satisfy the transcript-rewrite chapter");
     }
 
     /// The harness canary: a store whose windowed read adopts orphan

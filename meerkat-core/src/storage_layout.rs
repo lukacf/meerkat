@@ -56,6 +56,9 @@ pub struct StorageLayout {
     credentials_root: Option<PathBuf>,
     comms_identity_root: Option<PathBuf>,
     state_root: PathBuf,
+    /// Every state-root candidate resolution probed (chosen root included);
+    /// first materialization reserves across all of them.
+    realm_root_candidates: Vec<PathBuf>,
     cache_root: Option<PathBuf>,
 }
 
@@ -74,10 +77,12 @@ pub struct StorageLayoutInputs {
     pub user_config_root: Option<PathBuf>,
     /// The surface's documented default root when the realm exists nowhere.
     pub default_root: Option<RealmRootDefault>,
-    /// Whether the project-local candidate (`<context>/.rkat/realms`)
-    /// participates in probing. The CLI always probes it; server surfaces
-    /// only when started with an explicit context root, which keeps their
-    /// no-flags behavior unchanged.
+    /// Whether the project-local candidate (`<project-root>/.rkat/realms`,
+    /// where the project root is walked up from the invocation context and
+    /// falls back to the context itself outside any project) participates
+    /// in probing. The CLI always probes it; server surfaces only when
+    /// started with an explicit context root, which keeps their no-flags
+    /// behavior unchanged.
     pub probe_local_candidate: bool,
 }
 
@@ -112,21 +117,34 @@ impl StorageLayout {
         realm: &RealmConfig,
         global_candidate: &Path,
     ) -> Result<ResolvedStorage, RuntimeBootstrapError> {
-        let local_candidate = inputs
-            .probe_local_candidate
-            .then(|| local_realms_candidate(&inputs.invocation_context));
+        // The invocation context is *where the surface was started*, not
+        // necessarily the project root: walk up first, so a nested
+        // `--context-root` does not pin project persistence to a
+        // subdirectory of the project it lives in. Outside any project the
+        // context itself is where a fresh `.rkat` would be created.
+        let project_root = find_project_root(&inputs.invocation_context);
+        let local_candidate = inputs.probe_local_candidate.then(|| {
+            local_realms_candidate(
+                project_root
+                    .as_deref()
+                    .unwrap_or(&inputs.invocation_context),
+            )
+        });
         let mut realm_config = realm.clone();
         if realm_config.state_root.is_none() {
             realm_config.state_root = inputs.explicit_state_root.clone();
         }
         let default_root = inputs.default_root.unwrap_or(RealmRootDefault::UserGlobal);
-        let DualRootResolution { locator, choice } = realm_config.resolve_locator_dual_root_with(
+        let DualRootResolution {
+            locator,
+            choice,
+            candidate_roots,
+        } = realm_config.resolve_locator_dual_root_with(
             local_candidate.as_deref(),
             global_candidate,
             default_root,
         )?;
 
-        let project_root = find_project_root(&inputs.invocation_context);
         let user_home_root = inputs.user_config_root.clone().or_else(dirs::home_dir);
         let user_rkat_root = user_home_root.as_ref().map(|home| home.join(".rkat"));
 
@@ -138,6 +156,7 @@ impl StorageLayout {
             credentials_root: None,
             comms_identity_root: None,
             state_root: locator.state_root.clone(),
+            realm_root_candidates: candidate_roots,
             cache_root: None,
         };
         Ok(ResolvedStorage {
@@ -163,6 +182,7 @@ impl StorageLayout {
             user_rkat_root,
             credentials_root: None,
             comms_identity_root: None,
+            realm_root_candidates: vec![state_root.clone()],
             state_root,
             cache_root: None,
         }
@@ -203,6 +223,15 @@ impl StorageLayout {
         &self.state_root
     }
 
+    /// Every state-root candidate resolution probed, the chosen root
+    /// included. First materialization of a realm must reserve across all
+    /// of them (the store's cross-candidate first-start reservation) so two
+    /// surfaces with different default roots cannot each manufacture a
+    /// manifest for the same realm.
+    pub fn realm_root_candidates(&self) -> &[PathBuf] {
+        &self.realm_root_candidates
+    }
+
     /// Root for rebuildable caches, when composed.
     pub fn cache_root(&self) -> Option<&Path> {
         self.cache_root.as_deref()
@@ -238,8 +267,10 @@ impl StorageLayout {
     }
 }
 
-/// The project-local realms candidate for a context root:
-/// `<context>/.rkat/realms`.
+/// The project-local realms candidate for a project root:
+/// `<root>/.rkat/realms`. Callers pass the walked-up project root (see
+/// [`find_project_root`]); the invocation context itself only when outside
+/// any project.
 pub fn local_realms_candidate(context_root: &Path) -> PathBuf {
     context_root.join(".rkat").join("realms")
 }
@@ -362,6 +393,63 @@ mod tests {
             local_realms_candidate(&context).as_path()
         );
         assert!(resolved.locator.realm.as_str().starts_with("ws-"));
+    }
+
+    #[test]
+    fn nested_invocation_context_resolves_project_root_local_candidate() {
+        // A nested `--context-root` (or cwd) inside a project must not pin
+        // realm storage to the subdirectory: the local candidate hangs off
+        // the walked-up project root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("proj");
+        let nested = project.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
+        let inputs = StorageLayoutInputs {
+            invocation_context: nested.clone(),
+            explicit_state_root: None,
+            user_config_root: None,
+            default_root: Some(RealmRootDefault::ProjectLocal),
+            probe_local_candidate: true,
+        };
+        let realm = RealmConfig {
+            selection: RealmSelection::Explicit {
+                realm_id: "team".into(),
+            },
+            ..RealmConfig::default()
+        };
+        let resolved = StorageLayout::resolve_with_global_candidate(
+            inputs,
+            &realm,
+            &tmp.path().join("global"),
+        )
+        .expect("resolve");
+        assert_eq!(resolved.layout.project_root(), Some(project.as_path()));
+        assert_eq!(resolved.layout.invocation_context(), nested.as_path());
+        assert_eq!(
+            resolved.layout.state_root(),
+            local_realms_candidate(&project).as_path()
+        );
+        // The probed candidates surface for the first-start reservation.
+        assert_eq!(
+            resolved.layout.realm_root_candidates(),
+            &[local_realms_candidate(&project), tmp.path().join("global")]
+        );
+    }
+
+    #[test]
+    fn injected_roots_carry_a_single_candidate() {
+        let layout = StorageLayout::with_injected_roots(
+            PathBuf::from("/ctx"),
+            None,
+            None,
+            PathBuf::from("/state"),
+        );
+        assert_eq!(
+            layout.realm_root_candidates(),
+            &[PathBuf::from("/state")],
+            "injected layouts resolve single-root: no cross-candidate probing happened"
+        );
     }
 
     #[test]

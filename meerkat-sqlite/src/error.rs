@@ -40,6 +40,35 @@ pub enum SqliteStoreError {
         source: rusqlite::Error,
     },
 
+    /// A migration body ended the runner's IMMEDIATE transaction (COMMIT or
+    /// ROLLBACK, with or without re-BEGINning a fresh one), separating its
+    /// schema work from the ledger stamp. Custody is verified after every
+    /// body via a runner-owned savepoint; the domain is left unstamped.
+    #[error(
+        "migration {version} (`{name}`) for domain `{domain}` ended the runner's transaction; \
+         migration bodies must not COMMIT or ROLLBACK"
+    )]
+    MigrationBrokeTransaction {
+        domain: String,
+        version: i64,
+        name: String,
+    },
+
+    /// The `meerkat_schema` ledger table exists but is not the pinned shape
+    /// (`domain TEXT PRIMARY KEY, version INTEGER NOT NULL`), carries more
+    /// than one row for a domain, or records a non-positive version. This is
+    /// corrupt or foreign ledger state: it is refused, never healed by
+    /// re-running migrations over it.
+    #[error("meerkat_schema ledger is malformed: {detail}")]
+    LedgerMalformed { detail: String },
+
+    /// The Primary profile asked SQLite to establish `journal_mode=WAL` and
+    /// SQLite reported a different effective mode without raising an error
+    /// (the journal-mode pragma can silently keep the old mode). The
+    /// connection does not satisfy the profile's durability policy.
+    #[error("could not establish journal_mode=WAL on `{path}`: effective mode is `{actual}`")]
+    WalNotEstablished { path: PathBuf, actual: String },
+
     /// A domain registered an invalid migration list (non-contiguous or
     /// not starting at version 1). This is a programming error in the store
     /// crate, caught before any file is touched.
@@ -83,6 +112,13 @@ pub enum SqliteErrorClass {
 }
 
 /// Classify a rusqlite error at the storage level.
+///
+/// Adoption contract: store crates route every raw [`rusqlite::Error`]
+/// through this one classifier when deciding transient-vs-corrupt at their
+/// store boundary, instead of re-matching SQLite error codes locally.
+/// [`SqliteErrorClass::Other`] is the store layer's to interpret (constraint
+/// violations become CAS/stale semantics there, not here). Classification
+/// alone never authorizes a retry — see the crate-level retryability note.
 pub fn classify_sqlite_error(error: &rusqlite::Error) -> SqliteErrorClass {
     use rusqlite::ErrorCode;
     match error {

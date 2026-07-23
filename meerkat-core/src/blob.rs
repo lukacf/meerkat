@@ -295,6 +295,8 @@ pub enum BlobStoreError {
         /// materializing a copy. Filesystem metadata preflight may not know it.
         actual_encoded_bytes: Option<usize>,
     },
+    #[error("blob store write refused: maintenance fence held on {path}")]
+    MaintenanceFenceHeld { path: std::path::PathBuf },
     #[error("blob store read failed: {0}")]
     ReadFailed(String),
     #[error("blob {blob_id} is corrupt: {detail}")]

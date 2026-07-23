@@ -295,6 +295,8 @@ pub enum ArtifactError {
     NotFound(ArtifactId),
     #[error("artifact store read failed: {0}")]
     ReadFailed(String),
+    #[error("artifact store write refused: maintenance fence held on {path}")]
+    MaintenanceFenceHeld { path: std::path::PathBuf },
     #[error("artifact store write failed: {0}")]
     WriteFailed(String),
     #[error("artifact content is not blob-backed: {0}")]

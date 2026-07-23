@@ -330,6 +330,17 @@ fn split_brain_refuses_without_adopt_root_then_archives_the_other_copy() {
         archived[0].join("sessions.sqlite3").is_file(),
         "archive preserves the database"
     );
+    // Fence-before-compare evidence: every copy is fenced for the whole
+    // compare-to-archive interval, and the archived copy's released fence
+    // lock files ride into the archive.
+    assert!(
+        archived[0].join("realm.mfence").is_file(),
+        "archive must carry the realm write-admission lock file"
+    );
+    assert!(
+        archived[0].join("sessions.sqlite3.mfence").is_file(),
+        "archive must carry the per-database fence lock files"
+    );
     // The adopted copy stays where it lies, untouched.
     assert!(root_a.join("team").is_dir());
     assert!(root_a.join("team/sessions.sqlite3").is_file());
@@ -388,14 +399,20 @@ fn prune_lists_then_deletes_only_registered_artifacts() {
     let old_backup = paths.root.join("sessions.sqlite3.pre-0.0.1-1700000000");
     std::fs::write(&old_backup, b"old-backup").unwrap();
     backdate(&old_backup, 90);
-    let young_backup = paths.root.join("runtime.sqlite3.pre-0.0.1-1750000000");
+    let young_stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        - 86_400;
+    let young_name = format!("runtime.sqlite3.pre-0.0.1-{young_stamp}");
+    let young_backup = paths.root.join(&young_name);
     std::fs::write(&young_backup, b"young-backup").unwrap();
     let jsonl_dir = paths.root.join("sessions_jsonl");
     std::fs::create_dir_all(&jsonl_dir).unwrap();
     let quarantine = jsonl_dir.join("session_index.sqlite3.corrupt-42");
     std::fs::write(&quarantine, b"quarantine").unwrap();
     backdate(&quarantine, 90);
-    let archived_dir = root.join("old-team.pre-0.0.1-1700000000.split-brain");
+    let archived_dir = root.join(format!("old-team.pre-0.0.1-{young_stamp}.split-brain"));
     std::fs::create_dir_all(&archived_dir).unwrap();
     std::fs::write(archived_dir.join("sessions.sqlite3"), b"frozen").unwrap();
     // Distractors that must never be touched.
@@ -438,7 +455,7 @@ fn prune_lists_then_deletes_only_registered_artifacts() {
         action_of("session_index.sqlite3.corrupt-42"),
         "would-delete"
     );
-    assert_eq!(action_of("runtime.sqlite3.pre-0.0.1-1750000000"), "kept");
+    assert_eq!(action_of(&young_name), "kept");
     assert!(old_backup.is_file(), "dry-run deletes nothing");
 
     // Apply with the default 30-day threshold: old artifacts deleted, young
@@ -483,6 +500,101 @@ fn prune_lists_then_deletes_only_registered_artifacts() {
     assert!(!archived_dir.exists());
     assert!(live_db.is_file());
     assert!(notes.is_file());
+}
+
+#[test]
+fn prune_realm_filter_deletes_only_that_realms_artifacts() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("realms");
+    let alpha = write_manifest(&root, "alpha");
+    let beta = write_manifest(&root, "beta");
+    let alpha_backup = alpha.root.join("sessions.sqlite3.pre-0.0.1-1700000000");
+    std::fs::write(&alpha_backup, b"alpha-backup").unwrap();
+    let beta_backup = beta.root.join("sessions.sqlite3.pre-0.0.1-1700000000");
+    std::fs::write(&beta_backup, b"beta-backup").unwrap();
+    // Root-level whole-realm archives carrying each realm's identity.
+    let alpha_archive = root.join("alpha.pre-0.0.1-1700000000.split-brain");
+    std::fs::create_dir_all(&alpha_archive).unwrap();
+    std::fs::write(alpha_archive.join("sessions.sqlite3"), b"frozen").unwrap();
+    let beta_archive = root.join("beta.pre-0.0.1-1700000000.split-brain");
+    std::fs::create_dir_all(&beta_archive).unwrap();
+    // Root-level file archive with no realm identity: a scoped prune must
+    // never delete an unattributed preserved copy.
+    let orphan_archive = root.join("orphan.sqlite3.pre-0.0.1-1700000000");
+    std::fs::write(&orphan_archive, b"orphan").unwrap();
+
+    let output = run_rkat(
+        &temp,
+        &[
+            "--realm",
+            "alpha",
+            "storage",
+            "prune",
+            "--apply",
+            "--older-than-days",
+            "0",
+            "--json",
+            "--root",
+            root.to_str().unwrap(),
+        ],
+    );
+    assert_success(&output, "realm-scoped prune --apply");
+    let report = parse_json(&output);
+    let artifacts = report["artifacts"].as_array().expect("artifacts array");
+    assert_eq!(artifacts.len(), 2, "only alpha's artifacts: {report:#}");
+    assert!(
+        artifacts
+            .iter()
+            .all(|artifact| artifact["action"] == "deleted"),
+        "{report:#}"
+    );
+    assert!(!alpha_backup.exists(), "alpha's backup must be deleted");
+    assert!(!alpha_archive.exists(), "alpha's archive must be deleted");
+    assert!(beta_backup.is_file(), "beta's backup must survive");
+    assert!(beta_archive.is_dir(), "beta's archive must survive");
+    assert!(
+        orphan_archive.is_file(),
+        "unattributed root-level archive must survive a scoped prune"
+    );
+}
+
+#[test]
+fn explicit_roots_skip_the_ambient_legacy_home_probe() {
+    let temp = TempDir::new().unwrap();
+    // A legacy pre-realm sessions directory under the (overridden) home.
+    let legacy_sessions = temp.path().join(".rkat").join("sessions");
+    std::fs::create_dir_all(&legacy_sessions).unwrap();
+    std::fs::write(legacy_sessions.join("old.jsonl"), b"{}").unwrap();
+    let state_root = temp.path().join("realms");
+    create_healthy_realm(&state_root, "scoped");
+
+    // Explicit scope sweeps ONLY the given roots — no ambient home probe.
+    let scoped = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "migrate",
+            "--json",
+        ],
+    );
+    assert_success(&scoped, "explicitly scoped migrate");
+    let report = parse_json(&scoped);
+    assert!(
+        findings_with_code(&report, "legacy-home-sessions-dir").is_empty(),
+        "explicit roots must not probe the ambient home: {report:#}"
+    );
+
+    // The ambient dual-root sweep still reports the probe (report-only).
+    let ambient = run_rkat(&temp, &["storage", "migrate", "--json"]);
+    assert_success(&ambient, "ambient migrate");
+    let report = parse_json(&ambient);
+    assert_eq!(
+        findings_with_code(&report, "legacy-home-sessions-dir").len(),
+        1,
+        "{report:#}"
+    );
 }
 
 #[test]
@@ -543,4 +655,286 @@ fn foreign_fence_holder_fails_migrate_apply_typed() {
     // Nothing was migrated under the refused fence.
     let after = std::fs::read(&database).unwrap();
     assert_eq!(before, after, "refused migrate must not touch the database");
+}
+
+#[test]
+fn foreign_fence_holder_blocks_split_brain_resolution_before_any_compare_or_archive() {
+    let temp = TempDir::new().unwrap();
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    create_healthy_realm(&root_a, "team");
+    create_healthy_realm(&root_b, "team");
+
+    // Foreign holder on ONE copy's per-database fence: resolution fences
+    // every copy BEFORE comparing, so it must refuse with no divergence
+    // computed and nothing archived.
+    let lock_path = root_b.join("team").join("sessions.sqlite3.mfence");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().unwrap();
+
+    let output = run_rkat(
+        &temp,
+        &[
+            "storage",
+            "migrate",
+            "--apply",
+            "--json",
+            "--root",
+            root_a.to_str().unwrap(),
+            "--root",
+            root_b.to_str().unwrap(),
+            "--adopt-root",
+            root_a.to_str().unwrap(),
+            "--fence-wait-secs",
+            "0",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "held fence must refuse split-brain resolution\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let split = report["split_brain"].as_array().expect("split_brain array");
+    assert_eq!(split.len(), 1, "{report:#}");
+    assert_eq!(split[0]["resolution"]["kind"], "refused", "{report:#}");
+    let reason = split[0]["resolution"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("maintenance fence"),
+        "refusal must name the fence: {reason}"
+    );
+    // The comparison never ran under a broken fence: no divergence entries.
+    assert!(split[0]["sessions"].as_array().unwrap().is_empty());
+    assert!(split[0]["files"].as_array().unwrap().is_empty());
+    // Nothing moved.
+    assert!(root_a.join("team").is_dir());
+    assert!(root_b.join("team").is_dir());
+    drop(holder);
+}
+
+#[test]
+fn ledger_baseline_read_failures_and_future_versions_are_refusals_not_would_stamp() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "poisoned");
+    // An unreadable database must surface as a per-realm error, never as a
+    // missing ledger the dry-run could report as would-stamp.
+    std::fs::write(paths.root.join("tasks.db"), b"this is not sqlite").unwrap();
+    // A future-versioned domain must be reported as a refusal exactly as
+    // `--apply`'s guarded constructor would refuse it.
+    let jsonl_dir = paths.root.join("sessions_jsonl");
+    std::fs::create_dir_all(&jsonl_dir).unwrap();
+    {
+        let conn = Connection::open(jsonl_dir.join("session_index.sqlite3")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meerkat_schema VALUES ('jsonl-index', 9223372036854775807)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let output = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "migrate",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "baseline read failures and future versions must exit 1\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let realms = report["realms"].as_array().expect("realms array");
+    assert_eq!(realms.len(), 1, "{report:#}");
+    let errors: Vec<&str> = realms[0]["errors"]
+        .as_array()
+        .expect("realm errors")
+        .iter()
+        .map(|error| error.as_str().unwrap())
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("ledger unreadable") && error.contains("tasks.db")),
+        "unreadable database must surface typed: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("from the future") && error.contains("jsonl-index")),
+        "future version must surface as a refusal: {errors:?}"
+    );
+    // The unreadable database contributes no ledger rows (no would-stamp
+    // laundering)...
+    assert!(
+        ledger_entries(&realms[0], "tools-tasks", "tasks.db").is_empty(),
+        "{report:#}"
+    );
+    // ...and the future domain's row is report-only, never would-stamp.
+    let future_rows = ledger_entries(&realms[0], "jsonl-index", "session_index.sqlite3");
+    assert_eq!(future_rows.len(), 1, "{report:#}");
+    assert_eq!(future_rows[0]["action"], "report-only", "{report:#}");
+    assert_eq!(future_rows[0]["before"], 9_223_372_036_854_775_807_i64);
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_archive_failure_reports_archive_failed_with_completed_archives_visible() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = TempDir::new().unwrap();
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    let root_c = temp.path().join("root-c");
+    create_healthy_realm(&root_a, "team");
+    create_healthy_realm(&root_b, "team");
+    create_healthy_realm(&root_c, "team");
+    // root-c refuses renames (its realm directory cannot be moved within
+    // it), so the third copy's archive fails after root-b's succeeded.
+    std::fs::set_permissions(&root_c, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = run_rkat(
+        &temp,
+        &[
+            "storage",
+            "migrate",
+            "--apply",
+            "--json",
+            "--root",
+            root_a.to_str().unwrap(),
+            "--root",
+            root_b.to_str().unwrap(),
+            "--root",
+            root_c.to_str().unwrap(),
+            "--adopt-root",
+            root_a.to_str().unwrap(),
+        ],
+    );
+    // Restore write permission before asserting so tempdir cleanup works
+    // even when an assertion fails.
+    std::fs::set_permissions(&root_c, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "partial archive must exit 1\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let split = report["split_brain"].as_array().expect("split_brain array");
+    assert_eq!(split.len(), 1, "{report:#}");
+    let resolution = &split[0]["resolution"];
+    assert_eq!(resolution["kind"], "archive_failed", "{report:#}");
+    assert_eq!(
+        resolution["adopted"].as_str().unwrap(),
+        root_a.join("team").to_str().unwrap()
+    );
+    // The archive that succeeded before the failure stays visible AND on
+    // disk — a partial archive must never be reported as "nothing moved".
+    let archived = resolution["archived"].as_array().expect("archived array");
+    assert_eq!(archived.len(), 1, "{report:#}");
+    let archive_path = PathBuf::from(archived[0].as_str().unwrap());
+    assert!(
+        archive_path.is_dir(),
+        "completed archive must exist: {archive_path:?}"
+    );
+    let reason = resolution["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("root-c"),
+        "reason names the failure: {reason}"
+    );
+    assert!(
+        !root_b.join("team").exists(),
+        "root-b's copy was archived before the failure"
+    );
+    assert!(root_c.join("team").is_dir(), "the failed copy stays put");
+    assert!(
+        root_a.join("team").is_dir(),
+        "the adopted copy is untouched"
+    );
+    // Partial resolution is a hard error; the realm is not migrated in the
+    // same run.
+    assert!(!report["errors"].as_array().unwrap().is_empty());
+    assert!(
+        report["realms"].as_array().unwrap().is_empty(),
+        "{report:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn adopt_root_refuses_when_the_comparison_is_inconclusive() {
+    let temp = TempDir::new().unwrap();
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    create_healthy_realm(&root_a, "team");
+    create_healthy_realm(&root_b, "team");
+    // A symlink inside an authoritative tree poisons its entry as Unknown:
+    // the comparison cannot account for it, so no archive decision may rest
+    // on the report.
+    let blobs = root_b.join("team").join("blobs");
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::os::unix::fs::symlink("missing-target", blobs.join("ghost")).unwrap();
+
+    let output = run_rkat(
+        &temp,
+        &[
+            "storage",
+            "migrate",
+            "--apply",
+            "--json",
+            "--root",
+            root_a.to_str().unwrap(),
+            "--root",
+            root_b.to_str().unwrap(),
+            "--adopt-root",
+            root_a.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "inconclusive comparison must refuse the archive decision\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let split = report["split_brain"].as_array().expect("split_brain array");
+    assert_eq!(split.len(), 1, "{report:#}");
+    assert_eq!(split[0]["resolution"]["kind"], "refused", "{report:#}");
+    let reason = split[0]["resolution"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("inconclusive"),
+        "refusal names the inconclusive comparison: {reason}"
+    );
+    // The poisoned entry is visible as unknown, and nothing moved.
+    assert!(
+        split[0]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["status"]["kind"] == "unknown"),
+        "{report:#}"
+    );
+    assert!(root_a.join("team").is_dir());
+    assert!(root_b.join("team").is_dir());
 }

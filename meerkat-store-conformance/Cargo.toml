@@ -17,9 +17,13 @@ async-trait = { workspace = true }
 meerkat-core = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+# tokio is native-only: the baseline chapter's multi-task contention step is
+# the sole runtime consumer, and it is cfg-gated off on wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [lints]

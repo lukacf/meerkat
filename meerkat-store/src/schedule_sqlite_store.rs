@@ -1,6 +1,6 @@
 use crate::StoreError;
 use crate::json_column::JsonColumnBytes;
-use crate::sqlite_store::{begin_immediate_transaction, open_connection};
+use crate::sqlite_store::begin_immediate_transaction;
 use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
@@ -59,7 +59,18 @@ impl std::ops::DerefMut for ScheduleConn {
 
 fn open_schedule_connection(path: &Path) -> Result<ScheduleConn, StoreError> {
     let guard = meerkat_sqlite::OperationGuard::for_database(path)?;
-    let mut conn = open_connection(path)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // The schedule store preflights its own domain (not its
+            // co-tenants'): a future schedule-store file is refused before
+            // the Primary profile's WAL conversion.
+            schema_preflight: &[&SCHEDULE_STORE_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(StoreError::from)?;
     meerkat_sqlite::apply_domain_migrations(&mut conn, &SCHEDULE_STORE_DOMAIN)?;
     Ok(ScheduleConn {
         conn,
@@ -1310,6 +1321,52 @@ fn into_schedule_store_error(error: StoreError) -> ScheduleStoreError {
     match error {
         StoreError::Io(err) => ScheduleStoreError::Io(err.to_string()),
         StoreError::Serialization(err) => ScheduleStoreError::Serialization(err.to_string()),
+        // Bounded busy-handler exhaustion is the schedule store's retryable
+        // class: `Concurrency` is what the driver already re-reads and
+        // retries on, so classified lock contention must not collapse into
+        // the terminal `Internal` bucket.
+        StoreError::Busy(err) => ScheduleStoreError::Concurrency(err.to_string()),
         other => ScheduleStoreError::Internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn sqlite_failure(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn classified_busy_maps_to_the_retryable_concurrency_class() {
+        for code in [
+            rusqlite::ErrorCode::DatabaseBusy,
+            rusqlite::ErrorCode::DatabaseLocked,
+        ] {
+            let err = into_schedule_store_error(StoreError::from(sqlite_failure(code)));
+            assert!(
+                matches!(err, ScheduleStoreError::Concurrency(_)),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classified_corruption_stays_terminal() {
+        let err = into_schedule_store_error(StoreError::from(sqlite_failure(
+            rusqlite::ErrorCode::DatabaseCorrupt,
+        )));
+        assert!(
+            matches!(err, ScheduleStoreError::Internal(_)),
+            "unexpected error: {err:?}"
+        );
     }
 }

@@ -219,6 +219,96 @@ fn legacy_realm_reports_no_ledger_and_census_without_mutating() {
 }
 
 #[test]
+fn attached_global_option_forms_reach_the_storage_verbs() {
+    // `--state-root=…` / `--realm=…` / `-r…` must not trip the implicit
+    // `run` insertion in the argv scanner (which would misparse `storage`
+    // as a prompt).
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    create_healthy_realm(&state_root, "alpha");
+    create_healthy_realm(&state_root, "beta");
+    let state_root_arg = format!("--state-root={}", state_root.display());
+
+    let output = run_doctor(
+        &temp,
+        &[
+            &state_root_arg,
+            "--realm=alpha",
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "attached long forms must reach storage doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let inventory = report["inventory"].as_array().expect("inventory array");
+    assert_eq!(inventory.len(), 1, "{report:#}");
+    assert_eq!(inventory[0]["realm"], "alpha");
+
+    let output = run_doctor(
+        &temp,
+        &[&state_root_arg, "-rbeta", "storage", "doctor", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "combined short form must reach storage doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let inventory = report["inventory"].as_array().expect("inventory array");
+    assert_eq!(inventory.len(), 1, "{report:#}");
+    assert_eq!(inventory[0]["realm"], "beta");
+}
+
+#[test]
+fn isolated_and_default_model_are_usage_errors_for_storage_verbs() {
+    // Storage verbs dispatch before runtime-scope resolution: `--isolated`
+    // and `--default-model` can have no effect there and must be rejected
+    // as usage errors (exit 2), never silently ignored.
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    create_healthy_realm(&state_root, "healthy");
+
+    for (rejected_flag, args) in [
+        (
+            "--isolated",
+            vec!["--isolated", "storage", "doctor", "--json"],
+        ),
+        ("--isolated", vec!["--isolated", "storage", "migrate"]),
+        (
+            "--default-model",
+            vec!["--default-model", "gpt-5.4", "storage", "doctor"],
+        ),
+        (
+            "--default-model",
+            vec!["--default-model", "gpt-5.4", "storage", "prune", "--apply"],
+        ),
+    ] {
+        let mut full = vec!["--state-root", state_root.to_str().unwrap()];
+        full.extend(args);
+        let output = run_doctor(&temp, &full);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{rejected_flag} with storage verbs must exit 2\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(rejected_flag) && stderr.contains("rkat storage"),
+            "usage error must name the flag and the storage verbs: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn split_brain_twin_across_two_roots_is_an_error() {
     let temp = TempDir::new().unwrap();
     let root_a = temp.path().join("root-a");
@@ -359,5 +449,76 @@ fn dangling_blob_reference_and_future_schema_are_errors() {
     assert_eq!(
         findings_with_code(&filtered_report, "schema-from-the-future").len(),
         1
+    );
+}
+
+#[test]
+fn global_realm_config_writes_route_to_the_user_global_doc() {
+    // The reserved `global` realm's config head is the user-global document
+    // child realms inherit from (`<user-config-root>/.rkat/config.toml`);
+    // writing `<state_root>/global/config.toml` instead would shadow it.
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let user_root = temp.path().join("home");
+
+    let set = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--user-config-root",
+            user_root.to_str().unwrap(),
+            "--realm",
+            "global",
+            "config",
+            "set",
+            "--toml",
+            "agent.model = \"gpt-5.5\"",
+        ],
+    );
+    assert!(
+        set.status.success(),
+        "global-realm config set must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&set.stdout),
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let global_doc = user_root.join(".rkat").join("config.toml");
+    assert!(
+        global_doc.is_file(),
+        "the write must land in the user-global doc: {global_doc:?}"
+    );
+    let written = std::fs::read_to_string(&global_doc).unwrap();
+    assert!(written.contains("gpt-5.5"), "{written}");
+    assert!(
+        !state_root.join("global").join("config.toml").exists(),
+        "the reserved global realm must not materialize a shadowing per-realm doc"
+    );
+
+    // Reads route through the same projection.
+    let get = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--user-config-root",
+            user_root.to_str().unwrap(),
+            "--realm",
+            "global",
+            "config",
+            "get",
+        ],
+    );
+    assert!(
+        get.status.success(),
+        "global-realm config get must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&get.stdout),
+        String::from_utf8_lossy(&get.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&get.stdout).contains("gpt-5.5"),
+        "config get must read the user-global doc back:\n{}",
+        String::from_utf8_lossy(&get.stdout)
     );
 }

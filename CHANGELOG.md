@@ -86,6 +86,32 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
+- **Removed public helpers (storage unification arc):**
+  `meerkat_core::config::find_project_root`,
+  `meerkat_core::config::data_dir`, and the `meerkat_core::config::dirs`
+  module (its `home_dir` HOME-env stub) were removed. Replacements:
+  project-root discovery is `meerkat_core::storage_layout::find_project_root`
+  (re-exported at the crate root; note the semantic change — any existing
+  `.rkat` entry counts, not only a directory, matching the historically live
+  `meerkat_tools::find_project_root` behavior, which now delegates to it).
+  `data_dir()` has no drop-in replacement: realm state roots resolve through
+  `meerkat_core::StorageLayout` / `default_state_root()`, and the user
+  `~/.rkat` root is `StorageLayout::user_rkat_root()`. The `dirs::home_dir`
+  stub maps onto `StorageLayout::user_home_root()` (or the
+  `user_config_root` bootstrap input). `StorageConfig::default()` no longer
+  pre-fills `directory` from the ambient data dir (the field is deprecated
+  and ignored).
+- `meerkat_core::realm_exists_under` now returns
+  `Result<bool, RuntimeBootstrapError>` and probes fail closed: only
+  NotFound means absent (other IO outcomes are the new typed
+  `RootProbeFailed`), an identity-colliding directory (two realm ids
+  sanitizing to one directory name) is the new typed
+  `RealmDirectoryCollision`, and an unreadable manifest is the new typed
+  `ManifestUnreadable`. `DualRootResolution` gained the required
+  `candidate_roots` field, and `meerkat::PersistenceError` gained the
+  `Bootstrap` and `FirstStart` variants (cross-candidate first-start
+  reservation refusals from
+  `meerkat_store::realm::ensure_realm_manifest_pin_with_candidates`).
 - Generated `MeerkatMachine` recovery alphabets replace the eight
   phase-shaped `RecoverRuntimeAuthority*` inputs with the single total
   `ClassifyRuntimeAuthorityReconciliation` observation input. Downstream
@@ -237,6 +263,30 @@ via cargo-semver-checks against the published baselines).
   admission instead of silently using the prior model.
 
 ### Fixed
+
+- **Idle busy-loop: machine schemas are constructed once per process.** The
+  `machine!` macro now emits a `LazyLock`-cached `schema_static()` (with
+  `schema()` cloning the cache), and the schedule/occurrence wire-header
+  validation uses process-lifetime identity stamps. Previously every
+  schedule-host tick (250 ms, per member) re-parsed entire machine DSLs per
+  persisted row — ~0.25-0.3 core per idle durable member; an idle fleet now
+  costs ~zero. Structural regression tests pin the caching (pointer
+  identity) and the serde path (no schema construction per row).
+- **A stalled LLM provider stream no longer wedges the turn forever.** New
+  stream-inactivity watchdog (`[retry] stream_inactivity_timeout`, **default
+  ON at 300s**; `"disabled"` opts out): a provider call whose stream
+  produces no events inside the window is aborted with the retryable
+  `StreamStalled` failure, so one stall retries and repeated stalls exhaust
+  the retry budget and fail the turn typed instead of hanging indefinitely.
+  Behavior change: provider calls that previously sat silent for >5 minutes
+  and eventually completed are now aborted and retried. The compaction LLM
+  call is not yet watchdog-guarded (follow-up).
+- **`force_cancel` is legal from `Running`.** Force-cancelling a running mob
+  member now transitions through the machine's cancelling phase and
+  interrupts the in-flight work instead of refusing with
+  `invalid state transition: Running -> Running`; a second force-cancel
+  while cancelling is an idempotent success, and force-cancelling an
+  identity the roster has never seen answers `MemberNotFound`.
 
 - **Mob-shutdown restart wedge: a cancelled checkpointer gate no longer
   silently drops the committed-boundary SessionStore projection.** Mob stop

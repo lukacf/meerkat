@@ -53,7 +53,7 @@ use meerkat::{
     OutputSchema, PersistentSessionService, ScheduleService, ScheduleToolDispatcher, Session,
     SessionId, SessionService, SessionServiceControlExt, SessionServiceHistoryExt,
     WorkGraphService, encode_llm_client_override_for_service, handle_schedule_tools_call,
-    open_realm_persistence_in, schedule_tools_list,
+    schedule_tools_list,
 };
 use meerkat_contracts::{
     CommsSendParams, CommsSendResult, ErrorCode, RuntimeStateResult, SessionLocator, SkillsParams,
@@ -390,32 +390,54 @@ impl AppState {
         expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        // Realm-id-first dual-root resolution; the project-local candidate
-        // participates only with an explicit --context-root (see rkat-rpc).
-        let locator = bootstrap
-            .realm
-            .resolve_locator_dual_root(
-                bootstrap
-                    .context
-                    .context_root
-                    .as_deref()
-                    .map(meerkat_core::local_realms_candidate)
-                    .as_deref(),
-                meerkat_core::RealmRootDefault::UserGlobal,
-            )?
-            .locator;
+        // Realm-id-first dual-root resolution through the storage layout
+        // (the single path authority; the layout's realm-root candidates arm
+        // the cross-candidate first-start reservation at open). The
+        // project-local candidate participates only with an explicit
+        // --context-root (see rkat-rpc).
+        let invocation_context = bootstrap
+            .context
+            .context_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let meerkat_core::ResolvedStorage {
+            layout,
+            locator,
+            root_choice,
+        } = meerkat_core::StorageLayout::resolve(
+            meerkat_core::StorageLayoutInputs {
+                invocation_context,
+                explicit_state_root: bootstrap.realm.state_root.clone(),
+                user_config_root: bootstrap.context.user_config_root.clone(),
+                default_root: Some(meerkat_core::RealmRootDefault::UserGlobal),
+                probe_local_candidate: bootstrap.context.context_root.is_some(),
+            },
+            &bootstrap.realm,
+        )?;
+        tracing::info!(
+            realm = %locator.realm,
+            state_root = %locator.state_root.display(),
+            root_choice = ?root_choice,
+            "resolved realm storage"
+        );
         let realm = locator.realm;
-        let instance_id = bootstrap.realm.instance_id;
+        let realms_root = locator.state_root;
+        let instance_id = bootstrap.realm.instance_id.clone();
         let backend_hint = bootstrap
             .realm
             .backend_hint
             .as_deref()
             .and_then(parse_backend_hint);
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
-        let realms_root = locator.state_root;
         let (manifest, persistence) =
-            open_realm_persistence_in(&realms_root, realm.as_str(), backend_hint, origin_hint)
-                .await?;
+            meerkat::storage_provider::open_realm_persistence_with_layout(
+                layout.clone(),
+                realm.as_str(),
+                backend_hint,
+                origin_hint,
+            )
+            .await?;
         let session_store = persistence.session_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_service = WorkGraphService::with_scope(
@@ -424,15 +446,37 @@ impl AppState {
             meerkat::WorkNamespace::default(),
         );
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm.as_str());
+
+        // Shared filesystem realm-config source, composed before the head
+        // config store so both route through the SAME doc mapping: the
+        // reserved `global` realm maps to the layout's user-global doc
+        // (honoring --user-config-root; when no home-like root resolves, a
+        // path under the realms root that will never exist — so `global`
+        // yields None and behaves like today) and every other realm to its
+        // per-realm config. Routing the head store through `config_doc_path`
+        // means an explicit --state-root cannot shadow the global document
+        // with `<state_root>/global/config.toml`.
+        let global_doc = layout
+            .global_config_path()
+            .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
+        let fs_realm_config_source = meerkat_store::FilesystemRealmConfigSource::new(
+            realms_root.clone(),
+            global_doc,
+            meerkat_models::canonical(),
+        );
+        let head_config_doc = fs_realm_config_source.config_doc_path(&realm);
+        let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+            Arc::new(fs_realm_config_source);
+
         let resolved_paths = meerkat_core::ConfigResolvedPaths {
             root: realm_paths.root.display().to_string(),
             manifest_path: realm_paths.manifest_path.display().to_string(),
-            config_path: realm_paths.config_path.display().to_string(),
+            config_path: head_config_doc.display().to_string(),
             sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
             sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
         };
         let base_config_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
-            realm_paths.config_path.clone(),
+            head_config_doc,
             meerkat_models::canonical(),
         ));
         let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
@@ -455,20 +499,6 @@ impl AppState {
             "rkat-rest",
         )
         .await?;
-
-        // Shared filesystem realm-config source: maps the reserved `global`
-        // realm to the home-rooted doc (or, when no HOME-rooted path exists, a
-        // path under the realms root that will never exist — so `global` yields
-        // None and behaves like today) and every other realm to its per-realm
-        // config. Surfaces inject this rather than re-deriving the projection.
-        let global_doc = meerkat_core::Config::global_config_path()
-            .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
-        let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
-            Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
-                realms_root.clone(),
-                global_doc,
-                meerkat_models::canonical(),
-            ));
 
         // Compose the head realm's parent chain into the effective config the
         // agent build + auth-resolution paths read. The HEAD config is the raw

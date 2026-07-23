@@ -702,18 +702,27 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
             },
             instance_id: scope.instance_id.clone(),
             backend_hint: None,
-            state_root: pinned_root,
+            state_root: pinned_root.clone(),
         };
-        let local_candidate = scope
-            .context_root
-            .as_deref()
-            .map(meerkat_core::local_realms_candidate);
-        let resolution = realm_cfg.resolve_locator_dual_root(
-            local_candidate.as_deref(),
-            meerkat_core::RealmRootDefault::ProjectLocal,
+        // Same layout-authority resolution as the primary scope: the
+        // project-root walk (not the raw invocation context) feeds the
+        // project-local candidate, and first-start materialization runs the
+        // cross-candidate reservation instead of unlocked probes.
+        let resolved = meerkat_core::StorageLayout::resolve(
+            meerkat_core::StorageLayoutInputs {
+                invocation_context: scope.context_root.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                }),
+                explicit_state_root: pinned_root.clone(),
+                user_config_root: scope.user_config_root.clone(),
+                default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+                probe_local_candidate: true,
+            },
+            &realm_cfg,
         )?;
-        scope.locator = resolution.locator;
-        scope.root_choice = resolution.choice;
+        scope.locator = resolved.locator;
+        scope.root_choice = resolved.root_choice;
+        scope.layout = resolved.layout;
         scope.origin_hint = RealmOrigin::Explicit;
         let (reloaded_config, reloaded_root) = crate::load_config(&scope).await?;
         config = reloaded_config;

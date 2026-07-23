@@ -78,6 +78,12 @@ pub async fn artifacts(factory: &dyn ArtifactStoreFactory) -> Result<(), Conform
 
     // is_persistent honesty: stable across handles; persistent stores serve
     // records through reopened handles.
+    //
+    // Residual trust: without a process restart, a shared-state "reopen"
+    // (the correct model for in-memory stores) cannot expose an
+    // is_persistent() lie; the cross-handle write/delete below at least
+    // proves both handles address one backing. Genuine restart survival is
+    // only proven by factories that reopen the durable medium.
     let step = "is_persistent_honesty";
     let reopened = factory.open().await?;
     steps.ensure(
@@ -92,6 +98,53 @@ pub async fn artifacts(factory: &dyn ArtifactStoreFactory) -> Result<(), Conform
             survived == record,
             "a persistent artifact store must serve records after reopen",
         )?;
+
+        // Cross-handle identity: write through the reopened handle, read and
+        // delete through the original, observe the delete via the reopened.
+        let cross_id = steps.wrap(step, ArtifactId::new("conformance-artifact-cross"))?;
+        let cross_body = "cross-handle artifact body";
+        let cross_record = steps.wrap(
+            step,
+            ArtifactRecord::new(
+                cross_id.clone(),
+                ArtifactType::Text,
+                "cross-handle artifact".to_string(),
+                "text/plain".to_string(),
+                cross_body.len() as u64,
+                None,
+                ArtifactContentHandle::Opaque {
+                    handle: format!("opaque:{cross_body}"),
+                    media_type: "text/plain".to_string(),
+                },
+            ),
+        )?;
+        steps.wrap(step, reopened.put(cross_record.clone()).await)?;
+        let via_original = steps.wrap(step, store.get(&cross_id).await)?;
+        steps.ensure(
+            step,
+            via_original == cross_record,
+            "an artifact written through a reopened handle must be served by the original \
+             handle — the reopened handle is backed by different storage",
+        )?;
+        steps.wrap(step, store.delete(&cross_id).await)?;
+        match reopened.get(&cross_id).await {
+            Err(ArtifactError::NotFound(_)) => {}
+            Err(other) => {
+                return Err(steps.fail(
+                    step,
+                    format!(
+                        "a delete through the original handle must be observed as NotFound by \
+                         the reopened handle, got: {other}"
+                    ),
+                ));
+            }
+            Ok(_) => {
+                return Err(steps.fail(
+                    step,
+                    "a delete through the original handle must be observed by the reopened handle",
+                ));
+            }
+        }
     }
 
     let step = "delete_and_not_found_honesty";

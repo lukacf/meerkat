@@ -63,8 +63,17 @@ impl std::ops::DerefMut for IndexConn {
 
 fn open_connection(path: &Path) -> Result<IndexConn, StoreError> {
     let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(StoreError::from)?;
-    let mut conn = meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::PRIMARY)
-        .map_err(StoreError::from)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&JSONL_INDEX_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(StoreError::from)?;
     meerkat_sqlite::apply_domain_migrations(&mut conn, &JSONL_INDEX_DOMAIN)
         .map_err(StoreError::from)?;
     Ok(IndexConn {

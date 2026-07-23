@@ -1,11 +1,14 @@
 //! Baseline `SessionStore` chapter: the contract every backend must satisfy.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 use meerkat_core::session_store::session_projection_cas_token;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::{Message, UserMessage};
 use meerkat_core::{
-    Message, SessionCheckpointRevision, SessionCheckpointState, SessionFilter, SessionGeneration,
-    SessionId, SessionStore, SessionStoreError, UserMessage, adopt_legacy_session,
+    SessionCheckpointRevision, SessionCheckpointState, SessionFilter, SessionGeneration, SessionId,
+    SessionStore, SessionStoreError, adopt_legacy_session,
 };
 
 use crate::factory::SessionStoreFactory;
@@ -15,15 +18,21 @@ use crate::fixtures;
 const CHAPTER: &str = "baseline";
 
 /// Number of concurrent writers in the contention step.
+#[cfg(not(target_arch = "wasm32"))]
 const CONCURRENT_WRITERS: usize = 8;
 /// Bounded retry budget per writer (no timing dependence: writers retry on
 /// typed continuity conflicts only).
+#[cfg(not(target_arch = "wasm32"))]
 const CONCURRENT_WRITE_ATTEMPTS: usize = 200;
 
 /// Baseline chapter: save/load round-trips, list/delete,
 /// `delete_if_current_revision` guard semantics, append-only save-guard
 /// enforcement, checkpoint-stamp preservation across save/load,
 /// concurrent-writer contention, and large payloads.
+///
+/// On wasm32 the multi-task contention step is skipped: the target has no
+/// multi-threaded task spawn, so real writer parallelism is inexpressible
+/// there (every other step runs unchanged).
 pub async fn baseline(factory: &dyn SessionStoreFactory) -> Result<(), ConformanceFailure> {
     let steps = Steps::chapter(CHAPTER);
     let store = factory.open().await?;
@@ -33,6 +42,7 @@ pub async fn baseline(factory: &dyn SessionStoreFactory) -> Result<(), Conforman
     append_only_guard(&steps, store.as_ref()).await?;
     delete_if_current_revision_guard(&steps, store.as_ref()).await?;
     checkpoint_stamp_round_trip(&steps, factory, store.as_ref()).await?;
+    #[cfg(not(target_arch = "wasm32"))]
     concurrent_writer_contention(&steps, Arc::clone(&store)).await?;
     large_payload(&steps, store.as_ref()).await?;
     Ok(())
@@ -313,6 +323,7 @@ async fn checkpoint_stamp_round_trip(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn concurrent_writer_contention(
     steps: &Steps,
     store: Arc<dyn SessionStore>,

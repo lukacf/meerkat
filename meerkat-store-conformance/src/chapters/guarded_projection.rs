@@ -74,6 +74,39 @@ async fn create_when_absent(
         "guarded create must persist the projection",
     )?;
 
+    // expected = None over an EXISTING row must conflict: None means "no row
+    // may exist yet", never "unconditional upsert". A backend that treats it
+    // as an upsert silently clobbers a projection another writer committed.
+    let mut clobber = loaded.clone();
+    fixtures::push_text(&mut clobber, "create-over-existing clobber");
+    match store
+        .save_authoritative_projection_if_current_revision(&clobber, None)
+        .await
+    {
+        Err(SessionStoreError::TranscriptContinuityViolation { .. }) => {}
+        Err(other) => {
+            return Err(steps.fail(
+                STEP,
+                format!(
+                    "guarded create over an existing row must fail with \
+                     TranscriptContinuityViolation, got: {other}"
+                ),
+            ));
+        }
+        Ok(()) => {
+            return Err(steps.fail(
+                STEP,
+                "guarded create (expected = None) over an existing row must be rejected",
+            ));
+        }
+    }
+    let (row_after_clobber, _token) = load_current(steps, STEP, store, &session).await?;
+    steps.ensure(
+        STEP,
+        row_after_clobber.messages().len() == loaded.messages().len(),
+        "a rejected guarded create must leave the committed row intact",
+    )?;
+
     // expected = Some(token) against an ABSENT row must be rejected.
     let absent = fixtures::session_with_texts(&["never persisted"]);
     let bogus_token = steps.wrap(STEP, session_projection_cas_token(&absent))?;

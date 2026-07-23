@@ -33,7 +33,8 @@ impl ForwardingSessionStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for ForwardingSessionStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         self.inner.save(session).await
@@ -122,7 +123,8 @@ impl SwallowingSessionStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for SwallowingSessionStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         self.inner.save(session).await

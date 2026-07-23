@@ -97,6 +97,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
+/// Usage errors mirror clap's argument-error exit code.
+const EXIT_USAGE: u8 = 2;
 
 const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from the terminal";
 
@@ -712,6 +714,16 @@ fn is_root_flag_without_value(arg: &str) -> bool {
     matches!(arg, "--isolated")
 }
 
+/// Root flag spelled with its value attached: `--flag=value`, `-r=value`,
+/// or the combined short form `-rvalue` (`-r` is the only root short flag
+/// taking a value). These consume one argv slot, not two.
+fn is_root_flag_with_attached_value(arg: &str) -> bool {
+    if let Some((flag, _value)) = arg.split_once('=') {
+        return is_root_flag_with_value(flag);
+    }
+    !arg.starts_with("--") && arg.len() > 2 && arg.starts_with("-r")
+}
+
 /// Inject `run` as the default subcommand when the first positional argument
 /// is not a known command, while preserving top-level help/version handling.
 fn normalize_cli_args(
@@ -749,7 +761,7 @@ fn normalize_cli_args(
             if is_root_passthrough_flag(arg_str) {
                 return args;
             }
-            if is_root_flag_without_value(arg_str) {
+            if is_root_flag_without_value(arg_str) || is_root_flag_with_attached_value(arg_str) {
                 i += 1;
             } else if is_root_flag_with_value(arg_str) {
                 i += 2; // skip flag and its value
@@ -3399,6 +3411,10 @@ async fn main() -> anyhow::Result<ExitCode> {
     // storage handlers open no persistence bundle, take no realm leases,
     // and read only their candidate roots.
     if let Some(Commands::Storage { command }) = &cli.command {
+        if let Some(usage) = storage_global_usage_conflict(&cli) {
+            eprintln!("error: {usage}");
+            return Ok(ExitCode::from(EXIT_USAGE));
+        }
         return Ok(match handle_storage_command(command, &cli).await {
             Ok(()) => ExitCode::from(EXIT_SUCCESS),
             Err(e) => {
@@ -4437,6 +4453,10 @@ async fn write_comms_binding_out(
 #[derive(Clone)]
 struct RuntimeScope {
     locator: RealmLocator,
+    /// The bootstrap path authority the locator was resolved with. Carries
+    /// every probed realm-root candidate so first materialization can
+    /// reserve across all of them (`open_realm_persistence_with_layout`).
+    layout: meerkat_core::StorageLayout,
     /// How the state root was chosen (explicit flag / existing realm /
     /// surface default) — realm re-resolution (mob-host config override)
     /// keys off this.
@@ -4520,17 +4540,26 @@ fn resolve_runtime_scope_with_realm(
             .map(|b: RealmBackend| b.as_str().to_string()),
         state_root: cli.state_root.clone(),
     };
-    // Realm-id-first dual-root resolution: an explicit --state-root wins;
-    // else the realm is used where it already exists (project-local
-    // <context-root>/.rkat/realms or the user-global data dir; both is a
-    // typed split-brain refusal); else the CLI's documented project-local
-    // default applies.
-    let resolution = realm_cfg.resolve_locator_dual_root(
-        Some(&meerkat_core::local_realms_candidate(&context_root)),
-        meerkat_core::RealmRootDefault::ProjectLocal,
+    // Bootstrap path authority: realm-id-first dual-root resolution through
+    // `StorageLayout::resolve`. An explicit --state-root wins; else the
+    // realm is used where it already exists (project-local
+    // <project-root>/.rkat/realms — walked up from the context root — or
+    // the user-global data dir; both is a typed split-brain refusal); else
+    // the CLI's documented project-local default applies. The resolved
+    // layout rides on the scope so persistence opens reserve across every
+    // probed candidate root.
+    let resolved = meerkat_core::StorageLayout::resolve(
+        meerkat_core::StorageLayoutInputs {
+            invocation_context: context_root.clone(),
+            explicit_state_root: cli.state_root.clone(),
+            user_config_root: cli.user_config_root.clone(),
+            default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+            probe_local_candidate: true,
+        },
+        &realm_cfg,
     )?;
-    let locator = resolution.locator;
-    if resolution.choice == meerkat_core::RealmRootChoice::ExistingGlobal {
+    let locator = resolved.locator;
+    if resolved.root_choice == meerkat_core::RealmRootChoice::ExistingGlobal {
         tracing::info!(
             realm = %locator.realm,
             state_root = %locator.state_root.display(),
@@ -4544,7 +4573,8 @@ fn resolve_runtime_scope_with_realm(
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
-        root_choice: resolution.choice,
+        layout: resolved.layout,
+        root_choice: resolved.root_choice,
         instance_id: cli.instance.clone(),
         // Only pass an explicit backend hint when the caller asked for one.
         // Existing realms are always opened using their pinned manifest backend.
@@ -4561,19 +4591,29 @@ fn resolve_runtime_scope_with_realm(
 async fn resolve_config_store(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(Arc<dyn ConfigStore>, PathBuf)> {
-    let paths =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    if let Some(parent) = paths.config_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
-    }
+    // Route through the shared realm→config-document projection: the
+    // reserved `global` realm writes the user-global doc child realms
+    // actually inherit from — a `<state_root>/global/config.toml` head
+    // would shadow it. Other realms keep their per-realm doc.
+    let source = meerkat_store::FilesystemRealmConfigSource::new(
+        scope.locator.state_root.clone(),
+        cli_global_config_path(scope),
+        meerkat_models::canonical(),
+    );
+    let config_path = source.config_doc_path(&scope.locator.realm);
+    let base_dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tokio::fs::create_dir_all(&base_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     Ok((
         Arc::new(FileConfigStore::new(
-            paths.config_path,
+            config_path,
             meerkat_models::canonical(),
         )),
-        paths.root,
+        base_dir,
     ))
 }
 
@@ -7614,6 +7654,30 @@ where
     }
 }
 
+/// Global options that require runtime-scope resolution are usage errors
+/// for the storage verbs, which deliberately dispatch before it:
+/// `--isolated` would mint a realm the offline maintenance never uses, and
+/// `--default-model` would persist config into a scope the verbs never
+/// resolve. Silently ignoring either would misreport what ran.
+fn storage_global_usage_conflict(cli: &Cli) -> Option<&'static str> {
+    if !matches!(&cli.command, Some(Commands::Storage { .. })) {
+        return None;
+    }
+    if cli.isolated {
+        return Some(
+            "--isolated cannot be combined with `rkat storage` (offline maintenance never \
+             mints an isolated realm; scope the sweep with --realm/--root instead)",
+        );
+    }
+    if cli.default_model.is_some() {
+        return Some(
+            "--default-model cannot be combined with `rkat storage` (the storage verbs \
+             resolve no runtime scope to persist the default model into)",
+        );
+    }
+    None
+}
+
 async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow::Result<()> {
     match command {
         StorageCommands::Doctor { json, roots } => handle_storage_doctor(cli, *json, roots).await,
@@ -7676,6 +7740,27 @@ fn storage_realm_filter(cli: &Cli) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// The [`meerkat_core::StorageMigrator`] the storage verbs diagnose
+/// through. Storage dispatch happens before runtime-scope resolution, so no
+/// external provider manifest can be consulted here: the built-in disk
+/// provider's `migrator()` hook is the only reachable implementation
+/// (realms pinned to an external provider diagnose through that provider's
+/// migrator once a runtime composes it).
+fn storage_diagnosis_migrator() -> &'static dyn meerkat_core::StorageMigrator {
+    #[cfg(feature = "session-store")]
+    {
+        use meerkat::RealmStorageProvider as _;
+        static DISK_PROVIDER: meerkat::DiskStorageProvider = meerkat::DiskStorageProvider;
+        if let Some(migrator) = DISK_PROVIDER.migrator() {
+            return migrator;
+        }
+    }
+    // Builds without the facade provider seam still diagnose disk realms
+    // through the same trait.
+    static DISK_MIGRATOR: meerkat_store::DiskStorageMigrator = meerkat_store::DiskStorageMigrator;
+    &DISK_MIGRATOR
+}
+
 /// Read-only storage diagnosis over the storage sweep roots.
 async fn handle_storage_doctor(
     cli: &Cli,
@@ -7688,7 +7773,7 @@ async fn handle_storage_doctor(
         scope = scope.with_realm(realm);
     }
 
-    let diagnosis = meerkat_store::diagnose_disk_roots(&scope).await;
+    let diagnosis = storage_diagnosis_migrator().diagnose(&scope).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&diagnosis)?);
@@ -7718,6 +7803,9 @@ async fn handle_storage_migrate(
     if adopt_root.is_some() && !apply {
         anyhow::bail!("--adopt-root requires --apply (split-brain resolution archives a copy)");
     }
+    // Explicit `--root`/`--state-root` scope means "sweep ONLY these
+    // roots": nothing ambient — including the legacy home probe — is read.
+    let explicit_scope = cli.state_root.is_some() || !extra_roots.is_empty();
     let options = storage_migrate::MigrateOptions {
         roots: storage_sweep_roots(cli, extra_roots),
         realm_filter: storage_realm_filter(cli)?,
@@ -7727,7 +7815,11 @@ async fn handle_storage_migrate(
         // Ambient home resolution stays in this bootstrap module (the
         // storage-ambient gate's allowlist); the migrate module receives
         // the probe path explicitly. Report-only.
-        legacy_home_sessions: dirs::home_dir().map(|home| home.join(".rkat").join("sessions")),
+        legacy_home_sessions: if explicit_scope {
+            None
+        } else {
+            dirs::home_dir().map(|home| home.join(".rkat").join("sessions"))
+        },
     };
     let report = storage_migrate::run_storage_migrate(options).await;
 
@@ -7756,6 +7848,7 @@ async fn handle_storage_prune(
         roots: storage_sweep_roots(cli, extra_roots),
         apply,
         older_than_days,
+        realm_filter: storage_realm_filter(cli)?,
     };
     let report = storage_migrate::run_storage_prune(options).await;
 
@@ -8680,14 +8773,29 @@ async fn prune_realms_inner(
 async fn create_persistence_bundle(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(meerkat_store::RealmManifest, PersistenceBundle)> {
-    meerkat::open_realm_persistence_in(
-        &scope.locator.state_root,
-        scope.locator.realm.as_str(),
-        scope.backend_hint(),
-        Some(scope.origin_hint),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to open realm persistence backend: {e}"))
+    // The bootstrap layout is the path authority: its realm-root candidates
+    // arm the cross-candidate first-start reservation. A locator re-resolved
+    // after bootstrap (mob-host `[mob_host].realm` override) can leave the
+    // layout's chosen root; that path opens explicit-root (which builds its
+    // own single-candidate layout) instead of riding a stale one.
+    let opened = if scope.layout.state_root() == scope.locator.state_root.as_path() {
+        meerkat::storage_provider::open_realm_persistence_with_layout(
+            scope.layout.clone(),
+            scope.locator.realm.as_str(),
+            scope.backend_hint(),
+            Some(scope.origin_hint),
+        )
+        .await
+    } else {
+        meerkat::open_realm_persistence_in(
+            &scope.locator.state_root,
+            scope.locator.realm.as_str(),
+            scope.backend_hint(),
+            Some(scope.origin_hint),
+        )
+        .await
+    };
+    opened.map_err(|e| anyhow::anyhow!("Failed to open realm persistence backend: {e}"))
 }
 
 #[cfg(not(feature = "session-store"))]
@@ -17348,6 +17456,12 @@ mod tests {
                 realm: meerkat_core::connection::RealmId::parse(realm_id)
                     .expect("test realm id parses"),
             },
+            layout: meerkat_core::StorageLayout::with_injected_roots(
+                state_root.clone(),
+                None,
+                Some(state_root.clone()),
+                state_root.clone(),
+            ),
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
@@ -20989,6 +21103,93 @@ default_model = "gemma"
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_normalize_cli_args_attached_root_flag_forms() {
+        // `--flag=value` and combined short forms consume ONE argv slot; a
+        // following subcommand must not trigger the implicit `run` insertion.
+        for attached in [
+            "--realm=alpha",
+            "-r=alpha",
+            "-ralpha",
+            "--state-root=/tmp/roots",
+            "--context-root=/tmp/project",
+            "--default-model=gpt-5.4",
+        ] {
+            let args = normalize_cli_args(["rkat", attached, "storage"].map(Into::into));
+            assert_eq!(
+                args,
+                vec!["rkat", attached, "storage"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+                "{attached} must not trigger implicit run insertion"
+            );
+        }
+
+        // A bare prompt after an attached form still gets the shorthand,
+        // with `run` inserted AFTER the flag (not before it).
+        let args = normalize_cli_args(["rkat", "--realm=alpha", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--realm=alpha", "run", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let args = normalize_cli_args(["rkat", "-ralpha", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "-ralpha", "run", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        // Attached forms with no trailing arguments keep set-and-exit
+        // semantics (no `run` injected).
+        let args = normalize_cli_args(["rkat", "--default-model=gpt-5.4"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model=gpt-5.4"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_storage_global_usage_conflict() {
+        let isolated = Cli::try_parse_from(["rkat", "--isolated", "storage", "doctor"])
+            .expect("--isolated storage doctor parses");
+        let message = storage_global_usage_conflict(&isolated)
+            .expect("--isolated must conflict with storage verbs");
+        assert!(message.contains("--isolated"), "{message}");
+
+        let default_model = Cli::try_parse_from([
+            "rkat",
+            "--default-model",
+            "gpt-5.4",
+            "storage",
+            "prune",
+            "--apply",
+        ])
+        .expect("--default-model storage prune parses");
+        let message = storage_global_usage_conflict(&default_model)
+            .expect("--default-model must conflict with storage verbs");
+        assert!(message.contains("--default-model"), "{message}");
+
+        // Scope-selection globals stay valid for the storage verbs.
+        let scoped =
+            Cli::try_parse_from(["rkat", "--realm", "alpha", "storage", "migrate", "--apply"])
+                .expect("--realm storage migrate parses");
+        assert!(storage_global_usage_conflict(&scoped).is_none());
+
+        // Non-storage invocations never report a storage conflict.
+        let run = Cli::try_parse_from(["rkat", "--isolated", "run", "hello"])
+            .expect("--isolated run parses");
+        assert!(storage_global_usage_conflict(&run).is_none());
     }
 
     #[test]
@@ -25056,10 +25257,18 @@ default_model = "gpt-5.4"
 
     #[test]
     fn test_resolve_runtime_scope_uses_context_local_state_root_by_default() {
+        // Hermetic project marker: the layout walks the project root up from
+        // the context root, so the candidate must hang off `proj`, not the
+        // nested context directory.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
         let cli = Cli::try_parse_from([
             "rkat",
             "--context-root",
-            "/tmp/example-project",
+            nested.to_str().expect("utf-8 path"),
             "run",
             "hello",
         ])
@@ -25069,7 +25278,16 @@ default_model = "gpt-5.4"
 
         assert_eq!(
             scope.locator.state_root,
-            PathBuf::from("/tmp/example-project/.rkat/realms")
+            project.join(".rkat").join("realms")
+        );
+        assert_eq!(scope.layout.state_root(), scope.locator.state_root);
+        assert_eq!(scope.layout.project_root(), Some(project.as_path()));
+        assert!(
+            scope
+                .layout
+                .realm_root_candidates()
+                .contains(&scope.locator.state_root),
+            "the chosen root must be among the reservation candidates"
         );
     }
 
@@ -25799,6 +26017,12 @@ supports_reasoning = true
                 realm: meerkat_core::connection::RealmId::parse("test-realm")
                     .expect("test realm id parses"),
             },
+            layout: meerkat_core::StorageLayout::with_injected_roots(
+                root.clone(),
+                None,
+                None,
+                root.clone(),
+            ),
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,

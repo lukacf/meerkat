@@ -324,9 +324,9 @@ pub use meerkat_session::{
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive
 // machine-owned storage maintenance (bulk legacy-checkpoint adoption).
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use meerkat_session::LegacyCheckpointAdoptionReport;
 pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_session::{LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport};
 // Memory store implementation, re-exported for maintenance verbs that stamp
 // the memory database's schema ledger through its normal constructor.
 #[cfg(feature = "memory-store-session")]

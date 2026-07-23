@@ -10,6 +10,7 @@
 //! |--------------------------------------------|------------|
 //! | [`baseline`]                               | every `SessionStore` |
 //! | [`incremental`]                            | stores whose `as_incremental` is `Some` |
+//! | [`transcript_rewrite`]                     | stores implementing `save_transcript_rewrite` |
 //! | [`guarded_projection`]                     | stores implementing `save_authoritative_projection_if_current_revision` |
 //! | [`append_only`]                            | every `SessionStore` (pins emulated-CAS semantics) |
 //! | [`legacy_data`]                            | every `SessionStore` |
@@ -25,6 +26,7 @@ mod capability;
 mod guarded_projection;
 mod incremental;
 mod legacy_data;
+mod transcript_rewrite;
 
 pub use append_only::append_only;
 pub use artifacts::artifacts;
@@ -34,3 +36,4 @@ pub use capability::assert_forwards_incremental;
 pub use guarded_projection::guarded_projection;
 pub use incremental::incremental;
 pub use legacy_data::legacy_data;
+pub use transcript_rewrite::transcript_rewrite;

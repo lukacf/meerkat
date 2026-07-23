@@ -1047,8 +1047,15 @@ impl SqliteWorkGraphStore {
         // it admits.
         let _guard = meerkat_sqlite::OperationGuard::for_database(&self.path)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        let mut conn = meerkat_sqlite::open(&self.path, meerkat_sqlite::ConnectionProfile::PRIMARY)
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let mut conn = meerkat_sqlite::open_with(
+            &self.path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&WORKGRAPH_DOMAIN],
+                ..Default::default()
+            },
+        )
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         f(&mut conn)

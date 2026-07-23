@@ -47,6 +47,18 @@ pub enum PersistenceError {
     Runtime(#[from] RuntimeStoreError),
     #[error(transparent)]
     WorkGraph(#[from] meerkat_workgraph::WorkGraphError),
+    /// Resolving the storage layout for an open failed (invalid realm id,
+    /// undeterminable root probe, identity-colliding realm directory, ...).
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[error(transparent)]
+    Bootstrap(#[from] meerkat_core::RuntimeBootstrapError),
+    /// Cross-candidate first-start refusal: the realm was concurrently
+    /// materialized under a different candidate root, or the reservation
+    /// stayed contended past the bounded wait. (Plain store errors from the
+    /// same protocol surface as [`PersistenceError::Store`].)
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[error(transparent)]
+    FirstStart(meerkat_store::realm::RealmFirstStartError),
     /// A `Durable` storage slot resolved to a non-persistent store without
     /// the realm manifest declaring that domain ephemeral (fail-closed
     /// durability; see `storage_provider`).
@@ -55,6 +67,18 @@ pub enum PersistenceError {
          ephemeral declaration in the realm manifest; refusing to start"
     )]
     DurabilityViolation { domain: String },
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+impl From<meerkat_store::realm::RealmFirstStartError> for PersistenceError {
+    fn from(err: meerkat_store::realm::RealmFirstStartError) -> Self {
+        match err {
+            // Unwrap plain store failures so existing `Store(_)` matching
+            // keeps seeing them; only the reservation refusals are new.
+            meerkat_store::realm::RealmFirstStartError::Store(store) => Self::Store(store),
+            other => Self::FirstStart(other),
+        }
+    }
 }
 
 /// Backend-owned pairing of a session store with its matching runtime companion.
@@ -277,6 +301,33 @@ impl PersistenceBundle {
     }
 }
 
+/// Build the [`meerkat_core::StorageLayout`] for an open whose state root
+/// the caller already resolved. The root is threaded as the explicit state
+/// root (no dual-root probing — the caller's resolution already happened),
+/// while the ambient user/project slots resolve through the same bootstrap
+/// machinery the surfaces use, so the provider seam always receives ONE
+/// layout authority instead of composing roots independently.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub(crate) fn layout_for_explicit_state_root(
+    realms_root: &std::path::Path,
+    realm_id: &str,
+) -> Result<meerkat_core::StorageLayout, PersistenceError> {
+    use meerkat_core::{RealmConfig, RealmSelection, StorageLayoutInputs};
+    let realm_config = RealmConfig {
+        selection: RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        },
+        state_root: Some(realms_root.to_path_buf()),
+        ..RealmConfig::default()
+    };
+    let inputs = StorageLayoutInputs {
+        invocation_context: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ..StorageLayoutInputs::default()
+    };
+    let resolved = meerkat_core::StorageLayout::resolve(inputs, &realm_config)?;
+    Ok(resolved.layout)
+}
+
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub async fn open_realm_persistence_in(
     realms_root: &std::path::Path,
@@ -284,13 +335,32 @@ pub async fn open_realm_persistence_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
+    let layout = layout_for_explicit_state_root(realms_root, realm_id)?;
+    open_realm_persistence_builtin_with_layout(layout, realm_id, backend_hint, origin_hint).await
+}
+
+/// Built-in disk open through an externally resolved
+/// [`meerkat_core::StorageLayout`]: the layout's state root is the realm
+/// root and the layout (with its realm-root candidates, arming the
+/// cross-candidate first-start reservation) threads into the provider
+/// context. Surfaces that already resolved a layout call this (via
+/// `storage_provider::open_realm_persistence_with_layout`) instead of
+/// resolving twice.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub(crate) async fn open_realm_persistence_builtin_with_layout(
+    layout: meerkat_core::StorageLayout,
+    realm_id: &str,
+    backend_hint: Option<RealmBackend>,
+    origin_hint: Option<RealmOrigin>,
+) -> Result<(RealmManifest, PersistenceBundle), PersistenceError> {
+    let realms_root = layout.state_root().to_path_buf();
     let (pin, bundle) = open_realm_persistence_with_provider(
         &crate::storage_provider::DiskStorageProvider,
-        realms_root,
+        &realms_root,
         realm_id,
         backend_hint,
         origin_hint,
-        None,
+        Some(layout),
     )
     .await?;
     match pin {
@@ -322,10 +392,18 @@ pub async fn open_realm_persistence_with_provider(
     // Provider-aware ensure: the disk provider keeps the historical
     // builtin-only semantics; a named external provider accepts (and
     // creates) exactly its own pins, so external realms are openable
-    // through the seam they were pinned for.
+    // through the seam they were pinned for. When the layout carries
+    // dual-root candidates, first materialization runs under the
+    // cross-candidate reservation so a concurrent first start with a
+    // different default root cannot manufacture a split brain.
     let provider_pin_name = (provider.name() != "disk").then(|| provider.name());
-    let manifest = meerkat_store::ensure_realm_manifest_pin_in(
+    let candidate_roots: Vec<std::path::PathBuf> = layout
+        .as_ref()
+        .map(|layout| layout.realm_root_candidates().to_vec())
+        .unwrap_or_default();
+    let manifest = meerkat_store::realm::ensure_realm_manifest_pin_with_candidates(
         realms_root,
+        &candidate_roots,
         realm_id,
         provider_pin_name,
         backend_hint,
@@ -837,5 +915,44 @@ mod tests {
         let err = PersistenceError::from(RuntimeStoreError::WriteFailed("boom".to_string()));
 
         assert!(matches!(err, PersistenceError::Runtime(_)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_root_layout_is_single_candidate_at_the_given_root() {
+        let temp = TempDir::new().expect("tempdir");
+        let layout = layout_for_explicit_state_root(temp.path(), "team").expect("layout resolves");
+        assert_eq!(layout.state_root(), temp.path());
+        // A caller-resolved root never probes: single-candidate layout, so
+        // the store's first-start reservation degenerates to the unchanged
+        // single-root path.
+        assert_eq!(layout.realm_root_candidates(), &[temp.path().to_path_buf()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_root_layout_rejects_invalid_realm_ids_typed() {
+        let temp = TempDir::new().expect("tempdir");
+        let err = match layout_for_explicit_state_root(temp.path(), "not a realm id") {
+            Err(err) => err,
+            Ok(_) => panic!("invalid realm id must refuse"),
+        };
+        assert!(matches!(err, PersistenceError::Bootstrap(_)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn first_start_store_errors_still_surface_as_store_variant() {
+        // The From unwrap keeps plain store failures on the historical
+        // `Store(_)` arm; only reservation refusals ride `FirstStart`.
+        let err = PersistenceError::from(meerkat_store::realm::RealmFirstStartError::Store(
+            StoreError::Internal("boom".to_string()),
+        ));
+        assert!(matches!(err, PersistenceError::Store(_)));
+        let refusal =
+            PersistenceError::from(meerkat_store::realm::RealmFirstStartError::Contention {
+                realm_id: "team".to_string(),
+            });
+        assert!(matches!(refusal, PersistenceError::FirstStart(_)));
     }
 }

@@ -76,29 +76,37 @@ async fn append_and_head_create(
         "loaded head must match the saved head row",
     )?;
 
-    // The compat read path serves the slim materialization of the head.
+    // The compat read path serves the slim materialization of the head —
+    // exactly the head-covered messages, in order.
     let loaded = steps
         .wrap(STEP, store.load(session.id()).await)?
         .ok_or_else(|| steps.fail(STEP, "incremental session must load via SessionStore::load"))?;
     steps.ensure(
         STEP,
-        loaded.messages().len() == 2,
-        "slim load must serve exactly the head-covered messages",
+        loaded.messages() == session.messages(),
+        "slim load must serve exactly the head-covered messages, in order",
     )?;
 
-    // load_messages round-trips: full range and sub-range.
+    // load_messages round-trips: full range and sub-range serve the exact
+    // ordered rows, not merely the right count.
     let root = TranscriptStrandId::root();
     let all = steps.wrap(STEP, inc.load_messages(session.id(), &root, 0..2).await)?;
     steps.ensure(
         STEP,
-        all.len() == 2,
-        "full-range load_messages must serve both rows",
+        all.as_slice() == session.messages(),
+        "full-range load_messages must serve both rows in append order",
     )?;
     let tail = steps.wrap(STEP, inc.load_messages(session.id(), &root, 1..2).await)?;
     steps.ensure(
         STEP,
-        tail.len() == 1,
-        "sub-range load_messages must serve one row",
+        tail.as_slice() == &session.messages()[1..2],
+        "sub-range load_messages must serve exactly the addressed row",
+    )?;
+    let head_row = steps.wrap(STEP, inc.load_messages(session.id(), &root, 0..1).await)?;
+    steps.ensure(
+        STEP,
+        head_row.as_slice() == &session.messages()[0..1],
+        "sub-range load_messages must serve exactly the first row",
     )?;
     steps.ensure(
         STEP,
@@ -123,6 +131,24 @@ async fn append_contract(
         STEP,
         inc.append_messages(session.id(), &root, 2, delta).await,
     )?;
+
+    // Visibility boundary: an appended-but-unadopted row is invisible until
+    // the head advances — the head row is the only adoption authority.
+    let pre_adoption_head = steps
+        .wrap(STEP, inc.load_head(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "head must load before adoption"))?;
+    steps.ensure(
+        STEP,
+        pre_adoption_head.message_count == 2,
+        "an appended-but-unadopted strand row must not advance the served head",
+    )?;
+    let pre_adoption = steps.wrap(STEP, inc.load_messages(session.id(), &root, 0..3).await)?;
+    steps.ensure(
+        STEP,
+        pre_adoption.as_slice() == session.messages(),
+        "strand reads may address the appended row before adoption (rows are durable at append)",
+    )?;
+
     let new_head = steps.wrap(
         STEP,
         SessionHead::from_session(&session, root.clone(), head.rewrite_count),
@@ -131,6 +157,14 @@ async fn append_contract(
         STEP,
         inc.save_head(&new_head, SessionHeadCas::IfToken(token))
             .await,
+    )?;
+    let adopted_head = steps
+        .wrap(STEP, inc.load_head(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "head must load after adoption"))?;
+    steps.ensure(
+        STEP,
+        adopted_head.message_count == 3 && adopted_head.head_revision == new_head.head_revision,
+        "the adopted head must cover the appended row",
     )?;
 
     // Idempotency: re-appending identical bytes at the same seq is Ok.
@@ -358,14 +392,24 @@ async fn rewrite_commit_and_adoption(
         "adopted rewrite must round-trip through load_rewrites",
     )?;
 
-    // The compat read now serves the compacted (slim) transcript.
+    // The compat read now serves the compacted (slim) transcript — exactly
+    // the commit's revision content, not merely the right count.
     let slim = steps
         .wrap(STEP, store.load(session.id()).await)?
         .ok_or_else(|| steps.fail(STEP, "rewritten session must load"))?;
     steps.ensure(
         STEP,
-        slim.messages().len() == 1,
-        "post-adoption load must serve the rewritten transcript",
+        slim.messages() == rewritten.messages(),
+        "post-adoption load must serve exactly the rewritten transcript",
+    )?;
+    let slim_revision = steps.wrap(
+        STEP,
+        meerkat_core::transcript_messages_digest(slim.messages()),
+    )?;
+    steps.ensure(
+        STEP,
+        slim_revision == commit.revision,
+        "the post-adoption transcript must digest to the adopted commit revision",
     )?;
 
     // A replayed rewrite against the advanced head must conflict.
@@ -408,16 +452,24 @@ async fn rewrite_commit_and_adoption(
         .ok_or_else(|| steps.fail(STEP, "head row must survive reopen"))?;
     steps.ensure(
         STEP,
-        survived_head.rewrite_count == 1 && survived_head.message_count == 1,
-        "reopened head must carry the adopted rewrite and compacted count",
+        survived_head.rewrite_count == 1
+            && survived_head.message_count == 1
+            && survived_head.head_revision == commit.revision,
+        "reopened head must carry the adopted rewrite, compacted count, and commit revision",
     )?;
+    let survived_rewrites = steps.wrap(STEP, reopened_inc.load_rewrites(session.id()).await)?;
     steps.ensure(
         STEP,
-        steps
-            .wrap(STEP, reopened_inc.load_rewrites(session.id()).await)?
-            .len()
-            == 1,
-        "adopted rewrites must survive reopen",
+        survived_rewrites.len() == 1 && survived_rewrites[0].commit.revision == commit.revision,
+        "the adopted rewrite must survive reopen with its commit identity intact",
+    )?;
+    let survived_slim = steps
+        .wrap(STEP, reopened.load(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "rewritten session must load after reopen"))?;
+    steps.ensure(
+        STEP,
+        survived_slim.messages() == rewritten.messages(),
+        "the reopened slim load must serve exactly the rewritten transcript",
     )?;
     Ok(())
 }

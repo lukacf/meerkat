@@ -692,6 +692,307 @@ pub async fn ensure_realm_manifest_pin_in(
     Ok(RealmManifestPin::External(manifest))
 }
 
+/// Errors from the cross-candidate first-start reservation
+/// ([`ensure_realm_manifest_pin_with_candidates`]).
+#[derive(Debug, thiserror::Error)]
+pub enum RealmFirstStartError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// While this open was first-starting the realm under `requested_root`,
+    /// a concurrent first-start materialized it under a different candidate
+    /// root. Re-resolve: the realm now exists, and dual-root resolution
+    /// routes to it where it lies instead of creating a twin.
+    #[error(
+        "realm '{realm_id}' was concurrently materialized under '{}' while this \
+         surface was opening it under '{}'; re-resolve the realm root \
+         (resolution now routes to the existing copy)",
+        .existing_root.display(), .requested_root.display()
+    )]
+    MaterializedElsewhere {
+        realm_id: String,
+        requested_root: PathBuf,
+        existing_root: PathBuf,
+    },
+    /// The first-start reservation stayed contended past the bounded wait
+    /// without any candidate producing a manifest (e.g. the reservation
+    /// holder is still mid-first-start, or crashed recently enough that its
+    /// markers have not aged out yet).
+    #[error(
+        "realm '{realm_id}' first-start reservation is contended and no manifest \
+         appeared under any candidate root within the bounded wait; retry once \
+         the concurrent first start completes (crashed markers age out after \
+         {} seconds)",
+        MANIFEST_LOCK_STALE_AFTER.as_secs()
+    )]
+    Contention { realm_id: String },
+}
+
+/// On-disk payload of a first-start reservation marker. The embedded
+/// timestamp drives staleness (mtime is only the fallback for a torn
+/// write), so a crashed first start ages out deterministically.
+#[derive(Debug, Serialize, Deserialize)]
+struct FirstStartMarker {
+    realm_id: String,
+    pid: u32,
+    created_at_unix: u64,
+}
+
+fn first_start_marker_path(candidate_root: &Path, realm_id: &str) -> PathBuf {
+    candidate_root.join(format!(
+        ".realm-first-start.{}.lock",
+        sanitize_realm_id(realm_id)
+    ))
+}
+
+async fn create_first_start_marker(path: &Path, realm_id: &str) -> Result<(), std::io::Error> {
+    let payload = serde_json::to_vec(&FirstStartMarker {
+        realm_id: realm_id.to_string(),
+        pid: std::process::id(),
+        created_at_unix: now_unix_secs(),
+    })
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    file.write_all(&payload).await?;
+    file.sync_all().await?;
+    Ok(())
+}
+
+/// Age-based takeover check so a crashed first start cannot brick the
+/// realm: payload timestamp first, mtime as the fallback for a torn write.
+async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            if let Ok(marker) = serde_json::from_slice::<FirstStartMarker>(&bytes) {
+                let age = now_unix_secs().saturating_sub(marker.created_at_unix);
+                return Ok(age > MANIFEST_LOCK_STALE_AFTER.as_secs());
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(StoreError::Io(err)),
+    }
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => {
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let age = SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default();
+            Ok(age > MANIFEST_LOCK_STALE_AFTER)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(StoreError::Io(err)),
+    }
+}
+
+/// Cross-candidate first-start reservation: `create_new` markers in every
+/// candidate root serialize the FIRST materialization of a realm across
+/// roots, so two surfaces with different default roots cannot each
+/// manufacture a manifest for the same realm.
+struct FirstStartReservation {
+    markers: Vec<PathBuf>,
+}
+
+impl FirstStartReservation {
+    /// Acquire markers in every candidate root (deterministic sorted order,
+    /// so exactly one contender leads). `Ok(None)` = live contention.
+    async fn try_acquire(
+        candidates: &[PathBuf],
+        realm_id: &str,
+    ) -> Result<Option<Self>, StoreError> {
+        let mut acquired = Self {
+            markers: Vec::new(),
+        };
+        for candidate in candidates {
+            tokio::fs::create_dir_all(candidate)
+                .await
+                .map_err(StoreError::Io)?;
+            let marker_path = first_start_marker_path(candidate, realm_id);
+            // One stale-takeover retry per candidate: markers left by a
+            // crashed first start must not brick the realm.
+            let mut takeover_attempted = false;
+            loop {
+                match create_first_start_marker(&marker_path, realm_id).await {
+                    Ok(()) => {
+                        acquired.markers.push(marker_path);
+                        break;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if !takeover_attempted && first_start_marker_is_stale(&marker_path).await? {
+                            takeover_attempted = true;
+                            let _ = tokio::fs::remove_file(&marker_path).await;
+                            continue;
+                        }
+                        acquired.release().await;
+                        return Ok(None);
+                    }
+                    Err(err) => {
+                        acquired.release().await;
+                        return Err(StoreError::Io(err));
+                    }
+                }
+            }
+        }
+        Ok(Some(acquired))
+    }
+
+    async fn release(&mut self) {
+        for path in self.markers.drain(..) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+impl Drop for FirstStartReservation {
+    fn drop(&mut self) {
+        // Crash-safety net for early-return paths; the normal paths release
+        // explicitly. Markers left by a hard kill age out via staleness.
+        for path in std::mem::take(&mut self.markers) {
+            remove_file_nonblocking_on_drop(path);
+        }
+    }
+}
+
+/// True when `root` holds a manifest pinning exactly `realm`. A manifest
+/// for a *different* identity aliasing the same sanitized directory is not
+/// this realm (resolution refuses that collision before opening); a
+/// present-but-unreadable manifest propagates typed.
+async fn manifest_present_for(
+    root: &Path,
+    realm: &meerkat_core::RealmId,
+) -> Result<bool, StoreError> {
+    let manifest_path = realm_paths_in(root, realm.as_str()).manifest_path;
+    let bytes = match tokio::fs::read(&manifest_path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(StoreError::Io(err)),
+    };
+    let pin = parse_manifest_pin_bytes(&bytes)?;
+    Ok(pin.realm() == realm)
+}
+
+/// [`ensure_realm_manifest_pin_in`] guarded by the cross-candidate
+/// first-start reservation. `candidate_roots` are every state-root
+/// candidate resolution probed
+/// ([`meerkat_core::StorageLayout::realm_root_candidates`]); `realms_root`
+/// is the chosen root, where materialization lands. With zero or one
+/// distinct candidate the reservation is skipped entirely (the single-root
+/// path is unchanged).
+///
+/// First-materialization protocol:
+/// 1. reserve: `create_new` a marker in EVERY candidate root (sorted order;
+///    stale markers from crashed first starts age out);
+/// 2. re-probe every candidate for the realm's manifest under reservation —
+///    a realm that appeared under a *different* candidate is a typed
+///    [`RealmFirstStartError::MaterializedElsewhere`] refusal, never a twin;
+/// 3. materialize under the existing per-root manifest lock, then release
+///    the markers.
+///
+/// On reservation contention the loser bounded-waits re-probing (the
+/// winner's manifest will appear) and fails typed
+/// ([`RealmFirstStartError::Contention`]) if the reservation stays
+/// ambiguous.
+pub async fn ensure_realm_manifest_pin_with_candidates(
+    realms_root: &Path,
+    candidate_roots: &[PathBuf],
+    realm_id: &str,
+    provider: Option<&str>,
+    backend_hint: Option<RealmBackend>,
+    origin_hint: Option<RealmOrigin>,
+) -> Result<RealmManifestPin, RealmFirstStartError> {
+    let mut candidates: Vec<PathBuf> = candidate_roots.to_vec();
+    if !candidates.iter().any(|root| root == realms_root) {
+        candidates.push(realms_root.to_path_buf());
+    }
+    candidates.sort();
+    candidates.dedup();
+    if candidates.len() <= 1 {
+        return ensure_realm_manifest_pin_in(
+            realms_root,
+            realm_id,
+            provider,
+            backend_hint,
+            origin_hint,
+        )
+        .await
+        .map_err(Into::into);
+    }
+    let requested_realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+    let other_roots: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|root| root.as_path() != realms_root)
+        .cloned()
+        .collect();
+
+    let materialized_elsewhere =
+        |existing_root: PathBuf| RealmFirstStartError::MaterializedElsewhere {
+            realm_id: realm_id.to_string(),
+            requested_root: realms_root.to_path_buf(),
+            existing_root,
+        };
+
+    let deadline = Instant::now() + MANIFEST_LOCK_TIMEOUT;
+    loop {
+        // A manifest under the chosen root: open it (the per-root ensure
+        // path validates identity/backend); under another candidate: typed
+        // refusal instead of manufacturing a twin.
+        if manifest_present_for(realms_root, &requested_realm).await? {
+            return ensure_realm_manifest_pin_in(
+                realms_root,
+                realm_id,
+                provider,
+                backend_hint,
+                origin_hint,
+            )
+            .await
+            .map_err(Into::into);
+        }
+        for other in &other_roots {
+            if manifest_present_for(other, &requested_realm).await? {
+                return Err(materialized_elsewhere(other.clone()));
+            }
+        }
+        match FirstStartReservation::try_acquire(&candidates, realm_id).await? {
+            Some(mut reservation) => {
+                // Re-probe under reservation: a winner may have completed
+                // between the probes above and marker acquisition.
+                let mut existing_elsewhere = None;
+                for other in &other_roots {
+                    if manifest_present_for(other, &requested_realm).await? {
+                        existing_elsewhere = Some(other.clone());
+                        break;
+                    }
+                }
+                if let Some(existing_root) = existing_elsewhere {
+                    reservation.release().await;
+                    return Err(materialized_elsewhere(existing_root));
+                }
+                let result = ensure_realm_manifest_pin_in(
+                    realms_root,
+                    realm_id,
+                    provider,
+                    backend_hint,
+                    origin_hint,
+                )
+                .await;
+                reservation.release().await;
+                return result.map_err(Into::into);
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    return Err(RealmFirstStartError::Contention {
+                        realm_id: realm_id.to_string(),
+                    });
+                }
+                tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
 fn default_backend() -> Result<RealmBackend, StoreError> {
     #[cfg(feature = "sqlite")]
     {
@@ -1440,6 +1741,315 @@ mod tests {
         observe.await.unwrap();
     }
 
+    mod first_start_reservation {
+        use super::*;
+
+        fn candidates(a: &Path, b: &Path) -> Vec<PathBuf> {
+            vec![a.to_path_buf(), b.to_path_buf()]
+        }
+
+        #[tokio::test]
+        async fn single_candidate_skips_reservation_entirely() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("realms");
+            let pin = ensure_realm_manifest_pin_with_candidates(
+                &root,
+                std::slice::from_ref(&root),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap();
+            assert_eq!(pin.realm().as_str(), "team");
+            assert!(
+                !tokio::fs::try_exists(&first_start_marker_path(&root, "team"))
+                    .await
+                    .unwrap(),
+                "single-root path must not create reservation markers"
+            );
+        }
+
+        #[tokio::test]
+        async fn first_start_materializes_in_chosen_root_and_cleans_markers() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let pin = ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap();
+            assert_eq!(pin.realm().as_str(), "team");
+            assert!(
+                tokio::fs::try_exists(&realm_paths_in(&root_a, "team").manifest_path)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !tokio::fs::try_exists(&realm_paths_in(&root_b, "team").manifest_path)
+                    .await
+                    .unwrap(),
+                "the non-chosen candidate must not gain a manifest"
+            );
+            for root in [&root_a, &root_b] {
+                assert!(
+                    !tokio::fs::try_exists(&first_start_marker_path(root, "team"))
+                        .await
+                        .unwrap(),
+                    "markers must be released after materialization"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn realm_materialized_under_other_candidate_is_a_typed_refusal() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            // Simulate the race: after this surface resolved root_a, a
+            // concurrent first start materialized the realm under root_b.
+            ensure_realm_manifest_in(
+                &root_b,
+                "team",
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap();
+            let err = ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap_err();
+            match &err {
+                RealmFirstStartError::MaterializedElsewhere {
+                    realm_id,
+                    requested_root,
+                    existing_root,
+                } => {
+                    assert_eq!(realm_id, "team");
+                    assert_eq!(requested_root, &root_a);
+                    assert_eq!(existing_root, &root_b);
+                }
+                other => panic!("wrong error: {other}"),
+            }
+            assert!(
+                !tokio::fs::try_exists(&realm_paths_in(&root_a, "team").manifest_path)
+                    .await
+                    .unwrap(),
+                "the refusal must not manufacture a twin"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_first_starts_with_different_defaults_converge_on_one_root() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let mut handles = Vec::new();
+            for idx in 0..16 {
+                let (chosen, other) = if idx % 2 == 0 {
+                    (root_a.clone(), root_b.clone())
+                } else {
+                    (root_b.clone(), root_a.clone())
+                };
+                handles.push(tokio::spawn(async move {
+                    ensure_realm_manifest_pin_with_candidates(
+                        &chosen,
+                        &[chosen.clone(), other],
+                        "team",
+                        None,
+                        Some(supported_backend()),
+                        Some(RealmOrigin::Explicit),
+                    )
+                    .await
+                }));
+            }
+            let mut ok = 0usize;
+            for handle in handles {
+                match handle.await.unwrap() {
+                    Ok(pin) => {
+                        assert_eq!(pin.realm().as_str(), "team");
+                        ok += 1;
+                    }
+                    Err(RealmFirstStartError::MaterializedElsewhere { .. }) => {}
+                    // Bounded-wait contention is a legal (rare) outcome when
+                    // the scheduler starves a loser past the deadline.
+                    Err(RealmFirstStartError::Contention { .. }) => {}
+                    Err(other) => panic!("unexpected error: {other}"),
+                }
+            }
+            assert!(ok >= 1, "at least the winner must open the realm");
+            let in_a = tokio::fs::try_exists(&realm_paths_in(&root_a, "team").manifest_path)
+                .await
+                .unwrap();
+            let in_b = tokio::fs::try_exists(&realm_paths_in(&root_b, "team").manifest_path)
+                .await
+                .unwrap();
+            assert!(
+                in_a != in_b,
+                "exactly one candidate root may materialize the realm (a: {in_a}, b: {in_b})"
+            );
+        }
+
+        #[tokio::test]
+        async fn stale_marker_from_crashed_first_start_is_taken_over() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            tokio::fs::create_dir_all(&root_b).await.unwrap();
+            // A crashed first start left a marker older than the stale TTL.
+            let stale = FirstStartMarker {
+                realm_id: "team".to_string(),
+                pid: 0,
+                created_at_unix: now_unix_secs()
+                    .saturating_sub(MANIFEST_LOCK_STALE_AFTER.as_secs() + 5),
+            };
+            tokio::fs::write(
+                first_start_marker_path(&root_b, "team"),
+                serde_json::to_vec(&stale).unwrap(),
+            )
+            .await
+            .unwrap();
+            let pin = ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .expect("stale markers must not brick the realm");
+            assert_eq!(pin.realm().as_str(), "team");
+            assert!(
+                !tokio::fs::try_exists(&first_start_marker_path(&root_b, "team"))
+                    .await
+                    .unwrap(),
+                "the stale marker must be gone after takeover"
+            );
+        }
+
+        // Paused clock: the bounded wait elapses virtually instead of
+        // stalling the lane for the full 5s reservation timeout.
+        #[tokio::test(start_paused = true)]
+        async fn fresh_foreign_marker_bounded_waits_then_fails_typed() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            tokio::fs::create_dir_all(&root_b).await.unwrap();
+            // A live (fresh) reservation held by someone who never
+            // materializes: the loser must fail typed, not guess a root.
+            let fresh = FirstStartMarker {
+                realm_id: "team".to_string(),
+                pid: 0,
+                created_at_unix: now_unix_secs(),
+            };
+            tokio::fs::write(
+                first_start_marker_path(&root_b, "team"),
+                serde_json::to_vec(&fresh).unwrap(),
+            )
+            .await
+            .unwrap();
+            let err = ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, RealmFirstStartError::Contention { ref realm_id } if realm_id == "team"),
+                "expected typed contention, got: {err}"
+            );
+            assert!(
+                !tokio::fs::try_exists(&realm_paths_in(&root_a, "team").manifest_path)
+                    .await
+                    .unwrap(),
+                "an ambiguous reservation must not materialize"
+            );
+        }
+
+        #[tokio::test]
+        async fn foreign_identity_directory_in_other_candidate_does_not_block() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            // root_b holds realm `a.b`, whose directory aliases `a_b`'s.
+            ensure_realm_manifest_in(
+                &root_b,
+                "a.b",
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap();
+            // First-starting `a_b` under root_a is a different realm: the
+            // aliased directory in the other candidate is not "materialized
+            // elsewhere" (identity-colliding *routing* is refused earlier,
+            // at resolution).
+            let pin = ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "a_b",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .unwrap();
+            assert_eq!(pin.realm().as_str(), "a_b");
+        }
+    }
+
+    #[test]
+    fn global_realm_config_doc_routes_to_the_injected_global_doc() {
+        // Empty catalog: path routing does not consult model data.
+        let catalog = meerkat_core::ModelCatalog {
+            entries: &[],
+            capabilities: &[],
+            provider_defaults: &[],
+            image_generation_models: &[],
+            providers: &[],
+            default_models: &[],
+            image_generation_defaults: &[],
+            global_default_model: "",
+            provider_priority: &[],
+        };
+        let source = FilesystemRealmConfigSource::new(
+            "/state/realms",
+            "/home/user/.rkat/config.toml",
+            catalog,
+        );
+        let global = meerkat_core::connection::RealmId::global();
+        assert_eq!(
+            source.config_doc_path(&global),
+            PathBuf::from("/home/user/.rkat/config.toml"),
+            "the reserved global realm's doc must resolve through the \
+             user-global root regardless of the state root"
+        );
+        let team = meerkat_core::connection::RealmId::parse("team").unwrap();
+        assert_eq!(
+            source.config_doc_path(&team),
+            realm_paths_in(Path::new("/state/realms"), "team").config_path,
+        );
+    }
+
     #[tokio::test]
     async fn lease_stale_records_are_cleaned_up() {
         let temp = tempfile::tempdir().unwrap();
@@ -1587,6 +2197,22 @@ impl FilesystemRealmConfigSource {
             catalog,
         }
     }
+
+    /// The config document a realm resolves to: the reserved `global` realm
+    /// maps to the injected home-rooted global doc **regardless of which
+    /// state root materialized the realm**, every other realm to its
+    /// per-realm `<state_root>/<realm>/config.toml`.
+    ///
+    /// Writers must route through this too: writing the reserved realm's
+    /// doc at `<state_root>/global/config.toml` would shadow the user-global
+    /// document that child realms actually inherit from.
+    pub fn config_doc_path(&self, realm: &meerkat_core::connection::RealmId) -> PathBuf {
+        if realm.is_global() {
+            self.global_doc.clone()
+        } else {
+            realm_paths_in(&self.state_root, realm.as_str()).config_path
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1597,11 +2223,7 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         realm: &meerkat_core::connection::RealmId,
     ) -> Result<Option<meerkat_core::Config>, meerkat_core::config::ConfigError> {
         use meerkat_core::ConfigStore;
-        let path = if realm.is_global() {
-            self.global_doc.clone()
-        } else {
-            realm_paths_in(&self.state_root, realm.as_str()).config_path
-        };
+        let path = self.config_doc_path(realm);
         // Fail closed on an undeterminable existence probe (EACCES/ELOOP/ENOTDIR
         // on the path or an ancestor): a present-but-unstat-able config doc must
         // NOT silently drop its inherited credentials/limits from the fold — only
@@ -1624,11 +2246,7 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         // Same path resolution as `config_for_realm`; return the parsed raw TOML
         // so composition can honor presence (a child explicitly setting a scalar
         // to its struct default still wins). Absent doc -> None.
-        let path = if realm.is_global() {
-            self.global_doc.clone()
-        } else {
-            realm_paths_in(&self.state_root, realm.as_str()).config_path
-        };
+        let path = self.config_doc_path(realm);
         // Fail closed on an undeterminable existence probe (see config_for_realm):
         // only a confirmed `Ok(false)` means absent; an IO fault propagates so a
         // present-but-unreadable doc cannot silently drop its inherited presence.

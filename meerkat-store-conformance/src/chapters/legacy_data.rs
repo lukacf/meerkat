@@ -1,14 +1,18 @@
 //! Legacy-data chapter: "open a store written by version N−1" as a
 //! first-class axis.
 //!
-//! Fixtures are synthetic 0.7.x-shaped rows: **current-envelope** session
-//! JSON whose metadata LACKS the reserved `session_checkpoint_stamp_v1` key,
-//! optionally carrying the `session_runtime_checkpoint_provenance_v1`
-//! boolean marker. Do NOT fabricate v0/v1 envelopes —
-//! `meerkat_core::adopt_legacy_session` rejects them by design.
+//! Driven by **byte-literal** fixture documents
+//! ([`fixtures::legacy_v07_session_fixture`]): the serialized 0.7.x shape —
+//! current-envelope (`version: 2`) JSON whose metadata LACKS the reserved
+//! `session_checkpoint_stamp_v1` key, message content in the legacy
+//! plain-string form, optionally carrying the
+//! `session_runtime_checkpoint_provenance_v1` boolean marker — is installed
+//! into the factory's storage ([`SessionStoreFactory::install_session_document`])
+//! and then opened through the current backend. Do NOT fabricate v0/v1
+//! envelopes — `meerkat_core::adopt_legacy_session` rejects them by design.
 
 use meerkat_core::{
-    SessionCheckpointMetadataState, SessionCheckpointRevision, SessionCheckpointState,
+    Session, SessionCheckpointMetadataState, SessionCheckpointRevision, SessionCheckpointState,
     SessionGeneration, SessionStore, adopt_legacy_session, session_checkpoint_metadata_state,
 };
 
@@ -18,32 +22,74 @@ use crate::fixtures;
 
 const CHAPTER: &str = "legacy_data";
 
-/// Legacy-data chapter: a store loads legacy rows, reports them as
+/// Legacy-data chapter: byte-literal N−1 fixture documents decode stably,
+/// install into the factory's storage, load through the current backend as
 /// `LegacyUnverified` (with the runtime-checkpoint marker preserved),
-/// preserves the document on round-trip, and a stamped (adopted) session
+/// round-trip without being rewritten, and an adopted (stamped) session
 /// stays `Verified` across save/load and reopen.
 pub async fn legacy_data(factory: &dyn SessionStoreFactory) -> Result<(), ConformanceFailure> {
     let steps = Steps::chapter(CHAPTER);
-    let store = factory.open().await?;
 
-    legacy_row_reports_unverified(&steps, store.as_ref()).await?;
-    legacy_runtime_marker_preserved(&steps, store.as_ref()).await?;
-    legacy_document_round_trip(&steps, store.as_ref()).await?;
+    fixture_decode_stability(&steps)?;
+    let store = factory.open().await?;
+    legacy_row_reports_unverified(&steps, factory, store.as_ref()).await?;
+    legacy_runtime_marker_preserved(&steps, factory, store.as_ref()).await?;
+    legacy_document_round_trip(&steps, factory, store.as_ref()).await?;
     adoption_upgrade_and_survival(&steps, factory, store.as_ref()).await?;
+    Ok(())
+}
+
+/// Install a fixture and load it back through the current backend.
+async fn install_and_load(
+    steps: &Steps,
+    step: &'static str,
+    factory: &dyn SessionStoreFactory,
+    store: &dyn SessionStore,
+    fixture: &fixtures::LegacySessionFixture,
+) -> Result<Session, ConformanceFailure> {
+    factory.install_session_document(&fixture.document).await?;
+    steps
+        .wrap(step, store.load(&fixture.id).await)?
+        .ok_or_else(|| steps.fail(step, "installed legacy fixture row must load"))
+}
+
+/// The N−1 fixture bytes must decode through the current wire and re-encode
+/// to the identical document. This is a harness-level pin on the legacy
+/// shape itself: a drift here breaks migration custody for every store that
+/// persisted 0.7.x data, independent of any one backend.
+fn fixture_decode_stability(steps: &Steps) -> Result<(), ConformanceFailure> {
+    const STEP: &str = "fixture_decode_stability";
+    for fixture in [
+        fixtures::legacy_v07_session_fixture(),
+        fixtures::legacy_v07_runtime_checkpoint_fixture(),
+    ] {
+        let decoded = fixtures::decode_session_document(&fixture.document)?;
+        steps.ensure(
+            STEP,
+            decoded.id() == &fixture.id,
+            "decoded fixture must carry the fixture's session id",
+        )?;
+        let reencoded = steps.wrap(STEP, serde_json::to_value(&decoded))?;
+        let raw: serde_json::Value = steps.wrap(STEP, serde_json::from_slice(&fixture.document))?;
+        steps.ensure(
+            STEP,
+            reencoded == raw,
+            "the byte-literal N−1 fixture document must decode/encode stably through the \
+             current wire (canonical JSON value equality) — a drifting legacy shape breaks \
+             every store that persisted it",
+        )?;
+    }
     Ok(())
 }
 
 async fn legacy_row_reports_unverified(
     steps: &Steps,
+    factory: &dyn SessionStoreFactory,
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "legacy_row_reports_unverified";
-    let session = fixtures::session_with_texts(&["legacy turn one", "legacy turn two"]);
-    steps.wrap(STEP, store.save(&session).await)?;
-
-    let loaded = steps
-        .wrap(STEP, store.load(session.id()).await)?
-        .ok_or_else(|| steps.fail(STEP, "legacy row must load"))?;
+    let fixture = fixtures::legacy_v07_session_fixture();
+    let loaded = install_and_load(steps, STEP, factory, store, &fixture).await?;
     match steps.wrap(
         STEP,
         session_checkpoint_metadata_state(loaded.id(), loaded.metadata()),
@@ -78,16 +124,12 @@ async fn legacy_row_reports_unverified(
 
 async fn legacy_runtime_marker_preserved(
     steps: &Steps,
+    factory: &dyn SessionStoreFactory,
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "legacy_runtime_marker_preserved";
-    let session = fixtures::session_with_texts(&["legacy runtime checkpoint"]);
-    let marked = fixtures::with_legacy_runtime_checkpoint_marker(&session, true)?;
-    steps.wrap(STEP, store.save(&marked).await)?;
-
-    let loaded = steps
-        .wrap(STEP, store.load(marked.id()).await)?
-        .ok_or_else(|| steps.fail(STEP, "marked legacy row must load"))?;
+    let fixture = fixtures::legacy_v07_runtime_checkpoint_fixture();
+    let loaded = install_and_load(steps, STEP, factory, store, &fixture).await?;
     match steps.wrap(
         STEP,
         session_checkpoint_metadata_state(loaded.id(), loaded.metadata()),
@@ -99,7 +141,7 @@ async fn legacy_runtime_marker_preserved(
             legacy_runtime_checkpoint: false,
         } => Err(steps.fail(
             STEP,
-            "the session_runtime_checkpoint_provenance_v1 marker must survive save/load",
+            "the session_runtime_checkpoint_provenance_v1 marker must survive the legacy row",
         )),
         SessionCheckpointMetadataState::Stamped(_) => Err(steps.fail(
             STEP,
@@ -110,23 +152,22 @@ async fn legacy_runtime_marker_preserved(
 
 async fn legacy_document_round_trip(
     steps: &Steps,
+    factory: &dyn SessionStoreFactory,
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "legacy_document_round_trip";
-    let session = fixtures::session_with_texts(&["byte fidelity one", "byte fidelity two"]);
-    let saved_document = steps.wrap(STEP, serde_json::to_value(&session))?;
-    steps.wrap(STEP, store.save(&session).await)?;
-
-    let loaded = steps
-        .wrap(STEP, store.load(session.id()).await)?
-        .ok_or_else(|| steps.fail(STEP, "legacy row must load"))?;
+    let fixture = fixtures::legacy_v07_session_fixture();
+    let loaded = install_and_load(steps, STEP, factory, store, &fixture).await?;
     let loaded_document = steps.wrap(STEP, serde_json::to_value(&loaded))?;
+    let fixture_document: serde_json::Value =
+        steps.wrap(STEP, serde_json::from_slice(&fixture.document))?;
     steps.ensure(
         STEP,
-        loaded_document == saved_document,
+        loaded_document == fixture_document,
         "a legacy document must round-trip semantically byte-preserving (canonical JSON \
-         value equality) — adoption binds the stamp to the exact source bytes, so a store \
-         that rewrites legacy documents breaks migration custody",
+         value equality against the installed fixture bytes) — adoption binds the stamp to \
+         the exact source bytes, so a store that rewrites legacy documents breaks migration \
+         custody",
     )?;
     Ok(())
 }
@@ -137,15 +178,12 @@ async fn adoption_upgrade_and_survival(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "adoption_upgrade_and_survival";
-    let session = fixtures::session_with_texts(&["adoptable turn"]);
+    let fixture = fixtures::legacy_v07_session_fixture();
 
     // The migration write shape: the legacy row is already persisted, then
     // the adopted (stamped) document is saved over it — a metadata-only
     // upgrade the append-only guard admits.
-    steps.wrap(STEP, store.save(&session).await)?;
-    let stored_legacy = steps
-        .wrap(STEP, store.load(session.id()).await)?
-        .ok_or_else(|| steps.fail(STEP, "legacy row must load before adoption"))?;
+    let stored_legacy = install_and_load(steps, STEP, factory, store, &fixture).await?;
     let blob = fixtures::legacy_session_blob(&stored_legacy)?;
     let adopted = steps.wrap(
         STEP,
@@ -158,7 +196,7 @@ async fn adoption_upgrade_and_survival(
     steps.wrap(STEP, store.save(&adopted.session).await)?;
 
     let upgraded = steps
-        .wrap(STEP, store.load(session.id()).await)?
+        .wrap(STEP, store.load(&fixture.id).await)?
         .ok_or_else(|| steps.fail(STEP, "adopted row must load"))?;
     match steps.wrap(STEP, upgraded.try_checkpoint_state())? {
         SessionCheckpointState::Verified(stamp) if stamp == adopted.stamp => {}
@@ -176,7 +214,7 @@ async fn adoption_upgrade_and_survival(
     // Restart survival: adoption is one-time; the stamp must survive reopen.
     let reopened = factory.open().await?;
     let survived = steps
-        .wrap(STEP, reopened.load(session.id()).await)?
+        .wrap(STEP, reopened.load(&fixture.id).await)?
         .ok_or_else(|| steps.fail(STEP, "adopted row must survive reopen"))?;
     match steps.wrap(STEP, survived.try_checkpoint_state())? {
         SessionCheckpointState::Verified(stamp) if stamp == adopted.stamp => Ok(()),

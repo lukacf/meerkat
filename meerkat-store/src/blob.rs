@@ -26,6 +26,18 @@ struct StoredBlob {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_STORED_BLOB_METADATA_BYTES: u64 = 64 * 1024;
 
+/// A held maintenance fence is an admission verdict, not a write failure:
+/// callers distinguish "the realm is fenced, retry later" from real I/O.
+#[cfg(not(target_arch = "wasm32"))]
+fn map_blob_admission_error(err: meerkat_sqlite::SqliteStoreError) -> BlobStoreError {
+    match err {
+        meerkat_sqlite::SqliteStoreError::MaintenanceFenceHeld { path, .. } => {
+            BlobStoreError::MaintenanceFenceHeld { path }
+        }
+        other => BlobStoreError::WriteFailed(other.to_string()),
+    }
+}
+
 fn compute_blob_id(media_type: &str, data: &str) -> BlobId {
     // Single owner of the content-addressed blob identity lives in
     // meerkat-core so transcript-identity digests and the blob store agree on
@@ -120,6 +132,12 @@ impl BlobStore for MemoryBlobStore {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct FsBlobStore {
     root: PathBuf,
+    /// `Some(<realm_dir>/realm)` when `root` sits inside a realm directory:
+    /// write operations take the shared realm write-admission guard on it,
+    /// so the realm maintenance fence quiesces blob writes exactly like the
+    /// SQLite per-file fences quiesce the databases. Derived once at
+    /// construction (cheap hot path).
+    realm_admission: Option<PathBuf>,
     #[cfg(test)]
     parent_dir_syncs: std::sync::atomic::AtomicUsize,
 }
@@ -128,10 +146,24 @@ pub struct FsBlobStore {
 impl FsBlobStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
+            realm_admission: crate::migrate::store_realm_admission_target(&root),
             root,
             #[cfg(test)]
             parent_dir_syncs: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Take the realm write-admission guard for one write operation, when
+    /// this store sits inside a realm directory. Fails while the realm is
+    /// under offline maintenance; the maintenance holder's own in-process
+    /// operations self-admit (see `meerkat_sqlite::fence`).
+    fn realm_admission_guard(
+        &self,
+    ) -> Result<Option<meerkat_sqlite::OperationGuard>, meerkat_sqlite::SqliteStoreError> {
+        self.realm_admission
+            .as_deref()
+            .map(meerkat_sqlite::OperationGuard::for_database)
+            .transpose()
     }
 
     fn path_for(&self, blob_id: &BlobId) -> Result<PathBuf, BlobStoreError> {
@@ -230,6 +262,10 @@ impl FsBlobStore {
 #[async_trait]
 impl BlobStore for FsBlobStore {
     async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+        // Held across the whole write (including the repair/readback arms).
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(map_blob_admission_error)?;
         let media_type = meerkat_core::image_generation::MediaType::canonical_str(media_type);
         let blob_id = compute_blob_id(&media_type, data);
         let path = self.path_for(&blob_id)?;
@@ -369,6 +405,9 @@ impl BlobStore for FsBlobStore {
     }
 
     async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+        let _admission = self
+            .realm_admission_guard()
+            .map_err(map_blob_admission_error)?;
         let path = self.path_for(blob_id)?;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
@@ -483,6 +522,61 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("collect shard directory entries");
         assert_eq!(entries.len(), 1, "atomic repair must not leak temp files");
+    }
+
+    /// Realm-scoped blob stores must honor the realm write-admission fence:
+    /// a foreign maintenance holder excludes blob writes and deletes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn filesystem_writes_respect_realm_write_admission_fence() {
+        let temp = tempfile::tempdir().expect("temporary realm root");
+        let realm_dir = temp.path().join("team");
+        std::fs::create_dir_all(&realm_dir).expect("realm dir");
+        std::fs::write(
+            realm_dir.join(meerkat_core::REALM_MANIFEST_FILE_NAME),
+            b"{\"realm_id\":\"team\",\"backend\":\"sqlite\"}",
+        )
+        .expect("manifest");
+        let store = FsBlobStore::new(realm_dir.join("blobs"));
+
+        let blob = store
+            .put_image("image/png", "AQID")
+            .await
+            .expect("unfenced write succeeds");
+
+        // A FOREIGN process holding the realm write-admission fence (raw
+        // exclusive lock, no in-process holder registry entry).
+        let admission_lock = meerkat_sqlite::fence_lock_path(
+            &crate::migrate::realm_write_admission_target(&realm_dir),
+        );
+        let foreign = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&admission_lock)
+            .expect("open admission lock");
+        foreign.try_lock().expect("foreign exclusive lock");
+
+        assert!(matches!(
+            store.put_image("image/png", "BBBB").await,
+            Err(BlobStoreError::MaintenanceFenceHeld { .. })
+        ));
+        assert!(matches!(
+            store.delete(&blob.blob_id).await,
+            Err(BlobStoreError::MaintenanceFenceHeld { .. })
+        ));
+        // Reads stay available under the fence.
+        store
+            .get(&blob.blob_id)
+            .await
+            .expect("reads pass while the fence is held");
+
+        drop(foreign);
+        store
+            .put_image("image/png", "BBBB")
+            .await
+            .expect("write succeeds after fence release");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

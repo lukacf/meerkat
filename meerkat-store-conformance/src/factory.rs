@@ -12,17 +12,21 @@
 //! least free of sessions colliding with freshly minted `SessionId`s — all
 //! fixtures mint fresh ids). Use one factory per chapter invocation for the
 //! cleanest failure isolation.
+//!
+//! On wasm32 the factory traits (like the `meerkat-core` store traits they
+//! hand out) run under `async_trait(?Send)`.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::{ArtifactStore, BlobStore, SessionStore};
+use meerkat_core::{ArtifactStore, BlobStore, Session, SessionStore};
 
 use crate::failure::ConformanceFailure;
 
 /// Produces handles to one underlying session-store storage.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionStoreFactory: Send + Sync {
     /// Open a store handle over this factory's underlying storage.
     ///
@@ -30,10 +34,37 @@ pub trait SessionStoreFactory: Send + Sync {
     /// call must return a NEW handle over the SAME storage — this is how the
     /// restart-survival steps model a process restart.
     async fn open(&self) -> Result<Arc<dyn SessionStore>, ConformanceFailure>;
+
+    /// Install a raw persisted session document (the serialized bytes a
+    /// previous-generation fleet left behind) into this factory's underlying
+    /// storage. The legacy-data chapter drives its fixtures through this
+    /// seam so stores are opened OVER pre-existing data, not fed through the
+    /// current write path.
+    ///
+    /// Default: decode the document through the same serde row-decode path
+    /// every in-repo store uses and persist it through a plain `save` on a
+    /// fresh handle. That re-encodes through the current writer, so
+    /// byte-level media fidelity is only proven by factories that override
+    /// this to place the raw document into the medium itself (e.g. writing
+    /// the raw per-session file of a file-backed store).
+    async fn install_session_document(&self, document: &[u8]) -> Result<(), ConformanceFailure> {
+        let session: Session = serde_json::from_slice(document).map_err(|error| {
+            ConformanceFailure::new(
+                "factory",
+                "install_session_document",
+                format!("session document does not decode: {error}"),
+            )
+        })?;
+        let store = self.open().await?;
+        store.save(&session).await.map_err(|error| {
+            ConformanceFailure::new("factory", "install_session_document", error.to_string())
+        })
+    }
 }
 
 /// Produces handles to one underlying blob-store storage.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait BlobStoreFactory: Send + Sync {
     /// Open a blob-store handle over this factory's underlying storage.
     /// Same reopen contract as [`SessionStoreFactory::open`].
@@ -41,7 +72,8 @@ pub trait BlobStoreFactory: Send + Sync {
 }
 
 /// Produces handles to one underlying artifact-store storage.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait ArtifactStoreFactory: Send + Sync {
     /// Open an artifact-store handle over this factory's underlying storage.
     /// Same reopen contract as [`SessionStoreFactory::open`].
@@ -57,11 +89,24 @@ impl<F> FnSessionStoreFactory<F> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl<F, Fut> SessionStoreFactory for FnSessionStoreFactory<F>
 where
     F: Fn() -> Fut + Send + Sync,
     Fut: Future<Output = Result<Arc<dyn SessionStore>, ConformanceFailure>> + Send,
+{
+    async fn open(&self) -> Result<Arc<dyn SessionStore>, ConformanceFailure> {
+        (self.0)().await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl<F, Fut> SessionStoreFactory for FnSessionStoreFactory<F>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Arc<dyn SessionStore>, ConformanceFailure>>,
 {
     async fn open(&self) -> Result<Arc<dyn SessionStore>, ConformanceFailure> {
         (self.0)().await
@@ -77,11 +122,24 @@ impl<F> FnBlobStoreFactory<F> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl<F, Fut> BlobStoreFactory for FnBlobStoreFactory<F>
 where
     F: Fn() -> Fut + Send + Sync,
     Fut: Future<Output = Result<Arc<dyn BlobStore>, ConformanceFailure>> + Send,
+{
+    async fn open(&self) -> Result<Arc<dyn BlobStore>, ConformanceFailure> {
+        (self.0)().await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl<F, Fut> BlobStoreFactory for FnBlobStoreFactory<F>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Arc<dyn BlobStore>, ConformanceFailure>>,
 {
     async fn open(&self) -> Result<Arc<dyn BlobStore>, ConformanceFailure> {
         (self.0)().await
@@ -97,11 +155,24 @@ impl<F> FnArtifactStoreFactory<F> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl<F, Fut> ArtifactStoreFactory for FnArtifactStoreFactory<F>
 where
     F: Fn() -> Fut + Send + Sync,
     Fut: Future<Output = Result<Arc<dyn ArtifactStore>, ConformanceFailure>> + Send,
+{
+    async fn open(&self) -> Result<Arc<dyn ArtifactStore>, ConformanceFailure> {
+        (self.0)().await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl<F, Fut> ArtifactStoreFactory for FnArtifactStoreFactory<F>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Arc<dyn ArtifactStore>, ConformanceFailure>>,
 {
     async fn open(&self) -> Result<Arc<dyn ArtifactStore>, ConformanceFailure> {
         (self.0)().await

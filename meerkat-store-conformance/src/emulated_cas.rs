@@ -21,18 +21,17 @@
 //! zombie incident.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use meerkat_core::session_store::{
     append_only_save_guard, authoritative_projection_current_revision_guard,
-    session_projection_cas_token,
+    session_projection_cas_token, transcript_rewrite_save_guard,
 };
 use meerkat_core::{
     IncrementalSessionStore, Session, SessionFilter, SessionId, SessionMeta, SessionStore,
-    SessionStoreError,
+    SessionStoreError, TranscriptRewriteCommit,
 };
-use tokio::sync::Mutex;
 
 /// Windowed-read span: only this many most-recent sibling rows are consulted
 /// when resolving the current row (the emulated-CAS read shape).
@@ -120,7 +119,8 @@ fn encode(session: &Session) -> Result<Arc<[u8]>, SessionStoreError> {
 /// Reference append-only session store with emulated (windowed-read) CAS.
 ///
 /// Deliberately stays on the whole-blob compat path: `as_incremental`
-/// returns `None`.
+/// returns `None`. Uses a `std` mutex (never held across an await) so the
+/// reference store carries no async-runtime dependency on wasm32.
 pub struct EmulatedCasSessionStore {
     state: Mutex<HashMap<SessionId, RowSet>>,
     /// When true, uncommitted orphan siblings are visible to current-row
@@ -149,12 +149,20 @@ impl EmulatedCasSessionStore {
         }
     }
 
+    /// Lock the row state; a poisoned lock (a prior panic mid-write) is a
+    /// typed internal failure, never a panic in library code.
+    fn lock_state(&self) -> Result<MutexGuard<'_, HashMap<SessionId, RowSet>>, SessionStoreError> {
+        self.state.lock().map_err(|_| {
+            SessionStoreError::Internal("emulated-CAS row state mutex poisoned".to_string())
+        })
+    }
+
     async fn append_guarded<G>(&self, session: &Session, guard: G) -> Result<(), SessionStoreError>
     where
         G: FnOnce(&Session, Option<&Session>) -> Result<(), SessionStoreError>,
     {
         let bytes = encode(session)?;
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state()?;
         let rows = state.entry(session.id().clone()).or_default();
         let attempt_version = rows.next_version();
         // The INSERT happens before validation — this is the append-only
@@ -182,10 +190,22 @@ impl Default for EmulatedCasSessionStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for EmulatedCasSessionStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         self.append_guarded(session, append_only_save_guard).await
+    }
+
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &TranscriptRewriteCommit,
+    ) -> Result<(), SessionStoreError> {
+        self.append_guarded(session, |incoming, previous| {
+            transcript_rewrite_save_guard(incoming, previous, commit)
+        })
+        .await
     }
 
     async fn save_authoritative_projection(
@@ -212,7 +232,7 @@ impl SessionStore for EmulatedCasSessionStore {
     }
 
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
-        let state = self.state.lock().await;
+        let state = self.lock_state()?;
         let Some(rows) = state.get(id) else {
             return Ok(None);
         };
@@ -220,7 +240,7 @@ impl SessionStore for EmulatedCasSessionStore {
     }
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
-        let state = self.state.lock().await;
+        let state = self.lock_state()?;
         let mut metas = Vec::new();
         for (id, rows) in state.iter() {
             if let Some(session) = rows.current_session(id, self.orphan_rows_visible)? {
@@ -247,7 +267,7 @@ impl SessionStore for EmulatedCasSessionStore {
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state()?;
         let Some(rows) = state.get_mut(id) else {
             return Ok(());
         };
@@ -267,7 +287,7 @@ impl SessionStore for EmulatedCasSessionStore {
         id: &SessionId,
         expected_current_revision: &str,
     ) -> Result<bool, SessionStoreError> {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state()?;
         let Some(rows) = state.get_mut(id) else {
             return Ok(false);
         };

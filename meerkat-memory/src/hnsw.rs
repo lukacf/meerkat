@@ -265,8 +265,17 @@ impl std::ops::DerefMut for MemoryConn {
 fn open_connection(path: &Path) -> Result<MemoryConn, MemoryStoreError> {
     let guard = meerkat_sqlite::OperationGuard::for_database(path)
         .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    let mut conn = meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::PRIMARY)
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&MEMORY_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     meerkat_sqlite::apply_domain_migrations(&mut conn, &MEMORY_DOMAIN)
         .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     Ok(MemoryConn {

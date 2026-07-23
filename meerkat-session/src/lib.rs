@@ -56,8 +56,9 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
-    LegacyCheckpointAdoptionReport, LiveSessionActorTurnBoundaryLease,
-    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport,
+    LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
+    MachineSessionArchiveProtocol, PersistentSessionService,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

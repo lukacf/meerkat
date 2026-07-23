@@ -2122,6 +2122,20 @@ pub struct RetryConfig {
         skip_serializing_if = "CallTimeoutOverride::is_inherit"
     )]
     pub call_timeout_override: CallTimeoutOverride,
+    /// Tri-state override for the per-provider-stream inactivity watchdog.
+    ///
+    /// - `Inherit` (default / omitted): the built-in default window
+    ///   ([`crate::retry::DEFAULT_STREAM_INACTIVITY_TIMEOUT`], 300s) — the
+    ///   watchdog is ON by default because a silent provider stream otherwise
+    ///   hangs the turn forever
+    /// - `Disabled` (`stream_inactivity_timeout = "disabled"`): no watchdog
+    /// - `Value(duration)` (`stream_inactivity_timeout = "120s"`): explicit window
+    #[serde(
+        default,
+        rename = "stream_inactivity_timeout",
+        skip_serializing_if = "CallTimeoutOverride::is_inherit"
+    )]
+    pub stream_inactivity_timeout_override: CallTimeoutOverride,
 }
 
 impl Default for RetryConfig {
@@ -2133,6 +2147,7 @@ impl Default for RetryConfig {
             max_delay: policy.max_delay,
             multiplier: policy.multiplier,
             call_timeout_override: CallTimeoutOverride::default(),
+            stream_inactivity_timeout_override: CallTimeoutOverride::default(),
         }
     }
 }
@@ -2146,12 +2161,20 @@ impl From<RetryConfig> for RetryPolicy {
             CallTimeoutOverride::Disabled => None,
             CallTimeoutOverride::Value(d) => Some(d),
         };
+        // Unlike call_timeout, `Inherit` resolves to the built-in ON default
+        // here: there is no lower profile layer for the stall watchdog.
+        let stream_inactivity_timeout = match config.stream_inactivity_timeout_override {
+            CallTimeoutOverride::Inherit => Some(crate::retry::DEFAULT_STREAM_INACTIVITY_TIMEOUT),
+            CallTimeoutOverride::Disabled => None,
+            CallTimeoutOverride::Value(d) => Some(d),
+        };
         RetryPolicy {
             max_retries: config.max_retries,
             initial_delay: config.initial_delay,
             max_delay: config.max_delay,
             multiplier: config.multiplier,
             call_timeout,
+            stream_inactivity_timeout,
         }
     }
 }
@@ -4135,6 +4158,49 @@ max_retries = 2
         };
         let policy: crate::retry::RetryPolicy = config.into();
         assert_eq!(policy.call_timeout, None);
+    }
+
+    #[test]
+    fn retry_policy_from_config_stream_inactivity_inherit_defaults_on() {
+        let config = RetryConfig::default();
+        let policy: crate::retry::RetryPolicy = config.into();
+        assert_eq!(
+            policy.stream_inactivity_timeout,
+            Some(crate::retry::DEFAULT_STREAM_INACTIVITY_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn retry_policy_from_config_stream_inactivity_disabled() {
+        let config = RetryConfig {
+            stream_inactivity_timeout_override: CallTimeoutOverride::Disabled,
+            ..RetryConfig::default()
+        };
+        let policy: crate::retry::RetryPolicy = config.into();
+        assert_eq!(policy.stream_inactivity_timeout, None);
+    }
+
+    #[test]
+    fn retry_config_parses_stream_inactivity_timeout_from_toml() {
+        let toml_str = r#"
+[retry]
+stream_inactivity_timeout = "2m"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.retry.stream_inactivity_timeout_override,
+            CallTimeoutOverride::Value(Duration::from_secs(120))
+        );
+
+        let toml_str = r#"
+[retry]
+stream_inactivity_timeout = "disabled"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.retry.stream_inactivity_timeout_override,
+            CallTimeoutOverride::Disabled
+        );
     }
 
     #[test]

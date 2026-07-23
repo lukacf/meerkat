@@ -283,8 +283,8 @@ pub use realtime_transcript::{
     SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 pub use retry::{
-    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
-    select_retry_delay,
+    DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,
+    LlmRetrySchedule, RetryPolicy, select_retry_delay,
 };
 pub use runtime_bootstrap::{
     ContextConfig, DualRootResolution, REALM_MANIFEST_FILE_NAME, RealmConfig, RealmLocator,

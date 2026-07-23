@@ -64,6 +64,17 @@ impl LlmRetryFailure {
                     duration_ms: Some(*duration_ms),
                     message: message.clone(),
                 }),
+                // The stall watchdog is an agent-loop-owned timeout like
+                // CallTimeout, so it projects onto the same wire/machine kind.
+                // A dedicated `stream_stalled` kind would require machine-schema
+                // and contracts regeneration; the domain error stays distinct.
+                LlmFailureReason::StreamStalled { inactivity_ms } => Some(Self {
+                    provider: (*provider).to_string(),
+                    kind: LlmRetryFailureKind::CallTimeout,
+                    retry_after_ms: None,
+                    duration_ms: Some(*inactivity_ms),
+                    message: message.clone(),
+                }),
                 LlmFailureReason::ProviderError(provider_error)
                     if provider_error.is_retryable() =>
                 {
@@ -111,6 +122,18 @@ pub struct LlmRetrySchedule {
     pub plan: LlmRetryPlan,
 }
 
+/// Default stream-inactivity watchdog window for a single provider stream.
+///
+/// Conservative on purpose: a healthy provider stream emits events far more
+/// often than this, while a hung continuation otherwise blocks the turn
+/// forever. Disable via `stream_inactivity_timeout = "disabled"` in the
+/// `[retry]` config section or [`RetryPolicy::with_stream_inactivity_timeout`].
+pub const DEFAULT_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn default_stream_inactivity_timeout() -> Option<Duration> {
+    Some(DEFAULT_STREAM_INACTIVITY_TIMEOUT)
+}
+
 /// Configuration for retry behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
@@ -129,6 +152,22 @@ pub struct RetryPolicy {
     /// This is distinct from provider-native timeouts owned by the client layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout: Option<Duration>,
+    /// Inactivity watchdog for a single provider stream.
+    ///
+    /// When set, an LLM call whose stream reports no events for this window is
+    /// aborted with the retryable [`LlmFailureReason::StreamStalled`]; each
+    /// received stream event re-arms the window, so long-but-alive calls are
+    /// unaffected. `None` disables the watchdog. Default:
+    /// [`DEFAULT_STREAM_INACTIVITY_TIMEOUT`] (300s) — ON by default because
+    /// the failure mode is an unbounded mid-turn hang. Only applies to clients
+    /// that report stream liveness (see
+    /// `AgentLlmClient::stream_activity_count`).
+    ///
+    /// Not `skip_serializing_if`: `None` must round-trip as an explicit null
+    /// so a disabled watchdog is not silently re-enabled by the missing-field
+    /// default.
+    #[serde(default = "default_stream_inactivity_timeout")]
+    pub stream_inactivity_timeout: Option<Duration>,
 }
 
 impl Default for RetryPolicy {
@@ -139,6 +178,7 @@ impl Default for RetryPolicy {
             max_delay: Duration::from_secs(30),
             multiplier: 2.0,
             call_timeout: None,
+            stream_inactivity_timeout: default_stream_inactivity_timeout(),
         }
     }
 }
@@ -185,6 +225,12 @@ impl RetryPolicy {
     /// Set the hard per-call timeout for individual LLM calls
     pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.call_timeout = timeout;
+        self
+    }
+
+    /// Set the stream-inactivity watchdog window (`None` disables it)
+    pub fn with_stream_inactivity_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_inactivity_timeout = timeout;
         self
     }
 
@@ -305,6 +351,11 @@ mod tests {
         assert_eq!(policy.max_delay, Duration::from_secs(30));
         assert_eq!(policy.multiplier, 2.0);
         assert_eq!(policy.call_timeout, None);
+        assert_eq!(
+            policy.stream_inactivity_timeout,
+            Some(DEFAULT_STREAM_INACTIVITY_TIMEOUT),
+            "inactivity watchdog must default ON"
+        );
     }
 
     #[test]
@@ -475,5 +526,39 @@ mod tests {
         let json = r#"{"max_retries":3,"initial_delay":{"secs":0,"nanos":500000000},"max_delay":{"secs":30,"nanos":0},"multiplier":2.0}"#;
         let parsed: RetryPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.call_timeout, None);
+        // Legacy JSON without the watchdog field gets the ON default.
+        assert_eq!(
+            parsed.stream_inactivity_timeout,
+            Some(DEFAULT_STREAM_INACTIVITY_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn test_stream_inactivity_disabled_round_trips() {
+        let policy = RetryPolicy::default().with_stream_inactivity_timeout(None);
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: RetryPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.stream_inactivity_timeout, None,
+            "explicit disable must survive serialization"
+        );
+    }
+
+    #[test]
+    fn stream_stall_schedules_retry_as_call_timeout_kind() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::StreamStalled {
+                inactivity_ms: 300_000,
+            },
+            message: "stream stalled".to_string(),
+        };
+
+        let schedule = policy
+            .schedule_retry(&error, 0, None)
+            .expect("stream stall must be retryable");
+        assert_eq!(schedule.failure.kind, LlmRetryFailureKind::CallTimeout);
+        assert_eq!(schedule.failure.duration_ms, Some(300_000));
     }
 }

@@ -354,6 +354,12 @@ impl AgentErrorReason {
             LlmFailureReason::CallTimeout { duration_ms } => Self::LlmCallTimeout {
                 duration_ms: *duration_ms,
             },
+            // Wire projection reuses the call-timeout reason: both are
+            // agent-loop-owned deadlines on one provider call. A dedicated
+            // `llm_stream_stalled` wire variant requires schema/SDK regen.
+            LlmFailureReason::StreamStalled { inactivity_ms } => Self::LlmCallTimeout {
+                duration_ms: *inactivity_ms,
+            },
         }
     }
 

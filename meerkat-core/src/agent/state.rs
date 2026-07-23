@@ -45,11 +45,33 @@ use super::{
 ///
 /// This ensures timeout classification is deterministic and not guessed from
 /// merged elapsed durations.
+#[derive(Clone, Copy)]
 enum CallTimeoutSource {
     /// Hard per-call timeout fired (from override or profile default).
     CallBudget,
     /// Explicit whole-turn time budget fired.
     TurnBudget,
+}
+
+/// Outcome of awaiting one guarded LLM call.
+///
+/// The hard-timeout and stall deadlines are competing waits over the same
+/// pinned `stream_response` future; breaking out of the wait loop drops the
+/// future and thereby aborts the in-flight provider call.
+enum LlmCallWait {
+    Completed(Result<LlmStreamResult, AgentError>),
+    /// The pre-selected hard deadline (call budget or remaining turn budget)
+    /// elapsed.
+    HardTimeout {
+        limit: std::time::Duration,
+        source: CallTimeoutSource,
+    },
+    /// The stream-inactivity watchdog fired: the client reported no stream
+    /// events for the whole configured window.
+    Stalled {
+        window: std::time::Duration,
+        idle: std::time::Duration,
+    },
 }
 
 struct LlmRetryRequest<'a> {
@@ -304,7 +326,9 @@ fn fallback_activation_is_pre_stream_safe(
     match error {
         AgentError::Llm { reason, .. } => !matches!(
             reason,
-            LlmFailureReason::NetworkTimeout { .. } | LlmFailureReason::CallTimeout { .. }
+            LlmFailureReason::NetworkTimeout { .. }
+                | LlmFailureReason::CallTimeout { .. }
+                | LlmFailureReason::StreamStalled { .. }
         ),
         _ => false,
     }
@@ -1159,6 +1183,9 @@ where
     /// - retry delay capped by remaining turn budget
     /// - per-call timeout from override/profile, wrapped with remaining turn budget
     /// - typed timeout-origin selection before await
+    /// - stream-inactivity watchdog (`RetryPolicy::stream_inactivity_timeout`)
+    ///   for liveness-reporting clients: a silent provider stream is aborted
+    ///   with the retryable `LlmFailureReason::StreamStalled`
     async fn call_llm_with_retry(
         &mut self,
         request: LlmRetryRequest<'_>,
@@ -1204,82 +1231,131 @@ where
 
             // 4. Determine whether to wrap the call and select timeout source
             self.client.begin_stream_output_observation();
-            let call_result = match (effective_call_timeout, remaining_turn) {
-                (None, None) => {
-                    // No timeout wrapper needed
-                    self.client
-                        .stream_response(
-                            &current_messages,
-                            &current_tools,
-                            current_max_tokens,
-                            temperature,
-                            current_provider_params.as_ref(),
-                        )
-                        .await
+            let hard_timeout = match (effective_call_timeout, remaining_turn) {
+                (None, None) => None,
+                (Some(ct), None) => Some((ct, CallTimeoutSource::CallBudget)),
+                (None, Some(tr)) => Some((tr, CallTimeoutSource::TurnBudget)),
+                (Some(ct), Some(tr)) => {
+                    if tr < ct {
+                        Some((tr, CallTimeoutSource::TurnBudget))
+                    } else {
+                        Some((ct, CallTimeoutSource::CallBudget))
+                    }
                 }
-                (call_to, turn_remaining) => {
-                    // At least one timeout is active — select source and wrap
-                    let (effective_timeout, source) = match (call_to, turn_remaining) {
-                        (Some(ct), None) => (ct, CallTimeoutSource::CallBudget),
-                        (None, Some(tr)) => (tr, CallTimeoutSource::TurnBudget),
-                        (Some(ct), Some(tr)) => {
-                            if tr < ct {
-                                (tr, CallTimeoutSource::TurnBudget)
-                            } else {
-                                (ct, CallTimeoutSource::CallBudget)
-                            }
-                        }
-                        (None, None) => unreachable!(), // Already handled above
-                    };
+            };
+            // The inactivity watchdog applies only when the client reports
+            // stream liveness; clients without a probe keep the pre-watchdog
+            // contract (hard timeouts only).
+            let stall_window = self
+                .client
+                .stream_activity_count()
+                .and(self.retry_policy.stream_inactivity_timeout);
 
-                    match tokio::time::timeout(
-                        effective_timeout,
-                        self.client.stream_response(
-                            &current_messages,
-                            &current_tools,
-                            current_max_tokens,
-                            temperature,
-                            current_provider_params.as_ref(),
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(inner_result) => inner_result,
+            // Await the call under both deadlines. Each observed stream event
+            // re-arms the stall window; the hard deadline is fixed at call
+            // start. Timers route through the crate tokio alias, so this works
+            // identically on wasm32 (tokio_with_wasm) and native.
+            let wait_outcome = {
+                let probe_client = Arc::clone(&self.client);
+                let call_fut = self.client.stream_response(
+                    &current_messages,
+                    &current_tools,
+                    current_max_tokens,
+                    temperature,
+                    current_provider_params.as_ref(),
+                );
+                let mut call_fut = std::pin::pin!(call_fut);
+                let call_started = crate::time_compat::Instant::now();
+                let mut last_activity = call_started;
+                let mut last_count = probe_client.stream_activity_count();
+                loop {
+                    let now = crate::time_compat::Instant::now();
+                    let hard_remaining = match hard_timeout {
+                        Some((limit, source)) => {
+                            let elapsed = now.duration_since(call_started);
+                            if elapsed >= limit {
+                                break LlmCallWait::HardTimeout { limit, source };
+                            }
+                            Some(limit.saturating_sub(elapsed))
+                        }
+                        None => None,
+                    };
+                    let stall_remaining = match stall_window {
+                        Some(window) => {
+                            let idle = now.duration_since(last_activity);
+                            if idle >= window {
+                                break LlmCallWait::Stalled { window, idle };
+                            }
+                            Some(window.saturating_sub(idle))
+                        }
+                        None => None,
+                    };
+                    let wait = match (hard_remaining, stall_remaining) {
+                        (Some(hard), Some(stall)) => hard.min(stall),
+                        (Some(hard), None) => hard,
+                        (None, Some(stall)) => stall,
+                        (None, None) => break LlmCallWait::Completed(call_fut.as_mut().await),
+                    };
+                    match tokio::time::timeout(wait, call_fut.as_mut()).await {
+                        Ok(result) => break LlmCallWait::Completed(result),
                         Err(_elapsed) => {
-                            // Timeout fired — source is pre-selected shell-side,
-                            // but MeerkatMachine (#323) owns the VERDICT: retryable
-                            // call timeout vs terminal turn-budget. The loop only
-                            // mirrors the emitted verdict into the existing paths.
-                            let timeout_ms = effective_timeout.as_millis() as u64;
-                            match self.classify_call_timeout(source, timeout_ms)? {
-                                CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
-                                    provider: self.client.provider().as_str(),
-                                    reason: crate::error::LlmFailureReason::CallTimeout {
-                                        duration_ms: timeout_ms,
-                                    },
-                                    message: format!(
-                                        "LLM call timed out after {}s",
-                                        effective_timeout.as_secs()
-                                    ),
-                                }),
-                                CallTimeoutVerdict::TerminalTurnBudget => {
-                                    let exceeded =
-                                        self.budget.observe().exceeded().unwrap_or_else(|| {
-                                            let (elapsed_ms, limit_ms) = self
-                                                .budget
-                                                .time_usage()
-                                                .unwrap_or((timeout_ms, timeout_ms));
-                                            BudgetExceeded {
-                                                dimension: BudgetDimension::Time,
-                                                used: elapsed_ms / 1000,
-                                                limit: limit_ms / 1000,
-                                            }
-                                        });
-                                    return Err(exceeded.to_agent_error());
-                                }
+                            let count = probe_client.stream_activity_count();
+                            if count != last_count {
+                                last_count = count;
+                                last_activity = crate::time_compat::Instant::now();
                             }
                         }
                     }
+                }
+            };
+            let call_result = match wait_outcome {
+                LlmCallWait::Completed(result) => result,
+                LlmCallWait::HardTimeout { limit, source } => {
+                    // Timeout fired — source is pre-selected shell-side,
+                    // but MeerkatMachine (#323) owns the VERDICT: retryable
+                    // call timeout vs terminal turn-budget. The loop only
+                    // mirrors the emitted verdict into the existing paths.
+                    let timeout_ms = limit.as_millis() as u64;
+                    match self.classify_call_timeout(source, timeout_ms)? {
+                        CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
+                            provider: self.client.provider().as_str(),
+                            reason: crate::error::LlmFailureReason::CallTimeout {
+                                duration_ms: timeout_ms,
+                            },
+                            message: format!("LLM call timed out after {}s", limit.as_secs()),
+                        }),
+                        CallTimeoutVerdict::TerminalTurnBudget => {
+                            let exceeded = self.budget.observe().exceeded().unwrap_or_else(|| {
+                                let (elapsed_ms, limit_ms) =
+                                    self.budget.time_usage().unwrap_or((timeout_ms, timeout_ms));
+                                BudgetExceeded {
+                                    dimension: BudgetDimension::Time,
+                                    used: elapsed_ms / 1000,
+                                    limit: limit_ms / 1000,
+                                }
+                            });
+                            return Err(exceeded.to_agent_error());
+                        }
+                    }
+                }
+                LlmCallWait::Stalled { window, idle } => {
+                    // The provider call was aborted when the wait loop dropped
+                    // its future. The typed stall flows through the machine's
+                    // RecoverableFailure gate like any retryable LLM failure:
+                    // one stall retries, repeated stalls exhaust the retry
+                    // budget and terminalize the turn.
+                    Err(AgentError::Llm {
+                        provider: self.client.provider().as_str(),
+                        reason: crate::error::LlmFailureReason::StreamStalled {
+                            inactivity_ms: idle.as_millis() as u64,
+                        },
+                        message: format!(
+                            "LLM stream produced no events for {}s \
+                             (inactivity watchdog window {}s)",
+                            idle.as_secs(),
+                            window.as_secs()
+                        ),
+                    })
                 }
             };
 
@@ -13316,6 +13392,167 @@ mod tests {
         }
     }
 
+    /// First call reports one stream event then hangs forever; second call
+    /// succeeds. Exercises the stream-inactivity watchdog retry path.
+    struct StallThenSucceedClient {
+        calls: std::sync::atomic::AtomicUsize,
+        activity: std::sync::atomic::AtomicU64,
+    }
+
+    impl StallThenSucceedClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                activity: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for StallThenSucceedClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call == 1 {
+                // One event arrives, then the stream goes silent forever.
+                self.activity
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // The watchdog aborts the stalled call by dropping this future.
+                return std::future::pending().await;
+            }
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok after stall retry".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn stream_activity_count(&self) -> Option<u64> {
+            Some(self.activity.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    /// Every call reports one stream event then hangs forever.
+    struct AlwaysStallingClient {
+        activity: std::sync::atomic::AtomicU64,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for AlwaysStallingClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.activity
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The watchdog aborts the stalled call by dropping this future.
+            std::future::pending().await
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn stream_activity_count(&self) -> Option<u64> {
+            Some(self.activity.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    /// Emits stream events at a fixed interval, each below the watchdog
+    /// window, for a total call duration longer than the window.
+    struct SlowButAliveClient {
+        calls: std::sync::atomic::AtomicUsize,
+        activity: std::sync::atomic::AtomicU64,
+        interval: Duration,
+        ticks: u32,
+    }
+
+    impl SlowButAliveClient {
+        fn new(interval: Duration, ticks: u32) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                activity: std::sync::atomic::AtomicU64::new(0),
+                interval,
+                ticks,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for SlowButAliveClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..self.ticks {
+                tokio::time::sleep(self.interval).await;
+                self.activity
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "slow but alive".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn stream_activity_count(&self) -> Option<u64> {
+            Some(self.activity.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
     struct FallbackActivatingClient {
         registry: Arc<crate::ModelRegistry>,
         active: std::sync::atomic::AtomicUsize,
@@ -14075,6 +14312,7 @@ mod tests {
                 max_delay: Duration::from_millis(50),
                 multiplier: 2.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -14104,6 +14342,102 @@ mod tests {
             actual_delay >= hint,
             "retry delay ({actual_delay:?}) must be at least the server hint ({hint:?})",
         );
+    }
+
+    /// HomeCore defect B: a provider stream that goes silent mid-turn must be
+    /// aborted by the inactivity watchdog and retried through the ordinary
+    /// machine-gated recovery path — not hang the turn forever.
+    #[tokio::test]
+    async fn stream_stall_watchdog_aborts_and_retries() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(StallThenSucceedClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: Some(Duration::from_millis(40)),
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("stall once".to_string().into())
+            .await
+            .expect("stalled first call must retry and succeed");
+        assert_eq!(result.text, "ok after stall retry");
+        assert_eq!(client.calls(), 2, "one stall, one successful retry");
+    }
+
+    /// Repeated stalls must exhaust the retry budget and terminalize the turn
+    /// with the machine-owned typed failure instead of hanging.
+    #[tokio::test]
+    async fn stream_stall_exhausts_retries_with_typed_terminal_failure() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(AlwaysStallingClient {
+            activity: std::sync::atomic::AtomicU64::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: Some(Duration::from_millis(30)),
+            })
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("stall forever".to_string().into())
+            .await
+            .expect_err("stalled stream must terminalize typed, not hang");
+
+        match err {
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                ..
+            } => {
+                assert_eq!(outcome, TurnTerminalOutcome::Failed);
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::RetryExhausted);
+            }
+            other => panic!("expected typed TerminalFailure, got {other:?}"),
+        }
+    }
+
+    /// A slow-but-alive stream (events at intervals below the window, total
+    /// duration above it) must NOT trip the watchdog: each event re-arms it.
+    #[tokio::test]
+    async fn slow_but_alive_stream_does_not_trip_watchdog() {
+        use crate::retry::RetryPolicy;
+
+        // 20 ticks x 10ms ≈ 200ms total, watchdog window 100ms: without
+        // per-event re-arming the watchdog would fire mid-call.
+        let client = Arc::new(SlowButAliveClient::new(Duration::from_millis(10), 20));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: Some(Duration::from_millis(100)),
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("stay alive".to_string().into())
+            .await
+            .expect("alive stream must not be classified as stalled");
+        assert_eq!(result.text, "slow but alive");
+        assert_eq!(client.calls(), 1, "no retry for a live stream");
     }
 
     #[tokio::test]
@@ -14137,6 +14471,7 @@ mod tests {
             max_delay: Duration::from_millis(1),
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), tools, Arc::new(NoopStore))
         .await;
@@ -14279,6 +14614,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -14353,6 +14689,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -14404,6 +14741,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -14463,6 +14801,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -14523,6 +14862,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -14573,6 +14913,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -14912,6 +15253,7 @@ mod tests {
                 max_delay: Duration::from_millis(1),
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
@@ -15012,6 +15354,7 @@ mod tests {
                 max_delay: Duration::from_millis(50),
                 multiplier: 2.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -15108,6 +15451,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -15611,6 +15955,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -15752,6 +16097,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -15809,6 +16155,7 @@ mod tests {
             max_delay: Duration::ZERO,
             multiplier: 1.0,
             call_timeout: None,
+            stream_inactivity_timeout: None,
         })
         .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
@@ -15883,6 +16230,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -15969,6 +16317,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -16048,6 +16397,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -16136,6 +16486,7 @@ mod tests {
                 max_delay: Duration::ZERO,
                 multiplier: 1.0,
                 call_timeout: None,
+                stream_inactivity_timeout: None,
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;

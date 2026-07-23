@@ -270,8 +270,14 @@ via cargo-semver-checks against the published baselines).
   validation uses process-lifetime identity stamps. Previously every
   schedule-host tick (250 ms, per member) re-parsed entire machine DSLs per
   persisted row — ~0.25-0.3 core per idle durable member; an idle fleet now
-  costs ~zero. Structural regression tests pin the caching (pointer
-  identity) and the serde path (no schema construction per row).
+  costs ~zero. On 0.8.2/0.8.3 this escalates to **availability loss** on
+  restart: the spin contends with member restore, a large fleet's boot can
+  exceed the client init timeout, and the host process-manager restart loop
+  re-pays the full restore every iteration — the deployment never comes
+  back up on default timeouts. Upgrading to this release removes the
+  contention source; structural regression tests pin the caching (pointer
+  identity) and the serde path (no schema construction per row) so the
+  amplifier cannot silently return.
 - **A stalled LLM provider stream no longer wedges the turn forever.** New
   stream-inactivity watchdog (`[retry] stream_inactivity_timeout`, **default
   ON at 300s**; `"disabled"` opts out): a provider call whose stream

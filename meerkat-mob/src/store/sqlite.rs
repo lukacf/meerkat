@@ -79,7 +79,6 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
 const EVENT_WATCH_POLL_FALLBACK_MS: u64 = 250;
@@ -733,31 +732,34 @@ fn stored_event_envelope_mob_id(bytes: &[u8]) -> Option<String> {
 /// bytes remain the durable source; this column is only a physical locality
 /// key. Completely unreadable legacy bytes stay NULL and therefore remain
 /// conservatively visible to every identity observation.
-fn ensure_mob_event_route_schema(conn: &mut Connection) -> Result<(), MobStoreError> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(se)?;
+fn migration_0002_event_route(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     let has_mob_id = {
-        let mut statement = tx.prepare("PRAGMA table_info(mob_events)").map_err(se)?;
+        let mut statement = tx.prepare("PRAGMA table_info(mob_events)")?;
         let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(se)?;
-        let mut found = false;
-        for column in columns {
-            if column.map_err(se)? == "mob_id" {
-                found = true;
-                break;
-            }
-        }
-        found
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        columns.iter().any(|column| column == "mob_id")
     };
     if !has_mob_id {
-        tx.execute("ALTER TABLE mob_events ADD COLUMN mob_id TEXT", [])
-            .map_err(se)?;
+        tx.execute("ALTER TABLE mob_events ADD COLUMN mob_id TEXT", [])?;
     }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS mob_events_mob_cursor ON mob_events (mob_id, cursor)",
+        [],
+    )?;
+    Ok(())
+}
 
+/// Idempotent NULL-route heal, run on every open (not a one-shot migration):
+/// binaries predating the route column keep inserting rows with a NULL
+/// `mob_id`, and those rows must regain their physical locality key on the
+/// next open. Statement-at-a-time (no transaction of its own) is safe
+/// because each UPDATE is keyed and idempotent; rows whose event bytes are
+/// unreadable stay NULL and remain conservatively visible to every identity
+/// observation.
+fn heal_unrouted_events(conn: &Connection) -> Result<(), MobStoreError> {
     let unrouted = {
-        let mut statement = tx
+        let mut statement = conn
             .prepare(
                 "SELECT cursor, CAST(event_json AS BLOB)
                  FROM mob_events
@@ -775,42 +777,30 @@ fn ensure_mob_event_route_schema(conn: &mut Connection) -> Result<(), MobStoreEr
     };
     for (cursor, bytes) in unrouted {
         if let Some(mob_id) = stored_event_envelope_mob_id(&bytes) {
-            tx.execute(
+            conn.execute(
                 "UPDATE mob_events SET mob_id = ?2 WHERE cursor = ?1 AND mob_id IS NULL",
                 params![cursor, mob_id],
             )
             .map_err(se)?;
         }
     }
-    tx.execute(
-        "CREATE INDEX IF NOT EXISTS mob_events_mob_cursor ON mob_events (mob_id, cursor)",
-        [],
-    )
-    .map_err(se)?;
-    tx.commit().map_err(se)
+    Ok(())
 }
 
-fn ensure_member_operator_execution_fence_schema(
-    conn: &mut Connection,
-) -> Result<(), MobStoreError> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(se)?;
+fn migration_0003_member_operator_execution_fence(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
     let (has_host_id, has_binding_generation, has_member_session_id, primary_key) = {
-        let mut stmt = tx
-            .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
-            .map_err(se)?;
-        let columns = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
-            })
-            .map_err(se)?;
+        let mut stmt = tx.prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")?;
+        let columns = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?;
         let mut found_host_id = false;
         let mut found_binding_generation = false;
         let mut found_member_session_id = false;
         let mut primary_key = Vec::new();
         for column in columns {
-            let (name, key_position) = column.map_err(se)?;
+            let (name, key_position) = column?;
             match name.as_str() {
                 "host_id" => found_host_id = true,
                 "binding_generation" => found_binding_generation = true,
@@ -873,28 +863,84 @@ fn ensure_member_operator_execution_fence_schema(
                  )
              );
              DROP TABLE mob_runtime_member_operator_requests_pre_execution_fence;",
-        )
-        .map_err(se)?;
+        )?;
     }
-    tx.commit().map_err(se)
+    Ok(())
 }
 
-fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(se)?;
+fn migration_0001_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SCHEMA_SQL)
+}
+
+/// The mob store bundle's schema domain in the per-file migration ledger.
+///
+/// Migrations 0002/0003 lift the historical per-open upgrade functions
+/// (event-route column backfill, member-operator fence-table rebuild) into
+/// once-per-file migrations; their internal shape probes keep them
+/// convergent on files of any vintage.
+pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "mob",
+    migrations: &[
+        meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_mob_schema,
+        },
+        meerkat_sqlite::Migration {
+            version: 2,
+            name: "event-route",
+            apply: migration_0002_event_route,
+        },
+        meerkat_sqlite::Migration {
+            version: 3,
+            name: "member-operator-execution-fence",
+            apply: migration_0003_member_operator_execution_fence,
+        },
+    ],
+};
+
+/// Per-operation connection: fence guard lives exactly as long as the
+/// connection it admits.
+struct MobConn {
+    conn: Connection,
+    _guard: meerkat_sqlite::OperationGuard,
+}
+
+impl std::ops::Deref for MobConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
     }
-    let mut conn = Connection::open(path).map_err(se)?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(se)?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(se)?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(se)?;
-    conn.execute_batch(CREATE_SCHEMA_SQL).map_err(se)?;
-    ensure_mob_event_route_schema(&mut conn)?;
-    ensure_member_operator_execution_fence_schema(&mut conn)?;
+}
+
+impl std::ops::DerefMut for MobConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+fn open_connection(path: &Path) -> Result<MobConn, MobStoreError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(se)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&MOB_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(se)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).map_err(se)?;
+    // Data reconciliation (not schema): reconcile the durable cursor
+    // allocator with MAX(cursor) and heal NULL event routes on every open.
     repair_next_event_cursor(&conn)?;
-    Ok(conn)
+    heal_unrouted_events(&conn)?;
+    Ok(MobConn {
+        conn,
+        _guard: guard,
+    })
 }
 
 /// Open an existing mob database for passive observation without creating the
@@ -902,16 +948,12 @@ fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
 /// terminal storage removal, so it must never use the create-capable writer
 /// connection.
 fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreError> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(se)?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(se)?;
-    Ok(conn)
+    // Deliberately unguarded: passive observation may hold this connection
+    // across long watch windows, and readers must not stall the exclusive
+    // maintenance fence; reader quiescence during maintenance happens at the
+    // SQLite layer. No schema preflight either: a read-only open never
+    // mutates the file, and refusal belongs to the write-capable openers.
+    meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::ReadOnly).map_err(se)
 }
 
 fn initialize_identity_store_instance(conn: &Connection) -> Result<String, MobStoreError> {
@@ -967,21 +1009,25 @@ fn open_existing_identity_read_connection(
 fn open_existing_identity_write_connection(
     path: &Path,
     _expected_store_instance_id: &str,
-) -> Result<Connection, MobStoreError> {
-    let conn = Connection::open_with_flags(
+) -> Result<MobConn, MobStoreError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(se)?;
+    let conn = meerkat_sqlite::open_with(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        meerkat_sqlite::ConnectionProfile::Primary { create: false },
+        meerkat_sqlite::OpenOptions {
+            // Identity authority lives in the mob database: a future file
+            // is refused before the profile's WAL conversion.
+            schema_preflight: &[&MOB_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
     )
     .map_err(|error| {
         MobStoreError::WriteFailed(format!("identity store database is unavailable: {error}"))
     })?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(se)?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(se)?;
-    Ok(conn)
+    Ok(MobConn {
+        conn,
+        _guard: guard,
+    })
 }
 
 fn begin_identity_immediate<'connection>(
@@ -1460,26 +1506,32 @@ struct SqliteIdentityRuntimeWriteFence {
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn sqlite_is_busy_or_locked(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(sqlite_error, _)
-            if matches!(sqlite_error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
-}
-
-#[cfg(feature = "runtime-adapter")]
 impl meerkat_runtime::RuntimeStoreWriteFence for SqliteIdentityRuntimeWriteFence {
     fn execute_if_current(
         &self,
         operation: Box<dyn FnOnce() -> Result<(), meerkat_runtime::RuntimeStoreError> + '_>,
     ) -> Result<meerkat_runtime::RuntimeStoreWriteFenceOutcome, meerkat_runtime::RuntimeStoreError>
     {
-        let mut conn = match Connection::open_with_flags(
+        // Shared guard: while the exclusive maintenance fence is held the
+        // probe backs off instead of writing through offline maintenance.
+        let _guard = match meerkat_sqlite::OperationGuard::for_database(&self.path) {
+            Ok(guard) => guard,
+            Err(error) => {
+                return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+                    reason: format!(
+                        "identity runtime write fence deferred to the maintenance fence: {error}"
+                    ),
+                });
+            }
+        };
+        // Maintenance profile: read-write on the existing file, zero busy
+        // timeout for nonblocking admission, no pragma mutation. No schema
+        // preflight: a preflight refusal here would surface as an endlessly
+        // retried Backoff instead of a typed error, and the fence probe's
+        // SQL fails typed on a restructured file anyway.
+        let mut conn = match meerkat_sqlite::open(
             &self.path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
         ) {
             Ok(conn) => conn,
             Err(error) => {
@@ -1490,16 +1542,9 @@ impl meerkat_runtime::RuntimeStoreWriteFence for SqliteIdentityRuntimeWriteFence
                 });
             }
         };
-        if let Err(error) = conn.busy_timeout(Duration::ZERO) {
-            return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
-                reason: format!(
-                    "identity runtime write fence could not configure nonblocking admission: {error}"
-                ),
-            });
-        }
         let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
             Ok(tx) => tx,
-            Err(error) if sqlite_is_busy_or_locked(&error) => {
+            Err(error) if meerkat_sqlite::is_busy_or_locked(&error) => {
                 return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
                     reason: "identity runtime write fence authority guard is contended".to_string(),
                 });
@@ -7036,30 +7081,10 @@ impl SqliteRealmProfileStore {
     ///
     /// Creates the parent directory and initializes the schema if needed.
     pub fn open(db_path: &std::path::Path) -> Result<Self, MobStoreError> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                MobStoreError::Internal(format!(
-                    "failed to create realm profile store directory: {e}"
-                ))
-            })?;
-        }
-        let conn = rusqlite::Connection::open(db_path).map_err(|e| {
-            MobStoreError::Internal(format!("failed to open realm profile store: {e}"))
-        })?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
-        )
-        .map_err(se)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS realm_profiles (
-                name TEXT PRIMARY KEY,
-                profile_json BLOB NOT NULL,
-                revision INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-        )
-        .map_err(se)?;
+        // Same opener as every operation on this store (which shares the
+        // bundle opener): one connection policy, one schema domain.
+        let conn = open_connection(db_path)?;
+        drop(conn);
         Ok(Self {
             path: db_path.to_path_buf(),
         })

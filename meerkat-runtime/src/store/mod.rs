@@ -196,6 +196,22 @@ pub enum RuntimeStoreError {
         evidence_digest: Option<String>,
         detail: String,
     },
+    /// The file's schema ledger records a version newer than this binary
+    /// supports: a newer binary migrated the file and this one must refuse
+    /// it (typed, health-visible refusal — never a crash loop).
+    #[error(
+        "schema for domain '{domain}' is from the future: file has version {found}, \
+         this binary supports up to {supported}"
+    )]
+    SchemaFromTheFuture {
+        domain: String,
+        found: i64,
+        supported: i64,
+    },
+    /// The exclusive maintenance fence is held for this database; storage is
+    /// under offline maintenance.
+    #[error("maintenance fence is held for '{path}'; storage is under offline maintenance")]
+    MaintenanceFenceHeld { path: String },
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

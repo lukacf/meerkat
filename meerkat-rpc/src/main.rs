@@ -208,11 +208,41 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|b: RealmBackend| b.as_str().to_string()),
         state_root: cli.state_root.clone(),
     };
-    let locator = realm_cfg.resolve_locator()?;
+    // Realm-id-first dual-root resolution through the storage layout (the
+    // single path authority; the layout's realm-root candidates arm the
+    // cross-candidate first-start reservation at open). The project-local
+    // candidate is probed only when an explicit --context-root was given,
+    // keeping the no-flags server behavior (user-global data-dir root)
+    // unchanged.
+    let invocation_context = cli
+        .context_root
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let meerkat_core::ResolvedStorage {
+        layout,
+        locator,
+        root_choice,
+    } = meerkat_core::StorageLayout::resolve(
+        meerkat_core::StorageLayoutInputs {
+            invocation_context,
+            explicit_state_root: cli.state_root.clone(),
+            user_config_root: cli.user_config_root.clone(),
+            default_root: Some(meerkat_core::RealmRootDefault::UserGlobal),
+            probe_local_candidate: cli.context_root.is_some(),
+        },
+        &realm_cfg,
+    )?;
+    tracing::info!(
+        realm = %locator.realm,
+        state_root = %locator.state_root.display(),
+        root_choice = ?root_choice,
+        "resolved realm storage"
+    );
 
     let backend_hint = cli.realm_backend.map(Into::into);
-    let (manifest, persistence) = meerkat::open_realm_persistence_in(
-        &locator.state_root,
+    let (manifest, persistence) = meerkat::storage_provider::open_realm_persistence_with_layout(
+        layout.clone(),
         locator.realm.as_str(),
         backend_hint,
         Some(origin_hint),
@@ -222,8 +252,28 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let realm_paths =
         meerkat_store::realm_paths_in(&locator.state_root, &locator.realm.to_string());
 
+    // Shared filesystem realm-config source, composed before any config
+    // store so the head store routes through the SAME doc mapping. The
+    // reserved `global` realm maps to the layout's user-global config doc
+    // (honoring --user-config-root); when no home-like root resolves, a
+    // path under the state root that will never exist, so `global` yields
+    // `None`. Routing the head store through `config_doc_path` means an
+    // explicit --state-root cannot shadow the global document with
+    // `<state_root>/global/config.toml`.
+    let global_doc = layout
+        .global_config_path()
+        .unwrap_or_else(|| locator.state_root.join("__no_global__").join("config.toml"));
+    let fs_realm_config_source = meerkat_store::FilesystemRealmConfigSource::new(
+        locator.state_root.clone(),
+        global_doc,
+        meerkat_models::canonical(),
+    );
+    let head_config_doc = fs_realm_config_source.config_doc_path(&locator.realm);
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(fs_realm_config_source);
+
     let base_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
-        realm_paths.config_path.clone(),
+        head_config_doc.clone(),
         meerkat_models::canonical(),
     ));
     let tagged = TaggedConfigStore::new(
@@ -235,7 +285,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             resolved_paths: Some(ConfigResolvedPaths {
                 root: realm_paths.root.display().to_string(),
                 manifest_path: realm_paths.manifest_path.display().to_string(),
-                config_path: realm_paths.config_path.display().to_string(),
+                config_path: head_config_doc.display().to_string(),
                 sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -245,14 +295,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Compose inherited startup facts before building any process-owned
     // runtime capability. In particular, `[mob_host]` listen/advertise may
     // live in a parent realm while the head only tightens a resource bound.
-    let global_doc = Config::global_config_path()
-        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
-    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
-        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
-            locator.state_root.clone(),
-            global_doc,
-            meerkat_models::canonical(),
-        ));
     let head_config = config_store
         .get()
         .await

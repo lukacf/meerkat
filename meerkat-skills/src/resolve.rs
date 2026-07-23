@@ -28,6 +28,11 @@ use crate::source::{CompositeSkillSource, EmbeddedSkillSource, SourceNode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::source::{ExternalSkillSource, FilesystemSkillSource, StdioExternalClient};
 
+#[deprecated(
+    since = "0.8.4",
+    note = "ambient $HOME resolution is deprecated; use \
+            `resolve_repositories_with_roots` with explicit roots"
+)]
 pub async fn resolve_repositories(
     config: &SkillsConfig,
     project_root: Option<&Path>,

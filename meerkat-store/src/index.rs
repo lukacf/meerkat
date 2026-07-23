@@ -6,11 +6,9 @@
 use crate::json_column::JsonColumnBytes;
 use crate::{SessionFilter, StoreError};
 use meerkat_core::{SessionId, SessionMeta};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CREATE_SESSION_INDEX_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS session_index (
@@ -22,6 +20,20 @@ CREATE TABLE IF NOT EXISTS session_index (
 CREATE INDEX IF NOT EXISTS session_index_updated_idx
 ON session_index(updated_at_ms DESC, session_id ASC)";
 
+fn migration_0001_session_index(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SESSION_INDEX_SQL)
+}
+
+/// Schema domain for the JSONL store's rebuildable session index.
+pub const JSONL_INDEX_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "jsonl-index",
+    migrations: &[meerkat_sqlite::Migration {
+        version: 1,
+        name: "base-schema",
+        apply: migration_0001_session_index,
+    }],
+};
+
 fn system_time_millis(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
@@ -29,16 +41,45 @@ fn system_time_millis(time: SystemTime) -> i64 {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection, StoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Per-operation connection: the maintenance-fence guard lives exactly as
+/// long as the connection it admits.
+struct IndexConn {
+    conn: Connection,
+    _guard: meerkat_sqlite::OperationGuard,
+}
+
+impl std::ops::Deref for IndexConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
     }
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    conn.execute_batch(CREATE_SESSION_INDEX_SQL)?;
-    Ok(conn)
+}
+
+impl std::ops::DerefMut for IndexConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+fn open_connection(path: &Path) -> Result<IndexConn, StoreError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(StoreError::from)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&JSONL_INDEX_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(StoreError::from)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &JSONL_INDEX_DOMAIN)
+        .map_err(StoreError::from)?;
+    Ok(IndexConn {
+        conn,
+        _guard: guard,
+    })
 }
 
 /// SQLite-backed session index implementation.

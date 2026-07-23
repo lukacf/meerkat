@@ -16,23 +16,9 @@ use std::path::{Path, PathBuf};
 /// # Returns
 /// The detected project root directory, or None if no `.rkat` ancestor exists.
 pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
-    find_ancestor_with(start_dir, ".rkat")
-}
-
-/// Find an ancestor directory containing the specified marker directory.
-///
-/// Walks up the directory tree from `start` looking for a directory
-/// that contains a subdirectory or file named `marker`.
-fn find_ancestor_with(start: &Path, marker: &str) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    loop {
-        if current.join(marker).exists() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
+    // Canonical copy lives in meerkat-core's storage layout; this wrapper
+    // keeps the historical `meerkat_tools::find_project_root` export.
+    meerkat_core::storage_layout::find_project_root(start_dir)
 }
 
 /// Ensure `.rkat` directory exists in project root, creating if needed.

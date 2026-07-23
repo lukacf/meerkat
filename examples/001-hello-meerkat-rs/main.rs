@@ -24,12 +24,17 @@ use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService, build_ephemeral_service,
 };
 use meerkat_core::service::InitialTurnPolicy;
-use meerkat_store::realm_paths;
+use meerkat_store::realm_paths_in;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
-    let realm = realm_paths("examples/hello-meerkat");
+    // Explicit state root (the ambient default-root helper is deprecated):
+    // the example keeps its realm under the user-global data-dir root.
+    let realm = realm_paths_in(
+        &meerkat_core::default_state_root(),
+        "examples/hello-meerkat",
+    );
     let factory = AgentFactory::new(realm.root.clone()).runtime_root(realm.root);
     let service = build_ephemeral_service(factory, config, 16);
 

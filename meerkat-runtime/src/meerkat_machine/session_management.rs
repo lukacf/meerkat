@@ -780,6 +780,37 @@ mod ops_persistence_worker_tests {
         OperationId, OperationKind, OperationSpec, OpsLifecycleError, OpsLifecycleRegistry,
     };
 
+    // Idle-CPU regression gate: the persistence worker is change-notified
+    // (it blocks on the mpsc request channel), never interval-polled. An
+    // idle session must cost the worker zero store traffic — the loop only
+    // wakes for queued snapshot requests and exits when the channel closes.
+    #[tokio::test]
+    async fn idle_persistence_worker_writes_nothing_and_exits_on_channel_close() {
+        let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let runtime_id = LogicalRuntimeId::new("ops-worker-idle-test");
+        let (persist_tx, persist_rx) = crate::tokio::sync::mpsc::unbounded_channel();
+        let worker = spawn_ops_lifecycle_persistence_worker(
+            Arc::clone(&store),
+            runtime_id.clone(),
+            persist_rx,
+        )
+        .expect("persistence worker");
+
+        drop(persist_tx);
+        join_ops_lifecycle_persistence_worker(worker)
+            .await
+            .expect("idle worker must join once the request channel closes");
+
+        assert!(
+            store
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .expect("in-memory store read")
+                .is_none(),
+            "idle persistence worker persisted a snapshot without any request"
+        );
+    }
+
     #[tokio::test]
     async fn unregister_closes_and_joins_ops_persistence_before_late_callback() {
         let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());

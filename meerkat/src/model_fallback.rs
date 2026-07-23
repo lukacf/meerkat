@@ -195,6 +195,14 @@ impl AgentLlmClient for ModelFallbackClient {
             .stream_output_observed()
     }
 
+    fn stream_activity_count(&self) -> Option<u64> {
+        // Without this forwarder the stall watchdog silently disengages on
+        // every factory-built agent (fallback wraps the adapter by default).
+        self.candidates[self.active_index()]
+            .client
+            .stream_activity_count()
+    }
+
     fn compile_schema(
         &self,
         output_schema: &meerkat_core::OutputSchema,

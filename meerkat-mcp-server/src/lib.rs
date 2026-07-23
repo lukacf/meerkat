@@ -965,17 +965,27 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
     }
 }
 
+/// The ambient user-global config document convention, used where no
+/// resolved [`meerkat_core::StorageLayout`] is in hand (test constructors):
+/// the home-rooted doc, or a never-existent path under the realms root when
+/// no home resolves, so the reserved `global` realm yields None and behaves
+/// like a leaf realm.
+fn mcp_ambient_global_config_doc(realms_root: &std::path::Path) -> PathBuf {
+    meerkat_core::Config::global_config_path()
+        .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"))
+}
+
 /// Shared filesystem realm-config source for the MCP server.
 ///
-/// Mirrors REST: maps the reserved `global` realm to the home-rooted doc (or a
-/// never-existent path when no HOME-rooted path exists, so `global` yields None
-/// and behaves like a leaf realm) and every other realm to its per-realm config.
-/// Surfaces inject this rather than re-deriving the projection.
+/// Mirrors REST: maps the reserved `global` realm to the injected
+/// user-global doc and every other realm to its per-realm config. Returned
+/// concrete so config-store construction can route head docs through the
+/// SAME mapping (`config_doc_path`); surfaces inject this rather than
+/// re-deriving the projection.
 fn mcp_realm_config_source(
     realms_root: &std::path::Path,
-) -> Arc<dyn meerkat_core::RealmConfigSource> {
-    let global_doc = meerkat_core::Config::global_config_path()
-        .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
+    global_doc: PathBuf,
+) -> Arc<meerkat_store::FilesystemRealmConfigSource> {
     Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
         realms_root.to_path_buf(),
         global_doc,
@@ -989,7 +999,7 @@ async fn load_config_async(
     backend_hint: Option<meerkat_store::RealmBackend>,
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
-    source: &Arc<dyn meerkat_core::RealmConfigSource>,
+    source: &Arc<meerkat_store::FilesystemRealmConfigSource>,
 ) -> Config {
     let store = match realm_config_store(
         realm_id,
@@ -997,6 +1007,7 @@ async fn load_config_async(
         backend_hint,
         origin_hint,
         instance_id,
+        source,
     )
     .await
     {
@@ -1008,7 +1019,8 @@ async fn load_config_async(
     // the effective config so top-level fields inherit before env overrides win.
     // A compose failure (e.g. malformed parent edge) falls back to the head
     // realm's own config rather than nuking everything to defaults.
-    let mut config = match meerkat_core::EffectiveConfigReader::new(Arc::clone(source))
+    let dyn_source: Arc<dyn meerkat_core::RealmConfigSource> = Arc::clone(source) as _;
+    let mut config = match meerkat_core::EffectiveConfigReader::new(dyn_source)
         .effective_config_over_head(realm_id, head_config.clone())
         .await
     {
@@ -1054,10 +1066,16 @@ fn tagged_realm_config_store(
     realm_id: &meerkat_core::connection::RealmId,
     backend: meerkat_store::RealmBackend,
     instance_id: Option<&str>,
+    source: &meerkat_store::FilesystemRealmConfigSource,
 ) -> Arc<dyn ConfigStore> {
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id.as_str());
+    // Head doc routed through the shared source mapping: the reserved
+    // `global` realm reads/writes the user-global document, so an explicit
+    // state root cannot shadow global config with
+    // `<state_root>/global/config.toml`.
+    let config_doc = source.config_doc_path(realm_id);
     let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(
-        paths.config_path.clone(),
+        config_doc.clone(),
         meerkat_models::canonical(),
     ));
     let tagged = meerkat_core::TaggedConfigStore::new(
@@ -1069,7 +1087,7 @@ fn tagged_realm_config_store(
             resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
-                config_path: paths.config_path.display().to_string(),
+                config_path: config_doc.display().to_string(),
                 sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -1084,6 +1102,7 @@ async fn realm_config_store(
     backend_hint: Option<meerkat_store::RealmBackend>,
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
+    source: &meerkat_store::FilesystemRealmConfigSource,
 ) -> Result<Arc<dyn ConfigStore>, String> {
     let manifest = meerkat_store::ensure_realm_manifest_in(
         realms_root,
@@ -1098,6 +1117,7 @@ async fn realm_config_store(
         realm_id,
         manifest.backend,
         instance_id,
+        source,
     ))
 }
 
@@ -1265,10 +1285,40 @@ impl MeerkatMcpState {
         expose_paths: bool,
         default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let locator = bootstrap.realm.resolve_locator()?;
-        // Locator now carries the typed `RealmId` directly; no need to
-        // reparse at the mcp-server boundary. Downstream `meerkat_store::*_in`
-        // call sites obtain `&str` via `RealmId::as_str`.
+        // Realm-id-first dual-root resolution through the storage layout
+        // (the single path authority; the layout's realm-root candidates arm
+        // the cross-candidate first-start reservation at open). The
+        // project-local candidate participates only with an explicit
+        // --context-root (see rkat-rpc).
+        let invocation_context = bootstrap
+            .context
+            .context_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let meerkat_core::ResolvedStorage {
+            layout,
+            locator,
+            root_choice,
+        } = meerkat_core::StorageLayout::resolve(
+            meerkat_core::StorageLayoutInputs {
+                invocation_context,
+                explicit_state_root: bootstrap.realm.state_root.clone(),
+                user_config_root: bootstrap.context.user_config_root.clone(),
+                default_root: Some(meerkat_core::RealmRootDefault::UserGlobal),
+                probe_local_candidate: bootstrap.context.context_root.is_some(),
+            },
+            &bootstrap.realm,
+        )?;
+        tracing::info!(
+            realm = %locator.realm,
+            state_root = %locator.state_root.display(),
+            root_choice = ?root_choice,
+            "resolved realm storage"
+        );
+        // Locator carries the typed `RealmId` directly; no need to reparse
+        // at the mcp-server boundary. Downstream `meerkat_store::*_in` call
+        // sites obtain `&str` via `RealmId::as_str`.
         let realm_id = locator.realm;
         let realms_root = locator.state_root;
         let backend_hint = bootstrap
@@ -1277,23 +1327,34 @@ impl MeerkatMcpState {
             .as_deref()
             .and_then(parse_backend_hint);
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
-        let realm_config_source = mcp_realm_config_source(&realms_root);
+        // Open through the layout BEFORE loading config: first
+        // materialization must run under the cross-candidate first-start
+        // reservation, not the config loader's plain manifest ensure.
+        let (manifest, persistence) =
+            meerkat::storage_provider::open_realm_persistence_with_layout(
+                layout.clone(),
+                realm_id.as_str(),
+                backend_hint,
+                origin_hint,
+            )
+            .await?;
+        // The reserved `global` realm maps to the layout's user-global doc
+        // (honoring --user-config-root); when no home-like root resolves, a
+        // path under the realms root that will never exist, so `global`
+        // yields None.
+        let global_doc = layout
+            .global_config_path()
+            .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
+        let fs_realm_config_source = mcp_realm_config_source(&realms_root, global_doc);
         let config = load_config_async(
             &realm_id,
             &realms_root,
             backend_hint,
             origin_hint,
             bootstrap.realm.instance_id.as_deref(),
-            &realm_config_source,
+            &fs_realm_config_source,
         )
         .await;
-        let (manifest, persistence) = meerkat::open_realm_persistence_in(
-            &realms_root,
-            realm_id.as_str(),
-            backend_hint,
-            origin_hint,
-        )
-        .await?;
         let store_path = persistence
             .store_path()
             .map(std::path::Path::to_path_buf)
@@ -1315,7 +1376,9 @@ impl MeerkatMcpState {
             &realm_id,
             manifest.backend,
             bootstrap.realm.instance_id.as_deref(),
+            &fs_realm_config_source,
         );
+        let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> = fs_realm_config_source;
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
@@ -1497,14 +1560,15 @@ impl MeerkatMcpState {
         };
         let realm_id = locator.realm.clone();
         let realms_root = locator.state_root;
-        let realm_config_source = mcp_realm_config_source(&realms_root);
+        let fs_realm_config_source =
+            mcp_realm_config_source(&realms_root, mcp_ambient_global_config_doc(&realms_root));
         let mut config = load_config_async(
             &realm_id,
             &realms_root,
             Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
             bootstrap.realm.instance_id.as_deref(),
-            &realm_config_source,
+            &fs_realm_config_source,
         )
         .await;
         if let Some(max_sessions) = max_sessions_override {
@@ -1519,7 +1583,9 @@ impl MeerkatMcpState {
             &realm_id,
             meerkat_store::RealmBackend::Sqlite,
             bootstrap.realm.instance_id.as_deref(),
+            &fs_realm_config_source,
         );
+        let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> = fs_realm_config_source;
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
@@ -4956,6 +5022,55 @@ mod tests {
         session
             .install_checkpoint_stamp(checkpoint)
             .expect("fresh test session checkpoint should install");
+    }
+
+    /// The head config store for the reserved `global` realm routes to the
+    /// injected user-global document: an explicit state root must not shadow
+    /// it with `<state_root>/global/config.toml`.
+    #[test]
+    fn global_realm_head_config_store_routes_to_the_user_global_doc() {
+        let realms_root = PathBuf::from("/state/realms");
+        let global_doc = PathBuf::from("/home/user/.rkat/config.toml");
+        let source = mcp_realm_config_source(&realms_root, global_doc.clone());
+        let store = tagged_realm_config_store(
+            &realms_root,
+            &meerkat_core::connection::RealmId::global(),
+            meerkat_store::RealmBackend::Sqlite,
+            None,
+            &source,
+        );
+        let resolved = store
+            .metadata()
+            .and_then(|meta| meta.resolved_paths)
+            .expect("tagged store reports resolved paths");
+        assert_eq!(resolved.config_path, global_doc.display().to_string());
+    }
+
+    /// Non-global realms keep their per-realm head doc under the state root.
+    #[test]
+    fn non_global_realm_head_config_store_stays_realm_rooted() {
+        let realms_root = PathBuf::from("/state/realms");
+        let source =
+            mcp_realm_config_source(&realms_root, PathBuf::from("/home/user/.rkat/config.toml"));
+        let team = meerkat_core::connection::RealmId::parse("team").expect("valid realm id");
+        let store = tagged_realm_config_store(
+            &realms_root,
+            &team,
+            meerkat_store::RealmBackend::Sqlite,
+            None,
+            &source,
+        );
+        let resolved = store
+            .metadata()
+            .and_then(|meta| meta.resolved_paths)
+            .expect("tagged store reports resolved paths");
+        assert_eq!(
+            resolved.config_path,
+            meerkat_store::realm_paths_in(&realms_root, "team")
+                .config_path
+                .display()
+                .to_string()
+        );
     }
 
     #[tokio::test]

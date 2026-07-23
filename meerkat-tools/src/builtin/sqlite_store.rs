@@ -11,11 +11,6 @@ use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
 const CREATE_TASKS_TABLE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -30,41 +25,69 @@ const CREATE_TASKS_SESSION_INDEX_SQL: &str = r"
 CREATE INDEX IF NOT EXISTS tasks_session_idx
 ON tasks(session_id)";
 
-fn open_connection(path: &Path, ensure_schema: bool) -> Result<Connection, TaskError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| TaskError::StorageError(format!("Failed to create directory: {e}")))?;
+fn migration_0001_tasks_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_TASKS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_TASKS_SESSION_INDEX_SQL)?;
+    Ok(())
+}
+
+/// The task store's schema domain in the per-file migration ledger.
+const TOOLS_TASKS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "tools-tasks",
+    migrations: &[meerkat_sqlite::Migration {
+        version: 1,
+        name: "base-schema",
+        apply: migration_0001_tasks_schema,
+    }],
+};
+
+/// Per-operation connection: fence guard lives exactly as long as the
+/// connection it admits.
+struct TaskConn {
+    conn: Connection,
+    _guard: meerkat_sqlite::OperationGuard,
+}
+
+impl std::ops::Deref for TaskConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
     }
-    let conn = Connection::open(path)
-        .map_err(|e| TaskError::StorageError(format!("Failed to open database: {e}")))?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(|e| TaskError::StorageError(format!("Failed to set busy timeout: {e}")))?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| TaskError::StorageError(format!("Failed to set journal mode: {e}")))?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(|e| TaskError::StorageError(format!("Failed to set synchronous: {e}")))?;
-    if ensure_schema {
-        conn.execute_batch(CREATE_TASKS_TABLE_SQL)
-            .map_err(|e| TaskError::StorageError(format!("Failed to create tasks table: {e}")))?;
-        conn.execute_batch(CREATE_TASKS_SESSION_INDEX_SQL)
-            .map_err(|e| TaskError::StorageError(format!("Failed to create index: {e}")))?;
+}
+
+impl std::ops::DerefMut for TaskConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
-    Ok(conn)
+}
+
+/// Every physical open re-runs the domain ledger check: the fast path is a
+/// single version read when current, and a file migrated ahead by a newer
+/// binary must fail typed (`SchemaFromTheFuture`) on this handle's next
+/// operation rather than be read through a stale once-per-process latch.
+fn open_connection(path: &Path) -> Result<TaskConn, TaskError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path).map_err(se)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&TOOLS_TASKS_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(se)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &TOOLS_TASKS_DOMAIN).map_err(se)?;
+    Ok(TaskConn {
+        conn,
+        _guard: guard,
+    })
 }
 
 fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, TaskError> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| TaskError::StorageError(format!("Failed to begin transaction: {e}")))
-}
-
-/// Open a connection, ensuring schema on first use (tracked by the flag).
-fn open_cached(path: &Path, schema_ensured: &AtomicBool) -> Result<Connection, TaskError> {
-    let need_schema = !schema_ensured.load(Ordering::Acquire);
-    let conn = open_connection(path, need_schema)?;
-    if need_schema {
-        schema_ensured.store(true, Ordering::Release);
-    }
-    Ok(conn)
 }
 
 fn se(e: impl std::fmt::Display) -> TaskError {
@@ -84,7 +107,6 @@ fn now_millis() -> i64 {
 pub struct SqliteTaskStore {
     path: PathBuf,
     session_id: Option<String>,
-    schema_ensured: Arc<AtomicBool>,
 }
 
 impl SqliteTaskStore {
@@ -95,7 +117,6 @@ impl SqliteTaskStore {
         Self {
             path: path.into(),
             session_id,
-            schema_ensured: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -135,9 +156,8 @@ impl TaskStore for SqliteTaskStore {
     async fn list(&self) -> Result<Vec<Task>, TaskError> {
         let path = self.path.clone();
         let session_id = self.session_id.clone();
-        let schema = self.schema_ensured.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_cached(&path, &schema)?;
+            let conn = open_connection(&path)?;
             let mut tasks = Vec::new();
             if let Some(sid) = &session_id {
                 let mut stmt = conn
@@ -172,9 +192,8 @@ impl TaskStore for SqliteTaskStore {
         let path = self.path.clone();
         let task_id = id.0.clone();
         let session_id = self.session_id.clone();
-        let schema = self.schema_ensured.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_cached(&path, &schema)?;
+            let conn = open_connection(&path)?;
             let bytes: Option<Vec<u8>> = if let Some(sid) = &session_id {
                 conn.query_row(
                     "SELECT task_json FROM tasks WHERE task_id = ?1 AND session_id = ?2",
@@ -203,7 +222,6 @@ impl TaskStore for SqliteTaskStore {
 
     async fn create(&self, new_task: NewTask, session_id: Option<&str>) -> Result<Task, TaskError> {
         let path = self.path.clone();
-        let schema = self.schema_ensured.clone();
         // Use the store's session_id for scoping; the parameter session_id
         // is for tracking who created the task (created_by_session).
         let scope_session_id = self.session_id.clone();
@@ -229,7 +247,7 @@ impl TaskStore for SqliteTaskStore {
 
         let task_clone = task.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_cached(&path, &schema)?;
+            let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let json = Self::encode_task(&task_clone)?;
             let now_ms = now_millis();
@@ -257,10 +275,9 @@ impl TaskStore for SqliteTaskStore {
         let task_id = id.0.clone();
         let scope_session_id = self.session_id.clone();
         let tracking_session_id = session_id.map(String::from);
-        let schema = self.schema_ensured.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_cached(&path, &schema)?;
+            let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
 
             // Load existing task
@@ -353,10 +370,9 @@ impl TaskStore for SqliteTaskStore {
         let path = self.path.clone();
         let task_id = id.0.clone();
         let scope_session_id = self.session_id.clone();
-        let schema = self.schema_ensured.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_cached(&path, &schema)?;
+            let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let rows = if let Some(sid) = &scope_session_id {
                 tx.execute(
@@ -526,6 +542,47 @@ mod tests {
         let (_dir, store) = temp_store(Some("s1"));
         let result = store.delete(&TaskId::from_string("nonexistent")).await;
         assert!(matches!(result, Err(TaskError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_future_schema_refused_on_next_physical_open() {
+        let (_dir, store) = temp_store(Some("s1"));
+        // First operation opens a connection and stamps the tools-tasks domain.
+        store
+            .create(
+                NewTask {
+                    subject: "Pre-migration".to_string(),
+                    description: "".to_string(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // A newer binary migrates the domain past what this binary supports.
+        let raw =
+            meerkat_sqlite::open(store.path(), meerkat_sqlite::ConnectionProfile::PRIMARY).unwrap();
+        let bumped = raw
+            .execute(
+                "UPDATE meerkat_schema SET version = 999 WHERE domain = 'tools-tasks'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(bumped, 1, "domain ledger row must exist to be bumped");
+        drop(raw);
+
+        // The live store's next operation opens a fresh physical connection;
+        // the ledger recheck must refuse the future schema, not read through.
+        let err = store.list().await.expect_err("future schema must refuse");
+        assert!(
+            matches!(
+                &err,
+                TaskError::StorageError(msg)
+                    if msg.contains("from the future") && msg.contains("tools-tasks")
+            ),
+            "expected future-schema refusal, got: {err}"
+        );
     }
 
     #[tokio::test]

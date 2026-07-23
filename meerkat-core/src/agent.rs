@@ -167,6 +167,25 @@ pub trait AgentLlmClient: Send + Sync {
         false
     }
 
+    /// Monotonic count of raw provider stream events observed by this client.
+    ///
+    /// This feeds the agent loop's stream-inactivity watchdog
+    /// (`RetryPolicy::stream_inactivity_timeout`): the loop snapshots the
+    /// count around each stream-event window and treats "no change" as a
+    /// silent stream. Clients that consume a provider event stream should bump
+    /// the count on every received event — including non-visible ones — so
+    /// liveness is distinct from visible output
+    /// ([`Self::stream_output_observed`]).
+    ///
+    /// `None` (the default) means this client does not report stream liveness
+    /// and the watchdog is disabled for its calls; only the hard call/turn
+    /// timeouts apply. This fails open on purpose: a non-streaming custom
+    /// client would otherwise look permanently silent and be killed while
+    /// healthy.
+    fn stream_activity_count(&self) -> Option<u64> {
+        None
+    }
+
     /// Compile an output schema for this provider.
     ///
     /// Default implementation normalizes the schema without provider-specific lowering.

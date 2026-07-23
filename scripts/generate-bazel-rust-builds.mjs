@@ -896,6 +896,10 @@ function compileData(target, packageRoot, includeTests) {
       const includePath = match[1] ?? match[2];
       if (!includePath) continue;
       const absolute = resolve(dirname(sourceFile), includePath);
+      // Doc comments and test fixtures may contain include!("...") text
+      // naming files that do not exist (e.g. the ambient-gate's bypass
+      // fixtures); compile_data labels must be real files.
+      if (!existsSync(absolute)) continue;
       if (absolute.startsWith(`${packageRoot}/`)) {
         const rel = relative(packageRoot, absolute);
         if (rel && !rel.startsWith("..")) paths.add(rel);

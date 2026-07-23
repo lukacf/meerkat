@@ -35,6 +35,25 @@ identity from that path, and stores realm runtime state under
 `<context-root>/.rkat/realms/` unless `--context-root` or `--state-root` is
 provided.
 
+### Realm-id-first root resolution
+
+Every surface resolves the realm identity *first*, then probes for that
+specific realm under both candidate state roots — the project-local
+`<context-root>/.rkat/realms` and the user-global data-dir root:
+
+- an explicit `--state-root` always wins (no probing);
+- a realm that already exists under exactly one candidate root is used
+  where it lies (so an explicit `--realm` finds its data regardless of
+  which surface materialized it);
+- a realm materialized under **both** roots is a typed split-brain refusal
+  pointing at `rkat storage doctor` — no surface will silently pick one and
+  deepen the split;
+- a realm that exists nowhere is created under the surface's documented
+  default root (CLI: project-local; servers: user-global).
+
+Server surfaces probe the project-local candidate only when started with an
+explicit `--context-root`, which keeps their no-flags behavior unchanged.
+
 ## Explicit sharing
 
 Use the same realm everywhere:

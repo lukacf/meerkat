@@ -503,14 +503,26 @@ fn receipt_stage_from_machine(stage: occ_dsl::DeliveryReceiptStage) -> DeliveryR
     }
 }
 
-fn schedule_machine_schema_identity() -> (String, u32) {
-    let schema = sched_dsl::ScheduleLifecycleMachineState::schema();
-    (schema.machine.to_string(), schema.version)
+// The schema identity is read on every Schedule/Occurrence serde round-trip
+// (wire-header stamping and validation), which the schedule driver performs
+// per row per tick. It must never rebuild the machine schema per call — that
+// re-parses every identifier in the generated machine and burned whole cores
+// on idle multi-member hosts. Both accessors resolve to process-lifetime
+// constants derived from the cached `schema_static()` handle.
+fn schedule_machine_schema_identity() -> (&'static str, u32) {
+    static IDENTITY: std::sync::LazyLock<(String, u32)> = std::sync::LazyLock::new(|| {
+        let schema = sched_dsl::ScheduleLifecycleMachineState::schema_static();
+        (schema.machine.to_string(), schema.version)
+    });
+    (IDENTITY.0.as_str(), IDENTITY.1)
 }
 
-fn occurrence_machine_schema_identity() -> (String, u32) {
-    let schema = occ_dsl::OccurrenceLifecycleMachineState::schema();
-    (schema.machine.to_string(), schema.version)
+fn occurrence_machine_schema_identity() -> (&'static str, u32) {
+    static IDENTITY: std::sync::LazyLock<(String, u32)> = std::sync::LazyLock::new(|| {
+        let schema = occ_dsl::OccurrenceLifecycleMachineState::schema_static();
+        (schema.machine.to_string(), schema.version)
+    });
+    (IDENTITY.0.as_str(), IDENTITY.1)
 }
 
 fn validate_schedule_machine_wire_header(machine: &str, schema_version: u32) -> Result<(), String> {
@@ -2202,7 +2214,7 @@ impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWir
     fn from(state: &sched_dsl::ScheduleLifecycleMachineState) -> Self {
         let (machine, schema_version) = schedule_machine_schema_identity();
         Self {
-            machine,
+            machine: machine.to_owned(),
             schema_version,
             schedule_id: state.schedule_id.0.clone(),
             lifecycle_phase: schedule_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
@@ -2551,7 +2563,7 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
     fn from(state: &occ_dsl::OccurrenceLifecycleMachineState) -> Self {
         let (machine, schema_version) = occurrence_machine_schema_identity();
         Self {
-            machine,
+            machine: machine.to_owned(),
             schema_version,
             lifecycle_phase: occurrence_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
             occurrence_id: state.occurrence_id.0.clone(),
@@ -2952,6 +2964,53 @@ mod tests {
             keep_alive: false,
             app_context: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Machine schema identity caching (idle-CPU regression gate)
+    // -----------------------------------------------------------------------
+
+    // The wire-header identity is read on every Schedule/Occurrence serde
+    // round-trip, which the schedule driver performs per row per tick. If
+    // these accessors ever go back to constructing a fresh MachineSchema per
+    // call, an idle multi-member host burns whole cores parsing machine DSL
+    // identifiers. Pointer identity across calls proves the identity resolves
+    // to one process-lifetime allocation, i.e. zero re-parsing per call.
+    #[test]
+    fn machine_schema_identity_is_cached_per_process() {
+        let (schedule_first, schedule_version_first) = schedule_machine_schema_identity();
+        let (occurrence_first, occurrence_version_first) = occurrence_machine_schema_identity();
+        for _ in 0..3 {
+            let (schedule_again, schedule_version_again) = schedule_machine_schema_identity();
+            let (occurrence_again, occurrence_version_again) = occurrence_machine_schema_identity();
+            assert!(
+                std::ptr::eq(schedule_first, schedule_again),
+                "schedule machine identity string was re-allocated between calls"
+            );
+            assert!(
+                std::ptr::eq(occurrence_first, occurrence_again),
+                "occurrence machine identity string was re-allocated between calls"
+            );
+            assert_eq!(schedule_version_first, schedule_version_again);
+            assert_eq!(occurrence_version_first, occurrence_version_again);
+        }
+        assert_eq!(schedule_first, "ScheduleLifecycleMachine");
+        assert_eq!(occurrence_first, "OccurrenceLifecycleMachine");
+    }
+
+    // The generated schema handle behind the identity accessors must itself
+    // be the process-wide cached construction (LazyLock in the machine!
+    // macro), not a per-call rebuild.
+    #[test]
+    fn machine_schema_static_handles_are_cached_per_process() {
+        assert!(std::ptr::eq(
+            sched_dsl::ScheduleLifecycleMachineState::schema_static(),
+            sched_dsl::ScheduleLifecycleMachineState::schema_static(),
+        ));
+        assert!(std::ptr::eq(
+            occ_dsl::OccurrenceLifecycleMachineState::schema_static(),
+            occ_dsl::OccurrenceLifecycleMachineState::schema_static(),
+        ));
     }
 
     // -----------------------------------------------------------------------

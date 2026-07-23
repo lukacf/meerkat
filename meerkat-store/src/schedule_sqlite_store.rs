@@ -1,6 +1,6 @@
 use crate::StoreError;
 use crate::json_column::JsonColumnBytes;
-use crate::sqlite_store::{begin_immediate_transaction, open_connection};
+use crate::sqlite_store::begin_immediate_transaction;
 use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
@@ -11,9 +11,72 @@ use meerkat_schedule::{
     ScheduleFilter, SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
     ScheduleStoreRowFault, ScheduleStoreRowFaultKind, apply_supersession_feedback,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+fn migration_0001_schedule_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SCHEDULES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_OCCURRENCES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_OCCURRENCES_DUE_INDEX_SQL)?;
+    tx.execute_batch(CREATE_OCCURRENCES_SCHEDULE_INDEX_SQL)?;
+    tx.execute_batch(CREATE_RECEIPTS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_RECEIPTS_OCCURRENCE_INDEX_SQL)?;
+    Ok(())
+}
+
+/// The schedule store's schema domain in the per-file migration ledger.
+/// (Co-tenants the sessions file in the sqlite realm backend; the ledger
+/// keys strictly by domain, so co-tenancy is safe.)
+pub const SCHEDULE_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "schedule-store",
+    migrations: &[meerkat_sqlite::Migration {
+        version: 1,
+        name: "base-schema",
+        apply: migration_0001_schedule_schema,
+    }],
+};
+
+/// Per-operation connection: fence guard lives exactly as long as the
+/// connection it admits.
+struct ScheduleConn {
+    conn: Connection,
+    _guard: meerkat_sqlite::OperationGuard,
+}
+
+impl std::ops::Deref for ScheduleConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for ScheduleConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+fn open_schedule_connection(path: &Path) -> Result<ScheduleConn, StoreError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path)?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // The schedule store preflights its own domain (not its
+            // co-tenants'): a future schedule-store file is refused before
+            // the Primary profile's WAL conversion.
+            schema_preflight: &[&SCHEDULE_STORE_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(StoreError::from)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &SCHEDULE_STORE_DOMAIN)?;
+    Ok(ScheduleConn {
+        conn,
+        _guard: guard,
+    })
+}
 
 const CREATE_SCHEDULES_TABLE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS schedule_schedules (
@@ -67,8 +130,7 @@ pub struct SqliteScheduleStore {
 impl SqliteScheduleStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
-        let conn = open_connection(&path)?;
-        ensure_schedule_schema(&conn)?;
+        let conn = open_schedule_connection(&path)?;
         drop(conn);
         Ok(Self { path })
     }
@@ -83,8 +145,7 @@ impl SqliteScheduleStore {
     ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             reject_standalone_supersession_write(&write)?;
             verify_authorized_schedule_write_in_txn(&tx, &write)?;
@@ -104,8 +165,7 @@ impl SqliteScheduleStore {
         let path = self.path.clone();
         let schedule_id = schedule_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             conn.query_row(
                 "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
                 params![schedule_id],
@@ -125,8 +185,7 @@ impl SqliteScheduleStore {
     ) -> Result<Vec<Schedule>, StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
@@ -173,8 +232,7 @@ impl SqliteScheduleStore {
     ) -> Result<(Vec<Schedule>, Vec<ScheduleStoreRowFault>), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
@@ -229,8 +287,7 @@ impl SqliteScheduleStore {
     ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             verify_authorized_occurrence_write_in_txn(&tx, &write)?;
             let occurrence = write.into_occurrence();
@@ -248,8 +305,7 @@ impl SqliteScheduleStore {
     ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             for write in &writes {
                 verify_authorized_occurrence_write_in_txn(&tx, write)?;
@@ -272,8 +328,7 @@ impl SqliteScheduleStore {
         let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             conn.query_row(
                 "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
                 params![occurrence_id],
@@ -293,8 +348,7 @@ impl SqliteScheduleStore {
     ) -> Result<Vec<Occurrence>, StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT occurrence_json FROM schedule_occurrences ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
             )?;
@@ -344,8 +398,7 @@ impl SqliteScheduleStore {
     async fn append_receipt_impl(&self, receipt: DeliveryReceipt) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             let canonical_receipt = record_occurrence_receipt_in_txn(&tx, &receipt)?;
             write_receipt_in_txn(&tx, &canonical_receipt)?;
@@ -363,8 +416,7 @@ impl SqliteScheduleStore {
         let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT receipt_json FROM schedule_receipts WHERE occurrence_id = ?1 ORDER BY recorded_at_ms ASC, receipt_id ASC",
             )?;
@@ -388,8 +440,7 @@ impl SqliteScheduleStore {
     ) -> Result<ClaimDueResult, StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             let store_now_ms = select_store_now_ms(&tx)?;
             let store_now_utc = utc_from_millis(store_now_ms);
@@ -565,8 +616,7 @@ impl ScheduleStore for SqliteScheduleStore {
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || -> Result<DateTime<Utc>, StoreError> {
-            let conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let conn = open_schedule_connection(&path)?;
             Ok(utc_from_millis(select_store_now_ms(&conn)?))
         })
         .await
@@ -636,8 +686,7 @@ impl ScheduleStore for SqliteScheduleStore {
     ) -> Result<Schedule, ScheduleStoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             verify_authorized_schedule_write_in_txn(&tx, &schedule)?;
             for occurrence in &occurrences {
@@ -721,8 +770,7 @@ impl ScheduleStore for SqliteScheduleStore {
         let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             let current = tx
                 .query_row(
@@ -773,8 +821,7 @@ impl ScheduleStore for SqliteScheduleStore {
         let path = self.path.clone();
         let occurrence_id = occurrence_id.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
-            ensure_schedule_schema(&conn)?;
+            let mut conn = open_schedule_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             let Some(current) = read_occurrence_in_txn(&tx, &occurrence_id)? else {
                 tx.commit()?;
@@ -818,16 +865,6 @@ impl ScheduleStore for SqliteScheduleStore {
         .and_then(|result| result)
         .map_err(into_schedule_store_error)
     }
-}
-
-fn ensure_schedule_schema(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(CREATE_SCHEDULES_TABLE_SQL)?;
-    conn.execute_batch(CREATE_OCCURRENCES_TABLE_SQL)?;
-    conn.execute_batch(CREATE_OCCURRENCES_DUE_INDEX_SQL)?;
-    conn.execute_batch(CREATE_OCCURRENCES_SCHEDULE_INDEX_SQL)?;
-    conn.execute_batch(CREATE_RECEIPTS_TABLE_SQL)?;
-    conn.execute_batch(CREATE_RECEIPTS_OCCURRENCE_INDEX_SQL)?;
-    Ok(())
 }
 
 fn reject_standalone_supersession_write(write: &AuthorizedScheduleWrite) -> Result<(), StoreError> {
@@ -1284,6 +1321,52 @@ fn into_schedule_store_error(error: StoreError) -> ScheduleStoreError {
     match error {
         StoreError::Io(err) => ScheduleStoreError::Io(err.to_string()),
         StoreError::Serialization(err) => ScheduleStoreError::Serialization(err.to_string()),
+        // Bounded busy-handler exhaustion is the schedule store's retryable
+        // class: `Concurrency` is what the driver already re-reads and
+        // retries on, so classified lock contention must not collapse into
+        // the terminal `Internal` bucket.
+        StoreError::Busy(err) => ScheduleStoreError::Concurrency(err.to_string()),
         other => ScheduleStoreError::Internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn sqlite_failure(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn classified_busy_maps_to_the_retryable_concurrency_class() {
+        for code in [
+            rusqlite::ErrorCode::DatabaseBusy,
+            rusqlite::ErrorCode::DatabaseLocked,
+        ] {
+            let err = into_schedule_store_error(StoreError::from(sqlite_failure(code)));
+            assert!(
+                matches!(err, ScheduleStoreError::Concurrency(_)),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classified_corruption_stays_terminal() {
+        let err = into_schedule_store_error(StoreError::from(sqlite_failure(
+            rusqlite::ErrorCode::DatabaseCorrupt,
+        )));
+        assert!(
+            matches!(err, ScheduleStoreError::Internal(_)),
+            "unexpected error: {err:?}"
+        );
     }
 }

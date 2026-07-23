@@ -80,12 +80,40 @@ impl ArtifactStore for MemoryArtifactStore {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct FsArtifactStore {
     root: PathBuf,
+    /// `Some(<realm_dir>/realm)` when `root` sits inside a realm directory:
+    /// write operations take the shared realm write-admission guard on it,
+    /// so the realm maintenance fence quiesces artifact writes exactly like
+    /// the SQLite per-file fences quiesce the databases. Derived once at
+    /// construction (cheap hot path).
+    realm_admission: Option<PathBuf>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl FsArtifactStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            realm_admission: crate::migrate::store_realm_admission_target(&root),
+            root,
+        }
+    }
+
+    /// Take the realm write-admission guard for one write operation, when
+    /// this store sits inside a realm directory. Fails while the realm is
+    /// under offline maintenance; the maintenance holder's own in-process
+    /// operations self-admit (see `meerkat_sqlite::fence`).
+    fn realm_admission_guard(
+        &self,
+    ) -> Result<Option<meerkat_sqlite::OperationGuard>, ArtifactError> {
+        self.realm_admission
+            .as_deref()
+            .map(meerkat_sqlite::OperationGuard::for_database)
+            .transpose()
+            .map_err(|err| match err {
+                meerkat_sqlite::SqliteStoreError::MaintenanceFenceHeld { path, .. } => {
+                    ArtifactError::MaintenanceFenceHeld { path }
+                }
+                other => ArtifactError::WriteFailed(other.to_string()),
+            })
     }
 
     fn path_for(&self, artifact_id: &ArtifactId) -> PathBuf {
@@ -106,6 +134,7 @@ impl FsArtifactStore {
 #[async_trait]
 impl ArtifactStore for FsArtifactStore {
     async fn put(&self, record: ArtifactRecord) -> Result<ArtifactHandle, ArtifactError> {
+        let _admission = self.realm_admission_guard()?;
         record
             .validate_public_metadata()
             .map_err(|err| ArtifactError::WriteFailed(err.to_string()))?;
@@ -162,6 +191,7 @@ impl ArtifactStore for FsArtifactStore {
     }
 
     async fn delete(&self, artifact_id: &ArtifactId) -> Result<(), ArtifactError> {
+        let _admission = self.realm_admission_guard()?;
         let path = self.path_for(artifact_id);
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
@@ -279,5 +309,61 @@ mod tests {
 
         assert_eq!(restored.artifact_id.as_str(), "artifact-1");
         assert!(!encoded.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    /// Realm-scoped artifact stores must honor the realm write-admission
+    /// fence: a foreign maintenance holder excludes puts and deletes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn fs_artifact_writes_respect_realm_write_admission_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let realm_dir = temp.path().join("team");
+        std::fs::create_dir_all(&realm_dir).unwrap();
+        std::fs::write(
+            realm_dir.join(meerkat_core::REALM_MANIFEST_FILE_NAME),
+            b"{\"realm_id\":\"team\",\"backend\":\"sqlite\"}",
+        )
+        .unwrap();
+        let store = FsArtifactStore::new(realm_dir.join("artifacts"));
+
+        store
+            .put(record("artifact-1", None))
+            .await
+            .expect("unfenced write succeeds");
+
+        // A FOREIGN process holding the realm write-admission fence (raw
+        // exclusive lock, no in-process holder registry entry).
+        let admission_lock = meerkat_sqlite::fence_lock_path(
+            &crate::migrate::realm_write_admission_target(&realm_dir),
+        );
+        let foreign = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&admission_lock)
+            .expect("open admission lock");
+        foreign.try_lock().expect("foreign exclusive lock");
+
+        assert!(matches!(
+            store.put(record("artifact-2", None)).await,
+            Err(ArtifactError::MaintenanceFenceHeld { .. })
+        ));
+        assert!(matches!(
+            store.delete(&ArtifactId::new("artifact-1").unwrap()).await,
+            Err(ArtifactError::MaintenanceFenceHeld { .. })
+        ));
+        // Reads stay available under the fence.
+        store
+            .get(&ArtifactId::new("artifact-1").unwrap())
+            .await
+            .expect("reads pass while the fence is held");
+
+        drop(foreign);
+        store
+            .put(record("artifact-2", None))
+            .await
+            .expect("write succeeds after fence release");
     }
 }

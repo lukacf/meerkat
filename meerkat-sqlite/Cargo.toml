@@ -1,0 +1,23 @@
+[package]
+name = "meerkat-sqlite"
+description = "Shared SQLite mechanics for Meerkat stores: connection profiles, migration ledger, JSON column codec, maintenance fence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

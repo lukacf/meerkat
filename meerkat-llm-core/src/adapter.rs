@@ -11,7 +11,7 @@ use meerkat_core::{
     StopReason, ToolDef, Usage,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::block_assembler::BlockAssembler;
@@ -41,6 +41,10 @@ pub struct LlmClientAdapter {
     /// current call. The agent retry loop reads this to avoid cross-model
     /// fallback after partial output has escaped.
     stream_output_observed: Arc<AtomicBool>,
+    /// Monotonic count of raw provider stream events (visible or not),
+    /// bumped on every yielded item. The agent loop's stream-inactivity
+    /// watchdog compares snapshots of this count to detect a hung stream.
+    stream_activity: Arc<AtomicU64>,
 }
 
 impl LlmClientAdapter {
@@ -91,6 +95,7 @@ impl LlmClientAdapter {
             provider_params: None,
             event_tap: meerkat_core::new_event_tap(),
             stream_output_observed: Arc::new(AtomicBool::new(false)),
+            stream_activity: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -286,6 +291,7 @@ impl AgentLlmClient for LlmClientAdapter {
         let mut usage = Usage::default();
 
         while let Some(result) = stream.next().await {
+            self.stream_activity.fetch_add(1, Ordering::SeqCst);
             match result {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta, meta } => {
@@ -468,6 +474,10 @@ impl AgentLlmClient for LlmClientAdapter {
 
     fn stream_output_observed(&self) -> bool {
         self.stream_output_observed.load(Ordering::SeqCst)
+    }
+
+    fn stream_activity_count(&self) -> Option<u64> {
+        Some(self.stream_activity.load(Ordering::SeqCst))
     }
 
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
@@ -690,6 +700,50 @@ mod tests {
             meerkat_core::assistant_blocks_have_visible_or_actionable_output(result.blocks()),
             "non-empty reasoning delta should survive to the core commit predicate"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adapter_counts_every_raw_stream_event_as_activity() -> Result<(), String> {
+        let adapter = LlmClientAdapter::new(
+            Arc::new(ScriptedClient {
+                events: vec![
+                    // Non-visible events must still count as stream liveness.
+                    Ok(LlmEvent::UsageUpdate {
+                        usage: Usage::default(),
+                    }),
+                    Ok(LlmEvent::TextDelta {
+                        delta: "hello".to_string(),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    }),
+                ],
+            }),
+            "scripted-model".to_string(),
+        );
+
+        let before = adapter
+            .stream_activity_count()
+            .ok_or_else(|| "adapter must report stream liveness".to_string())?;
+        adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("count events"))],
+                &[],
+                1024,
+                None,
+                None,
+            )
+            .await
+            .map_err(|err| format!("stream response failed: {err}"))?;
+        let after = adapter
+            .stream_activity_count()
+            .ok_or_else(|| "adapter must report stream liveness".to_string())?;
+
+        assert_eq!(after - before, 3, "each raw event bumps the counter once");
         Ok(())
     }
 

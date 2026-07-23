@@ -1457,8 +1457,11 @@ mod sanity {
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
 
+        // The builder's canonical session identity must match the injected
+        // client's `(provider, model)` identity — the factory refuses
+        // mismatched agent-client overrides.
         let mut _agent = AgentBuilder::new()
-            .model("test-model")
+            .model("mock-model")
             .system_prompt("test prompt")
             .build(client, tools, store)
             .await

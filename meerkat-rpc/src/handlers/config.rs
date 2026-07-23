@@ -199,9 +199,9 @@ fn build_registry_or_invalid_params(
 fn runtime_skill_identity_roots(
     runtime: &SessionRuntime,
 ) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
-    let (context_root, user_root) = runtime.skill_identity_roots();
-    let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    (context_root, user_root.or(default_user_root))
+    // Roots were resolved once at bootstrap (rkat-rpc main HOME-defaults
+    // the user root before installing them); no ambient re-read here.
+    runtime.skill_identity_roots()
 }
 
 #[allow(clippy::result_large_err)]

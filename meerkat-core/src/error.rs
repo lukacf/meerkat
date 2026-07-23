@@ -26,6 +26,13 @@ pub enum LlmFailureReason {
     CallTimeout {
         duration_ms: u64,
     },
+    /// Agent-loop stream-inactivity watchdog fired: the provider stream
+    /// produced no events for the configured window (owned by agent loop
+    /// policy). Distinct from [`Self::CallTimeout`], which bounds the whole
+    /// call regardless of stream liveness.
+    StreamStalled {
+        inactivity_ms: u64,
+    },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -508,6 +515,7 @@ impl AgentError {
                 LlmFailureReason::RateLimited { .. } => true,
                 LlmFailureReason::NetworkTimeout { .. } => true,
                 LlmFailureReason::CallTimeout { .. } => true,
+                LlmFailureReason::StreamStalled { .. } => true,
                 LlmFailureReason::ProviderError(provider_error) => provider_error.is_retryable(),
                 _ => false,
             },
@@ -617,6 +625,28 @@ mod tests {
         let net = LlmFailureReason::NetworkTimeout { duration_ms: 1000 };
         let call = LlmFailureReason::CallTimeout { duration_ms: 1000 };
         assert_ne!(net, call);
+    }
+
+    #[test]
+    fn test_stream_stalled_is_recoverable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::StreamStalled {
+                inactivity_ms: 300_000,
+            },
+            "stream stalled after 300s of inactivity",
+        );
+        assert!(err.is_recoverable());
+        assert!(!err.is_graceful());
+    }
+
+    #[test]
+    fn test_stream_stalled_distinct_from_call_timeout() {
+        let stalled = LlmFailureReason::StreamStalled {
+            inactivity_ms: 1000,
+        };
+        let call = LlmFailureReason::CallTimeout { duration_ms: 1000 };
+        assert_ne!(stalled, call);
     }
 
     #[test]

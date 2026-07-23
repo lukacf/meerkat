@@ -24,7 +24,7 @@ comms = [
     "dep:parking_lot",
 ]
 mcp = ["dep:meerkat-mcp"]
-sqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite", "dep:meerkat-sqlite"]
 skills = []
 integration-real-tests = []
 
@@ -56,6 +56,7 @@ toml = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 rusqlite = { workspace = true, optional = true }
+meerkat-sqlite = { workspace = true, optional = true }
 shlex = "1.3"
 globset = "0.4"
 which = { workspace = true }

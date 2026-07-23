@@ -126,6 +126,7 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
         "make rmat-audit",
         "make seam-inventory",
         "make runtime-authority-bypass",
+        "make storage-ambient-gate",
         "make sync-meerkat-dogma-skill-docs",
         "make machine-authority-docs-gate",
         "make audit-generated-headers",

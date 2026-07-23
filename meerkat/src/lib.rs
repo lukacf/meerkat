@@ -250,11 +250,19 @@ pub use factory::{
 pub mod help;
 
 mod persistence;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub mod storage_provider;
 pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_in;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use persistence::open_realm_persistence_with_provider;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use storage_provider::{
+    DiskStorageProvider, RealmOpenContext, RealmStorageProvider, RealmStoreSet,
+};
 
 mod meerkat_machine;
 
@@ -313,6 +321,16 @@ pub use meerkat_session::{
     LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
+// Maintenance compositions (offline `rkat storage migrate`): a builder that
+// refuses agent construction, composed with the persistent service to drive
+// machine-owned storage maintenance (bulk legacy-checkpoint adoption).
+pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_session::{LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport};
+// Memory store implementation, re-exported for maintenance verbs that stamp
+// the memory database's schema ledger through its normal constructor.
+#[cfg(feature = "memory-store-session")]
+pub use meerkat_memory::HnswMemoryStore;
 // Durable stored-event row (typed envelope identity) for replay surfaces.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::event_store::StoredEvent;

@@ -1056,7 +1056,7 @@ where
 
 /// Get the user-level MCP config path: ~/.rkat/mcp.toml
 pub fn user_mcp_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".rkat/mcp.toml"))
+    dirs::home_dir().map(|h| h.join(".rkat/mcp.toml"))
 }
 
 pub fn user_mcp_path_in(root: &Path) -> PathBuf {
@@ -1065,7 +1065,7 @@ pub fn user_mcp_path_in(root: &Path) -> PathBuf {
 
 /// Get the user-level MCP config directory: ~/.rkat/
 pub fn user_mcp_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".rkat"))
+    dirs::home_dir().map(|h| h.join(".rkat"))
 }
 
 /// Find project-level MCP config in cwd only: ./.rkat/mcp.toml
@@ -1100,10 +1100,6 @@ pub fn project_mcp_path_in(root: &Path) -> PathBuf {
 /// Get the project MCP config directory for the current directory
 pub fn project_mcp_dir() -> Option<PathBuf> {
     std::env::current_dir().ok().map(|cwd| cwd.join(".rkat"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 impl std::fmt::Display for McpScope {

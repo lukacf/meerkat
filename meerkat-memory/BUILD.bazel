@@ -54,6 +54,7 @@ rust_library(
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-memory",
         normal = True,
@@ -88,6 +89,7 @@ rust_library(
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_skills_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-memory",
         normal = True,
@@ -138,6 +140,7 @@ rust_test(
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-memory",
         normal = True,

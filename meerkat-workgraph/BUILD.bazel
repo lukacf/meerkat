@@ -58,6 +58,7 @@ rust_library(
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-workgraph",
         normal = True,
@@ -96,6 +97,7 @@ rust_library(
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_skills_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-workgraph",
         normal = True,
@@ -150,6 +152,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-workgraph",
         normal = True,
@@ -205,6 +208,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-skills:meerkat_skills",
+        "//meerkat-sqlite:meerkat_sqlite",
         "//meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
         package_name = "meerkat-workgraph",

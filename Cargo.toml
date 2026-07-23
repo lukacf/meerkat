@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "meerkat-machine-derive",
     "meerkat-agent-build-authority",
+    "meerkat-sqlite",
     "meerkat-core",
     "meerkat-models",
     "meerkat-capabilities",
@@ -16,6 +17,7 @@ members = [
     "meerkat-schedule",
     "meerkat-workgraph",
     "meerkat-store",
+    "meerkat-store-conformance",
     "meerkat-tools",
     "meerkat-mcp",
     "meerkat-mcp-server",
@@ -135,6 +137,7 @@ tempfile = "3.14"
 
 # Internal crates
 meerkat-agent-build-authority = { version = "0.8.3", path = "meerkat-agent-build-authority" }
+meerkat-sqlite = { version = "0.8.3", path = "meerkat-sqlite" }
 meerkat-core = { version = "0.8.3", path = "meerkat-core" }
 meerkat-models = { version = "0.8.3", path = "meerkat-models" }
 meerkat-capabilities = { version = "0.8.3", path = "meerkat-capabilities" }
@@ -173,6 +176,7 @@ meerkat-machine-derive = { version = "0.8.3", path = "meerkat-machine-derive" }
 meerkat-machine-dsl = { version = "0.8.3", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.3", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.3", path = "meerkat-store", default-features = false }
+meerkat-store-conformance = { version = "0.8.3", path = "meerkat-store-conformance" }
 oai-rt-rs = "0.4.0"
 
 [profile.dev]

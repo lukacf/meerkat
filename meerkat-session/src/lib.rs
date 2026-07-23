@@ -16,6 +16,7 @@ pub mod tokio {
 
 pub mod ephemeral;
 pub(crate) mod generated;
+pub mod maintenance;
 pub mod staged_registry;
 pub(crate) mod turn_admission;
 
@@ -55,6 +56,7 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
+    LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport,
     LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
     MachineSessionArchiveProtocol, PersistentSessionService,
 };

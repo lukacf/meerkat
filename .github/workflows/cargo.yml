@@ -186,6 +186,9 @@ jobs:
       - name: Runtime authority bypass audit
         run: make runtime-authority-bypass
 
+      - name: Storage ambient-resolution gate
+        run: make storage-ambient-gate
+
       - name: Machine authority docs gate
         run: make machine-authority-docs-gate
 
@@ -344,6 +347,11 @@ jobs:
               -p meerkat-machine-schema -p machine-dsl-tests
               -p meerkat-capabilities -p meerkat-agent-build-authority
               -p meerkat-contracts
+          # meerkat-store/sqlite is explicit here: nothing in this crate
+          # group enables it (only mob/facade crates do, in other lanes), and
+          # without it the SQLite storage-conformance tests in
+          # meerkat-store/tests are cfg'd out of the only blocking lane that
+          # builds them.
           - group: client-session
             partition: "hash:1/1"
             scope: >-
@@ -352,6 +360,7 @@ jobs:
               -p meerkat-llm-core -p meerkat-mcp -p meerkat-memory
               -p meerkat-openai -p meerkat-providers -p meerkat-session
               -p meerkat-skills -p meerkat-store -p meerkat-tools
+              --features meerkat-store/sqlite
           - group: everything-else-1of3
             partition: "hash:1/3"
             scope: >-

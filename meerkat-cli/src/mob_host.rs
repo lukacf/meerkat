@@ -690,15 +690,39 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         && scope.origin_hint == RealmOrigin::Workspace
         && file_realm != scope.locator.realm.as_str()
     {
+        // Re-resolve the config-file realm with the same dual-root probing
+        // as the primary scope: an explicit --state-root stays pinned; a
+        // defaulted root lets the overridden realm be found where it already
+        // exists instead of assuming the workspace realm's root.
+        let pinned_root = (scope.root_choice == meerkat_core::RealmRootChoice::Explicit)
+            .then(|| scope.locator.state_root.clone());
         let realm_cfg = RealmConfig {
             selection: RealmSelection::Explicit {
                 realm_id: file_realm.clone(),
             },
             instance_id: scope.instance_id.clone(),
             backend_hint: None,
-            state_root: Some(scope.locator.state_root.clone()),
+            state_root: pinned_root.clone(),
         };
-        scope.locator = realm_cfg.resolve_locator()?;
+        // Same layout-authority resolution as the primary scope: the
+        // project-root walk (not the raw invocation context) feeds the
+        // project-local candidate, and first-start materialization runs the
+        // cross-candidate reservation instead of unlocked probes.
+        let resolved = meerkat_core::StorageLayout::resolve(
+            meerkat_core::StorageLayoutInputs {
+                invocation_context: scope.context_root.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                }),
+                explicit_state_root: pinned_root.clone(),
+                user_config_root: scope.user_config_root.clone(),
+                default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+                probe_local_candidate: true,
+            },
+            &realm_cfg,
+        )?;
+        scope.locator = resolved.locator;
+        scope.root_choice = resolved.root_choice;
+        scope.layout = resolved.layout;
         scope.origin_hint = RealmOrigin::Explicit;
         let (reloaded_config, reloaded_root) = crate::load_config(&scope).await?;
         config = reloaded_config;

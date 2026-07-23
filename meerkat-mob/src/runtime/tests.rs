@@ -33937,6 +33937,82 @@ async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member
         .expect("release blocked force-cancel test turn");
 }
 
+/// Defect regression (HomeCore report, defect C): the operator remedy for a
+/// wedged run must itself never wedge. Force-cancel of a member whose turn is
+/// mid-provider-call (a `start_turn` that never completes) must transition and
+/// interrupt, and a second force-cancel while the first cancellation is still
+/// converging must be an idempotent no-op success — never
+/// `invalid state transition: Running -> Running`.
+#[tokio::test]
+async fn test_force_cancel_member_mid_provider_call_is_idempotent() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("cancel-wedged");
+    let member_ref = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn target");
+    let session_id = member_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed target");
+    // Wedge the member: the provider call (start_turn) never returns.
+    service.set_start_turn_delay_ms(600_000);
+    let baseline_start_turn = service.start_turn_call_count();
+    handle
+        .member(&member_id)
+        .await
+        .expect("member handle")
+        .send("wedge mid-provider-call", HandlingMode::Queue)
+        .await
+        .expect("active turn admission");
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        baseline_start_turn + 1,
+        "wedged turn should reach the live session boundary",
+    )
+    .await;
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+
+    handle
+        .force_cancel_member(AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("force cancel of a mid-provider-call member must succeed");
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "force-cancel must request cooperative boundary cancel"
+    );
+
+    // Idempotency: a second force-cancel while the first cancellation is
+    // still in flight converges as success rather than an error.
+    handle
+        .force_cancel_member(AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("repeated force cancel must be an idempotent success");
+
+    // The member stays in the roster with its canonical binding intact.
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .unwrap()
+        .expect("member remains after repeated force-cancel");
+    assert_eq!(
+        entry.member_ref.bridge_session_id().cloned(),
+        Some(session_id.clone()),
+        "repeated force-cancel must not rewrite the member's session binding"
+    );
+
+    // Release the deliberately blocked test turn.
+    SessionService::interrupt(service.as_ref(), &session_id)
+        .await
+        .expect("release blocked force-cancel test turn");
+}
+
 #[tokio::test]
 async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cancel() {
     let (handle, service) = create_test_mob(sample_definition()).await;

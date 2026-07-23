@@ -13,12 +13,16 @@ pub mod adapter;
 pub mod approval_file_store;
 pub mod artifact;
 pub mod blob;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctor;
 mod error;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod json_column;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod migrate;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod realm;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
@@ -38,7 +42,14 @@ pub use adapter::StoreAdapter;
 pub use approval_file_store::FileApprovalStore;
 pub use artifact::MemoryArtifactStore;
 pub use blob::MemoryBlobStore;
+#[cfg(not(target_arch = "wasm32"))]
+pub use doctor::{DiskStorageMigrator, diagnose_disk_roots};
 pub use error::StoreError;
+#[cfg(not(target_arch = "wasm32"))]
+pub use migrate::{
+    MigrateMode, MigrateReport, PruneReport, RealmMaintenanceFence, archive_path_read_only,
+    backup_artifact_name,
+};
 
 // Re-export the canonical trait, filter, and error from meerkat-core.
 // Custom storage backends depend only on meerkat-core; existing consumers
@@ -56,6 +67,12 @@ pub use blob::FsBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use realm::FilesystemRealmConfigSource;
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(deprecated)]
+// the ambient no-`_in` wrappers stay exported through their deprecation window
+pub use realm::{ExternalRealmManifest, RealmManifestPin, ensure_realm_manifest_pin_in};
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(deprecated)]
+// the ambient no-`_in` wrappers stay exported through their deprecation window
 pub use realm::{
     REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
     RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,

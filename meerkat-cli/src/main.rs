@@ -19,6 +19,7 @@ mod mcp;
 mod mob_host;
 #[cfg(feature = "comms")]
 mod stdin_events;
+mod storage_migrate;
 mod stream_renderer;
 
 use base64::Engine as _;
@@ -96,10 +97,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
+/// Usage errors mirror clap's argument-error exit code.
+const EXIT_USAGE: u8 = 2;
 
 const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from the terminal";
 
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nRealm defaults:\n  - context root: current directory, unless --context-root is supplied\n  - state root: <context-root>/.rkat/realms, unless --state-root is supplied\n  - realm id: workspace-derived ws-... unless --realm or --isolated is supplied\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor, storage\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nRealm defaults:\n  - context root: current directory, unless --context-root is supplied\n  - state root: <context-root>/.rkat/realms, unless --state-root is supplied\n  - realm id: workspace-derived ws-... unless --realm or --isolated is supplied\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
 const HELP_AFTER_HELP: &str = "Examples:\n  rkat help \"How do I add an mcp server and schedule to remove it in 30 minutes\"\n  rkat help \"Use gemini with my vertex auth, load ~/codex/skills\" --prompt \"Write a match-3 game in Erlang\"";
 
 const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --html \"make a visual explainer\"\n  rkat run --browser \"create an implementation plan\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - realm state under <context-root>/.rkat/realms; use --verbose to print the active realm root\n  - `--tools safe`\n  - provider-native web search on for supporting models; use `--no-web-search` to disable\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
@@ -711,6 +714,16 @@ fn is_root_flag_without_value(arg: &str) -> bool {
     matches!(arg, "--isolated")
 }
 
+/// Root flag spelled with its value attached: `--flag=value`, `-r=value`,
+/// or the combined short form `-rvalue` (`-r` is the only root short flag
+/// taking a value). These consume one argv slot, not two.
+fn is_root_flag_with_attached_value(arg: &str) -> bool {
+    if let Some((flag, _value)) = arg.split_once('=') {
+        return is_root_flag_with_value(flag);
+    }
+    !arg.starts_with("--") && arg.len() > 2 && arg.starts_with("-r")
+}
+
 /// Inject `run` as the default subcommand when the first positional argument
 /// is not a known command, while preserving top-level help/version handling.
 fn normalize_cli_args(
@@ -733,6 +746,7 @@ fn normalize_cli_args(
         "capabilities",
         "models",
         "doctor",
+        "storage",
         "auth",
         "help",
         "resume",
@@ -747,7 +761,7 @@ fn normalize_cli_args(
             if is_root_passthrough_flag(arg_str) {
                 return args;
             }
-            if is_root_flag_without_value(arg_str) {
+            if is_root_flag_without_value(arg_str) || is_root_flag_with_attached_value(arg_str) {
                 i += 1;
             } else if is_root_flag_with_value(arg_str) {
                 i += 2; // skip flag and its value
@@ -2004,6 +2018,18 @@ enum Commands {
     /// Check local setup and common prerequisites
     Doctor,
 
+    /// Storage diagnostics and offline maintenance
+    ///
+    /// `storage doctor` never mutates anything. `storage migrate` is the
+    /// offline migration framework (dry-run by default; `--apply` runs the
+    /// fenced structural migration). `storage prune` owns the lifecycle of
+    /// registered migration backup artifacts only; realm deletion stays
+    /// under `rkat realm delete` / `rkat realm prune`.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommands,
+    },
+
     /// Auth profile management — list, inspect, test, log in, log out,
     /// delete, and check status of realm-scoped auth profiles.
     /// `login` runs the interactive OAuth flow by default, or writes an
@@ -2015,6 +2041,129 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+}
+
+/// Storage diagnostics and offline-maintenance verbs (Phase 6 of the
+/// storage unification arc).
+#[derive(Subcommand)]
+enum StorageCommands {
+    /// Read-only diagnosis of realm storage across candidate state roots
+    ///
+    /// Safe against live realms: takes no leases, opens databases
+    /// read-only, and creates nothing. Reports per-root realm inventory,
+    /// manifest state, schema-ledger versions per database, dual-root
+    /// split-brain twins, a checkpoint-evidence census (verified vs
+    /// legacy-unverified sessions), dangling session→blob references, and
+    /// orphaned lock/lease/backup artifacts.
+    ///
+    /// By default the sweep covers the project-local root
+    /// (`<context-root>/.rkat/realms`) and the user-global data root. When
+    /// any explicit root is given (the global `--state-root` or one or more
+    /// `--root`), ONLY those roots are read. `--realm` restricts the sweep
+    /// to one realm id (split-brain twins for it are still detected across
+    /// all swept roots).
+    ///
+    /// Exit codes: 0 = no error-severity findings; 1 = errors found.
+    ///
+    /// This command never mutates anything. It is unrelated to
+    /// `rkat realm prune` (destructive realm deletion); `rkat storage
+    /// prune` owns migration-backup-artifact lifecycle only.
+    Doctor {
+        /// Emit the diagnosis as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
+    },
+
+    /// Offline migration framework (dry-run by default)
+    ///
+    /// Sweeps the same candidate roots as `storage doctor` and, per realm:
+    /// (1) ledger baseline — under the realm's exclusive maintenance fence,
+    /// every store is opened through its normal constructor so the guarded
+    /// schema-ledger migrations converge files of any vintage (dry-run
+    /// reports what would be stamped, read-only); (2) state-root adoption —
+    /// report-only, realms are used where they lie; (3) split-brain
+    /// reconciliation — a realm id under 2+ swept roots produces a
+    /// per-domain divergence report and a fail-closed refusal unless
+    /// `--apply --adopt-root <path>` names the root to keep, in which case
+    /// every other copy is archived read-only under the registered
+    /// `*.pre-<version>-<timestamp>` backup naming (no merging, no
+    /// synthesis); (4) checkpoint-evidence adoption — the machine-owned
+    /// bulk sweep stamps legacy pre-typed session checkpoints (sqlite
+    /// realms; jsonl realms heal lazily and are reported as skipped);
+    /// (5) deprecated leftovers — report-only. Per-mob databases under
+    /// `mobs/` are report-only in v1.
+    ///
+    /// Credential stores are never read, moved, or reported by this
+    /// command.
+    ///
+    /// Exit codes: 0 = clean; 1 = errors or fail-closed refusals
+    /// (split-brain without --adopt-root, maintenance fence not
+    /// acquirable).
+    Migrate {
+        /// Perform the fenced migration (default is a read-only dry-run)
+        #[arg(long)]
+        apply: bool,
+
+        /// Emit the migration report as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
+
+        /// Split-brain resolution: the swept state root whose realm copy is
+        /// adopted; every other copy is archived read-only. Requires
+        /// --apply.
+        #[arg(long = "adopt-root", value_name = "PATH")]
+        adopt_root: Option<PathBuf>,
+
+        /// Seconds to wait for in-flight store operations to drain when
+        /// acquiring the exclusive maintenance fence.
+        #[arg(long = "fence-wait-secs", value_name = "SECS", default_value_t = 10)]
+        fence_wait_secs: u64,
+    },
+
+    /// Delete registered migration backup artifacts (dry-run by default)
+    ///
+    /// Enumerates registered maintenance artifacts under the swept roots —
+    /// `*.pre-<version>-<timestamp>` migration backups (files or archived
+    /// realm directories) and `*.corrupt-<timestamp>` index quarantines —
+    /// with sizes and ages. With --apply, deletes those at least
+    /// --older-than-days old. Never touches anything outside the
+    /// registered naming patterns.
+    ///
+    /// Unrelated to `rkat realm prune`, which deletes live realms; this
+    /// command only manages maintenance backup artifacts.
+    ///
+    /// Exit codes: 0 = clean; 1 = deletion failures.
+    Prune {
+        /// Delete matching artifacts (default lists them)
+        #[arg(long)]
+        apply: bool,
+
+        /// Minimum artifact age in days for deletion (0 = all)
+        #[arg(long = "older-than-days", value_name = "DAYS", default_value_t = 30)]
+        older_than_days: u64,
+
+        /// Emit the prune report as pretty JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Additional state root to sweep (repeatable). Combines with the
+        /// global --state-root; when either is present, only the explicit
+        /// roots are read.
+        #[arg(long = "root", value_name = "PATH")]
+        roots: Vec<PathBuf>,
     },
 }
 
@@ -3255,6 +3404,26 @@ async fn main() -> anyhow::Result<ExitCode> {
     };
     init_tracing(&cli);
 
+    // `rkat storage …` dispatches before runtime-scope resolution on
+    // purpose: the dual-root resolver refuses a realm materialized under
+    // both candidate roots with a typed split-brain error pointing at
+    // doctor, and doctor is the tool that diagnoses exactly that state. The
+    // storage handlers open no persistence bundle, take no realm leases,
+    // and read only their candidate roots.
+    if let Some(Commands::Storage { command }) = &cli.command {
+        if let Some(usage) = storage_global_usage_conflict(&cli) {
+            eprintln!("error: {usage}");
+            return Ok(ExitCode::from(EXIT_USAGE));
+        }
+        return Ok(match handle_storage_command(command, &cli).await {
+            Ok(()) => ExitCode::from(EXIT_SUCCESS),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                ExitCode::from(EXIT_ERROR)
+            }
+        });
+    }
+
     let cli_scope = if auth_config_realm.is_some() {
         resolve_runtime_scope_with_realm(&cli, None)?
     } else {
@@ -3482,6 +3651,11 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models => handle_models_catalog(&cli_scope).await,
         Commands::Doctor => handle_doctor(&cli_scope).await,
+        // Storage verbs are dispatched before scope resolution (see the
+        // early dispatch at the top of main); this arm is unreachable.
+        Commands::Storage { .. } => Err(anyhow::anyhow!(
+            "storage commands are dispatched before runtime-scope resolution"
+        )),
         Commands::Auth { command } => {
             handle_auth_command(command, &cli_scope, auth_config_realm.as_deref()).await
         }
@@ -4279,6 +4453,14 @@ async fn write_comms_binding_out(
 #[derive(Clone)]
 struct RuntimeScope {
     locator: RealmLocator,
+    /// The bootstrap path authority the locator was resolved with. Carries
+    /// every probed realm-root candidate so first materialization can
+    /// reserve across all of them (`open_realm_persistence_with_layout`).
+    layout: meerkat_core::StorageLayout,
+    /// How the state root was chosen (explicit flag / existing realm /
+    /// surface default) — realm re-resolution (mob-host config override)
+    /// keys off this.
+    root_choice: meerkat_core::RealmRootChoice,
     instance_id: Option<String>,
     backend_hint: Option<RealmBackend>,
     origin_hint: RealmOrigin,
@@ -4349,10 +4531,6 @@ fn resolve_runtime_scope_with_realm(
         RealmSelection::Isolated => RealmOrigin::Generated,
         RealmSelection::WorkspaceDerived { .. } => RealmOrigin::Workspace,
     };
-    let state_root = cli
-        .state_root
-        .clone()
-        .unwrap_or_else(|| default_cli_state_root(&context_root));
     let realm_cfg = RealmConfig {
         selection,
         instance_id: cli.instance.clone(),
@@ -4360,9 +4538,34 @@ fn resolve_runtime_scope_with_realm(
             .realm_backend
             .map(Into::into)
             .map(|b: RealmBackend| b.as_str().to_string()),
-        state_root: Some(state_root),
+        state_root: cli.state_root.clone(),
     };
-    let locator = realm_cfg.resolve_locator()?;
+    // Bootstrap path authority: realm-id-first dual-root resolution through
+    // `StorageLayout::resolve`. An explicit --state-root wins; else the
+    // realm is used where it already exists (project-local
+    // <project-root>/.rkat/realms — walked up from the context root — or
+    // the user-global data dir; both is a typed split-brain refusal); else
+    // the CLI's documented project-local default applies. The resolved
+    // layout rides on the scope so persistence opens reserve across every
+    // probed candidate root.
+    let resolved = meerkat_core::StorageLayout::resolve(
+        meerkat_core::StorageLayoutInputs {
+            invocation_context: context_root.clone(),
+            explicit_state_root: cli.state_root.clone(),
+            user_config_root: cli.user_config_root.clone(),
+            default_root: Some(meerkat_core::RealmRootDefault::ProjectLocal),
+            probe_local_candidate: true,
+        },
+        &realm_cfg,
+    )?;
+    let locator = resolved.locator;
+    if resolved.root_choice == meerkat_core::RealmRootChoice::ExistingGlobal {
+        tracing::info!(
+            realm = %locator.realm,
+            state_root = %locator.state_root.display(),
+            "realm resolved to the user-global state root where it already exists"
+        );
+    }
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
@@ -4370,6 +4573,8 @@ fn resolve_runtime_scope_with_realm(
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
+        layout: resolved.layout,
+        root_choice: resolved.root_choice,
         instance_id: cli.instance.clone(),
         // Only pass an explicit backend hint when the caller asked for one.
         // Existing realms are always opened using their pinned manifest backend.
@@ -4383,26 +4588,32 @@ fn resolve_runtime_scope_with_realm(
     })
 }
 
-fn default_cli_state_root(context_root: &Path) -> PathBuf {
-    context_root.join(".rkat").join("realms")
-}
-
 async fn resolve_config_store(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(Arc<dyn ConfigStore>, PathBuf)> {
-    let paths =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    if let Some(parent) = paths.config_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
-    }
+    // Route through the shared realm→config-document projection: the
+    // reserved `global` realm writes the user-global doc child realms
+    // actually inherit from — a `<state_root>/global/config.toml` head
+    // would shadow it. Other realms keep their per-realm doc.
+    let source = meerkat_store::FilesystemRealmConfigSource::new(
+        scope.locator.state_root.clone(),
+        cli_global_config_path(scope),
+        meerkat_models::canonical(),
+    );
+    let config_path = source.config_doc_path(&scope.locator.realm);
+    let base_dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tokio::fs::create_dir_all(&base_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     Ok((
         Arc::new(FileConfigStore::new(
-            paths.config_path,
+            config_path,
             meerkat_models::canonical(),
         )),
-        paths.root,
+        base_dir,
     ))
 }
 
@@ -7443,6 +7654,294 @@ where
     }
 }
 
+/// Global options that require runtime-scope resolution are usage errors
+/// for the storage verbs, which deliberately dispatch before it:
+/// `--isolated` would mint a realm the offline maintenance never uses, and
+/// `--default-model` would persist config into a scope the verbs never
+/// resolve. Silently ignoring either would misreport what ran.
+fn storage_global_usage_conflict(cli: &Cli) -> Option<&'static str> {
+    if !matches!(&cli.command, Some(Commands::Storage { .. })) {
+        return None;
+    }
+    if cli.isolated {
+        return Some(
+            "--isolated cannot be combined with `rkat storage` (offline maintenance never \
+             mints an isolated realm; scope the sweep with --realm/--root instead)",
+        );
+    }
+    if cli.default_model.is_some() {
+        return Some(
+            "--default-model cannot be combined with `rkat storage` (the storage verbs \
+             resolve no runtime scope to persist the default model into)",
+        );
+    }
+    None
+}
+
+async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow::Result<()> {
+    match command {
+        StorageCommands::Doctor { json, roots } => handle_storage_doctor(cli, *json, roots).await,
+        StorageCommands::Migrate {
+            apply,
+            json,
+            roots,
+            adopt_root,
+            fence_wait_secs,
+        } => {
+            handle_storage_migrate(
+                cli,
+                *apply,
+                *json,
+                roots,
+                adopt_root.as_deref(),
+                *fence_wait_secs,
+            )
+            .await
+        }
+        StorageCommands::Prune {
+            apply,
+            older_than_days,
+            json,
+            roots,
+        } => handle_storage_prune(cli, *apply, *older_than_days, *json, roots).await,
+    }
+}
+
+/// Candidate state roots for the storage verbs, resolved WITHOUT opening
+/// persistence, taking leases, or building a service: an explicit
+/// `--state-root`/`--root` set is used verbatim (and nothing else is read);
+/// otherwise the sweep covers the CLI's project-local candidate and the
+/// user-global data root — the same two candidates the dual-root realm
+/// resolver probes.
+fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut state_roots: Vec<PathBuf> = Vec::new();
+    if let Some(explicit) = &cli.state_root {
+        state_roots.push(explicit.clone());
+    }
+    state_roots.extend(extra_roots.iter().cloned());
+    if state_roots.is_empty() {
+        let context_root = cli
+            .context_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        state_roots.push(meerkat_core::local_realms_candidate(&context_root));
+        state_roots.push(meerkat_core::default_state_root());
+    }
+    state_roots
+}
+
+/// Validated `--realm` filter for the storage verbs.
+fn storage_realm_filter(cli: &Cli) -> anyhow::Result<Option<String>> {
+    if let Some(realm) = &cli.realm {
+        meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm)?;
+        Ok(Some(realm.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The [`meerkat_core::StorageMigrator`] the storage verbs diagnose
+/// through. Storage dispatch happens before runtime-scope resolution, so no
+/// external provider manifest can be consulted here: the built-in disk
+/// provider's `migrator()` hook is the only reachable implementation
+/// (realms pinned to an external provider diagnose through that provider's
+/// migrator once a runtime composes it).
+fn storage_diagnosis_migrator() -> &'static dyn meerkat_core::StorageMigrator {
+    #[cfg(feature = "session-store")]
+    {
+        use meerkat::RealmStorageProvider as _;
+        static DISK_PROVIDER: meerkat::DiskStorageProvider = meerkat::DiskStorageProvider;
+        if let Some(migrator) = DISK_PROVIDER.migrator() {
+            return migrator;
+        }
+    }
+    // Builds without the facade provider seam still diagnose disk realms
+    // through the same trait.
+    static DISK_MIGRATOR: meerkat_store::DiskStorageMigrator = meerkat_store::DiskStorageMigrator;
+    &DISK_MIGRATOR
+}
+
+/// Read-only storage diagnosis over the storage sweep roots.
+async fn handle_storage_doctor(
+    cli: &Cli,
+    json: bool,
+    extra_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let state_roots = storage_sweep_roots(cli, extra_roots);
+    let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
+    if let Some(realm) = storage_realm_filter(cli)? {
+        scope = scope.with_realm(realm);
+    }
+
+    let diagnosis = storage_diagnosis_migrator().diagnose(&scope).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diagnosis)?);
+    } else {
+        print_storage_diagnosis_text(&scope, &diagnosis);
+    }
+
+    let errors = diagnosis.count(meerkat_core::FindingSeverity::Error);
+    if errors > 0 {
+        anyhow::bail!("storage doctor found {errors} error-severity finding(s)");
+    }
+    Ok(())
+}
+
+/// Offline migration framework (`rkat storage migrate`); dry-run by
+/// default. Dispatches before runtime-scope resolution like the other
+/// storage verbs (the dual-root resolver refuses split-brain realms, and
+/// reconciling them is exactly this verb's job).
+async fn handle_storage_migrate(
+    cli: &Cli,
+    apply: bool,
+    json: bool,
+    extra_roots: &[PathBuf],
+    adopt_root: Option<&Path>,
+    fence_wait_secs: u64,
+) -> anyhow::Result<()> {
+    if adopt_root.is_some() && !apply {
+        anyhow::bail!("--adopt-root requires --apply (split-brain resolution archives a copy)");
+    }
+    // Explicit `--root`/`--state-root` scope means "sweep ONLY these
+    // roots": nothing ambient — including the legacy home probe — is read.
+    let explicit_scope = cli.state_root.is_some() || !extra_roots.is_empty();
+    let options = storage_migrate::MigrateOptions {
+        roots: storage_sweep_roots(cli, extra_roots),
+        realm_filter: storage_realm_filter(cli)?,
+        apply,
+        adopt_root: adopt_root.map(Path::to_path_buf),
+        fence_wait: Duration::from_secs(fence_wait_secs),
+        // Ambient home resolution stays in this bootstrap module (the
+        // storage-ambient gate's allowlist); the migrate module receives
+        // the probe path explicitly. Report-only.
+        legacy_home_sessions: if explicit_scope {
+            None
+        } else {
+            dirs::home_dir().map(|home| home.join(".rkat").join("sessions"))
+        },
+    };
+    let report = storage_migrate::run_storage_migrate(options).await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        storage_migrate::print_migrate_report_text(&report);
+    }
+
+    if report.has_errors() {
+        anyhow::bail!("storage migrate reported errors or fail-closed refusals");
+    }
+    Ok(())
+}
+
+/// Registered-backup-artifact lifecycle (`rkat storage prune`); dry-run by
+/// default.
+async fn handle_storage_prune(
+    cli: &Cli,
+    apply: bool,
+    older_than_days: u64,
+    json: bool,
+    extra_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    let options = storage_migrate::PruneOptions {
+        roots: storage_sweep_roots(cli, extra_roots),
+        apply,
+        older_than_days,
+        realm_filter: storage_realm_filter(cli)?,
+    };
+    let report = storage_migrate::run_storage_prune(options).await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        storage_migrate::print_prune_report_text(&report);
+    }
+
+    if !report.errors.is_empty() {
+        anyhow::bail!("storage prune reported errors");
+    }
+    Ok(())
+}
+
+fn print_storage_diagnosis_text(
+    scope: &meerkat_core::DiagnoseScope,
+    diagnosis: &meerkat_core::StorageDiagnosis,
+) {
+    use meerkat_core::FindingSeverity;
+
+    println!("Swept {} state root(s):", scope.state_roots.len());
+    for root in &scope.state_roots {
+        println!("  {}", root.display());
+    }
+    if let Some(realm) = &scope.realm {
+        println!("Realm filter: {realm}");
+    }
+    println!();
+
+    for (severity, header) in [
+        (FindingSeverity::Error, "Errors:"),
+        (FindingSeverity::Warning, "Warnings:"),
+        (FindingSeverity::Info, "Info:"),
+    ] {
+        let group: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == severity)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("{header}");
+        for finding in group {
+            let realm = finding
+                .realm
+                .as_deref()
+                .map(|realm| format!(" realm={realm}"))
+                .unwrap_or_default();
+            println!("  [{}]{realm} {}", finding.code, finding.message);
+            if let Some(path) = &finding.path {
+                println!("      at {}", path.display());
+            }
+        }
+        println!();
+    }
+
+    println!("Inventory ({} realm(s)):", diagnosis.inventory.len());
+    for entry in &diagnosis.inventory {
+        println!(
+            "  {}  backend={}  {}",
+            entry.realm,
+            entry.backend.as_deref().unwrap_or("unknown"),
+            entry.root.display()
+        );
+        for database in &entry.databases {
+            let name = database
+                .path
+                .strip_prefix(&entry.root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| database.path.display().to_string());
+            let domains = database
+                .domains
+                .iter()
+                .map(|(domain, version)| match version {
+                    Some(version) => format!("{domain}={version}"),
+                    None => format!("{domain}=none"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    {name}: {domains}");
+        }
+    }
+    println!();
+    println!(
+        "storage doctor: {} error(s), {} warning(s), {} info",
+        diagnosis.count(FindingSeverity::Error),
+        diagnosis.count(FindingSeverity::Warning),
+        diagnosis.count(FindingSeverity::Info)
+    );
+}
+
 async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     fn validate_realm_id(realm_id: &str) -> anyhow::Result<()> {
         meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm_id)
@@ -8274,14 +8773,29 @@ async fn prune_realms_inner(
 async fn create_persistence_bundle(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(meerkat_store::RealmManifest, PersistenceBundle)> {
-    meerkat::open_realm_persistence_in(
-        &scope.locator.state_root,
-        scope.locator.realm.as_str(),
-        scope.backend_hint(),
-        Some(scope.origin_hint),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to open realm persistence backend: {e}"))
+    // The bootstrap layout is the path authority: its realm-root candidates
+    // arm the cross-candidate first-start reservation. A locator re-resolved
+    // after bootstrap (mob-host `[mob_host].realm` override) can leave the
+    // layout's chosen root; that path opens explicit-root (which builds its
+    // own single-candidate layout) instead of riding a stale one.
+    let opened = if scope.layout.state_root() == scope.locator.state_root.as_path() {
+        meerkat::storage_provider::open_realm_persistence_with_layout(
+            scope.layout.clone(),
+            scope.locator.realm.as_str(),
+            scope.backend_hint(),
+            Some(scope.origin_hint),
+        )
+        .await
+    } else {
+        meerkat::open_realm_persistence_in(
+            &scope.locator.state_root,
+            scope.locator.realm.as_str(),
+            scope.backend_hint(),
+            Some(scope.origin_hint),
+        )
+        .await
+    };
+    opened.map_err(|e| anyhow::anyhow!("Failed to open realm persistence backend: {e}"))
 }
 
 #[cfg(not(feature = "session-store"))]
@@ -16936,11 +17450,18 @@ mod tests {
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
+            root_choice: meerkat_core::RealmRootChoice::Explicit,
             locator: RealmLocator {
                 state_root: state_root.clone(),
                 realm: meerkat_core::connection::RealmId::parse(realm_id)
                     .expect("test realm id parses"),
             },
+            layout: meerkat_core::StorageLayout::with_injected_roots(
+                state_root.clone(),
+                None,
+                Some(state_root.clone()),
+                state_root.clone(),
+            ),
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
@@ -20582,6 +21103,93 @@ default_model = "gemma"
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_normalize_cli_args_attached_root_flag_forms() {
+        // `--flag=value` and combined short forms consume ONE argv slot; a
+        // following subcommand must not trigger the implicit `run` insertion.
+        for attached in [
+            "--realm=alpha",
+            "-r=alpha",
+            "-ralpha",
+            "--state-root=/tmp/roots",
+            "--context-root=/tmp/project",
+            "--default-model=gpt-5.4",
+        ] {
+            let args = normalize_cli_args(["rkat", attached, "storage"].map(Into::into));
+            assert_eq!(
+                args,
+                vec!["rkat", attached, "storage"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+                "{attached} must not trigger implicit run insertion"
+            );
+        }
+
+        // A bare prompt after an attached form still gets the shorthand,
+        // with `run` inserted AFTER the flag (not before it).
+        let args = normalize_cli_args(["rkat", "--realm=alpha", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--realm=alpha", "run", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let args = normalize_cli_args(["rkat", "-ralpha", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "-ralpha", "run", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        // Attached forms with no trailing arguments keep set-and-exit
+        // semantics (no `run` injected).
+        let args = normalize_cli_args(["rkat", "--default-model=gpt-5.4"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--default-model=gpt-5.4"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_storage_global_usage_conflict() {
+        let isolated = Cli::try_parse_from(["rkat", "--isolated", "storage", "doctor"])
+            .expect("--isolated storage doctor parses");
+        let message = storage_global_usage_conflict(&isolated)
+            .expect("--isolated must conflict with storage verbs");
+        assert!(message.contains("--isolated"), "{message}");
+
+        let default_model = Cli::try_parse_from([
+            "rkat",
+            "--default-model",
+            "gpt-5.4",
+            "storage",
+            "prune",
+            "--apply",
+        ])
+        .expect("--default-model storage prune parses");
+        let message = storage_global_usage_conflict(&default_model)
+            .expect("--default-model must conflict with storage verbs");
+        assert!(message.contains("--default-model"), "{message}");
+
+        // Scope-selection globals stay valid for the storage verbs.
+        let scoped =
+            Cli::try_parse_from(["rkat", "--realm", "alpha", "storage", "migrate", "--apply"])
+                .expect("--realm storage migrate parses");
+        assert!(storage_global_usage_conflict(&scoped).is_none());
+
+        // Non-storage invocations never report a storage conflict.
+        let run = Cli::try_parse_from(["rkat", "--isolated", "run", "hello"])
+            .expect("--isolated run parses");
+        assert!(storage_global_usage_conflict(&run).is_none());
     }
 
     #[test]
@@ -24642,17 +25250,25 @@ default_model = "gpt-5.4"
         let root = PathBuf::from("/tmp/example-project");
 
         assert_eq!(
-            default_cli_state_root(&root),
+            meerkat_core::local_realms_candidate(&root),
             PathBuf::from("/tmp/example-project/.rkat/realms")
         );
     }
 
     #[test]
     fn test_resolve_runtime_scope_uses_context_local_state_root_by_default() {
+        // Hermetic project marker: the layout walks the project root up from
+        // the context root, so the candidate must hang off `proj`, not the
+        // nested context directory.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
         let cli = Cli::try_parse_from([
             "rkat",
             "--context-root",
-            "/tmp/example-project",
+            nested.to_str().expect("utf-8 path"),
             "run",
             "hello",
         ])
@@ -24662,7 +25278,16 @@ default_model = "gpt-5.4"
 
         assert_eq!(
             scope.locator.state_root,
-            PathBuf::from("/tmp/example-project/.rkat/realms")
+            project.join(".rkat").join("realms")
+        );
+        assert_eq!(scope.layout.state_root(), scope.locator.state_root);
+        assert_eq!(scope.layout.project_root(), Some(project.as_path()));
+        assert!(
+            scope
+                .layout
+                .realm_root_candidates()
+                .contains(&scope.locator.state_root),
+            "the chosen root must be among the reservation candidates"
         );
     }
 
@@ -25386,11 +26011,18 @@ supports_reasoning = true
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
+            root_choice: meerkat_core::RealmRootChoice::Explicit,
             locator: RealmLocator {
                 state_root: root.clone(),
                 realm: meerkat_core::connection::RealmId::parse("test-realm")
                     .expect("test realm id parses"),
             },
+            layout: meerkat_core::StorageLayout::with_injected_roots(
+                root.clone(),
+                None,
+                None,
+                root.clone(),
+            ),
             instance_id: None,
             backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,

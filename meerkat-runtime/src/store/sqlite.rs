@@ -7,15 +7,12 @@ mod inner {
     use std::sync::Arc;
     #[cfg(test)]
     use std::sync::atomic::{AtomicU8, Ordering};
-    use std::time::Duration;
 
     use chrono::{DateTime, Utc};
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
-    use meerkat_store::sqlite_store::{begin_immediate_transaction, open_connection};
-    use rusqlite::{
-        Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-    };
+    use meerkat_store::sqlite_store::begin_immediate_transaction;
+    use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
     use serde::{Deserialize, Serialize};
 
     use crate::identifiers::LogicalRuntimeId;
@@ -92,16 +89,84 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
     receipt_json BLOB NOT NULL
 )";
 
-    fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
-        conn.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+    fn migration_0001_runtime_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
     }
 
-    fn open_runtime_connection(path: &Path) -> Result<Connection, RuntimeStoreError> {
-        let conn =
-            open_connection(path).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-        ensure_runtime_schema(&conn)?;
-        Ok(conn)
+    /// The runtime store's schema domain in the per-file migration ledger.
+    /// (Co-tenants the sessions file in the sqlite realm backend.)
+    pub const RUNTIME_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+        name: "runtime-store",
+        migrations: &[meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_runtime_schema,
+        }],
+    };
+
+    fn map_shared_sqlite_error(err: meerkat_sqlite::SqliteStoreError) -> RuntimeStoreError {
+        match err {
+            meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            } => RuntimeStoreError::SchemaFromTheFuture {
+                domain,
+                found,
+                supported,
+            },
+            meerkat_sqlite::SqliteStoreError::MaintenanceFenceHeld { path } => {
+                RuntimeStoreError::MaintenanceFenceHeld {
+                    path: path.display().to_string(),
+                }
+            }
+            other => RuntimeStoreError::WriteFailed(other.to_string()),
+        }
+    }
+
+    /// Per-operation connection: fence guard lives exactly as long as the
+    /// connection it admits.
+    struct RuntimeConn {
+        conn: Connection,
+        _guard: meerkat_sqlite::OperationGuard,
+    }
+
+    impl std::ops::Deref for RuntimeConn {
+        type Target = Connection;
+        fn deref(&self) -> &Connection {
+            &self.conn
+        }
+    }
+
+    impl std::ops::DerefMut for RuntimeConn {
+        fn deref_mut(&mut self) -> &mut Connection {
+            &mut self.conn
+        }
+    }
+
+    fn open_runtime_connection(path: &Path) -> Result<RuntimeConn, RuntimeStoreError> {
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let mut conn = meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                // The runtime store preflights its own domain (not its
+                // co-tenants'): a future runtime-store file is refused
+                // typed before the Primary profile's WAL conversion.
+                schema_preflight: &[&RUNTIME_STORE_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        )
+        .map_err(map_shared_sqlite_error)?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(RuntimeConn {
+            conn,
+            _guard: guard,
+        })
     }
 
     fn begin_runtime_transaction(
@@ -686,27 +751,41 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         path: &Path,
         apply: bool,
     ) -> Result<Connection, RuntimeStoreError> {
-        if !path.is_file() {
-            return Err(RuntimeStoreError::ReadFailed(format!(
-                "runtime database does not exist: {}",
-                path.display()
-            )));
-        }
-        let flags = if apply {
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-        } else {
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-        };
-        let conn = Connection::open_with_flags(path, flags).map_err(|error| {
+        // Maintenance profile: fail-fast zero busy timeout in both modes,
+        // never creates, never mutates pragmas on the legacy file. No open
+        // preflight: future-schema certification runs inside the apply
+        // path's exclusive transaction (`certify_runtime_domain_not_future`).
+        meerkat_sqlite::open(
+            path,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: apply },
+        )
+        .map_err(|error| {
             if apply {
                 RuntimeStoreError::WriteFailed(error.to_string())
             } else {
                 RuntimeStoreError::ReadFailed(error.to_string())
             }
-        })?;
-        conn.busy_timeout(Duration::ZERO)
-            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-        Ok(conn)
+        })
+    }
+
+    /// Ledger certification for the legacy migrator: refuse a runtime-store
+    /// domain stamped by a newer binary before any row is read or mutated —
+    /// the same fail-closed check `apply_domain_migrations` performs for the
+    /// ordinary opener. Takes the caller's connection so the apply path can
+    /// run it inside its exclusive transaction (a `Transaction` derefs to
+    /// `Connection`).
+    fn certify_runtime_domain_not_future(conn: &Connection) -> Result<(), RuntimeStoreError> {
+        let supported = RUNTIME_STORE_DOMAIN.supported_version();
+        match meerkat_sqlite::domain_version(conn, RUNTIME_STORE_DOMAIN.name)
+            .map_err(map_shared_sqlite_error)?
+        {
+            Some(found) if found > supported => Err(RuntimeStoreError::SchemaFromTheFuture {
+                domain: RUNTIME_STORE_DOMAIN.name.to_string(),
+                found,
+                supported,
+            }),
+            _ => Ok(()),
+        }
     }
 
     fn apply_legacy_v0_6_34(
@@ -716,6 +795,10 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Exclusive)
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        // Certify inside the exclusive transaction, before any row is read:
+        // a file migrated by a newer binary must be refused typed, not
+        // reinterpreted by this binary's legacy heuristics.
+        certify_runtime_domain_not_future(&tx)?;
         let mut preflight = preflight_legacy_v0_6_34(&tx)?;
         let blocked = preflight
             .items
@@ -1225,6 +1308,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 return apply_legacy_v0_6_34(path);
             }
             let conn = open_existing_legacy_database(path, false)?;
+            certify_runtime_domain_not_future(&conn)?;
             let preflight = preflight_legacy_v0_6_34(&conn)?;
             Ok(LegacyV0_6_34MigrationReport {
                 applied: false,
@@ -6046,6 +6130,48 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             assert!(SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).is_err());
             assert_eq!(
                 raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
+                before
+            );
+        }
+
+        #[test]
+        fn legacy_migration_refuses_a_future_runtime_store_domain_without_writes() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = create_complete_v0_6_34_realm_database(&path);
+            // A newer binary already migrated this file: its ledger stamp is
+            // ahead of what this binary supports.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema (domain, version) VALUES (?1, ?2)",
+                params![
+                    RUNTIME_STORE_DOMAIN.name,
+                    RUNTIME_STORE_DOMAIN.supported_version() + 1
+                ],
+            )
+            .unwrap();
+            drop(conn);
+
+            let before =
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
+            for apply in [false, true] {
+                let err = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, apply)
+                    .expect_err("future runtime-store domain must be refused");
+                assert!(
+                    matches!(
+                        err,
+                        RuntimeStoreError::SchemaFromTheFuture { ref domain, .. }
+                            if domain == RUNTIME_STORE_DOMAIN.name
+                    ),
+                    "unexpected error: {err:?}"
+                );
+            }
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0),
                 before
             );
         }

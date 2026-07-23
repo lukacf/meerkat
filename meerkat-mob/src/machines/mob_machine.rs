@@ -4388,6 +4388,122 @@ mod tests {
         );
     }
 
+    /// Defect regression (HomeCore report, defect C): force-cancel is the
+    /// operator remedy for a wedged member run and must stay admissible from
+    /// Running for every KNOWN member identity. A member whose runtime retired
+    /// out from under its identity binding (`ObserveRuntimeRetired`) used to
+    /// be guard-rejected, which the shell surfaced as
+    /// `invalid state transition: Running -> Running`.
+    #[test]
+    fn force_cancel_converges_for_wedged_member_without_live_runtime() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        seed_live_member(&mut authority, &identity, &runtime_id);
+
+        // Live member: the active arm admits and emits the interrupt marker.
+        let active = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ForceCancel {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("force-cancel of a live member must be admitted");
+        assert!(
+            active
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, MobMachineEffect::FlowTerminalized)),
+            "the active cancel arm must emit FlowTerminalized"
+        );
+
+        // The runtime retires out from under the identity binding — the
+        // wedged-run shape (identity retained, liveness gone).
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+            })
+            .expect("runtime retirement observation");
+        assert!(!authority.state().live_runtime_ids.contains(&runtime_id));
+        assert!(
+            authority
+                .state()
+                .identity_to_runtime
+                .contains_key(&identity)
+        );
+
+        let converged = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ForceCancel {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("force-cancel of a member without a live runtime must converge as a no-op");
+        assert!(
+            converged.effects.is_empty(),
+            "no interrupt authority may be minted without a live runtime"
+        );
+
+        // Idempotency: a second force-cancel is another no-op success.
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ForceCancel {
+                agent_identity: identity,
+            },
+        )
+        .expect("repeated force-cancel must stay a no-op success");
+
+        // Unknown identities stay rejected: the wedge arms admit only KNOWN
+        // members, never a missing identity binding.
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ForceCancel {
+                    agent_identity: AgentIdentity::from("no-such-member"),
+                },
+            )
+            .is_err(),
+            "force-cancel of an unknown identity must remain guard-rejected"
+        );
+    }
+
+    /// A retiring member is already draining under cancel authority; a
+    /// repeated force-cancel while cancelling must be a no-op success, not an
+    /// error.
+    #[test]
+    fn force_cancel_converges_for_retiring_member() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
+
+        authority
+            .apply_signal(MobMachineSignal::RetireMember {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                session_id: Some(session_id),
+            })
+            .expect("RetireMember should mark the live member as retiring");
+        assert_eq!(
+            authority.state().member_state_markers.get(&runtime_id),
+            Some(&MobMemberState::Retiring)
+        );
+
+        let converged = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ForceCancel {
+                agent_identity: identity,
+            },
+        )
+        .expect("force-cancel of a retiring member must converge as a no-op");
+        assert!(
+            converged.effects.is_empty(),
+            "the retiring arm must not mint interrupt authority"
+        );
+    }
+
     #[test]
     fn retire_member_rejects_absent_session_for_session_bound_member() {
         let mut authority = MobMachineAuthority::new();

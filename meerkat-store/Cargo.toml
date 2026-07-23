@@ -28,6 +28,7 @@ chrono = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 rusqlite = { workspace = true }
+meerkat-sqlite = { workspace = true }
 dirs = { workspace = true }
 fs4 = "0.12"
 
@@ -35,6 +36,7 @@ fs4 = "0.12"
 tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
+meerkat-store-conformance = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 toml = { workspace = true }

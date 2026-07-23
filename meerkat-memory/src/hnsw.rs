@@ -21,13 +21,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
-
 /// Base durable shape shared with pre-`session_id` binaries; the idempotent
-/// migration in [`migrate_memory_schema`] upgrades it in place on open.
+/// ledger migration 0002 upgrades it in place on open.
 const CREATE_MEMORY_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS memory_metadata (
     point_id INTEGER PRIMARY KEY,
@@ -196,73 +193,95 @@ impl EmbeddingModel for BagOfWordsEmbeddingModel {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection, MemoryStoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(MemoryStoreError::Io)?;
-    }
-    let conn = Connection::open(path).map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    conn.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    Ok(conn)
+/// The memory store's schema domain in the per-file migration ledger.
+///
+/// Migration 0001 is the base durable shape shared with pre-`session_id`
+/// binaries; 0002 lifts the historical in-place upgrade (projection column +
+/// covering index + allocator + compaction staging) into a once-per-file
+/// migration. The `table_info` guard keeps 0002 convergent on files of any
+/// vintage; the NULL `session_id` backfill deliberately stays OUT of the
+/// migration — [`backfill_null_session_ids`] already heals NULL rows on
+/// every open and before each per-scope operation (old binaries keep writing
+/// NULL rows after the migration, so a one-shot backfill could never be the
+/// invariant anyway).
+const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "memory",
+    migrations: &[
+        meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_memory_schema,
+        },
+        meerkat_sqlite::Migration {
+            version: 2,
+            name: "scoped-projection-and-staging",
+            apply: migration_0002_scoped_projection,
+        },
+    ],
+};
+
+fn migration_0001_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
 }
 
-/// Race-safe, idempotent durable-format migration for the shared
-/// `memory.sqlite3` file.
-///
-/// Adds the `session_id TEXT` projection column on `memory_metadata` (the
-/// durable source of truth stays `metadata_json`; the column is a
-/// divergence-free projection written in the same transaction as every row),
-/// the covering index, and the `memory_allocator` counter table seeded from
-/// `MAX(point_id)`.
-///
-/// Everything runs inside one `BEGIN IMMEDIATE` transaction with the
-/// `PRAGMA table_info` re-check INSIDE the transaction, so concurrent opens
-/// race safely: the loser's re-check sees the winner's committed column
-/// instead of failing on a duplicate `ALTER TABLE`.
-fn migrate_memory_schema(conn: &mut Connection) -> Result<(), MemoryStoreError> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+fn migration_0002_scoped_projection(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     let has_session_id = {
-        let mut stmt = tx
-            .prepare("PRAGMA table_info(memory_metadata)")
-            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+        let mut stmt = tx.prepare("PRAGMA table_info(memory_metadata)")?;
         let column_names = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-        let mut found = false;
-        for name in column_names {
-            let name = name.map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-            if name == "session_id" {
-                found = true;
-            }
-        }
-        found
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        column_names.iter().any(|name| name == "session_id")
     };
     if !has_session_id {
-        tx.execute("ALTER TABLE memory_metadata ADD COLUMN session_id TEXT", [])
-            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-        // Backfill the projection column from the typed durable metadata in
-        // the same transaction that creates the column.
-        backfill_null_session_ids(&tx)?;
+        tx.execute("ALTER TABLE memory_metadata ADD COLUMN session_id TEXT", [])?;
     }
-    tx.execute(CREATE_MEMORY_SESSION_INDEX_SQL, [])
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    tx.execute(CREATE_MEMORY_ALLOCATOR_SCHEMA_SQL, [])
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    tx.execute(SEED_MEMORY_ALLOCATOR_SQL, [])
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    tx.execute_batch(CREATE_COMPACTION_STAGE_SCHEMA_SQL)
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-    tx.commit()
-        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    tx.execute(CREATE_MEMORY_SESSION_INDEX_SQL, [])?;
+    tx.execute(CREATE_MEMORY_ALLOCATOR_SCHEMA_SQL, [])?;
+    tx.execute(SEED_MEMORY_ALLOCATOR_SQL, [])?;
+    tx.execute_batch(CREATE_COMPACTION_STAGE_SCHEMA_SQL)?;
     Ok(())
+}
+
+/// Per-operation connection: fence guard lives exactly as long as the
+/// connection it admits.
+struct MemoryConn {
+    conn: Connection,
+    _guard: meerkat_sqlite::OperationGuard,
+}
+
+impl std::ops::Deref for MemoryConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for MemoryConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+fn open_connection(path: &Path) -> Result<MemoryConn, MemoryStoreError> {
+    let guard = meerkat_sqlite::OperationGuard::for_database(path)
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    let mut conn = meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            // Future-schema refusal precedes the Primary profile's WAL
+            // conversion.
+            schema_preflight: &[&MEMORY_DOMAIN],
+            ..meerkat_sqlite::OpenOptions::default()
+        },
+    )
+    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &MEMORY_DOMAIN)
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    Ok(MemoryConn {
+        conn,
+        _guard: guard,
+    })
 }
 
 /// Idempotent NULL `session_id` backfill from the typed durable metadata.
@@ -535,8 +554,8 @@ impl HnswMemoryStore {
         std::fs::create_dir_all(dir).map_err(MemoryStoreError::Io)?;
 
         let db_path = dir.join("memory.sqlite3");
-        let mut conn = open_connection(&db_path)?;
-        migrate_memory_schema(&mut conn)?;
+        // `open_connection` brings the schema domain up to date.
+        let conn = open_connection(&db_path)?;
         // Heal on every open: rows an old binary wrote since the last heal
         // must never stay invisible to scoped SQL.
         backfill_null_session_ids(&conn)?;
@@ -1681,6 +1700,7 @@ mod tests {
         MessageRange,
     };
     use meerkat_core::types::SessionId;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 

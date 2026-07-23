@@ -36,7 +36,11 @@
             "groups": [
               {
                 "group": "Getting started",
-                "pages": ["introduction", "quickstart", "guides/auth"]
+                "pages": [
+                  "introduction",
+                  "quickstart",
+                  "guides/auth"
+                ]
               },
               {
                 "group": "Concepts",
@@ -192,6 +196,7 @@
                   "architecture/stopped-phase-revival-plan",
                   "architecture/workgraph-attention-goals",
                   "architecture/delivery-interaction-operations",
+                  "plans/storage-unification-plan",
                   "reference/mob-architecture",
                   "reference/design-philosophy"
                 ]
@@ -266,15 +271,21 @@
             "groups": [
               {
                 "group": "Rust",
-                "pages": ["mobkit/sdks/rust"]
+                "pages": [
+                  "mobkit/sdks/rust"
+                ]
               },
               {
                 "group": "TypeScript",
-                "pages": ["mobkit/sdks/typescript"]
+                "pages": [
+                  "mobkit/sdks/typescript"
+                ]
               },
               {
                 "group": "Python",
-                "pages": ["mobkit/sdks/python"]
+                "pages": [
+                  "mobkit/sdks/python"
+                ]
               }
             ]
           },

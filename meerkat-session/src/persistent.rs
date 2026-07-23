@@ -973,6 +973,51 @@ async fn load_verified_runtime_checkpoint_authority(
     VerifiedCheckpointAuthority::from_serialized(serialized, session_id, role).map(Some)
 }
 
+/// Outcome of [`PersistentSessionService::adopt_legacy_checkpoints`].
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LegacyCheckpointAdoptionReport {
+    /// Session-store rows enumerated.
+    pub scanned: usize,
+    /// Rows already carrying verified checkpoint authority (no-ops).
+    pub already_verified: usize,
+    /// Rows adopted by this sweep (any migration disposition).
+    pub adopted: usize,
+    /// Per-session refusals (divergent pairs, invalid evidence) — reported,
+    /// never synthesized around.
+    pub refused: Vec<(meerkat_core::SessionId, String)>,
+    /// Per-session load/decode failures — the sweep continues past them so
+    /// one malformed session cannot abort adoption of the rest. `Err` is
+    /// reserved for sweep-level failures (store enumeration itself).
+    pub failures: Vec<(meerkat_core::SessionId, String)>,
+    /// Sessions skipped by
+    /// [`LegacyCheckpointAdoptionOptions::only_cursor_free`] because their
+    /// documents carry runtime-checkpoint provenance and are therefore not
+    /// unambiguously cursor-free.
+    pub skipped_cursor_ambiguous: Vec<(meerkat_core::SessionId, String)>,
+}
+
+/// Options for [`PersistentSessionService::adopt_legacy_checkpoints_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LegacyCheckpointAdoptionOptions {
+    /// Stamp only sessions that are unambiguously cursor-free.
+    ///
+    /// A pre-typed document carries no numeric continuity cursor, so this
+    /// guard treats runtime-checkpoint provenance as cursor ambiguity: a
+    /// session with a committed legacy runtime snapshot, or whose store row
+    /// records the pre-typed intra-turn checkpointer marker, is skipped
+    /// (reported in
+    /// [`LegacyCheckpointAdoptionReport::skipped_cursor_ambiguous`]) instead
+    /// of being stamped at `INITIAL`. The partial-adoption shape (a verified
+    /// runtime snapshot over a still-legacy row) stays eligible: its
+    /// convergence mints no new stamp.
+    ///
+    /// Enable this on fleets whose external continuity rows may record a
+    /// nonzero generation floor (for example MobKit member fleets that
+    /// rebound sessions) until observed-cursor adoption has run; the default
+    /// (`false`) preserves full stamping for plain fleets.
+    pub only_cursor_free: bool,
+}
+
 /// The committed runtime snapshot classified for authority resolution: absent,
 /// fully verified, or a pre-typed legacy document eligible for the one-time
 /// recovery migration. Malformed evidence and intra-turn rows still error.
@@ -7192,6 +7237,142 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Bulk, offline form of the machine-owned legacy-checkpoint adoption
+    /// (`rkat storage migrate` case 4), with default options.
+    ///
+    /// Cursor ordering contract: adopted migration roots are stamped at
+    /// `SessionGeneration::INITIAL`/`SessionCheckpointRevision::INITIAL` (the
+    /// shipped v0.6.34 cursors). On fleets whose external continuity rows
+    /// record a nonzero generation floor (for example MobKit member fleets
+    /// that rebound sessions), downstream observed-cursor adoption — the
+    /// [`meerkat_core::adopt_legacy_session`] path with the observed cursor,
+    /// e.g. the MobKit adoption tooling — MUST run before this sweep:
+    /// stamping `INITIAL` under a nonzero floor makes the mismatch sticky,
+    /// because the stamped document verifies and never re-migrates. When
+    /// that ordering cannot be externally guaranteed, run
+    /// [`Self::adopt_legacy_checkpoints_with`] with
+    /// [`LegacyCheckpointAdoptionOptions::only_cursor_free`] instead.
+    pub async fn adopt_legacy_checkpoints(
+        &self,
+    ) -> Result<LegacyCheckpointAdoptionReport, SessionError> {
+        self.adopt_legacy_checkpoints_with(LegacyCheckpointAdoptionOptions::default())
+            .await
+    }
+
+    /// Bulk legacy-checkpoint adoption with explicit options; see
+    /// [`Self::adopt_legacy_checkpoints`] for the cursor ordering contract.
+    ///
+    /// Enumerates every session-store row and drives the SAME migration the
+    /// committed-authority resolver performs lazily (dispositions, CAS-
+    /// hardened writes, and idempotence included), so operators can take the
+    /// adoption cost out of resume/certification windows. Divergent pairs
+    /// refuse per session, and per-session load/decode failures are reported
+    /// per session — neither aborts the sweep; `Err` is reserved for the
+    /// enumeration itself failing.
+    ///
+    /// Scope note: rows discoverable through `SessionStore::list` are the
+    /// sweep universe; a legacy runtime snapshot with no store row is not
+    /// enumerable through public store traits and continues to heal lazily
+    /// at its first authority touch.
+    ///
+    /// Callers run this under the exclusive maintenance fence; the fence's
+    /// holder self-admission lets these production store paths pass their
+    /// per-operation guards in-process.
+    pub async fn adopt_legacy_checkpoints_with(
+        &self,
+        options: LegacyCheckpointAdoptionOptions,
+    ) -> Result<LegacyCheckpointAdoptionReport, SessionError> {
+        const ROLE: &str = "bulk legacy checkpoint adoption";
+        let metas = self
+            .store
+            .list(meerkat_core::session_store::SessionFilter::default())
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let mut report = LegacyCheckpointAdoptionReport::default();
+        for meta in metas {
+            report.scanned += 1;
+            let id = meta.id;
+            // Full loads, not index metadata: the census must not trust
+            // possibly-defaulted list metadata (JSONL index rows).
+            let store_session = match self.store.load(&id).await {
+                Ok(session) => session,
+                Err(error) => {
+                    report
+                        .failures
+                        .push((id, format!("session-store row load failed: {error}")));
+                    continue;
+                }
+            };
+            let runtime_copy =
+                match load_runtime_checkpoint_copy(self.runtime_store.as_ref(), &id, ROLE).await {
+                    Ok(copy) => copy,
+                    Err(error) => {
+                        report
+                            .failures
+                            .push((id, format!("runtime snapshot load failed: {error}")));
+                        continue;
+                    }
+                };
+            let store_row_legacy_marker = match store_session.as_ref() {
+                Some(row) => match row.try_checkpoint_state() {
+                    Ok(meerkat_core::SessionCheckpointState::LegacyUnverified {
+                        legacy_runtime_checkpoint,
+                    }) => Some(legacy_runtime_checkpoint),
+                    Ok(meerkat_core::SessionCheckpointState::Verified(_)) => None,
+                    Err(error) => {
+                        report.refused.push((
+                            id,
+                            format!("session-store checkpoint evidence is invalid: {error}"),
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let store_row_legacy = store_row_legacy_marker.is_some();
+            let runtime_legacy = matches!(runtime_copy, CommittedCheckpointCopy::Legacy { .. });
+            if !store_row_legacy && !runtime_legacy {
+                report.already_verified += 1;
+                continue;
+            }
+            if options.only_cursor_free {
+                // Every stamping disposition requires a legacy source copy;
+                // the verified-snapshot-over-legacy-row shape converges via
+                // projection rebuild without minting a stamp, so only
+                // runtime-checkpoint provenance blocks stamping here.
+                if runtime_legacy {
+                    report.skipped_cursor_ambiguous.push((
+                        id,
+                        "a committed legacy runtime snapshot exists; the lineage was \
+                         runtime-managed and its continuity row may record a nonzero \
+                         generation floor"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                if !matches!(runtime_copy, CommittedCheckpointCopy::Verified(_))
+                    && store_row_legacy_marker == Some(true)
+                {
+                    report.skipped_cursor_ambiguous.push((
+                        id,
+                        "the store row records pre-typed runtime-checkpoint provenance; \
+                         the lineage may carry an external continuity cursor"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+            }
+            match self
+                .migrate_legacy_checkpoint_authority(&id, runtime_copy, store_session, ROLE)
+                .await
+            {
+                Ok(_) => report.adopted += 1,
+                Err(error) => report.refused.push((id, error.to_string())),
+            }
+        }
+        Ok(report)
+    }
+
     /// Resolve the latest verified committed document authority without ever
     /// treating the legacy Boolean or an intra-turn projection as authority.
     /// RuntimeStore wins unless SessionStore carries a verified committed
@@ -7307,7 +7488,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Some(runtime));
         }
         Err(SessionError::Agent(AgentError::InternalError(format!(
-            "cannot prepare {role} for session {id}: RuntimeStore and SessionStore checkpoint authorities conflict"
+            "cannot prepare {role} for session {id}: RuntimeStore and SessionStore checkpoint \
+             authorities conflict (runtime stamp {runtime_stamp:?} with base \
+             {runtime_base:?}; store stamp {store_stamp:?} with base {store_base:?})",
+            runtime_stamp = runtime.stamp,
+            runtime_base = runtime.stamp.authority_base(),
+            store_stamp = store.stamp,
+            store_base = store.stamp.authority_base(),
         ))))
     }
 
@@ -7804,7 +7991,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let gate = self.gate_for_session(id).await;
         let guard = gate.cancelled.lock().await;
         if *guard {
-            return Ok(());
+            // The RuntimeStore has already committed this boundary. Reporting
+            // success here without projecting would durably record the
+            // finalization as succeeded while the SessionStore projection
+            // silently lags; two skipped boundaries put the projection more
+            // than one revision behind the runtime authority, a state the
+            // resume-side reconciler refuses forever (the mob-shutdown
+            // restart wedge). Honor the gate's no-write-after-cancel
+            // contract, but fail retryable so the terminal-recovery drain
+            // re-projects the committed snapshot instead of losing it.
+            drop(guard);
+            let store_error = SessionStoreError::Internal(format!(
+                "checkpointer gate for session {id} is cancelled; committed runtime checkpoint \
+                 projection deferred to terminal recovery"
+            ));
+            tracing::warn!(
+                session_id = %id,
+                "checkpointer gate cancelled after committed runtime checkpoint; retaining \
+                 runtime snapshot authority for projection retry"
+            );
+            match self.discard_live_session_unfenced(id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                Err(discard_error) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %discard_error,
+                        "failed to discard live session after gate-cancelled committed runtime \
+                         projection deferral"
+                    );
+                }
+            }
+            return Err(SessionError::Store(Box::new(store_error)));
         }
         let projection_result = if let Some(incremental) = self.incremental.clone() {
             save_session_projection_incremental(
@@ -31038,6 +31255,183 @@ mod tests {
         assert_eq!(
             snapshot_stamp.provenance(),
             meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_adoption_survives_per_session_failures_and_reports_them() {
+        // One malformed session must not abort the sweep: its failure is
+        // accumulated per session and the remaining rows still adopt.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        // Poisoned session: its committed runtime snapshot holds a different
+        // session's document, so the per-session runtime load fails typed.
+        let poisoned =
+            with_legacy_checkpoint_marker(&legacy_session_with_texts(&["poisoned"]), true);
+        let poisoned_id = poisoned.id().clone();
+        store
+            .save(&poisoned)
+            .await
+            .expect("poisoned row should save");
+        let foreign = legacy_session_with_texts(&["foreign document"]);
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&poisoned_id),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&foreign)
+                        .expect("foreign session should serialize"),
+                },
+            )
+            .await
+            .expect("foreign snapshot should commit");
+
+        let healthy = with_legacy_checkpoint_marker(&legacy_session_with_texts(&["healthy"]), true);
+        let healthy_id = healthy.id().clone();
+        store.save(&healthy).await.expect("healthy row should save");
+
+        let report = service
+            .adopt_legacy_checkpoints()
+            .await
+            .expect("per-session failures must not abort the sweep");
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.adopted, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].0, poisoned_id);
+        assert!(report.refused.is_empty());
+
+        let row_stamp = verified_store_row(&store, &healthy_id).await;
+        assert_eq!(
+            row_stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_free_guard_skips_runtime_provenance_and_default_still_stamps() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        // Runtime-managed shape: committed legacy runtime snapshot plus an
+        // identical legacy row.
+        let runtime_managed =
+            with_legacy_checkpoint_marker(&legacy_session_with_texts(&["runtime managed"]), true);
+        let runtime_managed_id = runtime_managed.id().clone();
+        seed_legacy_runtime_snapshot(&runtime_store, &runtime_managed).await;
+        store
+            .save(&runtime_managed)
+            .await
+            .expect("runtime-managed row should save");
+
+        // Store-only row carrying pre-typed runtime-checkpoint provenance.
+        let checkpointed_row =
+            with_legacy_checkpoint_marker(&legacy_session_with_texts(&["checkpointed row"]), true);
+        let checkpointed_row_id = checkpointed_row.id().clone();
+        store
+            .save(&checkpointed_row)
+            .await
+            .expect("checkpointed row should save");
+
+        // Unambiguously cursor-free: store-only row, no provenance marker.
+        let cursor_free = legacy_session_with_texts(&["cursor free"]);
+        let cursor_free_id = cursor_free.id().clone();
+        store
+            .save(&cursor_free)
+            .await
+            .expect("cursor-free row should save");
+
+        let report = service
+            .adopt_legacy_checkpoints_with(LegacyCheckpointAdoptionOptions {
+                only_cursor_free: true,
+            })
+            .await
+            .expect("guarded sweep should succeed");
+        assert_eq!(report.scanned, 3);
+        assert_eq!(report.adopted, 1);
+        assert!(report.failures.is_empty());
+        assert!(report.refused.is_empty());
+        let skipped: Vec<&SessionId> = report
+            .skipped_cursor_ambiguous
+            .iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert!(skipped.contains(&&runtime_managed_id));
+        assert!(skipped.contains(&&checkpointed_row_id));
+
+        // The cursor-free row is stamped at INITIAL; ambiguous shapes stay
+        // legacy for downstream observed-cursor adoption.
+        let stamped = verified_store_row(&store, &cursor_free_id).await;
+        assert_eq!(
+            stamped.generation(),
+            meerkat_core::SessionGeneration::INITIAL
+        );
+        let ambiguous_row = store
+            .load(&checkpointed_row_id)
+            .await
+            .expect("row load should succeed")
+            .expect("row should exist");
+        assert!(matches!(
+            ambiguous_row
+                .try_checkpoint_state()
+                .expect("checkpoint state should decode"),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+        ));
+
+        // Default options preserve the plain-fleet behavior: the previously
+        // skipped shapes adopt and nothing is skipped.
+        let followup = service
+            .adopt_legacy_checkpoints()
+            .await
+            .expect("default sweep should succeed");
+        assert_eq!(followup.adopted, 2);
+        assert_eq!(followup.already_verified, 1);
+        assert!(followup.skipped_cursor_ambiguous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cursor_free_guard_still_converges_partial_adoption() {
+        // A verified runtime snapshot over a still-legacy row converges via
+        // projection rebuild without minting a stamp, so the conservative
+        // guard must not strand the partial-adoption shape — and the
+        // existing nonzero cursor is preserved, never reset to INITIAL.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let legacy = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = legacy.id().clone();
+        let legacy_bytes = serde_json::to_vec(&legacy).expect("legacy session should serialize");
+        let adopted = meerkat_core::adopt_legacy_session(
+            &legacy_bytes,
+            meerkat_core::SessionGeneration::new(3),
+            meerkat_core::SessionCheckpointRevision::new(4),
+        )
+        .expect("legacy session should adopt");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                SessionDelta {
+                    session_snapshot: adopted.serialized.clone(),
+                },
+            )
+            .await
+            .expect("typed runtime snapshot should commit");
+        store.save(&legacy).await.expect("legacy row should save");
+
+        let report = service
+            .adopt_legacy_checkpoints_with(LegacyCheckpointAdoptionOptions {
+                only_cursor_free: true,
+            })
+            .await
+            .expect("guarded sweep should succeed");
+        assert_eq!(report.adopted, 1);
+        assert!(report.skipped_cursor_ambiguous.is_empty());
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(
+            row_stamp, adopted.stamp,
+            "the row converges onto the existing authority; no INITIAL stamp is minted"
         );
     }
 }

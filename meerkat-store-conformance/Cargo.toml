@@ -1,0 +1,30 @@
+[package]
+name = "meerkat-store-conformance"
+description = "Storage conformance harness for Meerkat session/blob/artifact store backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+meerkat-core = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# tokio is native-only: the baseline chapter's multi-task contention step is
+# the sole runtime consumer, and it is cfg-gated off on wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

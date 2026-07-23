@@ -19,6 +19,7 @@ pub mod source;
 
 pub use engine::DefaultSkillEngine;
 pub use registration::{SkillRegistration, collect_registered_skills};
+#[allow(deprecated)] // deprecated ambient wrapper stays exported through its window
 pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::FilesystemSkillSource;

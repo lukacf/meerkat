@@ -13,8 +13,105 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Added (storage unification arc)
+
+- **`meerkat-sqlite`**: new leaf crate owning the shared SQLite mechanics —
+  DDL-free connection opening under named policy profiles (`Primary` /
+  `ReadOnly` / `Maintenance`), the per-file schema migration ledger
+  (`meerkat_schema(domain, version)` with the pinned concurrent-open
+  transaction protocol and a typed, health-visible `SchemaFromTheFuture`
+  refusal), the `JsonColumnBytes` codec, per-operation maintenance-fence
+  guards, and storage-level error classification.
+- **`meerkat-store-conformance`**: new published crate with the per-trait
+  storage conformance profiles (baseline / incremental / guarded-projection),
+  the capability-discovery chapter (`as_incremental` swallow made loud), the
+  append-only-media chapter (emulated-CAS revision-guard semantics,
+  superseded-sibling dedup ownership, checkpoint monotonicity), the
+  legacy-data axis, and blob/artifact chapters — downstream backends run the
+  identical suite.
+- **`meerkat_core::StorageLayout`**: the single path authority resolved at
+  bootstrap (invocation context, walked-up project root, the
+  `user_home_root`/`user_rkat_root` split, credentials/comms-identity/cache
+  slots, state root), plus realm-id-first dual-root resolution: an explicit
+  `--state-root` wins; a realm existing under exactly one candidate root
+  (project-local `.rkat/realms` or the user-global data dir) is used where it
+  lies; both is a typed split-brain refusal pointing at doctor; the resolver
+  never creates an empty twin.
+- **`meerkat::storage_provider`**: the `RealmStorageProvider` seam (one
+  provider supplies all durable stores for a realm; the facade composes),
+  machine-readable durability classes (`Durable` / `RebuildableCache` /
+  `Scratch`) with fail-closed enforcement (an undeclared non-persistent
+  durable slot is a startup error, never a silent in-memory fallback), and
+  realm-manifest v2 read defenses (`manifest_format` refusal for future
+  formats; provider-pinned realms refuse disk opens typed).
+- **`rkat storage doctor`** (read-only, live-realm-safe, `--json`): per-root
+  realm inventory, schema-ledger state per database, dual-root twin
+  detection, checkpoint-evidence census, dangling blob references, orphaned
+  lease/lock/backup artifacts. `StorageMigrator::diagnose` is the
+  shape-stable hook remote/mobkit backends implement.
+- **`rkat storage migrate [--apply]`** (dry-run by default, offline,
+  fail-closed) and **`rkat storage prune`**: ledger baselining, split-brain
+  reconciliation (exact-dedup report + adopt-one-root/archive-other; no
+  synthesis), bulk machine-owned legacy-checkpoint adoption
+  (`PersistentSessionService::adopt_legacy_checkpoints`), registered
+  `*.pre-<version>-<timestamp>` backup artifacts with a prune lifecycle.
+- New CI gate `storage-ambient-gate`: bans ambient root resolution
+  (`dirs::*`, `HOME`/`XDG` reads) in production code outside the
+  bootstrap/layout modules and documented conventions.
+
+### Changed (storage unification arc — operator-visible)
+
+- The shared SQLite opener is DDL-free: schedule/runtime opens no longer
+  plant empty session tables in co-tenant files (existing stray tables are
+  tolerated by ledger baselining and doctor).
+- `SQLITE_BUSY_TIMEOUT_MS` harmonizes on the one shared 60s value (was
+  redefined six times at 5s/60s); the workgraph attention-column upgrade and
+  the mob event-route/operator-fence upgrades became once-per-file ledger
+  migrations instead of per-open probes.
+- Every SQLite file gains a `meerkat_schema` ledger table and a sibling
+  `<file>.mfence` fence-lock file (operators reading realm directories will
+  see both; doctor inventories them).
+- Server surfaces (`rkat-rpc`/`rkat-rest`/`rkat-mcp`) keep their no-flags
+  behavior; with an explicit `--context-root` plus `--realm`, a realm already
+  materialized project-locally now resolves to that root instead of the
+  user-global default.
+
+### Deprecated (storage unification arc)
+
+- `StorageConfig.directory` (never consumed by any surface; warns when set).
+- The ambient no-`_in` realm helpers (`realm_paths`, `start_realm_lease`,
+  `inspect_realm_leases`, `ensure_realm_manifest`,
+  `open_realm_session_store`) and `meerkat_skills::resolve_repositories` —
+  use the explicit-root variants.
+
 ### Breaking
 
+- **Removed public helpers (storage unification arc):**
+  `meerkat_core::config::find_project_root`,
+  `meerkat_core::config::data_dir`, and the `meerkat_core::config::dirs`
+  module (its `home_dir` HOME-env stub) were removed. Replacements:
+  project-root discovery is `meerkat_core::storage_layout::find_project_root`
+  (re-exported at the crate root; note the semantic change — any existing
+  `.rkat` entry counts, not only a directory, matching the historically live
+  `meerkat_tools::find_project_root` behavior, which now delegates to it).
+  `data_dir()` has no drop-in replacement: realm state roots resolve through
+  `meerkat_core::StorageLayout` / `default_state_root()`, and the user
+  `~/.rkat` root is `StorageLayout::user_rkat_root()`. The `dirs::home_dir`
+  stub maps onto `StorageLayout::user_home_root()` (or the
+  `user_config_root` bootstrap input). `StorageConfig::default()` no longer
+  pre-fills `directory` from the ambient data dir (the field is deprecated
+  and ignored).
+- `meerkat_core::realm_exists_under` now returns
+  `Result<bool, RuntimeBootstrapError>` and probes fail closed: only
+  NotFound means absent (other IO outcomes are the new typed
+  `RootProbeFailed`), an identity-colliding directory (two realm ids
+  sanitizing to one directory name) is the new typed
+  `RealmDirectoryCollision`, and an unreadable manifest is the new typed
+  `ManifestUnreadable`. `DualRootResolution` gained the required
+  `candidate_roots` field, and `meerkat::PersistenceError` gained the
+  `Bootstrap` and `FirstStart` variants (cross-candidate first-start
+  reservation refusals from
+  `meerkat_store::realm::ensure_realm_manifest_pin_with_candidates`).
 - Generated `MeerkatMachine` recovery alphabets replace the eight
   phase-shaped `RecoverRuntimeAuthority*` inputs with the single total
   `ClassifyRuntimeAuthorityReconciliation` observation input. Downstream
@@ -166,6 +263,50 @@ via cargo-semver-checks against the published baselines).
   admission instead of silently using the prior model.
 
 ### Fixed
+
+- **Idle busy-loop: machine schemas are constructed once per process.** The
+  `machine!` macro now emits a `LazyLock`-cached `schema_static()` (with
+  `schema()` cloning the cache), and the schedule/occurrence wire-header
+  validation uses process-lifetime identity stamps. Previously every
+  schedule-host tick (250 ms, per member) re-parsed entire machine DSLs per
+  persisted row — ~0.25-0.3 core per idle durable member; an idle fleet now
+  costs ~zero. On 0.8.2/0.8.3 this escalates to **availability loss** on
+  restart: the spin contends with member restore, a large fleet's boot can
+  exceed the client init timeout, and the host process-manager restart loop
+  re-pays the full restore every iteration — the deployment never comes
+  back up on default timeouts. Upgrading to this release removes the
+  contention source; structural regression tests pin the caching (pointer
+  identity) and the serde path (no schema construction per row) so the
+  amplifier cannot silently return.
+- **A stalled LLM provider stream no longer wedges the turn forever.** New
+  stream-inactivity watchdog (`[retry] stream_inactivity_timeout`, **default
+  ON at 300s**; `"disabled"` opts out): a provider call whose stream
+  produces no events inside the window is aborted with the retryable
+  `StreamStalled` failure, so one stall retries and repeated stalls exhaust
+  the retry budget and fail the turn typed instead of hanging indefinitely.
+  Behavior change: provider calls that previously sat silent for >5 minutes
+  and eventually completed are now aborted and retried. The compaction LLM
+  call is not yet watchdog-guarded (follow-up).
+- **`force_cancel` is legal from `Running`.** Force-cancelling a running mob
+  member now transitions through the machine's cancelling phase and
+  interrupts the in-flight work instead of refusing with
+  `invalid state transition: Running -> Running`; a second force-cancel
+  while cancelling is an idempotent success, and force-cancelling an
+  identity the roster has never seen answers `MemberNotFound`.
+
+- **Mob-shutdown restart wedge: a cancelled checkpointer gate no longer
+  silently drops the committed-boundary SessionStore projection.** Mob stop
+  cancels (and retry-flaps) per-session checkpointer gates before member
+  loops quiesce; boundary commits landing in that window advanced the
+  RuntimeStore authority while the projection skip returned success, so two
+  such commits left the SessionStore more than one revision behind — a
+  divergence the resume-side authority reconciler refuses forever
+  ("RuntimeStore and SessionStore checkpoint authorities conflict",
+  identities permanently degraded after restart). The gate keeps its
+  no-write-after-cancel contract but now fails with the retryable
+  projection error, so the terminal-recovery drain re-projects the
+  committed snapshot on restart and the stores reconverge. The
+  authority-conflict error now names both stamps and their bases.
 
 - Cold runtime recovery is level-triggered over every persisted lifecycle
   shape. Decodable prior-process rows normalize through target-local CAS to a

@@ -21,8 +21,6 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 60_000;
-
 /// Per-store SQLite contention policy. The default tolerates the long WAL
 /// writer holds produced by large durable snapshot commits while keeping the
 /// wait bounded. Runtime/session stores may override it per instance.
@@ -35,7 +33,7 @@ pub struct SqliteConnectionOptions {
 impl Default for SqliteConnectionOptions {
     fn default() -> Self {
         Self {
-            busy_timeout: Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS),
+            busy_timeout: meerkat_sqlite::SHARED_BUSY_TIMEOUT,
         }
     }
 }
@@ -122,22 +120,65 @@ fn parse_session_id(raw: String) -> Result<SessionId, StoreError> {
     Ok(SessionId(uuid))
 }
 
+/// Open a session-store connection under the shared Primary profile (WAL,
+/// `synchronous=FULL`, the shared busy timeout).
+///
+/// DDL-free since the storage unification: opening a connection no longer
+/// plants the session tables, so co-tenant stores (schedule, runtime) stop
+/// materializing empty session tables in their files — they open through
+/// their own domain-preflighted openers. Callers apply the
+/// [`SESSION_STORE_DOMAIN`] schema domain after opening; the same domain is
+/// preflighted at open so a future file is refused before the profile's WAL
+/// conversion touches it.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     open_connection_with_options(path, SqliteConnectionOptions::default())
 }
 
+/// [`open_connection`] with a per-store contention policy override.
 pub fn open_connection_with_options(
     path: &Path,
     options: SqliteConnectionOptions,
 ) -> Result<Connection, StoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(options.busy_timeout)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    ensure_schema(&conn)?;
+    meerkat_sqlite::open_with(
+        path,
+        meerkat_sqlite::ConnectionProfile::PRIMARY,
+        meerkat_sqlite::OpenOptions {
+            busy_timeout: Some(options.busy_timeout),
+            // Future-schema refusal must fire before the Primary profile's
+            // journal-mode conversion mutates the file.
+            schema_preflight: &[&SESSION_STORE_DOMAIN],
+        },
+    )
+    .map_err(StoreError::from)
+}
+
+fn migration_0001_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SESSIONS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSIONS_UPDATED_INDEX_SQL)?;
+    tx.execute_batch(CREATE_SESSION_STRAND_MESSAGES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_REWRITES_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_HEADS_TABLE_SQL)?;
+    tx.execute_batch(CREATE_SESSION_HEADS_UPDATED_INDEX_SQL)?;
+    Ok(())
+}
+
+/// The session store's schema domain in the per-file migration ledger.
+pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "session-store",
+    migrations: &[meerkat_sqlite::Migration {
+        version: 1,
+        name: "base-schema",
+        apply: migration_0001_session_schema,
+    }],
+};
+
+/// Open a connection and bring the session-store schema domain up to date.
+fn open_session_connection(
+    path: &Path,
+    options: SqliteConnectionOptions,
+) -> Result<Connection, StoreError> {
+    let mut conn = open_connection_with_options(path, options)?;
+    meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)?;
     Ok(conn)
 }
 
@@ -156,13 +197,16 @@ pub fn begin_immediate_transaction_with_options(
         .map_err(StoreError::from)
 }
 
-pub fn ensure_schema(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(CREATE_SESSIONS_TABLE_SQL)?;
-    conn.execute_batch(CREATE_SESSIONS_UPDATED_INDEX_SQL)?;
-    conn.execute_batch(CREATE_SESSION_STRAND_MESSAGES_TABLE_SQL)?;
-    conn.execute_batch(CREATE_SESSION_REWRITES_TABLE_SQL)?;
-    conn.execute_batch(CREATE_SESSION_HEADS_TABLE_SQL)?;
-    conn.execute_batch(CREATE_SESSION_HEADS_UPDATED_INDEX_SQL)?;
+/// Bring the session-store schema domain up to date on an already-open
+/// connection.
+///
+/// Routes through the shared migration ledger ([`SESSION_STORE_DOMAIN`]):
+/// the domain version is checked and stamped in the same transaction as the
+/// DDL, and a file stamped by a newer binary is refused typed
+/// ([`StoreError::SchemaFromTheFuture`]) before anything runs. There is no
+/// unledgered DDL entry point.
+pub fn ensure_schema(conn: &mut Connection) -> Result<(), StoreError> {
+    meerkat_sqlite::apply_domain_migrations(conn, &SESSION_STORE_DOMAIN)?;
     Ok(())
 }
 
@@ -692,7 +736,8 @@ impl SqliteSessionStore {
         options: SqliteConnectionOptions,
     ) -> Result<Self, StoreError> {
         let path = path.into();
-        let conn = open_connection_with_options(&path, options)?;
+        let _guard = meerkat_sqlite::OperationGuard::for_database(&path)?;
+        let conn = open_session_connection(&path, options)?;
         drop(conn);
         Ok(Self { path, options })
     }
@@ -711,8 +756,11 @@ impl SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
             let mut conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+                open_session_connection(&path, options).map_err(into_session_store_error)?;
             let tx = begin_immediate_transaction_with_options(&mut conn, options)
                 .map_err(into_session_store_error)?;
             let value = op(&tx)?;
@@ -735,8 +783,11 @@ impl SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
             let mut conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+                open_session_connection(&path, options).map_err(into_session_store_error)?;
             let tx = conn
                 .transaction()
                 .map_err(StoreError::from)
@@ -897,8 +948,10 @@ impl SessionStore for SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<Vec<SessionMeta>, SessionStoreError> {
-            let conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
             let created_after = filter.created_after.map(system_time_millis);
             let updated_after = filter.updated_after.map(system_time_millis);
 
@@ -976,8 +1029,10 @@ impl SessionStore for SqliteSessionStore {
         let options = self.options;
         let session_id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<SessionMeta>, SessionStoreError> {
-            let conn =
-                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
             let mut meta = conn
                 .query_row(
                     r"
@@ -1437,6 +1492,47 @@ mod tests {
             .expect("bounded busy retry should survive the concurrent writer");
         transaction.commit().unwrap();
         holder.join().unwrap();
+    }
+
+    #[test]
+    fn ensure_schema_stamps_the_session_domain_ledger() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("schema.sqlite3");
+        let mut conn = open_connection(&path).unwrap();
+        ensure_schema(&mut conn).unwrap();
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, SESSION_STORE_DOMAIN.name).unwrap(),
+            Some(SESSION_STORE_DOMAIN.supported_version())
+        );
+        // The DDL actually ran under the ledger.
+        conn.query_row("SELECT COUNT(*) FROM session_heads", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_schema_refuses_a_future_domain_version() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("future.sqlite3");
+        let mut conn = open_connection(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meerkat_schema (domain, version) VALUES (?1, ?2)",
+            params![
+                SESSION_STORE_DOMAIN.name,
+                SESSION_STORE_DOMAIN.supported_version() + 1
+            ],
+        )
+        .unwrap();
+        let err = ensure_schema(&mut conn).expect_err("future schema must be refused");
+        assert!(
+            matches!(err, StoreError::SchemaFromTheFuture { .. }),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -160,7 +160,6 @@ rust_test(
     size = "small",
     data = [
         "//:test_fixtures",
-        "//meerkat:package_runfiles",
         "//test-fixtures/machine-dsl-tests:package_runfiles",
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",

@@ -54,6 +54,7 @@ url = { workspace = true }
 schemars = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-sqlite = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 notify = { workspace = true }

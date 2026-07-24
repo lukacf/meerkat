@@ -169,6 +169,7 @@ pub(crate) enum UpcallToolErrorClass {
     InvalidArguments,
     ExecutionFailed,
     Timeout,
+    InactivityTimeout,
     AccessDenied,
     Other,
 }
@@ -247,6 +248,17 @@ impl UpcallToolOutcome {
                 message: error.to_string(),
                 name: Some(name.clone()),
                 timeout_ms: Some(*timeout_ms),
+                unavailable_reason: None,
+                data: None,
+            },
+            ToolError::InactivityTimeout {
+                name,
+                inactivity_ms,
+            } => UpcallToolError {
+                class: UpcallToolErrorClass::InactivityTimeout,
+                message: error.to_string(),
+                name: Some(name.clone()),
+                timeout_ms: Some(*inactivity_ms),
                 unavailable_reason: None,
                 data: None,
             },
@@ -358,6 +370,9 @@ impl UpcallToolError {
             },
             UpcallToolErrorClass::Timeout => {
                 ToolError::timeout(name, self.timeout_ms.unwrap_or_default())
+            }
+            UpcallToolErrorClass::InactivityTimeout => {
+                ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
             UpcallToolErrorClass::Other => ToolError::other(self.message),
@@ -1240,6 +1255,7 @@ mod tests {
             ToolError::execution_failed("boom"),
             ToolError::execution_failed_with_data("boom", json!({"cause": "unavailable"})),
             ToolError::timeout("mob_run_flow", 90_000),
+            ToolError::inactivity_timeout("stream_scan", 30_000),
             ToolError::access_denied("retire_member"),
             ToolError::other("misc"),
         ];
@@ -1265,6 +1281,19 @@ mod tests {
                 ) => {
                     assert_eq!(name, rname);
                     assert_eq!(timeout_ms, rms);
+                }
+                (
+                    ToolError::InactivityTimeout {
+                        name,
+                        inactivity_ms,
+                    },
+                    ToolError::InactivityTimeout {
+                        name: rname,
+                        inactivity_ms: rms,
+                    },
+                ) => {
+                    assert_eq!(name, rname);
+                    assert_eq!(inactivity_ms, rms);
                 }
                 (ToolError::AccessDenied { name }, ToolError::AccessDenied { name: rname }) => {
                     assert_eq!(name, rname);

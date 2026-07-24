@@ -124,7 +124,7 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             ToolError::ExecutionFailed { .. } | ToolError::ExecutionFailedWithData { .. } => {
                 Self::ExecutionFailed
             }
-            ToolError::Timeout { .. } => Self::Timeout,
+            ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
             ToolError::Other(_) => Self::Other,
             ToolError::CallbackPending { .. } => Self::CallbackPending,

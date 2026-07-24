@@ -4311,6 +4311,94 @@ impl SessionRuntime {
         meerkat::DetachedJobService::new(self.job_store.clone())
     }
 
+    /// Record an explicit durable session wait for a detached job.
+    ///
+    /// This returns after MeerkatMachine accepts the wait binding; it never
+    /// keeps a provider turn open while the job executes.
+    pub async fn await_job(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        reference: &meerkat::JobReference,
+    ) -> Result<meerkat::JobAwaitReceipt, RpcError> {
+        self.ensure_runtime_executor(session_id).await?;
+        let realm_id = self.realm_id().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "await_job requires an active realm".to_string(),
+            data: None,
+        })?;
+        let operations = self
+            .runtime_adapter
+            .ops_lifecycle_registry(session_id)
+            .await
+            .ok_or_else(|| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "await_job could not resolve runtime operation authority for {session_id}"
+                ),
+                data: None,
+            })?;
+        meerkat::JobAwaitCoordinator::new(
+            realm_id.to_string(),
+            self.detached_job_service(),
+            operations,
+        )
+        .await_job(session_id, reference)
+        .await
+        .map_err(|error| RpcError {
+            code: error::INVALID_REQUEST,
+            message: error.to_string(),
+            data: None,
+        })
+    }
+
+    pub async fn detached_job_await_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat::JobAwaitActivity>, RpcError> {
+        let Some(realm_id) = self.realm_id() else {
+            return Ok(None);
+        };
+        let Some(operations) = self
+            .runtime_adapter
+            .ops_lifecycle_registry(session_id)
+            .await
+        else {
+            return Ok(None);
+        };
+        meerkat::JobAwaitCoordinator::new(
+            realm_id.to_string(),
+            self.detached_job_service(),
+            operations,
+        )
+        .activity_for_session(session_id)
+        .map_err(|error| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!(
+                "failed to project detached job wait activity for {session_id}: {error}"
+            ),
+            data: None,
+        })
+    }
+
+    pub async fn detached_job_awaiting_member_count(&self) -> Result<u64, RpcError> {
+        let sessions = self.list_sessions(SessionQuery::default()).await?;
+        let unique_sessions = sessions
+            .into_iter()
+            .map(|session| (session.session_id.to_string(), session.session_id))
+            .collect::<BTreeMap<_, _>>();
+        let mut awaiting = 0_u64;
+        for session_id in unique_sessions.into_values() {
+            if self
+                .detached_job_await_activity(&session_id)
+                .await?
+                .is_some()
+            {
+                awaiting = awaiting.saturating_add(1);
+            }
+        }
+        Ok(awaiting)
+    }
+
     pub(crate) async fn monitor_job_manager_for_session(
         self: &Arc<Self>,
         session_id: &SessionId,
@@ -4479,20 +4567,40 @@ impl SessionRuntime {
             .list_all(10_000)
             .await
             .map_err(|error| error.to_string())?;
-        let sessions = jobs
+        let mut sessions = BTreeMap::new();
+        for job in jobs
             .into_iter()
             .filter(|job| job.spec.realm_id == realm_id.as_str())
-            .map(|job| {
-                let session_id = job.spec.origin_session_id;
-                (session_id.to_string(), session_id)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let sink: Arc<dyn meerkat::JobDeliverySink> = Arc::new(SessionRuntimeJobDeliverySink {
-            runtime: Arc::clone(self),
-        });
-        let applier =
-            meerkat::JobRuntimeDeliveryApplier::new(self.runtime_delivery_inbox.clone(), sink);
+        {
+            let origin_session_id = job.spec.origin_session_id;
+            sessions.insert(origin_session_id.to_string(), origin_session_id);
+            for subscription in job.subscriptions {
+                let session_id = subscription.session_id().clone();
+                sessions.insert(session_id.to_string(), session_id);
+            }
+        }
+        let base_sink: Arc<dyn meerkat::JobDeliverySink> =
+            Arc::new(SessionRuntimeJobDeliverySink {
+                runtime: Arc::clone(self),
+            });
         for session_id in sessions.into_values() {
+            let sink: Arc<dyn meerkat::JobDeliverySink> = match self
+                .runtime_adapter
+                .ops_lifecycle_registry(&session_id)
+                .await
+            {
+                Some(operations) => Arc::new(meerkat::JobAwaitDeliverySink::new(
+                    meerkat::JobAwaitCoordinator::new(
+                        realm_id.to_string(),
+                        self.detached_job_service(),
+                        operations,
+                    ),
+                    base_sink.clone(),
+                )),
+                None => base_sink.clone(),
+            };
+            let applier =
+                meerkat::JobRuntimeDeliveryApplier::new(self.runtime_delivery_inbox.clone(), sink);
             applier
                 .apply_pending(
                     &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),

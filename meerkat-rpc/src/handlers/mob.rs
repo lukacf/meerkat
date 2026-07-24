@@ -2063,6 +2063,27 @@ pub async fn handle_member_status(
                             .iter()
                             .filter(|job| job.phase == meerkat::JobPhase::NeedsAttention)
                             .count();
+                        if result.activity.is_none() {
+                            let await_activity =
+                                match runtime.detached_job_await_activity(&session_id).await {
+                                    Ok(activity) => activity,
+                                    Err(error) => {
+                                        return RpcResponse::error(id, error.code, error.message);
+                                    }
+                                };
+                            if let Some(activity) = await_activity {
+                                result.activity =
+                                    Some(meerkat_contracts::JobExecutionActivity {
+                                        kind: meerkat_contracts::JobExecutionActivityKind::AwaitingDetached,
+                                        since_ms: activity.since_ms,
+                                        job_ids: activity
+                                            .job_ids
+                                            .into_iter()
+                                            .map(|job_id| job_id.to_string())
+                                            .collect(),
+                                    });
+                            }
+                        }
                         result.detached_jobs =
                             Some(meerkat_contracts::DetachedJobsActivitySummary {
                                 active: u64::try_from(active).unwrap_or(u64::MAX),

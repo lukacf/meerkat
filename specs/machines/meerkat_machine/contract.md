@@ -11478,11 +11478,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpRecord`(operation_id, status, kind, source, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
 - Guards:
   - `not_already_registered`
-  - `recovered_status_terminal`
-  - `terminal_outcome_present`
-  - `terminal_payload_present`
-  - `completion_sequence_present`
+  - `recoverable_shape`
   - `operation_source_valid`
+  - `detached_wait_has_typed_source`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
   - `terminal_payload_variant_matches_status`
@@ -11494,11 +11492,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpRecord`(operation_id, status, kind, source, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
 - Guards:
   - `not_already_registered`
-  - `recovered_status_terminal`
-  - `terminal_outcome_present`
-  - `terminal_payload_present`
-  - `completion_sequence_present`
+  - `recoverable_shape`
   - `operation_source_valid`
+  - `detached_wait_has_typed_source`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
   - `terminal_payload_variant_matches_status`
@@ -11510,11 +11506,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpRecord`(operation_id, status, kind, source, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
 - Guards:
   - `not_already_registered`
-  - `recovered_status_terminal`
-  - `terminal_outcome_present`
-  - `terminal_payload_present`
-  - `completion_sequence_present`
+  - `recoverable_shape`
   - `operation_source_valid`
+  - `detached_wait_has_typed_source`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
   - `terminal_payload_variant_matches_status`
@@ -11526,11 +11520,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpRecord`(operation_id, status, kind, source, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
 - Guards:
   - `not_already_registered`
-  - `recovered_status_terminal`
-  - `terminal_outcome_present`
-  - `terminal_payload_present`
-  - `completion_sequence_present`
+  - `recoverable_shape`
   - `operation_source_valid`
+  - `detached_wait_has_typed_source`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
   - `terminal_payload_variant_matches_status`
@@ -11542,11 +11534,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpRecord`(operation_id, status, kind, source, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
 - Guards:
   - `not_already_registered`
-  - `recovered_status_terminal`
-  - `terminal_outcome_present`
-  - `terminal_payload_present`
-  - `completion_sequence_present`
+  - `recoverable_shape`
   - `operation_source_valid`
+  - `detached_wait_has_typed_source`
   - `completion_sequence_unclaimed`
   - `terminal_outcome_matches_status`
   - `terminal_payload_variant_matches_status`
@@ -11645,7 +11635,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ClassifyOperationCompletionWake`(operation_id, kind)
 - Guards:
-  - `background_tool_completion`
+  - `detached_completion`
 - Emits: `OperationCompletionWakeClassified`
 - To: `Idle`
 
@@ -11685,9 +11675,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ClassifyRecoveredOperationRecord`(operation_id, status, kind, terminal_outcome_present, terminal_payload_present, completion_sequence_present)
 - Guards:
-  - `durable_kind`
-  - `status_terminal`
-  - `terminal_witnesses_present`
+  - `recoverable_record`
 - Emits: `RetainTerminalRecord`
 - To: `Idle`
 
@@ -11696,6 +11684,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyRecoveredOperationRecord`(operation_id, status, kind, terminal_outcome_present, terminal_payload_present, completion_sequence_present)
 - Guards:
   - `status_non_terminal`
+  - `not_running_detached_job_wait`
   - `no_terminal_witnesses`
 - Emits: `DiscardRecoveredOperationRecord`
 - To: `Idle`

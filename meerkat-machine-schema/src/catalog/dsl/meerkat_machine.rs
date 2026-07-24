@@ -56,6 +56,34 @@ pub struct WorkId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct OperationId(pub String);
 
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct DetachedJobRealmId(pub String);
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct DetachedJobId(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct WaitRequestId(pub String);
 
@@ -73,6 +101,7 @@ pub enum OperationKind {
     MobMemberChild,
     BackgroundToolOp,
     BackgroundToolCapacitySlot,
+    DetachedJobWait,
 }
 
 #[derive(
@@ -92,6 +121,7 @@ pub enum OperationSourceKind {
     #[default]
     SessionChild,
     BackendPeer,
+    DetachedJob,
 }
 
 /// Typed source identity for an async operation. The lifecycle machine stores
@@ -114,6 +144,8 @@ pub struct OperationSource {
     pub session_id: Option<SessionId>,
     pub peer_id: Option<PeerId>,
     pub address: Option<PeerAddress>,
+    pub realm_id: Option<DetachedJobRealmId>,
+    pub job_id: Option<DetachedJobId>,
 }
 
 /// Typed mirror of [`meerkat_core::Provider`] for use inside DSL bridging
@@ -5547,11 +5579,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             || ((source.get("value").kind == OperationSourceKind::SessionChild)
                 && source.get("value").session_id != None
                 && source.get("value").peer_id == None
-                && source.get("value").address == None)
+                && source.get("value").address == None
+                && source.get("value").realm_id == None
+                && source.get("value").job_id == None)
             || ((source.get("value").kind == OperationSourceKind::BackendPeer)
                 && source.get("value").session_id == None
                 && source.get("value").peer_id != None
-                && source.get("value").address != None)
+                && source.get("value").address != None
+                && source.get("value").realm_id == None
+                && source.get("value").job_id == None)
+            || ((source.get("value").kind == OperationSourceKind::DetachedJob)
+                && source.get("value").session_id == None
+                && source.get("value").peer_id == None
+                && source.get("value").address == None
+                && source.get("value").realm_id != None
+                && source.get("value").job_id != None)
         }
 
         helper op_lifecycle_transition_rejection_idempotent(
@@ -17591,7 +17633,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17631,7 +17674,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17667,7 +17711,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17704,7 +17749,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17797,7 +17843,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17838,7 +17885,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.completion_sequence_claims.insert(self.next_completion_seq);
                 if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
-                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
                     self.completion_feed_kinds.insert(
                         operation_id,
@@ -17853,10 +17901,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // RecoverOpRecord: restore a persisted terminal async operation via
-        // generated authority. Non-terminal operations and terminal rows
-        // missing outcome/sequence witnesses are rejected, so shell recovery
-        // cannot reconstruct canonical op truth by writing maps directly.
+        // RecoverOpRecord: restore a persisted terminal async operation or a
+        // running DetachedJobWait binding via generated authority. Other
+        // non-terminal operations remain volatile. A reconstructed wait is
+        // session continuity only: it never claims or mutates job authority.
         transition RecoverOpRecord {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecoverOpRecord {
@@ -17871,23 +17919,37 @@ macro_rules! meerkat_catalog_machine_dsl {
                 completion_sequence
             }
             guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
-            guard "recovered_status_terminal" {
-                status == OperationStatus::Completed
-                || status == OperationStatus::Failed
-                || status == OperationStatus::Aborted
-                || status == OperationStatus::Cancelled
-                || status == OperationStatus::Retired
-                || status == OperationStatus::Terminated
+            guard "recoverable_shape" {
+                ((status == OperationStatus::Completed
+                    || status == OperationStatus::Failed
+                    || status == OperationStatus::Aborted
+                    || status == OperationStatus::Cancelled
+                    || status == OperationStatus::Retired
+                    || status == OperationStatus::Terminated)
+                    && terminal_outcome != None
+                    && terminal_payload != None
+                    && completion_sequence != None)
+                || (kind == OperationKind::DetachedJobWait
+                    && status == OperationStatus::Running
+                    && terminal_outcome == None
+                    && terminal_payload == None
+                    && completion_sequence == None)
             }
-            guard "terminal_outcome_present" { terminal_outcome != None }
-            guard "terminal_payload_present" { terminal_payload != None }
-            guard "completion_sequence_present" { completion_sequence != None }
             guard "operation_source_valid" { operation_source_valid(source) }
+            guard "detached_wait_has_typed_source" {
+                kind != OperationKind::DetachedJobWait
+                || (source != None
+                    && source.get("value").kind == OperationSourceKind::DetachedJob)
+            }
             guard "completion_sequence_unclaimed" {
-                !self.completion_sequence_claims.contains(completion_sequence.get("value"))
+                completion_sequence == None
+                || !self.completion_sequence_claims.contains(completion_sequence.get("value"))
             }
             guard "terminal_outcome_matches_status" {
-                (status == OperationStatus::Completed
+                (kind == OperationKind::DetachedJobWait
+                    && status == OperationStatus::Running
+                    && terminal_outcome == None)
+                || (status == OperationStatus::Completed
                     && terminal_outcome == Some(OperationTerminalOutcomeKind::Completed))
                 || (status == OperationStatus::Failed
                     && terminal_outcome == Some(OperationTerminalOutcomeKind::Failed))
@@ -17901,7 +17963,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && terminal_outcome == Some(OperationTerminalOutcomeKind::Terminated))
             }
             guard "terminal_payload_variant_matches_status" {
-                (status == OperationStatus::Completed
+                (kind == OperationKind::DetachedJobWait
+                    && status == OperationStatus::Running
+                    && terminal_payload == None)
+                || (status == OperationStatus::Completed
                     && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Completed))
                 || (status == OperationStatus::Failed
                     && terminal_payload.get("value").is_data_variant(OpTerminalPayload::Failed))
@@ -17922,12 +17987,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.op_peer_ready.insert(operation_id, peer_ready);
                 self.op_progress_counts.insert(operation_id, progress_count);
-                self.op_terminal_outcomes.insert(operation_id, terminal_outcome.get("value"));
-                self.op_terminal_payload.insert(operation_id, terminal_payload.get("value"));
-                self.op_completion_seq.insert(operation_id, completion_sequence.get("value"));
-                self.completion_sequence_claims.insert(completion_sequence.get("value"));
-                if kind == OperationKind::BackgroundToolOp
-                    || kind == OperationKind::MobMemberChild {
+                if terminal_outcome != None {
+                    self.op_terminal_outcomes.insert(operation_id, terminal_outcome.get("value"));
+                }
+                if terminal_payload != None {
+                    self.op_terminal_payload.insert(operation_id, terminal_payload.get("value"));
+                }
+                if completion_sequence != None {
+                    self.op_completion_seq.insert(operation_id, completion_sequence.get("value"));
+                    self.completion_sequence_claims.insert(completion_sequence.get("value"));
+                }
+                if status == OperationStatus::Running {
+                    self.active_op_count += 1;
+                }
+                if completion_sequence != None
+                    && (kind == OperationKind::BackgroundToolOp
+                        || kind == OperationKind::MobMemberChild
+                        || kind == OperationKind::DetachedJobWait) {
                     self.completion_feed_sequences.insert(
                         operation_id,
                         completion_sequence.get("value")
@@ -17942,7 +18018,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                         terminal_payload.get("value")
                     );
                 }
-                if self.next_completion_seq < completion_sequence.get("value") {
+                if completion_sequence != None
+                    && self.next_completion_seq < completion_sequence.get("value") {
                     self.next_completion_seq = completion_sequence.get("value");
                 }
             }
@@ -18101,6 +18178,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "public_completion_kind" {
                 kind == OperationKind::BackgroundToolOp
                 || kind == OperationKind::MobMemberChild
+                || kind == OperationKind::DetachedJobWait
             }
             update {}
             to Idle
@@ -18113,8 +18191,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ClassifyOperationCompletionWakeWake {
             per_phase [Idle]
             on input ClassifyOperationCompletionWake { operation_id, kind }
-            guard "background_tool_completion" {
+            guard "detached_completion" {
                 kind == OperationKind::BackgroundToolOp
+                || kind == OperationKind::DetachedJobWait
             }
             update {}
             to Idle
@@ -18159,6 +18238,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "durable_kind" {
                 kind == OperationKind::BackgroundToolOp
                 || kind == OperationKind::MobMemberChild
+                || kind == OperationKind::DetachedJobWait
             }
             update {}
             to Idle
@@ -18196,22 +18276,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_payload_present,
                 completion_sequence_present
             }
-            guard "durable_kind" {
-                kind == OperationKind::BackgroundToolOp
-                || kind == OperationKind::MobMemberChild
-            }
-            guard "status_terminal" {
-                status == OperationStatus::Completed
-                || status == OperationStatus::Failed
-                || status == OperationStatus::Aborted
-                || status == OperationStatus::Cancelled
-                || status == OperationStatus::Retired
-                || status == OperationStatus::Terminated
-            }
-            guard "terminal_witnesses_present" {
-                terminal_outcome_present == true
-                && terminal_payload_present == true
-                && completion_sequence_present == true
+            guard "recoverable_record" {
+                ((kind == OperationKind::BackgroundToolOp
+                    || kind == OperationKind::MobMemberChild
+                    || kind == OperationKind::DetachedJobWait)
+                    && (status == OperationStatus::Completed
+                        || status == OperationStatus::Failed
+                        || status == OperationStatus::Aborted
+                        || status == OperationStatus::Cancelled
+                        || status == OperationStatus::Retired
+                        || status == OperationStatus::Terminated)
+                    && terminal_outcome_present == true
+                    && terminal_payload_present == true
+                    && completion_sequence_present == true)
+                || (kind == OperationKind::DetachedJobWait
+                    && status == OperationStatus::Running
+                    && terminal_outcome_present == false
+                    && terminal_payload_present == false
+                    && completion_sequence_present == false)
             }
             update {}
             to Idle
@@ -18233,6 +18315,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || status == OperationStatus::Provisioning
                 || status == OperationStatus::Running
                 || status == OperationStatus::Retiring
+            }
+            guard "not_running_detached_job_wait" {
+                kind != OperationKind::DetachedJobWait
+                || status != OperationStatus::Running
             }
             guard "no_terminal_witnesses" {
                 terminal_outcome_present == false
@@ -18262,6 +18348,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "public_completion_kind" {
                 kind == OperationKind::BackgroundToolOp
                 || kind == OperationKind::MobMemberChild
+                || kind == OperationKind::DetachedJobWait
             }
             guard "completion_sequence_nonzero" { completion_sequence > 0 }
             guard "completion_sequence_within_recovered_cursor" {

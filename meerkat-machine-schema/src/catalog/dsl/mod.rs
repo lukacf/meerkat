@@ -1562,15 +1562,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("MeerkatPhase"),
             NamedTypeBinding::string("MobId"),
             NamedTypeBinding::string("OperationId"),
+            NamedTypeBinding::string("DetachedJobRealmId"),
+            NamedTypeBinding::string("DetachedJobId"),
             NamedTypeBinding::string_enum(
                 "OperationKind",
                 &[
                     "MobMemberChild",
                     "BackgroundToolOp",
                     "BackgroundToolCapacitySlot",
+                    "DetachedJobWait",
                 ],
             ),
-            NamedTypeBinding::string_enum("OperationSourceKind", &["SessionChild", "BackendPeer"]),
+            NamedTypeBinding::string_enum(
+                "OperationSourceKind",
+                &["SessionChild", "BackendPeer", "DetachedJob"],
+            ),
             NamedTypeBinding::type_path_struct(
                 "OperationSource",
                 "crate::catalog::dsl::meerkat_machine::OperationSource",
@@ -1579,6 +1585,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     TypePathStructField::optional_named("session_id", "SessionId"),
                     TypePathStructField::optional_named("peer_id", "PeerId"),
                     TypePathStructField::optional_named("address", "PeerAddress"),
+                    TypePathStructField::optional_named("realm_id", "DetachedJobRealmId"),
+                    TypePathStructField::optional_named("job_id", "DetachedJobId"),
                 ],
             ),
             NamedTypeBinding::string_enum(

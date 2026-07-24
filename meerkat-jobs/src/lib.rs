@@ -37,10 +37,10 @@ pub use types::{
     CheckpointRef, ExecutionIntentId, FenceToken, InteractionLineageId, JobDeliveryKind,
     JobDescription, JobFailureCode, JobHealthCondition, JobHealthSnapshot, JobId, JobNotification,
     JobNotificationReceipt, JobOutboxEntry, JobOutboxPayload, JobPhase, JobProgress,
-    JobProgressKind, JobReceipt, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey,
-    JobSubscription, JobSubscriptionId, JobTerminalKind, JobTerminalResult, NotificationId,
-    NotificationIdempotencyKey, OriginMemberId, PredicateEvaluationReceipt, RestartClass,
-    RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
+    JobProgressKind, JobReceipt, JobReference, JobResultRef, JobSnapshot, JobSpec,
+    JobSubmissionKey, JobSubscription, JobSubscriptionId, JobTerminalKind, JobTerminalResult,
+    NotificationId, NotificationIdempotencyKey, OriginMemberId, PredicateEvaluationReceipt,
+    RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 
 #[doc(hidden)]

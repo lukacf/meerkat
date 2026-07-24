@@ -4046,6 +4046,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
             CancelOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
             AbortOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: OpTerminalPayload },
+            RollbackUnreturnedOp { operation_id: String },
             PeerReadyOp { operation_id: String },
             ProgressReportedOp { operation_id: String },
             RetireRequestedOp { operation_id: String },
@@ -4830,6 +4831,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordBoundarySequence,
             SubmitOpEvent { operation_id: String },
             NotifyOpWatcher { operation_id: String },
+            UnreturnedOpRolledBack { operation_id: String },
             ExposeOperationPeer { operation_id: String },
             RetainTerminalRecord { operation_id: String },
             DiscardRecoveredOperationRecord { operation_id: String },
@@ -5325,6 +5327,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RecordBoundarySequence => local seam NoOwnerRealization,
         disposition SubmitOpEvent => local seam NoOwnerRealization,
         disposition NotifyOpWatcher => local seam NoOwnerRealization,
+        disposition UnreturnedOpRolledBack => local seam NoOwnerRealization,
         disposition ExposeOperationPeer => local seam NoOwnerRealization,
         disposition RetainTerminalRecord => local seam NoOwnerRealization,
         disposition DiscardRecoveredOperationRecord => local seam NoOwnerRealization,
@@ -17539,6 +17542,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // A submission future can be dropped after process spawn/start but
+        // before its public JobId is returned. Once the shell has proven that
+        // process-group containment completed, reconcile that never-returned
+        // operation as absence. This is deliberately non-terminal: no
+        // completion sequence, watcher notification, or feed row may describe
+        // work the caller never received authority to observe.
+        transition RollbackUnreturnedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RollbackUnreturnedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "from_status_valid" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
+            }
+            update {
+                self.op_statuses.remove(operation_id);
+                self.op_kinds.remove(operation_id);
+                self.op_sources.remove(operation_id);
+                self.op_peer_ready.remove(operation_id);
+                self.op_progress_counts.remove(operation_id);
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit UnreturnedOpRolledBack { operation_id: operation_id }
         }
 
         // CompleteOp: terminal success from Running|Retiring.

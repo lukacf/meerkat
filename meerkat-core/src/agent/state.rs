@@ -259,7 +259,7 @@ fn assistant_image_events_from_blocks(
         .collect()
 }
 
-fn assistant_image_events_from_effects(
+pub(super) fn assistant_image_events_from_effects(
     effects: &[crate::ops::SessionEffect],
 ) -> Vec<crate::event::AssistantImageEvent> {
     let mut images = Vec::new();
@@ -3153,6 +3153,24 @@ where
             };
         }
 
+        if let Some(pending_op_refs) = self.pending_callback_async_ops.take() {
+            let barrier_operation_ids = pending_op_refs
+                .iter()
+                .filter(|op_ref| op_ref.wait_policy == crate::ops::WaitPolicy::Barrier)
+                .map(|op_ref| op_ref.operation_id.clone())
+                .collect::<Vec<_>>();
+            let has_barrier_ops = !barrier_operation_ids.is_empty();
+            if let Err(error) = self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
+                run_id: run_id.clone(),
+                op_refs: pending_op_refs.clone(),
+                barrier_operation_ids,
+                has_barrier_ops,
+            }) {
+                self.pending_callback_async_ops = Some(pending_op_refs);
+                return Err(error);
+            }
+        }
+
         loop {
             self.observe_cancel_after_boundary_request(&run_id)?;
 
@@ -3278,12 +3296,17 @@ where
                     //    Collected first, then applied through the ONE atomic
                     //    notice-refresh transcript edit below.
                     let mut background_job_notices: Vec<Message> = Vec::new();
+                    let mut background_job_refresh_ready = true;
+                    let mut background_job_delivery_committed = true;
+                    let mut prepared_background_job_events = Vec::new();
+                    let mut background_job_cursor_advance = None;
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
                     if let (Some(feed), Some(registry)) =
                         (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
                     {
                         let batch = feed.list_since(self.applied_cursor);
                         let mut delivery_authority_ok = true;
+                        let mut prepared_entries = Vec::new();
                         for entry in &batch.entries {
                             match registry
                                 .classify_operation_completion_wake(&entry.operation_id, entry.kind)
@@ -3302,65 +3325,69 @@ where
                                 }
                             }
 
-                            let enrichment = self
-                                .completion_enrichment
-                                .as_ref()
-                                .and_then(|e| e.enrich(&entry.operation_id));
-
-                            let job_id = enrichment
-                                .as_ref()
-                                .map(|e| e.job_id.clone())
-                                .unwrap_or_else(|| entry.operation_id.to_string());
-                            let detail = enrichment
-                                .as_ref()
-                                .map(|e| e.detail.clone())
-                                .unwrap_or_default();
-                            let terminal_status =
-                                BackgroundJobTerminalStatus::from_terminal_outcome(
-                                    &entry.terminal_outcome,
-                                );
-                            let status_str = terminal_status.as_str();
-
-                            emit_event!(AgentEvent::background_job_completed(
-                                job_id.clone(),
-                                entry.display_name.clone(),
-                                terminal_status,
-                                detail.clone(),
-                            ));
-
-                            let mut notice = format!(
-                                "Background job `{}` (id={}) {}: {}",
-                                entry.display_name, job_id, status_str, detail,
-                            );
-                            notice.push_str("\nUse shell_job_status to get the full output.");
-                            background_job_notices.push(synthetic_notice_block_message(
-                                SystemNoticeKind::BackgroundJob,
-                                notice,
-                                crate::types::SystemNoticeBlock::BackgroundJob {
-                                    job_id,
-                                    display_name: Some(entry.display_name.clone()),
-                                    status: terminal_status,
-                                    detail: Some(detail),
+                            let enrichment = match self.completion_enrichment.as_ref() {
+                                Some(provider) => match provider.enrich(&entry.operation_id) {
+                                    crate::completion_feed::CompletionEnrichment::Found(data) => {
+                                        Some(data)
+                                    }
+                                    crate::completion_feed::CompletionEnrichment::Missing => None,
+                                    crate::completion_feed::CompletionEnrichment::Busy => {
+                                        tracing::debug!(
+                                            operation_id = %entry.operation_id,
+                                            "completion enrichment is busy; deferring the whole feed batch"
+                                        );
+                                        delivery_authority_ok = false;
+                                        break;
+                                    }
                                 },
-                            ));
+                                None => None,
+                            };
+                            prepared_entries.push((entry, enrichment));
                         }
+
                         if delivery_authority_ok {
-                            match registry.advance_completion_cursor(
-                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
-                                batch.watermark,
-                                self.epoch_cursor_state.as_deref(),
-                            ) {
-                                Ok(cursor) => {
-                                    self.applied_cursor = cursor;
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        cursor = batch.watermark,
-                                        "generated completion cursor authority rejected agent-applied cursor advance"
+                            for (entry, enrichment) in prepared_entries {
+                                let job_id = enrichment
+                                    .as_ref()
+                                    .map(|e| e.job_id.clone())
+                                    .unwrap_or_else(|| entry.operation_id.to_string());
+                                let detail = enrichment
+                                    .as_ref()
+                                    .map(|e| e.detail.clone())
+                                    .unwrap_or_default();
+                                let terminal_status =
+                                    BackgroundJobTerminalStatus::from_terminal_outcome(
+                                        &entry.terminal_outcome,
                                     );
-                                }
+                                prepared_background_job_events.push((
+                                    job_id.clone(),
+                                    entry.display_name.clone(),
+                                    terminal_status,
+                                    detail.clone(),
+                                ));
+
+                                let notice = background_job_completion_notice(
+                                    &entry.display_name,
+                                    &job_id,
+                                    terminal_status,
+                                    &detail,
+                                    enrichment.is_some(),
+                                );
+                                background_job_notices.push(synthetic_notice_block_message(
+                                    SystemNoticeKind::BackgroundJob,
+                                    notice,
+                                    crate::types::SystemNoticeBlock::BackgroundJob {
+                                        job_id,
+                                        display_name: Some(entry.display_name.clone()),
+                                        status: terminal_status,
+                                        detail: Some(detail),
+                                    },
+                                ));
                             }
+
+                            background_job_cursor_advance = Some((registry, batch.watermark));
+                        } else {
+                            background_job_refresh_ready = false;
                         }
                     } else if self.completion_feed.is_some() {
                         tracing::debug!(
@@ -3368,19 +3395,79 @@ where
                         );
                     }
                     // ONE atomic strip+push refresh for background-job
-                    // notices: stale notices are cleared even when no feed is
-                    // wired, and a strip fault propagates typed instead of
-                    // pushing fresh notices beside stale ones.
-                    self.session
-                        .replace_synthetic_notices(
-                            SystemNoticeKind::BackgroundJob,
-                            background_job_notices,
-                        )
-                        .map_err(|error| {
-                            AgentError::InternalError(format!(
-                                "background-job synthetic notice refresh failed: {error}"
-                            ))
-                        })?;
+                    // notices. A contended enrichment or cursor-authority
+                    // fault leaves the prior notice set untouched for retry;
+                    // otherwise stale notices are cleared even when no feed is
+                    // wired. Strip faults propagate typed.
+                    if background_job_refresh_ready {
+                        self.session
+                            .replace_synthetic_notices(
+                                SystemNoticeKind::BackgroundJob,
+                                background_job_notices,
+                            )
+                            .map_err(|error| {
+                                AgentError::InternalError(format!(
+                                    "background-job synthetic notice refresh failed: {error}"
+                                ))
+                            })?;
+
+                        // Cursor publication follows the fallible transcript
+                        // refresh. If the refresh failed above, the cursor and
+                        // public events remain untouched and the same feed
+                        // entries are retryable. If cursor authority refuses,
+                        // the idempotent notice replacement may be retried but
+                        // no event is emitted early.
+                        let delivery_committed = if let Some((registry, watermark)) =
+                            background_job_cursor_advance
+                        {
+                            match registry.advance_completion_cursor(
+                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                                watermark,
+                                self.epoch_cursor_state.as_deref(),
+                            ) {
+                                Ok(cursor) => {
+                                    self.applied_cursor = cursor;
+                                    true
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        cursor = watermark,
+                                        "generated completion cursor authority rejected agent-applied cursor advance"
+                                    );
+                                    background_job_delivery_committed = false;
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if delivery_committed {
+                            for (job_id, display_name, terminal_status, detail) in
+                                prepared_background_job_events
+                            {
+                                emit_event!(AgentEvent::background_job_completed(
+                                    job_id,
+                                    display_name,
+                                    terminal_status,
+                                    detail,
+                                ));
+                            }
+                        }
+                    }
+                    if !background_job_refresh_ready || !background_job_delivery_committed {
+                        // A Busy enrichment lookup is a boundary-admission
+                        // deferral. Cursor refusal is the same admission class:
+                        // the completion remains unconsumed until generated
+                        // authority accepts its cursor. Do not let inference
+                        // observe an omitted or externally uncommitted
+                        // completion, and do not spend a provider call while
+                        // it remains unprojectable. The transcript notice
+                        // replacement is idempotent, so a cursor refusal can
+                        // safely retry it without duplicating the user turn.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
@@ -4063,13 +4150,6 @@ where
                                 }
                             };
 
-                        // Add assistant message with ordered blocks
-                        self.session
-                            .push(Message::BlockAssistant(assistant_msg.clone()));
-                        for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
-                            emit_event!(AgentEvent::AssistantImageAppended { image });
-                        }
-
                         // Emit tool call requests
                         for (tc, args) in &tool_calls {
                             emit_event!(AgentEvent::ToolCallRequested {
@@ -4208,6 +4288,7 @@ where
                         let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
                         let mut accumulated_session_effects =
                             Vec::<crate::ops::SessionEffect>::new();
+                        let mut callback_pending: Vec<(String, String, Value)> = Vec::new();
                         for (_, tc, dispatch_result, duration_ms) in dispatch_results {
                             let mut tool_session_effects = Vec::new();
                             let mut tool_result = match dispatch_result {
@@ -4221,31 +4302,15 @@ where
                                     tool_name: callback_tool,
                                     args: callback_args,
                                 }) => {
-                                    // Callback-pending is a successful
-                                    // continuation boundary for this core
-                                    // turn, not a hard failure. Close the
-                                    // generated turn before returning the
-                                    // typed external terminal so the runtime
-                                    // never observes a completed application
-                                    // backed by a live WaitingForOps turn.
-                                    let transition = self.apply_turn_input(
-                                        TurnExecutionInput::CallbackPending {
-                                            run_id: run_id.clone(),
-                                        },
-                                    )?;
-                                    self.execute_turn_effects(&transition, turn_count, &event_tx)
-                                        .await?;
-                                    // Merge tool_use_id into args for external handler
-                                    let mut merged_args =
-                                        callback_args.as_object().cloned().unwrap_or_default();
-                                    merged_args.insert(
-                                        "tool_use_id".to_string(),
-                                        Value::String(tc.id.clone()),
-                                    );
-                                    return Err(AgentError::CallbackPending {
-                                        tool_name: callback_tool,
-                                        args: Value::Object(merged_args),
-                                    });
+                                    // Defer the successful continuation
+                                    // boundary until every completed sibling
+                                    // has been projected.
+                                    callback_pending.push((
+                                        tc.id.clone(),
+                                        callback_tool,
+                                        callback_args,
+                                    ));
+                                    continue;
                                 }
                                 Err(e) => {
                                     crate::ops::terminal_tool_outcome_for_error(tc.id.clone(), e)
@@ -4356,7 +4421,67 @@ where
                                     crate::ops::SessionEffect::AppendAssistantBlocks { .. }
                                 )
                             });
-                        if !pre_tool_effects.is_empty() {
+                        let callback_batch_pending = !callback_pending.is_empty();
+
+                        // The assistant tool-use message is published only
+                        // after dispatch has proven that the batch has at most
+                        // one externally pending callback. This keeps an
+                        // ambiguous batch from leaving an unresumable tail. A
+                        // mixed callback batch prepares its assistant tail and
+                        // durable staging record on a clone first, so a staging
+                        // refusal cannot partially mutate the live transcript.
+                        if callback_batch_pending {
+                            if callback_pending.is_empty() {
+                                let error = AgentError::InternalError(
+                                    "callback staging lost its pending callback witnesses"
+                                        .to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                            let mut effects = pre_tool_effects.clone();
+                            effects.extend(post_tool_effects.clone());
+                            let batch = crate::session::PendingCallbackToolBatch {
+                                run_id: run_id.clone(),
+                                tool_use_order: assistant_msg
+                                    .tool_calls()
+                                    .map(|call| call.id.to_string())
+                                    .collect(),
+                                pending_tool_use_ids: callback_pending
+                                    .iter()
+                                    .map(|(tool_use_id, _, _)| tool_use_id.clone())
+                                    .collect(),
+                                completed_results: tool_results.clone(),
+                                session_effects: effects,
+                                async_ops: pending_op_refs.clone(),
+                            };
+                            let mut staged_session = self.session.clone();
+                            staged_session.push(Message::BlockAssistant(assistant_msg.clone()));
+                            if let Err(error) =
+                                staged_session.stage_pending_callback_tool_batch(batch)
+                            {
+                                let error = AgentError::InternalError(format!(
+                                    "failed to stage mixed callback tool batch: {error}"
+                                ));
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                            self.session = staged_session;
+                        } else {
+                            self.session
+                                .push(Message::BlockAssistant(assistant_msg.clone()));
+                        }
+                        for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
+                            emit_event!(AgentEvent::AssistantImageAppended { image });
+                        }
+
+                        if !callback_batch_pending && !pre_tool_effects.is_empty() {
                             self.apply_session_effects(&pre_tool_effects, Some(&run_id))?;
                         }
                         let tool_batch_produced_output =
@@ -4369,29 +4494,68 @@ where
                                     )
                                 });
 
-                        // Add tool results to session
-                        self.session.push(Message::tool_results(tool_results));
+                        // Callback-pending has no local tool result. Preserve
+                        // any completed siblings without fabricating an empty
+                        // ToolResults message for a callback-only batch.
+                        if !callback_batch_pending && !tool_results.is_empty() {
+                            self.session
+                                .push(Message::tool_results(tool_results.clone()));
+                        }
 
                         let assistant_image_events =
                             assistant_image_events_from_effects(&post_tool_effects);
-                        if !post_tool_effects.is_empty() {
+                        if !callback_batch_pending && !post_tool_effects.is_empty() {
                             self.apply_session_effects(&post_tool_effects, Some(&run_id))?;
                         }
                         if tool_batch_produced_output {
                             run_has_visible_or_actionable_output = true;
                         }
-                        for image in assistant_image_events {
-                            emit_event!(AgentEvent::AssistantImageAppended { image });
+                        if !callback_batch_pending {
+                            for image in assistant_image_events {
+                                emit_event!(AgentEvent::AssistantImageAppended { image });
+                            }
                         }
 
                         self.observe_cancel_after_boundary_request(&run_id)?;
 
                         self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
                             run_id: run_id.clone(),
-                            op_refs: pending_op_refs,
+                            op_refs: pending_op_refs.clone(),
                             barrier_operation_ids,
                             has_barrier_ops,
                         })?;
+
+                        if callback_batch_pending {
+                            // Close the generated turn only after completed
+                            // sibling outcomes have either committed normally
+                            // or entered the durable callback staging record.
+                            let transition =
+                                self.apply_turn_input(TurnExecutionInput::CallbackPending {
+                                    run_id: run_id.clone(),
+                                })?;
+                            self.execute_turn_effects(&transition, turn_count, &event_tx)
+                                .await?;
+                            if callback_pending.len() == 1 {
+                                let (tool_use_id, tool_name, args) = callback_pending.remove(0);
+                                return Err(AgentError::CallbackPending {
+                                    tool_use_id,
+                                    tool_name,
+                                    args,
+                                });
+                            }
+                            return Err(AgentError::CallbackBatchPending {
+                                pending_tool_calls: callback_pending
+                                    .into_iter()
+                                    .map(|(tool_use_id, tool_name, args)| {
+                                        crate::error::PendingCallbackToolCall {
+                                            tool_use_id,
+                                            tool_name,
+                                            args,
+                                        }
+                                    })
+                                    .collect(),
+                            });
+                        }
 
                         if self.turn_has_barrier_ops()? {
                             // Stay in WaitingForOps — the outer match arm will
@@ -5004,6 +5168,27 @@ type ToolDispatchResult = (
     u64,
 );
 
+fn background_job_completion_notice(
+    display_name: &str,
+    job_id: &str,
+    terminal_status: BackgroundJobTerminalStatus,
+    detail: &str,
+    shell_job_status_available: bool,
+) -> String {
+    let mut notice = format!(
+        "Background job `{display_name}` (id={job_id}) {}",
+        terminal_status.as_str()
+    );
+    if !detail.is_empty() {
+        notice.push_str(": ");
+        notice.push_str(detail);
+    }
+    if shell_job_status_available {
+        notice.push_str("\nUse shell_job_status to get the full output.");
+    }
+    notice
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type ToolDispatchFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ToolDispatchResult>> + Send + 'static>>;
@@ -5036,25 +5221,106 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                     .unwrap_or(default_timeout);
                 async move {
                     let start = crate::time_compat::Instant::now();
-                    let dispatch_result = match dispatch_semaphore.acquire().await {
-                        Ok(_permit) => {
-                            match tokio::time::timeout(
-                                call_timeout,
-                                tools_ref
-                                    .dispatch_with_context(tc.as_view(), &tool_dispatch_context),
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(_) => Err(ToolError::timeout(
-                                    tc.name.clone(),
-                                    u64::try_from(call_timeout.as_millis()).unwrap_or(u64::MAX),
+                    let resolution_context = match crate::ToolDeadlineChain::new(vec![
+                        crate::ToolDeadlineContributor::finite(
+                            crate::ToolDeadlineOwner::CoreToolDispatch,
+                            call_timeout,
+                        ),
+                    ]) {
+                        Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
+                        Err(error) => {
+                            return (
+                                tool_index,
+                                tc,
+                                Err(ToolError::from(
+                                    crate::ToolExecutionResolutionError::Deadline(error),
                                 )),
+                                start.elapsed().as_millis() as u64,
+                            );
+                        }
+                    };
+                    let plan = match crate::resolve_tool_execution_plan_fenced(
+                        &tools_ref,
+                        tc.as_view(),
+                        &tool_dispatch_context,
+                        &resolution_context,
+                    ) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            return (
+                                tool_index,
+                                tc,
+                                Err(ToolError::from(error)),
+                                start.elapsed().as_millis() as u64,
+                            );
+                        }
+                    };
+                    if let Err(error) = tools_ref.validate_resolved_execution_plan(
+                        tc.as_view(),
+                        &resolution_context,
+                        &plan,
+                    ) {
+                        return (
+                            tool_index,
+                            tc,
+                            Err(ToolError::from(error)),
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                    let effective_timeout = plan.deadlines().effective_timeout();
+                    tracing::debug!(
+                        tool = %tc.name,
+                        execution_mode = ?plan.mode(),
+                        effective_deadline_ms = ?effective_timeout
+                            .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+                        deadline_winner = ?plan
+                            .deadlines()
+                            .winner()
+                            .map(|winner| winner.owner().as_str()),
+                        deadline_chain = %plan.deadlines().diagnostic(),
+                        "resolved tool execution plan"
+                    );
+                    let remaining_timeout =
+                        effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed()));
+                    let advertised_timeout_ms = effective_timeout
+                        .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
+                        .unwrap_or(0);
+                    if matches!(remaining_timeout, Some(timeout) if timeout.is_zero()) {
+                        let timeout_error =
+                            ToolError::timeout(tc.name.clone(), advertised_timeout_ms);
+                        return (
+                            tool_index,
+                            tc,
+                            Err(timeout_error),
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                    let admitted_dispatch = async {
+                        match dispatch_semaphore.acquire().await {
+                            Ok(_permit) => {
+                                crate::dispatch_tool_execution_plan_fenced(
+                                    &tools_ref,
+                                    tc.as_view(),
+                                    &tool_dispatch_context,
+                                    &plan,
+                                )
+                                .await
+                            }
+                            Err(_) => Err(ToolError::execution_failed(
+                                "tool dispatch concurrency semaphore closed",
+                            )),
+                        }
+                    };
+                    let dispatch_result = match remaining_timeout {
+                        Some(remaining) => {
+                            match tokio::time::timeout(remaining, admitted_dispatch).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    Err(ToolError::timeout(tc.name.clone(), advertised_timeout_ms))
+                                }
                             }
                         }
-                        Err(_) => Err(ToolError::execution_failed(
-                            "tool dispatch concurrency semaphore closed",
-                        )),
+                        None => admitted_dispatch.await,
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
                     (tool_index, tc, dispatch_result, duration_ms)
@@ -5076,7 +5342,10 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
     clippy::manual_async_fn
 )]
 mod tests {
-    use super::{SystemNoticeKind, is_synthetic_notice};
+    use super::{
+        SystemNoticeKind, ToolCallOwned, background_job_completion_notice,
+        dispatch_tool_calls_boxed, is_synthetic_notice,
+    };
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
@@ -10640,6 +10909,23 @@ mod tests {
                 Arc::clone(&self.tools)
             }
 
+            fn resolve_execution_plan(
+                &self,
+                _call: ToolCallView<'_>,
+                _dispatch_context: &crate::ToolDispatchContext,
+                resolution_context: &crate::ToolExecutionResolutionContext,
+            ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError>
+            {
+                let resolved =
+                    resolution_context.with_deadline(crate::ToolDeadlineContributor::finite(
+                        crate::ToolDeadlineOwner::ToolInternal,
+                        std::time::Duration::from_millis(5),
+                    ))?;
+                crate::ToolExecutionContract::default()
+                    .resolve_default(resolved.deadlines().clone())
+                    .map_err(Into::into)
+            }
+
             async fn dispatch(
                 &self,
                 _call: ToolCallView<'_>,
@@ -10670,7 +10956,7 @@ mod tests {
                     serde_json::json!({}),
                 ),
                 crate::ops::ToolDispatchTimeoutPolicy::Finite {
-                    timeout: std::time::Duration::from_millis(5),
+                    timeout: std::time::Duration::from_millis(100),
                 },
             ),
         )
@@ -10770,6 +11056,240 @@ mod tests {
         assert!(
             saw_timeout_completion,
             "normal dispatch loop must emit a timeout tool completion for the hanging tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_deadline_chain_controls_dispatch_timeout() {
+        struct PlanDeadlineHangingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for PlanDeadlineHangingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _call: ToolCallView<'_>,
+                _dispatch_context: &crate::ToolDispatchContext,
+                resolution_context: &crate::ToolExecutionResolutionContext,
+            ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError>
+            {
+                let resolved =
+                    resolution_context.with_deadline(crate::ToolDeadlineContributor::finite(
+                        crate::ToolDeadlineOwner::ToolInternal,
+                        std::time::Duration::from_millis(5),
+                    ))?;
+                crate::ToolExecutionContract::default()
+                    .resolve_default(resolved.deadlines().clone())
+                    .map_err(Into::into)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                std::future::pending().await
+            }
+        }
+
+        let dispatcher = Arc::new(PlanDeadlineHangingDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "planned_slow",
+                "hangs beyond its resolved deadline",
+                serde_json::json!({"type": "object"}),
+            ))]),
+        });
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallOwned {
+            id: "planned-call".to_string(),
+            name: "planned_slow".to_string(),
+            args,
+        };
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            dispatch_tool_calls_boxed(
+                dispatcher,
+                crate::ToolDispatchContext::default(),
+                std::time::Duration::from_secs(10),
+                std::collections::HashMap::new(),
+                1,
+                vec![(0, call)],
+            ),
+        )
+        .await
+        .expect("the resolved 5ms deadline must win over the 10s outer default");
+
+        assert!(matches!(
+            &results[0].2,
+            Err(ToolError::Timeout {
+                name,
+                timeout_ms: 5,
+            }) if name == "planned_slow"
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolved_deadline_includes_time_waiting_for_dispatch_admission() {
+        struct QueueRecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            body_entries: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for QueueRecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.body_entries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call.name == "occupies_slot" {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(ToolResult::new(call.id.to_string(), "done".to_string(), false).into())
+            }
+        }
+
+        let body_entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = Arc::new(QueueRecordingDispatcher {
+            tools: Arc::from([
+                Arc::new(ToolDef::new(
+                    "occupies_slot",
+                    "holds the sole dispatch slot",
+                    serde_json::json!({"type": "object"}),
+                )),
+                Arc::new(ToolDef::new(
+                    "queued",
+                    "must expire before entering its body",
+                    serde_json::json!({"type": "object"}),
+                )),
+            ]),
+            body_entries: Arc::clone(&body_entries),
+        });
+        let calls = ["occupies_slot", "queued"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    index,
+                    ToolCallOwned {
+                        id: format!("call-{index}"),
+                        name: name.to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    },
+                )
+            })
+            .collect();
+
+        let results = dispatch_tool_calls_boxed(
+            dispatcher,
+            crate::ToolDispatchContext::default(),
+            std::time::Duration::from_secs(1),
+            std::collections::HashMap::from([(
+                "queued".to_string(),
+                std::time::Duration::from_millis(5),
+            )]),
+            1,
+            calls,
+        )
+        .await;
+
+        assert!(matches!(
+            &results[1].2,
+            Err(ToolError::Timeout {
+                name,
+                timeout_ms: 5,
+            }) if name == "queued"
+        ));
+        assert_eq!(
+            body_entries.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the queued call must expire before its tool body is entered"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_plan_cannot_erase_caller_owned_deadline() {
+        struct DeadlineErasingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            body_entered: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for DeadlineErasingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _call: ToolCallView<'_>,
+                _dispatch_context: &crate::ToolDispatchContext,
+                _resolution_context: &crate::ToolExecutionResolutionContext,
+            ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError>
+            {
+                let replacement = crate::ToolDeadlineChain::new(vec![
+                    crate::ToolDeadlineContributor::unbounded(
+                        crate::ToolDeadlineOwner::ToolInternal,
+                    ),
+                ])?;
+                crate::ToolExecutionContract::default()
+                    .resolve_default(replacement)
+                    .map_err(Into::into)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.body_entered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending().await
+            }
+        }
+
+        let body_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dispatcher = Arc::new(DeadlineErasingDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "erases_deadline",
+                "returns a replacement deadline chain",
+                serde_json::json!({"type": "object"}),
+            ))]),
+            body_entered: Arc::clone(&body_entered),
+        });
+        let call = ToolCallOwned {
+            id: "erase-call".to_string(),
+            name: "erases_deadline".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+        };
+
+        let results = dispatch_tool_calls_boxed(
+            dispatcher,
+            crate::ToolDispatchContext::default(),
+            std::time::Duration::from_millis(5),
+            std::collections::HashMap::new(),
+            1,
+            vec![(0, call)],
+        )
+        .await;
+
+        assert!(matches!(
+            &results[0].2,
+            Err(ToolError::ExecutionFailed { message })
+                if message.contains("replaced an upstream deadline")
+        ));
+        assert!(
+            !body_entered.load(std::sync::atomic::Ordering::SeqCst),
+            "invalid resolved plan must be rejected before tool-body entry"
         );
     }
 
@@ -11076,10 +11596,15 @@ mod tests {
             .await
             .expect_err("callback tool dispatch must return the external terminal");
         match error {
-            AgentError::CallbackPending { tool_name, args } => {
+            AgentError::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(tool_use_id, "callback-call");
                 assert_eq!(tool_name, "ask_user");
                 assert_eq!(args["question"], "approve?");
-                assert_eq!(args["tool_use_id"], "callback-call");
+                assert!(args.get("tool_use_id").is_none());
             }
             other => panic!("expected callback-pending terminal, got {other:?}"),
         }
@@ -11120,6 +11645,629 @@ mod tests {
         assert_eq!(snapshot.tool_calls_pending, 0);
         assert_eq!(turn_handle.run_completed_effect_count(), 1);
         assert_eq!(turn_handle.run_failed_effect_count(), 0);
+
+        for invalid in [
+            Vec::new(),
+            vec![ToolResult::new(
+                "wrong-id".to_string(),
+                "wrong".to_string(),
+                false,
+            )],
+            vec![
+                ToolResult::new("callback-call".to_string(), "approved".to_string(), false),
+                ToolResult::new("extra-id".to_string(), "extra".to_string(), false),
+            ],
+        ] {
+            let before = serde_json::to_value(agent.session()).unwrap();
+            agent
+                .apply_pending_callback_tool_results(invalid)
+                .expect_err("callback-only staging must reject a non-exact pending id set");
+            assert_eq!(
+                serde_json::to_value(agent.session()).unwrap(),
+                before,
+                "rejected callback-only result sets must leave session bytes unchanged"
+            );
+        }
+
+        let approved = vec![ToolResult::new(
+            "callback-call".to_string(),
+            "approved".to_string(),
+            false,
+        )];
+        agent
+            .apply_pending_callback_tool_results(approved.clone())
+            .expect("the exact callback-only result should apply");
+        let applied_bytes = serde_json::to_value(agent.session()).unwrap();
+        agent
+            .apply_pending_callback_tool_results(approved)
+            .expect("identical callback redelivery should coalesce");
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            applied_bytes,
+            "identical callback redelivery must be a byte-for-byte no-op"
+        );
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "denied".to_string(),
+                false,
+            )])
+            .expect_err("conflicting callback redelivery must fail typed");
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            applied_bytes,
+            "conflicting redelivery must not poison the applied continuation"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_pending_preserves_completed_sibling_outcome() {
+        struct MixedCallbackDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for MixedCallbackDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                if call.name == "ask_user" {
+                    return Err(ToolError::callback_pending(
+                        call.name,
+                        serde_json::json!({ "question": "approve?" }),
+                    ));
+                }
+                Ok(crate::ops::ToolDispatchOutcome::new(
+                    ToolResult::new(call.id.to_string(), "sibling complete".to_string(), false),
+                    vec![crate::ops::AsyncOpRef::barrier(
+                        crate::ops::OperationId::new(),
+                    )],
+                    vec![crate::ops::SessionEffect::AppendAssistantBlocks {
+                        blocks: vec![
+                            AssistantBlock::Text {
+                                text: "sibling effect".to_string(),
+                                meta: None,
+                            },
+                            AssistantBlock::Image {
+                                image_id: crate::AssistantImageId::new(uuid::Uuid::from_u128(777)),
+                                blob_ref: crate::BlobRef {
+                                    blob_id: crate::BlobId::new("staged-sibling-image"),
+                                    media_type: "image/png".to_string(),
+                                },
+                                media_type: crate::MediaType::new("image/png"),
+                                width: 8,
+                                height: 8,
+                                revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                                meta: crate::ProviderImageMetadata::NotEmitted,
+                            },
+                        ],
+                    }],
+                ))
+            }
+        }
+
+        struct MixedCallbackClient {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for MixedCallbackClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(super::LlmStreamResult::new(
+                    vec![
+                        AssistantBlock::ToolUse {
+                            id: "callback-first".to_string(),
+                            name: "ask_user".into(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"question":"approve?"}"#.to_string(),
+                            )
+                            .unwrap(),
+                            meta: None,
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "sibling-second".to_string(),
+                            name: "do_work".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap(),
+                            meta: None,
+                        },
+                    ],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let client = Arc::new(MixedCallbackClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new().with_ops_lifecycle(Arc::new(CompletionCursorRegistry::new())),
+        )
+        .build_standalone(
+            client.clone(),
+            Arc::new(MixedCallbackDispatcher {
+                tools: Arc::from([
+                    Arc::new(ToolDef::new(
+                        "ask_user",
+                        "waits for callback",
+                        serde_json::json!({"type": "object"}),
+                    )),
+                    Arc::new(ToolDef::new(
+                        "do_work",
+                        "completes beside callback",
+                        serde_json::json!({"type": "object"}),
+                    )),
+                ]),
+            }),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+        let (initial_tx, mut initial_rx) = mpsc::channel(64);
+        let error = agent
+            .run_with_events("run mixed tools".to_string().into(), initial_tx)
+            .await
+            .expect_err("the callback continuation should remain externally pending");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        assert!(
+            !std::iter::from_fn(|| initial_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::AssistantImageAppended { image }
+                    if image.image_id
+                        == crate::AssistantImageId::new(uuid::Uuid::from_u128(777))
+            )),
+            "a staged sibling image must not emit before callback application commits it"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .all(|message| !matches!(message, Message::ToolResults { .. })),
+            "a mixed callback batch must not commit a partial provider-visible ToolResults set"
+        );
+        assert!(
+            agent.session().messages().iter().all(|message| !matches!(
+                message,
+                Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            AssistantBlock::Text { text, .. } if text == "sibling effect"
+                        )
+                    })
+            )),
+            "sibling transcript effects remain staged until the callback result arrives"
+        );
+
+        let durable_session = serde_json::from_value(
+            serde_json::to_value(agent.session())
+                .expect("mixed callback staging must serialize durably"),
+        )
+        .expect("mixed callback staging must restore durably");
+        *agent.session_mut() = durable_session;
+
+        let before_rejected_apply = serde_json::to_value(agent.session()).unwrap();
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "not-the-pending-id".to_string(),
+                "wrong".to_string(),
+                false,
+            )])
+            .expect_err("a mismatched callback result set must fail closed");
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            before_rejected_apply,
+            "a rejected callback result set must leave transcript and durable staging untouched"
+        );
+
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-first".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result should atomically publish the complete staged batch");
+
+        let messages = agent.session().messages();
+        let tool_results_index = messages
+            .iter()
+            .position(|message| matches!(message, Message::ToolResults { .. }))
+            .expect("the complete tool-results batch should now be committed");
+        let Message::ToolResults { results, .. } = &messages[tool_results_index] else {
+            unreachable!("position selected the tool-results message");
+        };
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| (result.tool_use_id.as_str(), result.text_content()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("callback-first", "approved".to_string()),
+                ("sibling-second", "sibling complete".to_string()),
+            ],
+            "the committed batch must preserve original assistant tool-call order"
+        );
+        assert!(
+            messages.iter().all(|message| !matches!(
+                message,
+                Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            AssistantBlock::Text { text, .. } if text == "sibling effect"
+                        )
+                    })
+            )),
+            "post-tool effects remain behind the admitted ToolResults tail until resume"
+        );
+        assert!(
+            matches!(
+                messages.get(tool_results_index.saturating_sub(1)),
+                Some(Message::BlockAssistant(assistant))
+                    if assistant.tool_calls().map(|call| call.id).collect::<Vec<_>>()
+                        == vec!["callback-first", "sibling-second"]
+            ),
+            "the full ToolResults set must remain exactly adjacent to its assistant tool-use batch"
+        );
+        assert!(
+            agent
+                .pending_callback_async_ops
+                .as_ref()
+                .is_some_and(|refs| {
+                    refs.len() == 1 && refs[0].wait_policy == crate::ops::WaitPolicy::Barrier
+                }),
+            "the staged sibling barrier must survive callback application"
+        );
+
+        let mut unstamped_agent = AgentBuilder::new()
+            .resume_session(agent.session().clone())
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .build_standalone(
+                client.clone(),
+                Arc::new(MixedCallbackDispatcher {
+                    tools: Arc::from([
+                        Arc::new(ToolDef::new(
+                            "ask_user",
+                            "waits for callback",
+                            serde_json::json!({"type": "object"}),
+                        )),
+                        Arc::new(ToolDef::new(
+                            "do_work",
+                            "completes beside callback",
+                            serde_json::json!({"type": "object"}),
+                        )),
+                    ]),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        unstamped_agent.runtime_execution_kind_required = true;
+        let unstamped_before = serde_json::to_value(unstamped_agent.session()).unwrap();
+        let (unstamped_tx, mut unstamped_rx) = mpsc::channel(16);
+        let unstamped_error = unstamped_agent
+            .run_pending_with_events(unstamped_tx)
+            .await
+            .expect_err("runtime-attached continuation without its execution stamp must fail");
+        assert!(
+            unstamped_error
+                .to_string()
+                .contains("runtime_execution_kind not set"),
+            "unexpected missing-stamp error: {unstamped_error}"
+        );
+        assert_eq!(
+            serde_json::to_value(unstamped_agent.session()).unwrap(),
+            unstamped_before,
+            "missing runtime stamp must fail before staged transcript effects apply"
+        );
+        assert!(
+            !std::iter::from_fn(|| unstamped_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::AssistantImageAppended { .. }
+            )),
+            "missing runtime stamp must fail before staged image publication"
+        );
+
+        agent.runtime_execution_kind_required = true;
+        let wrong_kind_before = serde_json::to_value(agent.session()).unwrap();
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        let (wrong_kind_tx, mut wrong_kind_rx) = mpsc::channel(16);
+        let wrong_kind_error = agent
+            .run_pending_with_events(wrong_kind_tx)
+            .await
+            .expect_err("a pending continuation must reject a ContentTurn execution stamp");
+        assert!(
+            wrong_kind_error
+                .to_string()
+                .contains("expected ResumePending"),
+            "unexpected wrong-kind error: {wrong_kind_error}"
+        );
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            wrong_kind_before,
+            "a wrong runtime execution kind must fail before staged transcript effects apply"
+        );
+        assert!(
+            !std::iter::from_fn(|| wrong_kind_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::AssistantImageAppended { .. }
+            )),
+            "a wrong runtime execution kind must fail before staged image publication"
+        );
+
+        agent.set_runtime_execution_kind(Some(
+            crate::lifecycle::RuntimeExecutionKind::ResumePending,
+        ));
+        let (resume_tx, mut resume_rx) = mpsc::channel(64);
+        let resume_error = agent
+            .run_pending_with_events(resume_tx)
+            .await
+            .expect_err("the test registry refuses wait_all, so the barrier must fail closed");
+        assert!(
+            resume_error.to_string().contains("wait_all"),
+            "the continuation should reach the barrier wait before failing, got: {resume_error}"
+        );
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the callback continuation must not call the provider before its sibling barrier"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| resume_rx.try_recv().ok())
+                .filter(|event| matches!(
+                    event,
+                    crate::event::AgentEvent::AssistantImageAppended { image }
+                        if image.image_id
+                            == crate::AssistantImageId::new(uuid::Uuid::from_u128(777))
+                ))
+                .count(),
+            1,
+            "the staged image event should emit once after commit at resume"
+        );
+        assert!(agent.session().messages().iter().any(|message| {
+            matches!(
+                message,
+                Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            AssistantBlock::Text { text, .. } if text == "sibling effect"
+                        )
+                    })
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_attached_content_turn_rejects_resume_pending_before_transcript_or_provider() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingClient(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl AgentLlmClient for CountingClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "unexpected".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "counting-model"
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(CountingClient(Arc::clone(&calls))),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.runtime_execution_kind_required = true;
+        agent.set_runtime_execution_kind(Some(
+            crate::lifecycle::RuntimeExecutionKind::ResumePending,
+        ));
+        let before = serde_json::to_value(agent.session()).unwrap();
+
+        let error = agent
+            .run("must not be appended".to_string().into())
+            .await
+            .expect_err("an ordinary run requires the exact ContentTurn execution stamp");
+
+        assert!(
+            error.to_string().contains("expected ContentTurn"),
+            "unexpected wrong-kind error: {error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            before,
+            "wrong-kind admission must not append a user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_callback_pending_results_stage_and_apply_as_one_ordered_batch() {
+        struct TwoCallbacks {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for TwoCallbacks {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::callback_pending(
+                    call.name,
+                    serde_json::json!({ "question": call.name }),
+                ))
+            }
+        }
+
+        struct TwoCallbackClient;
+
+        #[async_trait]
+        impl AgentLlmClient for TwoCallbackClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![
+                        AssistantBlock::ToolUse {
+                            id: "callback-a".to_string(),
+                            name: "ask_a".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap(),
+                            meta: None,
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "callback-b".to_string(),
+                            name: "ask_b".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap(),
+                            meta: None,
+                        },
+                    ],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(TwoCallbackClient),
+                Arc::new(TwoCallbacks {
+                    tools: Arc::from([
+                        Arc::new(ToolDef::new(
+                            "ask_a",
+                            "first callback",
+                            serde_json::json!({"type": "object"}),
+                        )),
+                        Arc::new(ToolDef::new(
+                            "ask_b",
+                            "second callback",
+                            serde_json::json!({"type": "object"}),
+                        )),
+                    ]),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let error = agent
+            .run("request two callbacks".to_string().into())
+            .await
+            .expect_err("the batch should suspend on both callbacks");
+        let AgentError::CallbackBatchPending { pending_tool_calls } = error else {
+            panic!("expected typed callback batch terminal");
+        };
+        assert_eq!(
+            pending_tool_calls
+                .iter()
+                .map(|call| (call.tool_use_id.as_str(), call.tool_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("callback-a", "ask_a"), ("callback-b", "ask_b")]
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .all(|message| { !matches!(message, Message::ToolResults { .. }) }),
+            "the callback batch must remain staged without partial results"
+        );
+        let before_partial = serde_json::to_value(agent.session()).unwrap();
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-a".to_string(),
+                "a".to_string(),
+                false,
+            )])
+            .expect_err("a partial N-callback result set must fail closed");
+        assert_eq!(
+            serde_json::to_value(agent.session()).unwrap(),
+            before_partial
+        );
+        agent
+            .apply_pending_callback_tool_results(vec![
+                ToolResult::new("callback-b".to_string(), "b".to_string(), false),
+                ToolResult::new("callback-a".to_string(), "a".to_string(), false),
+            ])
+            .expect("the exact N-callback result set should apply");
+        let Message::ToolResults { results, .. } = agent.session().messages().last().unwrap()
+        else {
+            panic!("the exact N-callback set should commit one ToolResults message");
+        };
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["callback-a", "callback-b"],
+            "callback results must commit in original assistant order"
+        );
     }
 
     /// Row 273: a `WaitingForOps` authority fault (here: barrier ops
@@ -17124,6 +18272,560 @@ mod tests {
             client.calls_made(),
             4,
             "expect 1 agentic + 3 extraction attempts"
+        );
+    }
+
+    #[test]
+    fn recovered_background_completion_does_not_advertise_missing_shell_job_status_record() {
+        let notice = background_job_completion_notice(
+            "shell:security-scan",
+            "op-recovered",
+            crate::event::BackgroundJobTerminalStatus::Completed,
+            "",
+            false,
+        );
+
+        assert!(
+            !notice.contains("shell_job_status"),
+            "a recovered terminal without live shell enrichment has no JobManager record to query"
+        );
+    }
+
+    #[test]
+    fn live_shell_background_completion_advertises_status_query() {
+        let notice = background_job_completion_notice(
+            "shell:security-scan",
+            "job-live",
+            crate::event::BackgroundJobTerminalStatus::Completed,
+            "exit_code: 0",
+            true,
+        );
+
+        assert!(
+            notice.contains("shell_job_status"),
+            "a live enriched shell completion should retain the useful status-tool hint"
+        );
+    }
+
+    struct CompletionCursorRegistry {
+        cursor: std::sync::atomic::AtomicU64,
+        advance_failures_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CompletionCursorRegistry {
+        fn new() -> Self {
+            Self {
+                cursor: std::sync::atomic::AtomicU64::new(0),
+                advance_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn rejecting_first(advance_failures: usize) -> Self {
+            Self {
+                cursor: std::sync::atomic::AtomicU64::new(0),
+                advance_failures_remaining: std::sync::atomic::AtomicUsize::new(advance_failures),
+            }
+        }
+
+        fn cursor(&self) -> u64 {
+            self.cursor.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::ops_lifecycle::OpsLifecycleRegistry for CompletionCursorRegistry {
+        fn register_operation(
+            &self,
+            _spec: crate::ops_lifecycle::OperationSpec,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not register operations")
+        }
+
+        fn provisioning_succeeded(
+            &self,
+            _id: &crate::ops::OperationId,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not provision operations")
+        }
+
+        fn provisioning_failed(
+            &self,
+            _id: &crate::ops::OperationId,
+            _error: String,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not provision operations")
+        }
+
+        fn peer_ready(
+            &self,
+            _id: &crate::ops::OperationId,
+            _peer: crate::ops_lifecycle::OperationPeerHandle,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not publish peers")
+        }
+
+        fn register_watcher(
+            &self,
+            _id: &crate::ops::OperationId,
+        ) -> Result<
+            crate::ops_lifecycle::OperationCompletionWatch,
+            crate::ops_lifecycle::OpsLifecycleError,
+        > {
+            unreachable!("completion delivery test does not watch operations")
+        }
+
+        fn report_progress(
+            &self,
+            _id: &crate::ops::OperationId,
+            _update: crate::ops_lifecycle::OperationProgressUpdate,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not report progress")
+        }
+
+        fn complete_operation(
+            &self,
+            _id: &crate::ops::OperationId,
+            _result: crate::ops::OperationResult,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not complete through the registry")
+        }
+
+        fn fail_operation(
+            &self,
+            _id: &crate::ops::OperationId,
+            _error: String,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not fail operations")
+        }
+
+        fn abort_provisioning(
+            &self,
+            _id: &crate::ops::OperationId,
+            _reason: Option<String>,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not abort operations")
+        }
+
+        fn cancel_operation(
+            &self,
+            _id: &crate::ops::OperationId,
+            _reason: Option<String>,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not cancel operations")
+        }
+
+        fn request_retire(
+            &self,
+            _id: &crate::ops::OperationId,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not retire operations")
+        }
+
+        fn mark_retired(
+            &self,
+            _id: &crate::ops::OperationId,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not retire operations")
+        }
+
+        fn snapshot(
+            &self,
+            _id: &crate::ops::OperationId,
+        ) -> Result<
+            Option<crate::ops_lifecycle::OperationLifecycleSnapshot>,
+            crate::ops_lifecycle::OpsLifecycleError,
+        > {
+            unreachable!("completion delivery test does not snapshot operations")
+        }
+
+        fn list_operations(
+            &self,
+        ) -> Result<
+            Vec<crate::ops_lifecycle::OperationLifecycleSnapshot>,
+            crate::ops_lifecycle::OpsLifecycleError,
+        > {
+            unreachable!("completion delivery test does not list operations")
+        }
+
+        fn terminate_owner(
+            &self,
+            _reason: String,
+        ) -> Result<(), crate::ops_lifecycle::OpsLifecycleError> {
+            unreachable!("completion delivery test does not terminate owners")
+        }
+
+        fn classify_operation_completion_wake(
+            &self,
+            _id: &crate::ops::OperationId,
+            _kind: crate::ops_lifecycle::OperationKind,
+        ) -> Result<
+            crate::ops_lifecycle::OperationCompletionWakeClass,
+            crate::ops_lifecycle::OpsLifecycleError,
+        > {
+            Ok(crate::ops_lifecycle::OperationCompletionWakeClass::Wake)
+        }
+
+        fn completion_cursor(
+            &self,
+            _consumer: crate::ops_lifecycle::CompletionCursorConsumer,
+        ) -> Result<Option<u64>, crate::ops_lifecycle::OpsLifecycleError> {
+            Ok(Some(self.cursor()))
+        }
+
+        fn advance_completion_cursor(
+            &self,
+            _consumer: crate::ops_lifecycle::CompletionCursorConsumer,
+            cursor: u64,
+            _projection: Option<&crate::runtime_epoch::EpochCursorState>,
+        ) -> Result<u64, crate::ops_lifecycle::OpsLifecycleError> {
+            if self
+                .advance_failures_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(crate::ops_lifecycle::OpsLifecycleError::Internal(
+                    "injected completion cursor refusal".to_string(),
+                ));
+            }
+            self.cursor
+                .store(cursor, std::sync::atomic::Ordering::SeqCst);
+            Ok(cursor)
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_notice_failure_keeps_cursor_and_event_retryable_then_emits_once() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+
+        let operation_id = crate::ops::OperationId::new();
+        let feed = Arc::new(MockCompletionFeed::new());
+        feed.push(crate::completion_feed::CompletionEntry {
+            seq: 1,
+            operation_id: operation_id.clone(),
+            kind: crate::ops_lifecycle::OperationKind::BackgroundToolOp,
+            display_name: "shell:retryable".to_string(),
+            terminal_outcome: crate::ops_lifecycle::OperationTerminalOutcome::Completed(
+                crate::ops::OperationResult {
+                    id: operation_id,
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            ),
+            completed_at_ms: Some(1),
+        });
+        let registry = Arc::new(CompletionCursorRegistry::new());
+
+        let mut bad_session = crate::Session::new();
+        bad_session.set_metadata_unchecked_for_test(
+            crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+            serde_json::json!("malformed"),
+        );
+        let mut bad_agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .with_ops_lifecycle(registry.clone())
+                .with_completion_feed(feed.clone()),
+            bad_session,
+        )
+        .build_standalone(
+            Arc::new(StaticLlmClient),
+            Arc::new(NoTools),
+            Arc::new(NoopStore),
+        )
+        .await;
+        let (bad_tx, mut bad_rx) = mpsc::channel(32);
+        bad_agent
+            .run_with_events("first".to_string().into(), bad_tx)
+            .await
+            .expect_err("malformed transcript metadata must fail the notice refresh");
+        assert_eq!(registry.cursor(), 0, "failed notice apply must not advance");
+        assert!(
+            !std::iter::from_fn(|| bad_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::BackgroundJobCompleted { .. }
+            )),
+            "failed notice apply must not emit the completion event"
+        );
+
+        let mut recovered_session = bad_agent.session().clone();
+        recovered_session.set_metadata_unchecked_for_test(
+            crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+            serde_json::to_value(
+                crate::realtime_transcript_revision::SessionRealtimeTranscriptState::default(),
+            )
+            .unwrap(),
+        );
+        let mut recovered_agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .with_ops_lifecycle(registry.clone())
+                .with_completion_feed(feed),
+            recovered_session,
+        )
+        .build_standalone(
+            Arc::new(StaticLlmClient),
+            Arc::new(NoTools),
+            Arc::new(NoopStore),
+        )
+        .await;
+        let (retry_tx, mut retry_rx) = mpsc::channel(32);
+        recovered_agent
+            .run_with_events("retry".to_string().into(), retry_tx)
+            .await
+            .expect("the unchanged completion should be retryable");
+        assert_eq!(registry.cursor(), 1);
+        let completion_events = std::iter::from_fn(|| retry_rx.try_recv().ok())
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::event::AgentEvent::BackgroundJobCompleted { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            completion_events, 1,
+            "the retried completion must emit exactly once after cursor commit"
+        );
+
+        let (again_tx, mut again_rx) = mpsc::channel(32);
+        recovered_agent
+            .run_with_events("again".to_string().into(), again_tx)
+            .await
+            .expect("later turns should remain healthy");
+        assert!(
+            !std::iter::from_fn(|| again_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::BackgroundJobCompleted { .. }
+            )),
+            "an advanced cursor must suppress duplicate completion events"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_completion_enrichment_defers_provider_until_eventual_single_application() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingClient {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for CountingClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "counting-model"
+            }
+        }
+
+        struct BusyThenFound {
+            attempts: AtomicUsize,
+            provider_calls: Arc<AtomicUsize>,
+        }
+
+        impl crate::completion_feed::CompletionEnrichmentProvider for BusyThenFound {
+            fn enrich(
+                &self,
+                _operation_id: &crate::ops::OperationId,
+            ) -> crate::completion_feed::CompletionEnrichment {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    assert_eq!(
+                        self.provider_calls.load(Ordering::SeqCst),
+                        0,
+                        "Busy enrichment must defer before any provider call"
+                    );
+                    crate::completion_feed::CompletionEnrichment::Busy
+                } else {
+                    crate::completion_feed::CompletionEnrichment::Found(
+                        crate::completion_feed::CompletionEnrichmentData {
+                            job_id: "job-1".to_string(),
+                            detail: "done".to_string(),
+                        },
+                    )
+                }
+            }
+        }
+
+        let operation_id = crate::ops::OperationId::new();
+        let feed = Arc::new(MockCompletionFeed::new());
+        feed.push(crate::completion_feed::CompletionEntry {
+            seq: 1,
+            operation_id: operation_id.clone(),
+            kind: crate::ops_lifecycle::OperationKind::BackgroundToolOp,
+            display_name: "shell:busy".to_string(),
+            terminal_outcome: crate::ops_lifecycle::OperationTerminalOutcome::Completed(
+                crate::ops::OperationResult {
+                    id: operation_id,
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            ),
+            completed_at_ms: Some(1),
+        });
+        let registry = Arc::new(CompletionCursorRegistry::new());
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let enrichment = Arc::new(BusyThenFound {
+            attempts: AtomicUsize::new(0),
+            provider_calls: Arc::clone(&provider_calls),
+        });
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new()
+                .with_ops_lifecycle(registry.clone())
+                .with_completion_feed(feed)
+                .with_completion_enrichment(enrichment.clone()),
+        )
+        .build_standalone(
+            Arc::new(CountingClient {
+                calls: Arc::clone(&provider_calls),
+            }),
+            Arc::new(NoTools),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel(32);
+        agent
+            .run_with_events("apply completion".to_string().into(), tx)
+            .await
+            .expect("eventual enrichment availability should admit one provider turn");
+
+        assert_eq!(enrichment.attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            1,
+            "repeated Busy must spend zero provider calls before one admitted turn"
+        );
+        assert_eq!(registry.cursor(), 1);
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| matches!(
+                    event,
+                    crate::event::AgentEvent::BackgroundJobCompleted { .. }
+                ))
+                .count(),
+            1,
+            "eventual enrichment must apply and publish exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_refusal_defers_provider_and_retries_completion_without_external_consumption() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingClient(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl AgentLlmClient for CountingClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "counting-model"
+            }
+        }
+
+        let operation_id = crate::ops::OperationId::new();
+        let feed = Arc::new(MockCompletionFeed::new());
+        feed.push(crate::completion_feed::CompletionEntry {
+            seq: 1,
+            operation_id: operation_id.clone(),
+            kind: crate::ops_lifecycle::OperationKind::BackgroundToolOp,
+            display_name: "shell:cursor-refusal".to_string(),
+            terminal_outcome: crate::ops_lifecycle::OperationTerminalOutcome::Completed(
+                crate::ops::OperationResult {
+                    id: operation_id,
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            ),
+            completed_at_ms: Some(1),
+        });
+        let registry = Arc::new(CompletionCursorRegistry::rejecting_first(2));
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new()
+                .with_ops_lifecycle(registry.clone())
+                .with_completion_feed(feed),
+        )
+        .build_standalone(
+            Arc::new(CountingClient(Arc::clone(&provider_calls))),
+            Arc::new(NoTools),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel(32);
+        agent
+            .run_with_events("apply completion".to_string().into(), tx)
+            .await
+            .expect("eventual cursor authority availability should admit one provider turn");
+
+        assert_eq!(registry.cursor(), 1);
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            1,
+            "cursor refusal must spend zero provider calls before one committed delivery"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| matches!(
+                    event,
+                    crate::event::AgentEvent::BackgroundJobCompleted { .. }
+                ))
+                .count(),
+            1,
+            "the completion must remain externally unconsumed until cursor commit"
         );
     }
 }

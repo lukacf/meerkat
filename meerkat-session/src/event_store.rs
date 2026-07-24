@@ -351,13 +351,20 @@ pub(crate) fn interaction_terminal_events_semantically_equal(
                 interaction_id: left_id,
                 tool_name: left_tool,
                 args: left_args,
+                pending_tool_calls: left_pending,
             },
             AgentEvent::InteractionCallbackPending {
                 interaction_id: right_id,
                 tool_name: right_tool,
                 args: right_args,
+                pending_tool_calls: right_pending,
             },
-        ) => left_id == right_id && left_tool == right_tool && left_args == right_args,
+        ) => {
+            left_id == right_id
+                && left_tool == right_tool
+                && left_args == right_args
+                && left_pending == right_pending
+        }
         (
             AgentEvent::InteractionFailed {
                 interaction_id: left_id,

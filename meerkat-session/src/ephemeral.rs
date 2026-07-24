@@ -19,8 +19,8 @@ use meerkat_core::service::{
     DeferredPromptPolicy, MobToolAuthorityContext, SessionControlError, SessionError,
     SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
     SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
-    SessionUsage, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
-    TurnToolOverlay,
+    SessionUsage, SessionView, StageToolResultsDisposition, StageToolResultsRequest,
+    StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::session_document::{
     SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
@@ -1630,10 +1630,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
     fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
         match error {
-            SessionError::Agent(AgentError::CallbackPending { tool_name, args }) => {
-                Some(CoreApplyTerminal::CallbackPending {
-                    tool_name: tool_name.clone(),
-                    args: args.clone(),
+            SessionError::Agent(AgentError::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }),
+            SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
+                Some(CoreApplyTerminal::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
                 })
             }
             _ => None,
@@ -1661,12 +1669,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Some(CoreApplyTerminal::RunResult(run_result)) => {
                 CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), *run_result)
             }
-            Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-                CoreApplyOutput::with_callback_pending(
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => CoreApplyOutput::with_callback_pending(
+                receipt,
+                Some(session_snapshot),
+                tool_use_id,
+                tool_name,
+                args,
+            ),
+            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
+                CoreApplyOutput::with_callback_batch_pending(
                     receipt,
                     Some(session_snapshot),
-                    tool_name,
-                    args,
+                    pending_tool_calls,
                 )
             }
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
@@ -4353,16 +4371,37 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
         req: StageToolResultsRequest,
     ) -> Result<StageToolResultsResult, SessionError> {
         Self::validate_tool_result_video(&req.results)?;
+        let session = self.export_session(id).await?;
+        if matches!(
+            session.classify_callback_result_ingress(&req.results)?,
+            meerkat_core::session::CallbackResultIngress::AlreadyApplied
+        ) {
+            return Ok(StageToolResultsResult {
+                accepted_result_count: 0,
+                disposition: StageToolResultsDisposition::AlreadyApplied,
+            });
+        }
         let state = self
             .deferred_turn_state(id)
             .await
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let accepted = {
             let mut guard = lock_deferred_turn_state(&state);
-            guard.stage_tool_results(req.results, SystemTime::now())
+            guard
+                .try_stage_tool_results(req.results, SystemTime::now())
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::ConfigError(
+                        error.to_string(),
+                    ))
+                })?
         };
         Ok(StageToolResultsResult {
             accepted_result_count: accepted,
+            disposition: if accepted == 0 {
+                StageToolResultsDisposition::AlreadyStaged
+            } else {
+                StageToolResultsDisposition::Staged
+            },
         })
     }
 }

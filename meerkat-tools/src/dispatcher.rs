@@ -188,19 +188,67 @@ impl ToolDispatcher {
 
     /// Dispatch a tool call
     pub async fn dispatch_call(&self, call: ToolCallView<'_>) -> Result<ToolResult, DispatchError> {
+        self.dispatch_call_with_resolution_elapsed(call, None).await
+    }
+
+    async fn dispatch_call_with_resolution_elapsed(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_elapsed_override: Option<Duration>,
+    ) -> Result<ToolResult, DispatchError> {
         let args: Value = serde_json::from_str(call.args.get())
             .map_err(|e| ToolValidationError::invalid_arguments(call.name, e.to_string()))?;
         let tool = self.live_tool_def(call.name)?;
-        // 1. Validate arguments against schema
         Self::validate_args_for_tool(tool.as_ref(), call.name, &args)?;
 
-        // 2. Dispatch to router with timeout
-        let outcome = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
-            .await
-            .map_err(|_| DispatchError::Timeout {
-                timeout_ms: self.default_timeout.as_millis() as u64,
-            })?
-            .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))?;
+        let dispatch_context = ToolDispatchContext::default();
+        let resolution_context = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::Dispatcher,
+                    self.default_timeout,
+                ),
+            ])
+            .map_err(meerkat_core::ToolExecutionResolutionError::from)
+            .map_err(ToolError::from)?,
+        );
+        let resolution_started = std::time::Instant::now();
+        let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+            &self.router,
+            call,
+            &dispatch_context,
+            &resolution_context,
+        )
+        .map_err(ToolError::from)?;
+        self.router
+            .validate_resolved_execution_plan(call, &resolution_context, &plan)
+            .map_err(ToolError::from)?;
+        let effective_timeout = plan
+            .deadlines()
+            .effective_timeout()
+            .unwrap_or(self.default_timeout);
+        let timeout = effective_timeout.saturating_sub(
+            resolution_elapsed_override.unwrap_or_else(|| resolution_started.elapsed()),
+        );
+        if timeout.is_zero() {
+            return Err(DispatchError::Timeout {
+                timeout_ms: effective_timeout.as_millis() as u64,
+            });
+        }
+        let outcome = tokio::time::timeout(
+            timeout,
+            meerkat_core::dispatch_tool_execution_plan_fenced(
+                &self.router,
+                call,
+                &dispatch_context,
+                &plan,
+            ),
+        )
+        .await
+        .map_err(|_| DispatchError::Timeout {
+            timeout_ms: effective_timeout.as_millis() as u64,
+        })?
+        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))?;
 
         Ok(outcome.result)
     }
@@ -252,6 +300,35 @@ impl AgentToolDispatcher for ToolDispatcher {
         .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))
     }
 
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let args: Value =
+            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
+                name: call.name.into(),
+                reason: e.to_string(),
+            })?;
+        let tool = self.live_tool_def(call.name)?;
+        Self::validate_args_for_tool(tool.as_ref(), call.name, &args).map_err(|e| match e {
+            ToolValidationError::NotFound { name } => ToolError::NotFound { name },
+            ToolValidationError::InvalidArguments { name, reason } => {
+                ToolError::InvalidArguments { name, reason }
+            }
+        })?;
+
+        tokio::time::timeout(
+            self.default_timeout,
+            self.router
+                .dispatch_resolved_with_context(call, context, plan),
+        )
+        .await
+        .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
+        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))
+    }
+
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
         self.router.external_tool_surface_snapshot()
     }
@@ -273,14 +350,59 @@ impl AgentToolDispatcher for ToolDispatcher {
     fn pending_catalog_sources(&self) -> Arc<[String]> {
         self.router.pending_catalog_sources()
     }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(
+            meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+                .with_live_authority(0, 0)
+                .with_dependency(&self.router.execution_binding_fingerprint(tool_name)?),
+        )
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        let resolution_context =
+            resolution_context.with_deadline(meerkat_core::ToolDeadlineContributor::finite(
+                meerkat_core::ToolDeadlineOwner::Dispatcher,
+                self.default_timeout,
+            ))?;
+        let plan =
+            self.router
+                .resolve_execution_plan(call, dispatch_context, &resolution_context)?;
+        resolution_context.validate_resolved_plan(&plan)?;
+        Ok(plan)
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::{
+        ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+        ToolExecutionResolutionContext,
+    };
     use serde_json::json;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct MutableExactDispatcher {
         tool_names: Mutex<Vec<&'static str>>,
@@ -288,6 +410,26 @@ mod tests {
 
     struct UnroutableVisibleDispatcher {
         tool_name: &'static str,
+    }
+
+    struct EpochDispatcher {
+        tool: ToolDef,
+        epoch: AtomicU64,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for EpochDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(self.tool.clone())])
+        }
+
+        fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
+            self.epoch.load(Ordering::Acquire)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
+        }
     }
 
     impl MutableExactDispatcher {
@@ -311,6 +453,13 @@ mod tests {
     }
 
     struct ContextAwareDispatcher;
+
+    struct DeadlineErasingDispatcher;
+
+    struct ResolvedOnlyDispatcher {
+        saw_dispatcher_deadline: AtomicU64,
+        dispatch_count: AtomicU64,
+    }
 
     impl ExactMockDispatcher {
         fn with_unavailable_reason(name: &str, reason: ToolUnavailableReason) -> Self {
@@ -359,6 +508,88 @@ mod tests {
                 false,
             )
             .into())
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for DeadlineErasingDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([tool_def("erase_deadline")])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "ok".to_string(), false).into())
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            _call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            _resolution_context: &ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            let erased = ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap();
+            meerkat_core::ToolExecutionContract::default()
+                .resolve_default(erased)
+                .map_err(Into::into)
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ResolvedOnlyDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([tool_def("resolved_only")])
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+            resolution: &ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            if resolution
+                .deadlines()
+                .contributors()
+                .iter()
+                .any(|contributor| {
+                    contributor.owner() == ToolDeadlineOwner::Dispatcher
+                        && contributor.timeout() == Some(Duration::from_millis(17))
+                })
+            {
+                self.saw_dispatcher_deadline.store(1, Ordering::Release);
+            }
+            let _ = (call, context);
+            meerkat_core::ToolExecutionContract::default()
+                .resolve_default(resolution.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::execution_failed(
+                "plain dispatch must not be used by dispatch_call",
+            ))
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &ToolDispatchContext,
+            _plan: &meerkat_core::ResolvedToolExecutionPlan,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.dispatch_count.fetch_add(1, Ordering::AcqRel);
+            Ok(ToolResult::new(call.id.to_string(), "resolved".to_string(), false).into())
         }
     }
 
@@ -517,6 +748,130 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&outcome.result.text_content()).expect("tool result JSON");
         assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn public_dispatch_call_uses_fenced_resolved_path_and_dispatcher_deadline() {
+        let router = Arc::new(ResolvedOnlyDispatcher {
+            saw_dispatcher_deadline: AtomicU64::new(0),
+            dispatch_count: AtomicU64::new(0),
+        });
+        let dispatcher =
+            ToolDispatcher::new(router.clone()).with_timeout(Duration::from_millis(17));
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+
+        let result = dispatcher
+            .dispatch_call(make_call("resolved_only", &args_raw))
+            .await
+            .expect("public dispatch uses the resolved path");
+
+        assert_eq!(result.text_content(), "resolved");
+        assert_eq!(router.saw_dispatcher_deadline.load(Ordering::Acquire), 1);
+        assert_eq!(router.dispatch_count.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn public_dispatch_call_never_polls_inner_after_resolution_exhausts_budget() {
+        let router = Arc::new(ResolvedOnlyDispatcher {
+            saw_dispatcher_deadline: AtomicU64::new(0),
+            dispatch_count: AtomicU64::new(0),
+        });
+        let dispatcher = ToolDispatcher::new(router.clone()).with_timeout(Duration::from_nanos(1));
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+
+        let error = dispatcher
+            .dispatch_call_with_resolution_elapsed(
+                make_call("resolved_only", &args_raw),
+                Some(Duration::from_nanos(1)),
+            )
+            .await
+            .expect_err("an exhausted budget must fail before polling the ready dispatcher");
+
+        assert!(matches!(error, DispatchError::Timeout { timeout_ms: 0 }));
+        assert_eq!(
+            router.dispatch_count.load(Ordering::Acquire),
+            0,
+            "tokio::time::timeout(0, ready_future) must never get a chance to poll inner"
+        );
+    }
+
+    #[test]
+    fn tool_dispatcher_appends_its_enforced_timeout_to_execution_plan() {
+        let router: Arc<dyn AgentToolDispatcher> = Arc::new(ContextAwareDispatcher);
+        let dispatcher = ToolDispatcher::new(router);
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let context = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let plan = dispatcher
+            .resolve_execution_plan(
+                make_call("inspect_context", &args_raw),
+                &ToolDispatchContext::default(),
+                &context,
+            )
+            .expect("tool dispatcher should forward plan resolution");
+
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            plan.deadlines()
+                .winner()
+                .map(ToolDeadlineContributor::owner),
+            Some(ToolDeadlineOwner::Dispatcher)
+        );
+    }
+
+    #[test]
+    fn tool_dispatcher_binding_fingerprint_composes_inner_epoch() {
+        let inner = Arc::new(EpochDispatcher {
+            tool: ToolDef::new("live", "live tool", serde_json::json!({"type": "object"})),
+            epoch: AtomicU64::new(0),
+        });
+        let dispatcher = ToolDispatcher::new(inner.clone());
+        let before = dispatcher
+            .execution_binding_fingerprint("live")
+            .expect("initial live binding");
+
+        inner.epoch.fetch_add(1, Ordering::AcqRel);
+
+        let after = dispatcher
+            .execution_binding_fingerprint("live")
+            .expect("updated live binding");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn tool_dispatcher_rejects_child_plan_that_erases_dispatcher_deadline() {
+        let router: Arc<dyn AgentToolDispatcher> = Arc::new(DeadlineErasingDispatcher);
+        let dispatcher = ToolDispatcher::new(router);
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let context = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            )])
+            .unwrap(),
+        );
+
+        let error = dispatcher
+            .resolve_execution_plan(
+                make_call("erase_deadline", &args_raw),
+                &ToolDispatchContext::default(),
+                &context,
+            )
+            .expect_err("a child resolver must not erase the dispatcher deadline");
+
+        assert!(matches!(
+            error,
+            meerkat_core::ToolExecutionResolutionError::DeadlineExtension(_)
+        ));
     }
 
     #[tokio::test]

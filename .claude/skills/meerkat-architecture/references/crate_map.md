@@ -6,7 +6,7 @@
 meerkat-sqlite            (shared SQLite mechanics: connection profiles, meerkat_schema migration
                            ledger, JsonColumnBytes codec, per-operation maintenance-fence guards,
                            error classification — rusqlite only, no meerkat deps; consumed by
-                           store/runtime/tools/memory/workgraph/mob)
+                           store/runtime/tools/memory/workgraph/jobs/mob)
 meerkat-models            (canonical provider model catalog/capabilities data; core stays provider-free)
 meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
 meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
@@ -30,7 +30,9 @@ meerkat-core              (pure types, traits, agent loop, session-store contrac
   ├── meerkat-tools           (tool registry, builtins, shell, session-scoped task store)
   ├── meerkat-session         (session service: Ephemeral, Persistent)
   ├── meerkat-runtime         (runtime control plane, policy engine, completion-feed wake,
-                                DSL handle impls)
+                                generated durable-delivery inbox/cursor authority, DSL handle impls)
+  ├── meerkat-jobs            (generated DetachedJobMachine authority, fenced attempts,
+                                typed terminal results, atomic outbox, memory/disk stores)
   ├── meerkat-workgraph       (realm-scoped durable WorkGraph service, stores, tools, read surface)
   ├── meerkat-live            (LiveAdapterHost, live projection sink, WebSocket transport)
   ├── meerkat-comms           (inter-agent: inproc, TCP, UDS, Ed25519)
@@ -77,7 +79,7 @@ RuntimeBootstrap (surface flags)
      the built-in — realm manifest v2 pin: builtin backend or external
      provider pin, refused typed on mismatch/future format)
   → RealmStoreSet (one provider supplies session/runtime/schedule/workgraph/
-     blob/artifact stores + one DurabilityDeclaration per slot;
+     jobs/blob/artifact stores + one DurabilityDeclaration per slot;
      enforce_fail_closed_durability refuses undeclared non-persistent
      durable slots at startup)
   → PersistenceBundle (facade composition; store-only seam — mob storage
@@ -126,6 +128,19 @@ profiles; the in-repo stores run the same suite in
 | `RuntimeControlPlane` | Multi-session runtime control (ingest, retire, respawn, reset, recover, destroy) | `MeerkatMachine` |
 | `RuntimeDriver` | Per-session input lifecycle (accept, run events, control, recover, retire, destroy) | `EphemeralRuntimeDriver`, `PersistentRuntimeDriver` |
 
+### Durable job traits (defined in meerkat-jobs)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
+| `DetachedJobStore` | Atomic durable job insertion, realm-scoped submission deduplication, revision CAS, and terminal outbox persistence; lifecycle meaning remains generated-machine-owned | `MemoryDetachedJobStore`, `SqliteDetachedJobStore` |
+
+### Runtime delivery traits (defined in meerkat-runtime)
+
+| Trait/type | Purpose | Implementors |
+|-------|---------|-------------|
+| `RuntimeStore` delivery primitives | Persist opaque generated `RuntimeDeliveryMachine` authority with CAS and atomically insert ordered inbox rows; stores do not assign sequence or application semantics | `InMemoryRuntimeStore`, `SqliteRuntimeStore` |
+| `RuntimeDeliveryInbox` | Apply generated identity/sequence/cursor transitions over a runtime store and expose pending durable delivery records | Runtime-owned service |
+
 ### Session traits (defined in meerkat-session)
 
 | Trait | Purpose | Implementors |
@@ -137,7 +152,7 @@ profiles; the in-repo stores run the same suite in
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the six required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
+| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the seven required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
 
 ### Mob traits (defined in meerkat-mob)
 

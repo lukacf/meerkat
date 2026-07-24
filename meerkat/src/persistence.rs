@@ -47,6 +47,8 @@ pub enum PersistenceError {
     Runtime(#[from] RuntimeStoreError),
     #[error(transparent)]
     WorkGraph(#[from] meerkat_workgraph::WorkGraphError),
+    #[error(transparent)]
+    Jobs(#[from] meerkat_jobs::DetachedJobError),
     /// Resolving the storage layout for an open failed (invalid realm id,
     /// undeterminable root probe, identity-colliding realm directory, ...).
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -91,6 +93,7 @@ pub struct PersistenceBundle {
     session_store: Arc<dyn SessionStore>,
     schedule_store: Arc<dyn ScheduleStore>,
     workgraph_store: Arc<dyn WorkGraphStore>,
+    job_store: Arc<dyn meerkat_jobs::DetachedJobStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
@@ -110,6 +113,7 @@ struct RealmSubsystemStores {
     blob_store: Arc<dyn BlobStore>,
     schedule_store: Arc<dyn ScheduleStore>,
     workgraph_store: Arc<dyn WorkGraphStore>,
+    job_store: Arc<dyn meerkat_jobs::DetachedJobStore>,
 }
 
 impl PersistenceBundle {
@@ -163,6 +167,7 @@ impl PersistenceBundle {
             session_store,
             schedule_store,
             workgraph_store,
+            job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             runtime_store,
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
@@ -208,6 +213,7 @@ impl PersistenceBundle {
             session_store,
             schedule_store,
             workgraph_store,
+            job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -231,6 +237,7 @@ impl PersistenceBundle {
             stores.schedule_store,
             stores.workgraph_store,
         );
+        bundle.job_store = stores.job_store;
         let event_store: Arc<dyn EventStore> = Arc::new(FileEventStore::new(
             projection_root.join(".rkat").join("events"),
         ));
@@ -261,6 +268,10 @@ impl PersistenceBundle {
 
     pub fn workgraph_store(&self) -> Arc<dyn WorkGraphStore> {
         self.workgraph_store.clone()
+    }
+
+    pub fn job_store(&self) -> Arc<dyn meerkat_jobs::DetachedJobStore> {
+        self.job_store.clone()
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -439,6 +450,7 @@ pub async fn open_realm_persistence_with_provider(
                 blob_store: set.blob_store.clone(),
                 schedule_store: set.schedule_store.clone(),
                 workgraph_store: set.workgraph_store.clone(),
+                job_store: set.job_store.clone(),
             },
         )
     } else {
@@ -451,6 +463,7 @@ pub async fn open_realm_persistence_with_provider(
         );
         bundle.manifest = builtin_manifest;
         bundle.store_path = Some(set.store_path.clone());
+        bundle.job_store = set.job_store.clone();
         bundle
     };
     bundle.artifact_store = set.artifact_store.clone();
@@ -502,11 +515,15 @@ pub(crate) fn open_disk_store_set(
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 paths.runtime_sqlite_path.clone(),
             )?) as Arc<dyn RuntimeStore>;
+            let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
+                paths.jobs_sqlite_path.clone(),
+            )?) as Arc<dyn meerkat_jobs::DetachedJobStore>;
             Ok(RealmStoreSet {
                 session_store,
                 runtime_store,
                 schedule_store,
                 workgraph_store,
+                job_store,
                 blob_store,
                 artifact_store,
                 store_path: paths.sessions_jsonl_dir.clone(),
@@ -515,6 +532,7 @@ pub(crate) fn open_disk_store_set(
                     durable_disk("sessions"),
                     durable_disk("runtime"),
                     durable_disk("workgraph"),
+                    durable_disk("jobs"),
                     durable_disk("blobs"),
                     durable_disk("artifacts"),
                     // Scheduling is disabled on the jsonl backend by design.
@@ -537,11 +555,14 @@ pub(crate) fn open_disk_store_set(
             let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
             let runtime_store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new())
                 as Arc<dyn RuntimeStore>;
+            let job_store = Arc::new(meerkat_jobs::MemoryDetachedJobStore::new())
+                as Arc<dyn meerkat_jobs::DetachedJobStore>;
             Ok(RealmStoreSet {
                 session_store,
                 runtime_store,
                 schedule_store,
                 workgraph_store,
+                job_store,
                 blob_store,
                 artifact_store,
                 store_path: paths.root.clone(),
@@ -551,6 +572,7 @@ pub(crate) fn open_disk_store_set(
                     "runtime",
                     "schedule",
                     "workgraph",
+                    "jobs",
                     "blobs",
                     "artifacts",
                 ]
@@ -572,6 +594,9 @@ pub(crate) fn open_disk_store_set(
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 sqlite_store.path().to_path_buf(),
             )?) as Arc<dyn RuntimeStore>;
+            let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
+                paths.jobs_sqlite_path.clone(),
+            )?) as Arc<dyn meerkat_jobs::DetachedJobStore>;
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             let artifact_store: Arc<dyn ArtifactStore> =
@@ -581,6 +606,7 @@ pub(crate) fn open_disk_store_set(
                 runtime_store,
                 schedule_store,
                 workgraph_store,
+                job_store,
                 blob_store,
                 artifact_store,
                 store_path: paths.root.clone(),
@@ -590,6 +616,7 @@ pub(crate) fn open_disk_store_set(
                     "runtime",
                     "schedule",
                     "workgraph",
+                    "jobs",
                     "blobs",
                     "artifacts",
                 ]

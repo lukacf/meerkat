@@ -3033,6 +3033,33 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Ok(())
     }
 
+    fn rollback_unreturned_operation(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
+        let mut state = self.write_state()?;
+        state.ensure_owner_active()?;
+        let expected_id = mm_dsl::OperationId::from_domain(id).0;
+        let effects = state.dsl_apply_with_effects(
+            mm_dsl::MeerkatMachineInput::RollbackUnreturnedOp {
+                operation_id: expected_id.clone(),
+            },
+            "RollbackUnreturnedOp",
+        )?;
+        let mut acknowledgements = effects.iter().filter(|effect| {
+            matches!(
+                effect,
+                mm_dsl::MeerkatMachineEffect::UnreturnedOpRolledBack { operation_id }
+                    if operation_id == &expected_id
+            )
+        });
+        if acknowledgements.next().is_none() || acknowledgements.next().is_some() {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated rollback authority did not emit exactly one matching acknowledgement for {id}"
+            )));
+        }
+        state.records.remove(id);
+        state.completed_order.retain(|queued| queued != id);
+        Ok(())
+    }
+
     fn cancel_operation(
         &self,
         id: &OperationId,
@@ -4294,6 +4321,38 @@ mod tests {
 
         let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
         assert!(recovered.snapshot(&operation_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn rollback_unreturned_background_operation_restores_absence_without_completion() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("unreturned");
+        let operation_id = spec.id.clone();
+
+        registry
+            .register_operation(spec)
+            .expect("register unreturned operation");
+        registry
+            .provisioning_succeeded(&operation_id)
+            .expect("start unreturned operation");
+        registry
+            .rollback_unreturned_operation(&operation_id)
+            .expect("generated rollback should restore absence");
+
+        assert!(
+            registry
+                .snapshot(&operation_id)
+                .expect("snapshot after rollback")
+                .is_none(),
+            "never-returned operation must not retain public lifecycle state"
+        );
+        let feed = registry
+            .completion_feed()
+            .expect("runtime registry exposes completion feed");
+        assert!(
+            feed.list_since(0).entries.is_empty(),
+            "never-returned operation must not mint a phantom completion"
+        );
     }
 
     #[test]

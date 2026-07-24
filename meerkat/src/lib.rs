@@ -145,6 +145,23 @@ pub use meerkat_core::{
 
 mod agent_builder;
 pub use agent_builder::AgentBuilder;
+mod job_delivery;
+pub use job_delivery::{
+    AppliedRuntimeJobDelivery, JobDeliveryApplication, JobDeliveryContent, JobDeliverySink,
+    JobNotificationDeliveryPayload, JobOutboxProjectionError, JobOutboxProjector,
+    JobRuntimeDeliveryApplier, JobTerminalDeliveryPayload, PreparedJobDelivery,
+    ProjectedJobDelivery,
+};
+mod job_surface;
+pub use job_surface::{project_job_description, project_job_receipt};
+#[cfg(feature = "schedule")]
+mod predicate_schedule;
+#[cfg(feature = "schedule")]
+pub use predicate_schedule::{
+    PredicateObservationProvider, PredicateSourceObservationError,
+    SCHEDULED_PREDICATE_RUNNABLE_NAME, ScheduledPredicateParams, ScheduledPredicateRunnable,
+    scheduled_predicate_runnable_name, scheduled_predicate_runner_handle,
+};
 
 // Config store types (filesystem-dependent — not available on wasm32)
 #[cfg(not(target_arch = "wasm32"))]
@@ -305,6 +322,18 @@ pub use meerkat_core::{
     SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_jobs::SqliteDetachedJobStore;
+pub use meerkat_jobs::{
+    AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
+    CheckpointRef, DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId,
+    FenceToken, InteractionLineageId, JobDeliveryKind, JobDescription, JobFailureCode,
+    JobHealthCondition, JobId, JobNotification, JobOutboxEntry, JobPhase, JobProgress,
+    JobProgressKind, JobReceipt, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey,
+    JobSubscription, JobSubscriptionId, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore,
+    OriginMemberId, RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef,
+    ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

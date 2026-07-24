@@ -318,10 +318,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -1153,6 +1157,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/components/schemas/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/components/schemas/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -10110,6 +10121,24 @@
           }
         ]
       },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
+      },
       "PlainTextResponse": {
         "type": "string"
       },
@@ -12360,6 +12389,11 @@
             "type": "boolean"
           },
           "comms": {
+            "type": "boolean"
+          },
+          "durable_jobs": {
+            "default": false,
+            "description": "Durable detached-job protocol and storage are available.",
             "type": "boolean"
           },
           "event_replay": {

@@ -167,6 +167,10 @@ pub struct CallbackToolDefinition {
     pub description: String,
     #[cfg_attr(feature = "schema", schemars(with = "Value"))]
     pub input_schema: Value,
+    /// Private host/gateway execution metadata. It is never copied into the
+    /// provider-facing `ToolDef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<super::jobs::CallbackToolExecution>,
 }
 
 impl From<CallbackToolDefinition> for meerkat_core::ToolDef {

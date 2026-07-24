@@ -316,6 +316,7 @@ export interface WireLiveConfigPropagationReport {
 
 export interface CallbackToolDefinition {
   description: string;
+  execution?: CallbackToolExecution | null;
   input_schema: unknown;
   name: ToolName;
 }
@@ -768,6 +769,7 @@ export interface RuntimeHostFeatureFlags {
   artifacts: boolean;
   blobs: boolean;
   comms: boolean;
+  durable_jobs?: boolean;
   event_replay: boolean;
   external_members: boolean;
   mcp_live: boolean;
@@ -882,6 +884,264 @@ export interface WireSessionTranscriptRevision {
 export interface WireSessionTranscriptRevisionList {
   entries: Record<string, unknown>[];
   head_revision: string;
+}
+
+export interface CallbackToolExecutionFast {
+  mode: "fast";
+}
+
+export interface CallbackToolExecutionDetached {
+  credential_scopes?: string[];
+  idempotency_scope: JobIdempotencyScope;
+  mode: "detached";
+  restart_class: JobRestartClass;
+  runner: JobRunner;
+  submission_timeout_ms: number;
+}
+
+export type CallbackToolExecution = CallbackToolExecutionFast | CallbackToolExecutionDetached;
+
+export interface JobDeliveryKindRecord {
+  kind: "record";
+}
+
+export interface JobDeliveryKindNotification {
+  kind: "notification";
+}
+
+export interface JobDeliveryKindEvent {
+  handling_mode: WireHandlingMode;
+  kind: "event";
+}
+
+export type JobDeliveryKind = JobDeliveryKindRecord | JobDeliveryKindNotification | JobDeliveryKindEvent;
+
+export type JobHealthStatus = "ok" | "degraded";
+
+export type JobIdempotencyScope = "tool_call" | "interaction_and_arguments" | "host_semantic_key";
+
+export type JobPhase = "unsubmitted" | "queued" | "claimed" | "running" | "waiting_external" | "loss_observed" | "retry_scheduled" | "succeeded" | "failed" | "cancelled" | "worker_lost" | "needs_attention";
+
+export type JobRestartClass = "adoptable" | "checkpoint_resumable" | "replayable" | "non_resumable";
+
+export interface JobTerminalResultSucceeded {
+  kind: "succeeded";
+  result_ref?: string | null;
+}
+
+export interface JobTerminalResultFailed {
+  code: string;
+  detail_ref?: string | null;
+  kind: "failed";
+}
+
+export interface JobTerminalResultCancelled {
+  kind: "cancelled";
+}
+
+export interface JobTerminalResultWorkerLost {
+  kind: "worker_lost";
+}
+
+export interface JobTerminalResultNeedsAttention {
+  kind: "needs_attention";
+  reason: string;
+}
+
+export type JobTerminalResult = JobTerminalResultSucceeded | JobTerminalResultFailed | JobTerminalResultCancelled | JobTerminalResultWorkerLost | JobTerminalResultNeedsAttention;
+
+export type MonitorOutputProtocol = "framed_jsonl" | "lines";
+
+export type WireHandlingMode = "queue" | "steer";
+
+export interface JobArtifactRef {
+  reference: string;
+}
+
+export interface JobAttemptAuthority {
+  attempt_id: string;
+  fence: number;
+  job_id: string;
+}
+
+export interface JobHealthSummary {
+  awaiting_members: number;
+  delivery_backlog: number;
+  needs_attention: number;
+  queued: number;
+  running: number;
+  stale_leases: number;
+  status: JobHealthStatus;
+}
+
+export interface JobProgress {
+  cursor: number;
+  detail: string;
+}
+
+export interface JobRunner {
+  name: string;
+  version: string;
+}
+
+export interface JobSummary {
+  attempt_count: number;
+  cancel_requested: boolean;
+  delivery_backlog: number;
+  job_id: string;
+  phase: JobPhase;
+  progress?: JobProgress | null;
+  restart_class: JobRestartClass;
+  runner: JobRunner;
+  subscription_count: number;
+  terminal_result?: JobTerminalResult | null;
+}
+
+export interface JobsArtifactsParams {
+  job_id: string;
+}
+
+export interface JobsArtifactsResult {
+  artifacts: JobArtifactRef[];
+  job_id: string;
+}
+
+export interface JobsCancelParams {
+  job_id: string;
+}
+
+export interface JobsCancelResult {
+  job: JobSummary;
+}
+
+export interface JobsGetParams {
+  job_id: string;
+}
+
+export interface JobsGetResult {
+  job: JobSummary;
+}
+
+export interface JobsHealthResult {
+  detached_jobs: JobHealthSummary;
+}
+
+export interface JobsListParams {
+  limit?: number | null;
+  session_id?: string | null;
+}
+
+export interface JobsListResult {
+  jobs: JobSummary[];
+}
+
+export interface JobsProgressParams {
+  job_id: string;
+}
+
+export interface JobsProgressResult {
+  job_id: string;
+  phase: JobPhase;
+  progress?: JobProgress | null;
+}
+
+export interface JobsResultParams {
+  job_id: string;
+}
+
+export interface JobsResultResult {
+  job_id: string;
+  phase: JobPhase;
+  result?: JobTerminalResult | null;
+}
+
+export interface JobsRetryParams {
+  job_id: string;
+  retry_due_at_ms: number;
+}
+
+export interface JobsRetryResult {
+  job: JobSummary;
+}
+
+export interface JobsSubscribeParams {
+  delivery: JobDeliveryKind;
+  job_id: string;
+  session_id: string;
+  subscription_id: string;
+}
+
+export interface JobsSubscribeResult {
+  job: JobSummary;
+}
+
+export interface JobsUnsubscribeParams {
+  job_id: string;
+  subscription_id: string;
+}
+
+export interface JobsUnsubscribeResult {
+  job: JobSummary;
+}
+
+export interface MobkitJobCancelAckParams {
+  acknowledged_at_ms: number;
+  authority: JobAttemptAuthority;
+}
+
+export interface MobkitJobCheckpointParams {
+  authority: JobAttemptAuthority;
+  checkpoint_ref: string;
+  observed_at_ms: number;
+}
+
+export interface MobkitJobCompleteParams {
+  authority: JobAttemptAuthority;
+  completed_at_ms: number;
+  result_ref?: string | null;
+}
+
+export interface MobkitJobFailParams {
+  authority: JobAttemptAuthority;
+  code: string;
+  detail_ref?: string | null;
+  failed_at_ms: number;
+}
+
+export interface MobkitJobHeartbeatParams {
+  authority: JobAttemptAuthority;
+  heartbeat_at_ms: number;
+  lease_expires_at_ms: number;
+}
+
+export interface MobkitJobMutationResult {
+  job: JobSummary;
+}
+
+export interface MobkitJobProgressParams {
+  authority: JobAttemptAuthority;
+  cursor: number;
+  detail: string;
+  observed_at_ms: number;
+}
+
+export interface MonitorsStartParams {
+  command: string;
+  delivery: JobDeliveryKind;
+  max_line_bytes?: number | null;
+  max_notifications_per_window?: number | null;
+  max_retained_diagnostic_bytes?: number | null;
+  notification_window_ms?: number | null;
+  protocol?: MonitorOutputProtocol;
+  restart_class: JobRestartClass;
+  session_id: string;
+  submission_key: string;
+  timeout_secs: number;
+  working_dir?: string | null;
+}
+
+export interface MonitorsStartResult {
+  job: JobSummary;
 }
 
 export interface MobWireParams {
@@ -1174,21 +1434,21 @@ export interface MobEventsResult {
 export interface MobMemberSendParams {
   agent_identity: string;
   content: WireContentInput;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: WireHandlingMode;
   mob_id: string;
   render_metadata?: Record<string, unknown> | null;
 }
 
 export interface MobMemberSendResult {
   agent_identity: string;
-  handling_mode: "queue" | "steer";
+  handling_mode: WireHandlingMode;
   member_ref: WireMemberRef;
   mob_id: string;
 }
 
 export interface MobIngressInteractionParams {
   content: WireContentInput;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: WireHandlingMode;
   mob_id: string;
   render_metadata?: Record<string, unknown> | null;
   spec: MobMemberSpecWire;
@@ -1323,9 +1583,11 @@ export interface MobTurnStartParams {
 }
 
 export interface MobMemberStatusResult {
+  activity?: Record<string, unknown> | null;
   comms_reachability?: WireReachability | null;
   control_reachability?: WireReachability | null;
   current_session_id?: string | null;
+  detached_jobs?: Record<string, unknown> | null;
   error?: string | null;
   external_member?: unknown;
   freshness_reason?: string | null;
@@ -2837,8 +3099,6 @@ export type McpLiveOpStatus = "staged" | "applied" | "rejected";
 export type McpHttpTransport = "streamable-http" | "sse";
 
 export type MobPeerTarget = { local: string } | { external: WireTrustedPeerSpec };
-
-export type WireHandlingMode = "queue" | "steer";
 
 export type WireRenderClass = "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
 

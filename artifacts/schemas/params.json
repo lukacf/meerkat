@@ -879,10 +879,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -1714,6 +1718,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -7459,6 +7470,24 @@
             "type": "string"
           }
         ]
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PortableDefinitionExtract": {
         "additionalProperties": false,
@@ -31534,6 +31563,17 @@
           "description": {
             "type": "string"
           },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CallbackToolExecution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Private host/gateway execution metadata. It is never copied into the\nprovider-facing `ToolDef`."
+          },
           "input_schema": true,
           "name": {
             "$ref": "#/$defs/ToolName"
@@ -31543,6 +31583,91 @@
           "name",
           "description",
           "input_schema"
+        ],
+        "type": "object"
+      },
+      "CallbackToolExecution": {
+        "description": "Private host/gateway execution declaration for a callback tool.",
+        "oneOf": [
+          {
+            "properties": {
+              "mode": {
+                "const": "fast",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "credential_scopes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "idempotency_scope": {
+                "$ref": "#/$defs/JobIdempotencyScope"
+              },
+              "mode": {
+                "const": "detached",
+                "type": "string"
+              },
+              "restart_class": {
+                "$ref": "#/$defs/JobRestartClass"
+              },
+              "runner": {
+                "$ref": "#/$defs/JobRunner"
+              },
+              "submission_timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mode",
+              "runner",
+              "restart_class",
+              "idempotency_scope",
+              "submission_timeout_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "JobIdempotencyScope": {
+        "enum": [
+          "tool_call",
+          "interaction_and_arguments",
+          "host_semantic_key"
+        ],
+        "type": "string"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
         ],
         "type": "object"
       },

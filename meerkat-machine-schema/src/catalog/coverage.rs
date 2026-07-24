@@ -14,14 +14,16 @@ use crate::{CompositionSchema, MachineSchema, SchedulerRule};
 use super::{
     compositions::{
         adaptive_mob_bundle_composition, auth_lease_bundle_composition,
-        meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
+        job_runtime_delivery_composition, meerkat_mob_seam_composition,
+        schedule_bundle_composition, schedule_mob_bundle_composition,
         schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
     },
     dsl::{
-        dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine,
-        dsl_occurrence_lifecycle_machine, dsl_schedule_lifecycle_machine,
-        dsl_session_document_machine, dsl_session_turn_admission_machine,
-        dsl_work_attention_lifecycle_machine, dsl_workgraph_lifecycle_machine,
+        dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_detached_job_machine,
+        dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
+        dsl_runtime_delivery_machine, dsl_schedule_lifecycle_machine, dsl_session_document_machine,
+        dsl_session_turn_admission_machine, dsl_work_attention_lifecycle_machine,
+        dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -1194,6 +1196,182 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
+            &dsl_detached_job_machine(),
+            &[machine_anchor(
+                "detached_job_authority",
+                "DetachedJobMachine",
+                "meerkat-jobs/src/service.rs",
+                "generated detached-job lifecycle authority with mechanical CAS and typed projection",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "SubmitQueued",
+                        "ClaimQueued",
+                        "ClaimRetryScheduled",
+                        "RenewRunningLease",
+                        "RenewExternalWaitLease",
+                        "ReportRunningProgress",
+                        "ReportExternalWaitProgress",
+                        "EmitRunningNotification",
+                        "EmitExternalWaitNotification",
+                        "SuppressRunningNotificationReplay",
+                        "SuppressExternalWaitNotificationReplay",
+                        "RecordRunningCheckpoint",
+                        "RecordExternalWaitCheckpoint",
+                        "WaitExternalFromRunning",
+                        "ResumeRunningFromExternal",
+                        "RequestCancelRunning",
+                        "RequestCancelWaitingExternal",
+                        "RequestCancelAlreadyRequestedRunning",
+                        "RequestCancelAlreadyRequestedWaitingExternal",
+                        "RequestCancelAlreadyCancelled",
+                        "RequestCancelQueued",
+                        "RequestCancelRetryScheduled",
+                        "RequestCancelLossObserved",
+                        "LeaseExpiresRunning",
+                        "LeaseExpiresWaitingExternal",
+                        "ScheduleRetryAfterLoss",
+                        "ClassifyNonResumableWorkerLoss",
+                        "CompleteRunningAttempt",
+                        "CompleteWaitingExternalAttempt",
+                        "FailRunningAttempt",
+                        "FailWaitingExternalAttempt",
+                        "AcknowledgeRunningCancel",
+                        "AcknowledgeWaitingExternalCancel",
+                        "MarkQueuedNeedsAttention",
+                        "MarkRunningNeedsAttention",
+                        "MarkWaitingExternalNeedsAttention",
+                        "MarkLossObservedNeedsAttention",
+                        "MarkRetryScheduledNeedsAttention",
+                        "ApplySucceededDelivery",
+                        "ApplyFailedDelivery",
+                        "ApplyCancelledDelivery",
+                        "ApplyWorkerLostDelivery",
+                        "ApplyNeedsAttentionDelivery",
+                        "ApplyRunningNotificationDelivery",
+                        "ApplyWaitingExternalNotificationDelivery",
+                        "ApplyLossObservedNotificationDelivery",
+                        "ApplyRetryScheduledNotificationDelivery",
+                        "ApplySucceededNotificationDelivery",
+                        "ApplyFailedNotificationDelivery",
+                        "ApplyCancelledNotificationDelivery",
+                        "ApplyWorkerLostNotificationDelivery",
+                        "ApplyNeedsAttentionNotificationDelivery",
+                        "ObserveRunningNotificationDeliveryAlreadyApplied",
+                        "ObserveWaitingExternalNotificationDeliveryAlreadyApplied",
+                        "ObserveLossObservedNotificationDeliveryAlreadyApplied",
+                        "ObserveRetryScheduledNotificationDeliveryAlreadyApplied",
+                        "ObserveSucceededNotificationDeliveryAlreadyApplied",
+                        "ObserveFailedNotificationDeliveryAlreadyApplied",
+                        "ObserveCancelledNotificationDeliveryAlreadyApplied",
+                        "ObserveWorkerLostNotificationDeliveryAlreadyApplied",
+                        "ObserveNeedsAttentionNotificationDeliveryAlreadyApplied",
+                        "ObserveSucceededDeliveryAlreadyApplied",
+                        "ObserveFailedDeliveryAlreadyApplied",
+                        "ObserveCancelledDeliveryAlreadyApplied",
+                        "ObserveWorkerLostDeliveryAlreadyApplied",
+                        "ObserveNeedsAttentionDeliveryAlreadyApplied",
+                    ])
+                    .effects(&[
+                        "JobSubmitted",
+                        "AttemptClaimed",
+                        "LeaseRenewed",
+                        "ProgressAccepted",
+                        "NotificationCommitted",
+                        "NotificationSuppressed",
+                        "CheckpointAccepted",
+                        "ExternalWaitAccepted",
+                        "RunningResumed",
+                        "CancelRequested",
+                        "LeaseExpiryRecorded",
+                        "RetryScheduled",
+                        "TerminalCommitted",
+                        "DeliveryApplied",
+                    ])
+                    .invariants(&[
+                        "fence_tracks_claim_count",
+                        "no_attempt_has_no_attempt_authority",
+                        "checkpoint_requires_attempt",
+                        "active_execution_requires_attempt_authority",
+                        "notification_identity_and_sequence_cardinality_match",
+                        "applied_notifications_are_committed",
+                        "terminal_requires_delivery",
+                        "nonterminal_has_no_terminal_delivery",
+                    ]),
+            )],
+            &[
+                scenario(
+                    "detached_job_reopen_preserves_committed_authority",
+                    "recovery rehydrates the committed attempt, fence, lease, checkpoint, and runner handle without minting new authority",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ClaimQueued",
+                            "RecordRunningCheckpoint",
+                            "LeaseExpiresRunning",
+                            "ScheduleRetryAfterLoss",
+                            "ClaimRetryScheduled",
+                        ])
+                        .effects(&[
+                            "AttemptClaimed",
+                            "CheckpointAccepted",
+                            "LeaseExpiryRecorded",
+                            "RetryScheduled",
+                        ]),
+                ),
+                scenario(
+                    "detached_job_terminal_outbox_is_atomic",
+                    "all terminal kinds commit typed result delivery and acknowledge it through generated authority",
+                    CoverageClaims::none()
+                        .effects(&["TerminalCommitted", "DeliveryApplied"]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_runtime_delivery_machine(),
+            &[machine_anchor(
+                "runtime_delivery_authority",
+                "RuntimeDeliveryMachine",
+                "meerkat-runtime/src/delivery_inbox.rs",
+                "generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "CommitNewDelivery",
+                        "ReuseCommittedDelivery",
+                        "ApplyNextDelivery",
+                        "ObserveAlreadyAppliedDelivery",
+                    ])
+                    .effects(&[
+                        "DeliveryCommitted",
+                        "DeliveryReused",
+                        "DeliveryApplied",
+                    ])
+                    .invariants(&[
+                        "applied_cursor_does_not_pass_committed_sequence",
+                        "empty_delivery_set_has_zero_sequence",
+                        "delivery_identity_and_sequence_cardinality_match",
+                        "committed_sequence_cardinality_tracks_high_water",
+                    ]),
+            )],
+            &[
+                scenario(
+                    "runtime_delivery_idempotent_commit",
+                    "a stable delivery identity receives one generated sequence and exact replay reuses it",
+                    CoverageClaims::none()
+                        .transitions(&["CommitNewDelivery", "ReuseCommittedDelivery"])
+                        .effects(&["DeliveryCommitted", "DeliveryReused"]),
+                ),
+                scenario(
+                    "runtime_delivery_ordered_application",
+                    "generated cursor authority applies each committed delivery exactly once in order",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ApplyNextDelivery",
+                            "ObserveAlreadyAppliedDelivery",
+                        ])
+                        .effects(&["DeliveryApplied"]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
             &dsl_session_document_machine(),
             &[machine_anchor(
                 "session_document_authority",
@@ -2034,6 +2212,68 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "peer-ingress-and-cancellation",
                     "peer input admission and cancellation requests cross the MobMachine to MeerkatMachine seam with explicit lifecycle notice feedback",
                     CoverageClaims::none(),
+                ),
+            ],
+        ),
+        composition_manifest_from_schema(
+            &job_runtime_delivery_composition(),
+            &[
+                route_anchor(
+                    "job_outbox_projector",
+                    "job_terminal_enters_runtime_inbox",
+                    "meerkat/src/job_delivery.rs",
+                    "mechanical job outbox projector submits stable delivery identity into runtime-owned durable authority before acknowledging the job",
+                    CoverageClaims::none().routes(&["job_terminal_enters_runtime_inbox"]),
+                ),
+                route_anchor(
+                    "job_notification_outbox_projector",
+                    "job_notification_enters_runtime_inbox",
+                    "meerkat/src/job_delivery.rs",
+                    "mechanical notification outbox projection uses a job-scoped stable runtime delivery identity",
+                    CoverageClaims::none().routes(&["job_notification_enters_runtime_inbox"]),
+                ),
+                route_anchor(
+                    "runtime_delivery_inbox",
+                    "runtime_delivery_commit_acknowledges_job_outbox",
+                    "meerkat-runtime/src/delivery_inbox.rs",
+                    "generated runtime delivery commit and exact reuse provide the only acknowledgements accepted by the job projector",
+                    CoverageClaims::none().routes(&[
+                        "runtime_delivery_commit_acknowledges_job_outbox",
+                        "runtime_delivery_reuse_acknowledges_job_outbox",
+                    ]),
+                ),
+                route_anchor(
+                    "job_runtime_delivery_schema",
+                    "runtime_delivery_reuse_acknowledges_job_outbox",
+                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "formal enqueued two-store job and runtime delivery composition",
+                    CoverageClaims::none(),
+                ),
+            ],
+            &[
+                scenario(
+                    "runtime-delivery-first-commit",
+                    "terminal job outbox commit enters runtime delivery authority and is acknowledged only after the durable runtime insert",
+                    CoverageClaims::none().routes(&[
+                        "job_terminal_enters_runtime_inbox",
+                        "runtime_delivery_commit_acknowledges_job_outbox",
+                    ]),
+                ),
+                scenario(
+                    "runtime-delivery-notification-commit",
+                    "nonterminal job notification enters runtime delivery authority and is acknowledged only after the durable runtime insert",
+                    CoverageClaims::none().routes(&[
+                        "job_notification_enters_runtime_inbox",
+                        "runtime_delivery_commit_acknowledges_job_outbox",
+                    ]),
+                ),
+                scenario(
+                    "runtime-delivery-crash-retry-reuse",
+                    "crash after runtime insert but before job acknowledgement reuses the original runtime sequence and then acknowledges once",
+                    CoverageClaims::none().routes(&[
+                        "job_terminal_enters_runtime_inbox",
+                        "runtime_delivery_reuse_acknowledges_job_outbox",
+                    ]),
                 ),
             ],
         ),

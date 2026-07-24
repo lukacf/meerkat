@@ -2864,6 +2864,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-hooks",
+ "meerkat-jobs",
  "meerkat-live",
  "meerkat-llm-core",
  "meerkat-mcp",
@@ -3171,6 +3172,25 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-jobs"
+version = "0.8.7"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "meerkat-core",
+ "meerkat-machine-schema",
+ "meerkat-sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
  "uuid",
 ]
 
@@ -3580,6 +3600,7 @@ dependencies = [
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-tools",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3757,11 +3778,13 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-jobs",
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-runtime",
  "meerkat-skills",
  "meerkat-sqlite",
+ "meerkat-store",
  "nix 0.29.0",
  "parking_lot",
  "rusqlite",

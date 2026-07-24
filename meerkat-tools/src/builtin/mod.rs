@@ -55,9 +55,9 @@ pub use sqlite_store::SqliteTaskStore;
 pub use store::TaskStore;
 
 use async_trait::async_trait;
-use meerkat_core::ToolDef;
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::types::ContentBlock;
+use meerkat_core::{ToolCallView, ToolDef};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -103,6 +103,30 @@ pub trait BuiltinTool: Send + Sync {
     /// Returns whether this tool is enabled by default
     fn default_enabled(&self) -> bool;
 
+    /// Internal execution declaration for this built-in tool.
+    ///
+    /// Provider-facing [`ToolDef`] remains unchanged; the composite attaches
+    /// this declaration only to its internal catalog entry.
+    fn execution_contract(&self) -> meerkat_core::ToolExecutionContract {
+        meerkat_core::ToolExecutionContract::default()
+    }
+
+    /// Resolve a call-specific execution plan before invoking the tool.
+    ///
+    /// Static tools inherit the declared default. Hybrid built-ins may inspect
+    /// typed arguments here, but the selected mode must remain within
+    /// [`Self::execution_contract`].
+    fn resolve_execution_plan(
+        &self,
+        _call: ToolCallView<'_>,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        self.execution_contract()
+            .resolve_default(resolution_context.deadlines().clone())
+            .map_err(Into::into)
+    }
+
     /// Execute the tool with the given arguments
     ///
     /// # Arguments
@@ -112,6 +136,19 @@ pub trait BuiltinTool: Send + Sync {
     /// * `Ok(ToolOutput)` - The tool's result (JSON or multimodal blocks)
     /// * `Err(BuiltinToolError)` - If execution failed
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError>;
+
+    /// Execute with the exact admitted call identity and turn context.
+    ///
+    /// Detached built-ins use this seam for stable tool-call idempotency.
+    /// Ordinary built-ins inherit the context-free implementation.
+    async fn call_with_context(
+        &self,
+        _call: ToolCallView<'_>,
+        args: Value,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call(args).await
+    }
 
     /// Async operation IDs started by this tool call, if any.
     ///

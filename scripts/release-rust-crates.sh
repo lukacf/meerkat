@@ -16,6 +16,7 @@ printf '%s\n' \
   meerkat-machine-kernels \
   meerkat-skills \
   meerkat-schedule \
+  meerkat-jobs \
   meerkat-workgraph \
   meerkat-contracts \
   meerkat-store \

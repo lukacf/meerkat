@@ -162,14 +162,9 @@ pub fn compose_rpc_mob_state(
     > = Arc::new({
         let runtime = Arc::clone(runtime);
         move || {
-            runtime.callback_request_tx().map(|tx| {
-                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    runtime.registered_tools(),
-                    tx,
-                    runtime.callback_id_counter(),
-                    vec![],
-                )) as Arc<dyn AgentToolDispatcher>
-            })
+            runtime
+                .callback_tool_dispatcher(vec![])
+                .map(|dispatcher| Arc::new(dispatcher) as Arc<dyn AgentToolDispatcher>)
         }
     });
     let tools_provider =
@@ -1162,6 +1157,7 @@ impl MethodRouter {
         // Ensure the runtime's notification sink is up-to-date so that
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
+        runtime.arm_job_delivery_driver();
         Self {
             runtime,
             config_store,
@@ -1860,6 +1856,37 @@ impl MethodRouter {
             "session/input_status" => self.handle_session_input_state(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            "jobs/get" => handlers::jobs::handle_get(id, params, &self.runtime).await,
+            "jobs/list" => handlers::jobs::handle_list(id, params, &self.runtime).await,
+            "jobs/cancel" => handlers::jobs::handle_cancel(id, params, &self.runtime).await,
+            "jobs/progress" => handlers::jobs::handle_get_progress(id, params, &self.runtime).await,
+            "jobs/result" => handlers::jobs::handle_result(id, params, &self.runtime).await,
+            "jobs/artifacts" => handlers::jobs::handle_artifacts(id, params, &self.runtime).await,
+            "jobs/retry" => handlers::jobs::handle_retry(id, params, &self.runtime).await,
+            "jobs/health" => handlers::jobs::handle_health(id, &self.runtime).await,
+            "monitors/start" => {
+                handlers::jobs::handle_monitor_start(id, params, &self.runtime).await
+            }
+            "jobs/subscribe" => handlers::jobs::handle_subscribe(id, params, &self.runtime).await,
+            "jobs/unsubscribe" => {
+                handlers::jobs::handle_unsubscribe(id, params, &self.runtime).await
+            }
+            "mobkit/jobs/heartbeat" => {
+                handlers::jobs::handle_heartbeat(id, params, &self.runtime).await
+            }
+            "mobkit/jobs/progress" => {
+                handlers::jobs::handle_progress(id, params, &self.runtime).await
+            }
+            "mobkit/jobs/checkpoint" => {
+                handlers::jobs::handle_checkpoint(id, params, &self.runtime).await
+            }
+            "mobkit/jobs/complete" => {
+                handlers::jobs::handle_complete(id, params, &self.runtime).await
+            }
+            "mobkit/jobs/fail" => handlers::jobs::handle_fail(id, params, &self.runtime).await,
+            "mobkit/jobs/cancel_ack" => {
+                handlers::jobs::handle_cancel_ack(id, params, &self.runtime).await
+            }
             "schedule/create" => {
                 handlers::schedule::handle_create(id, params, self.runtime.clone()).await
             }
@@ -2030,7 +2057,8 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             "mob/member_status" => {
-                handlers::mob::handle_member_status(id, params, &self.mob_state).await
+                handlers::mob::handle_member_status(id, params, &self.mob_state, &self.runtime)
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/snapshot" => handlers::mob::handle_snapshot(id, params, &self.mob_state).await,
@@ -2152,16 +2180,19 @@ impl MethodRouter {
                 Ok(config) => handlers::capabilities::handle_get(id, &config),
                 Err(e) => RpcResponse::error(id, e.code, e.message),
             },
-            "runtime/host_info" => handlers::runtime_host::handle_info(
-                id,
-                &self.runtime,
-                &self.config_store,
-                // Runtime-backed only: every session runs the v9 runtime.
-                true,
-                self.live_enabled(),
-                self.live_webrtc_enabled(),
-                self.skill_runtime.is_some(),
-            ),
+            "runtime/host_info" => {
+                handlers::runtime_host::handle_info(
+                    id,
+                    &self.runtime,
+                    &self.config_store,
+                    // Runtime-backed only: every session runs the v9 runtime.
+                    true,
+                    self.live_enabled(),
+                    self.live_webrtc_enabled(),
+                    self.skill_runtime.is_some(),
+                )
+                .await
+            }
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
                 id,
                 &self.runtime,
@@ -2171,7 +2202,7 @@ impl MethodRouter {
                 self.live_webrtc_enabled(),
                 self.skill_runtime.is_some(),
             ),
-            "runtime/health" => handlers::runtime_host::handle_health(id),
+            "runtime/health" => handlers::runtime_host::handle_health(id, &self.runtime).await,
             "approval/request" => {
                 handlers::approval::handle_request(id, params, self.runtime.clone()).await
             }
@@ -2420,27 +2451,52 @@ impl MethodRouter {
             }
         };
 
-        let registered_tools = self.runtime.registered_tools();
-        match registered_tools.write() {
-            Ok(mut tools) => {
-                let count = params.tools.len();
-                for new_tool in params.tools {
-                    let stamped = meerkat_core::ToolDef {
-                        provenance: Some(meerkat_core::types::ToolProvenance {
-                            kind: meerkat_core::types::ToolSourceKind::Callback,
-                            source_id: "callback".into(),
-                        }),
-                        ..new_tool.into()
-                    };
-                    if let Some(existing) = tools.iter_mut().find(|t| t.name == stamped.name) {
-                        *existing = stamped;
-                    } else {
-                        tools.push(stamped);
-                    }
+        let replacements: Result<Vec<_>, String> = params
+            .tools
+            .into_iter()
+            .map(|mut new_tool| {
+                let execution = crate::callback_dispatcher::execution_contract_from_wire(
+                    new_tool.execution.take(),
+                )?;
+                let tool = meerkat_core::ToolDef {
+                    provenance: Some(meerkat_core::types::ToolProvenance {
+                        kind: meerkat_core::types::ToolSourceKind::Callback,
+                        source_id: "callback".into(),
+                    }),
+                    ..new_tool.into()
+                };
+                Ok((tool, execution))
+            })
+            .collect();
+        let replacements = match replacements {
+            Ok(replacements) => replacements,
+            Err(error_message) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid callback execution contract: {error_message}"),
+                );
+            }
+        };
+        match self
+            .runtime
+            .callback_tool_registry()
+            .replace_or_add_with_contracts(replacements)
+        {
+            Ok(count) => {
+                if let Some(dispatcher) = self.runtime.callback_tool_dispatcher(vec![]) {
+                    tokio::spawn(async move {
+                        if let Err(error) = dispatcher.reconcile_detached_jobs().await {
+                            tracing::warn!(
+                                %error,
+                                "detached callback reconciliation did not complete"
+                            );
+                        }
+                    });
                 }
                 RpcResponse::success(id, ToolsRegisterResult { registered: count })
             }
-            Err(_) => RpcResponse::error(
+            Err(()) => RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
                 "Failed to acquire tool registry lock",
@@ -4700,12 +4756,86 @@ mod tests {
             cfg!(feature = "mob"),
             "runtime/capabilities must advertise the multi-host mob surface when compiled"
         );
+        assert_eq!(capabilities["result"]["features"]["durable_jobs"], true);
         assert_eq!(
             capabilities["result"]["features"]["secure_remote_rpc"],
             false
         );
         assert_eq!(capabilities["result"]["features"]["approvals"], false);
         assert_eq!(health["result"]["status"], "ok");
+        assert_eq!(health["result"]["checks"]["jobs"], "ok");
+    }
+
+    #[tokio::test]
+    async fn jobs_surface_is_realm_scoped_and_reports_healthy_queued_work() {
+        let (router, _rx) = test_router().await;
+        router.runtime.set_realm_context(
+            Some(meerkat_core::connection::RealmId::parse("realm-a").unwrap()),
+            None,
+            None,
+        );
+        let session_id = meerkat_core::SessionId::new();
+        let service = router.runtime.detached_job_service();
+        let receipt = service
+            .submit(meerkat::JobSpec::new(
+                "realm-a",
+                session_id,
+                meerkat::ExecutionIntentId::from_string("intent-rpc").unwrap(),
+                meerkat::InteractionLineageId::from_string("lineage-rpc").unwrap(),
+                meerkat::ToolIdentity::new("scan", "v1").unwrap(),
+                meerkat::RunnerIdentity::new("mobkit.callback", "v1").unwrap(),
+                meerkat::RestartClass::NonResumable,
+                meerkat::CanonicalArgumentsHash::new("sha256:args").unwrap(),
+                meerkat::JobSubmissionKey::new("rpc-job").unwrap(),
+            ))
+            .await
+            .unwrap();
+        let other = service
+            .submit(meerkat::JobSpec::new(
+                "realm-b",
+                meerkat_core::SessionId::new(),
+                meerkat::ExecutionIntentId::from_string("intent-other").unwrap(),
+                meerkat::InteractionLineageId::from_string("lineage-other").unwrap(),
+                meerkat::ToolIdentity::new("scan", "v1").unwrap(),
+                meerkat::RunnerIdentity::new("mobkit.callback", "v1").unwrap(),
+                meerkat::RestartClass::NonResumable,
+                meerkat::CanonicalArgumentsHash::new("sha256:other").unwrap(),
+                meerkat::JobSubmissionKey::new("rpc-job-other").unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let get = router
+            .dispatch(make_request(
+                "jobs/get",
+                serde_json::json!({"job_id": receipt.job_id.to_string()}),
+            ))
+            .await
+            .expect("response");
+        let get = result_value(&get);
+        assert_eq!(get["job"]["phase"], "queued");
+        assert!(get["job"].get("fence").is_none());
+
+        let health = router
+            .dispatch(make_request_no_params("jobs/health"))
+            .await
+            .expect("response");
+        let health = result_value(&health);
+        assert_eq!(health["detached_jobs"]["status"], "ok");
+        assert_eq!(health["detached_jobs"]["queued"], 1);
+
+        let cross_realm = router
+            .dispatch(make_request(
+                "jobs/get",
+                serde_json::json!({"job_id": other.job_id.to_string()}),
+            ))
+            .await
+            .expect("response");
+        assert!(cross_realm.result.is_none());
+        assert_eq!(
+            cross_realm.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
     }
 
     #[tokio::test]

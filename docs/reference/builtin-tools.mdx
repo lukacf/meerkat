@@ -383,6 +383,50 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 
 Shell tools execute commands and manage background jobs. They are all `default_enabled: false` and require the factory-level `enable_shell` flag (or a `ToolPolicyLayer` override) to be active.
 
+<Warning>
+`background: true` is available only when the session has a persistent realm
+job store and blob store. Submission, status, result references, cancellation,
+and terminal delivery are durable. The shell worker itself is
+`non_resumable`: if its process is lost across restart, the committed attempt
+becomes `worker_lost` after its existing lease expires and is never silently
+replayed.
+</Warning>
+
+`command: "some-command &"` and `background: true` are different contracts.
+An ampersand is only syntax interpreted by the selected shell. Meerkat still
+executes that shell invocation through the foreground tool path, returns the
+ordinary foreground result, and does not create a job ID or a record visible to
+`shell_jobs`, `shell_job_status`, or `shell_job_cancel`. Any child the shell
+leaves running is unmanaged and its lifetime is not guaranteed.
+
+Use `background: true` when the command must be managed as a Meerkat shell job.
+It commits and returns a stable job ID and enables durable status/list/cancel
+operations. This does not claim that the subprocess survives a host restart:
+the durable record survives and reports the non-resumable worker loss.
+
+### Timeout hierarchy
+
+Tool execution has layered deadlines; the narrowest applicable layer wins.
+
+| Layer | Default/current contract | Meaning |
+|---|---:|---|
+| Foreground shell command | 30 seconds | Shell-internal command deadline |
+| SDK/builder `ToolDispatcher` | 30 seconds | Enforced dispatcher-layer deadline when this wrapper is composed |
+| Schedule occurrence lease | 60 seconds | Scheduling/redelivery ownership lease; not a long-job execution deadline |
+| Normal Meerkat tool batch | 600 seconds | Agent-loop outer deadline; per-tool overrides may narrow it |
+| MobKit provider callback | 120 seconds | Public host-callback work window |
+| MobKit Python/TypeScript callback cancellation | 125 seconds | Host cancellation margin, not extra work time |
+| MobKit gateway callback wire | 130 seconds | Transport margin, not extra work time |
+| LLM stream inactivity | 300 seconds | Provider-stream watchdog; unrelated to tool callbacks |
+
+Changing the normal Meerkat tool timeout cannot extend a narrower shell,
+SDK/builder `ToolDispatcher`, or MobKit callback deadline. The foreground shell
+and dispatcher deadlines are distinct enforced layers, even though both
+defaults currently come from `ToolTimeoutPolicy`. Background shell submission
+returns within the normal tool call, but the spawned command keeps its own shell
+timeout. The command runs under one fenced non-resumable attempt; terminal state
+is committed before runtime notification delivery.
+
 <Accordion title="Shell configuration">
 Shell behavior is controlled by `ShellConfig`:
 
@@ -435,7 +479,9 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 </ParamField>
 
 <ParamField body="background" type="bool" default="false">
-  If `true`, run in background and return job ID immediately.
+  If `true`, durably submit a non-resumable shell job and return its stable job
+  ID. Requires persistent realm job and blob stores. Job truth survives restart;
+  a lost subprocess is classified as `worker_lost`, not replayed.
 </ParamField>
 
 <CodeGroup>
@@ -514,7 +560,12 @@ Check status of a background shell job. Returns full job details including outpu
 </Accordion>
 
 <Accordion title="shell_job_cancel">
-Cancel a running background shell job.
+Request cancellation of a running background shell job. For a live process,
+success returns `cancellation_requested`; this is not a terminal acknowledgement.
+Poll `shell_job_status` until it reports `cancelled`. Meerkat publishes terminal
+cancelled status only after the worker proves the complete process group has
+been contained. Synthetic jobs with no live process may return `cancelled`
+immediately because there is nothing to contain.
 
 **Default enabled:** No (requires shell to be enabled)
 
@@ -525,7 +576,7 @@ Cancel a running background shell job.
 ```json
 {
   "job_id": "job_<uuid-v7>",
-  "status": "cancelled"
+  "status": "cancellation_requested"
 }
 ```
 

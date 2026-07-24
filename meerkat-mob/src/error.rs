@@ -385,8 +385,18 @@ pub enum MobError {
     #[error("callback pending for session {session_id} on tool '{tool_name}'")]
     CallbackPending {
         session_id: meerkat_core::types::SessionId,
+        tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+    },
+    /// A member turn is waiting on one exact multi-callback result set.
+    #[error(
+        "callback batch pending for session {session_id} ({pending_tool_calls_len} tool calls)",
+        pending_tool_calls_len = .pending_tool_calls.len()
+    )]
+    CallbackBatchPending {
+        session_id: meerkat_core::types::SessionId,
+        pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
     },
 
     /// The fence token does not match the member's current incarnation.
@@ -675,9 +685,9 @@ impl MobError {
             Self::Internal(_) | Self::ExternalMemberCleanupUncertain { .. } => {
                 MobFailureClass::Internal
             }
-            Self::CallbackPending { .. } | Self::RuntimeEffectRefused { .. } => {
-                MobFailureClass::RuntimeRejected
-            }
+            Self::CallbackPending { .. }
+            | Self::CallbackBatchPending { .. }
+            | Self::RuntimeEffectRefused { .. } => MobFailureClass::RuntimeRejected,
             _ => MobFailureClass::MobRejected,
         }
     }
@@ -1077,6 +1087,7 @@ mod tests {
             (
                 MobError::CallbackPending {
                     session_id: meerkat_core::types::SessionId::new(),
+                    tool_use_id: "call-1".to_string(),
                     tool_name: "t".to_string(),
                     args: serde_json::Value::Null,
                 },

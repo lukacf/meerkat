@@ -1,0 +1,444 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
+use ::tokio::sync::RwLock;
+use async_trait::async_trait;
+use meerkat_core::SessionId;
+
+use crate::machines::detached_job::{DetachedJobMachineAuthority, DetachedJobMachineState};
+use crate::{
+    DetachedJobError, JobId, JobOutboxEntry, JobOutboxPayload, JobProgress, JobSpec,
+    JobSubmissionKey, JobTerminalResult,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredJob {
+    pub job_id: JobId,
+    pub spec: JobSpec,
+    pub revision: u64,
+    pub machine_state: DetachedJobMachineState,
+    pub progress: Option<JobProgress>,
+    pub terminal_result: Option<JobTerminalResult>,
+    pub subscriptions: Vec<crate::JobSubscription>,
+    pub outbox: Vec<JobOutboxEntry>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub enum InsertJobOutcome {
+    Inserted(StoredJob),
+    Existing(StoredJob),
+}
+
+#[async_trait]
+pub trait DetachedJobStore: Send + Sync {
+    async fn insert_deduplicated(
+        &self,
+        job: StoredJob,
+    ) -> Result<InsertJobOutcome, DetachedJobError>;
+
+    async fn get(&self, job_id: &JobId) -> Result<Option<StoredJob>, DetachedJobError>;
+
+    async fn compare_and_swap(
+        &self,
+        expected_revision: u64,
+        replacement: StoredJob,
+    ) -> Result<StoredJob, DetachedJobError>;
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<JobOutboxEntry>, DetachedJobError>;
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError>;
+
+    /// Mechanical recovery census. Callers must use generated lifecycle state
+    /// to decide whether a row is runnable, reconcilable, or terminal.
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError>;
+
+    fn is_persistent(&self) -> bool;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryDetachedJobStoreSnapshot {
+    jobs: BTreeMap<JobId, StoredJob>,
+    submission_index: BTreeMap<(String, JobSubmissionKey), JobId>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryDetachedJobStoreState {
+    jobs: BTreeMap<JobId, StoredJob>,
+    submission_index: BTreeMap<(String, JobSubmissionKey), JobId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryDetachedJobStore {
+    inner: Arc<RwLock<MemoryDetachedJobStoreState>>,
+}
+
+impl MemoryDetachedJobStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_snapshot(
+        snapshot: MemoryDetachedJobStoreSnapshot,
+    ) -> Result<Self, DetachedJobError> {
+        for ((realm_id, submission_key), job_id) in &snapshot.submission_index {
+            let Some(job) = snapshot.jobs.get(job_id) else {
+                return Err(DetachedJobError::Store(format!(
+                    "submission index {realm_id}/{submission_key} points to missing job {job_id}"
+                )));
+            };
+            if &job.spec.realm_id != realm_id || &job.spec.submission_key != submission_key {
+                return Err(DetachedJobError::Store(format!(
+                    "submission index {realm_id}/{submission_key} disagrees with job {}",
+                    job.job_id
+                )));
+            }
+            validate_stored_job(job)?;
+        }
+        for job in snapshot.jobs.values() {
+            let index_key = (job.spec.realm_id.clone(), job.spec.submission_key.clone());
+            if snapshot.submission_index.get(&index_key) != Some(&job.job_id) {
+                return Err(DetachedJobError::Store(format!(
+                    "job {} has no matching realm-scoped submission index",
+                    job.job_id
+                )));
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(RwLock::new(MemoryDetachedJobStoreState {
+                jobs: snapshot.jobs,
+                submission_index: snapshot.submission_index,
+            })),
+        })
+    }
+
+    pub async fn snapshot(&self) -> MemoryDetachedJobStoreSnapshot {
+        let guard = self.inner.read().await;
+        MemoryDetachedJobStoreSnapshot {
+            jobs: guard.jobs.clone(),
+            submission_index: guard.submission_index.clone(),
+        }
+    }
+
+    pub async fn get(&self, job_id: &JobId) -> Result<Option<StoredJob>, DetachedJobError> {
+        DetachedJobStore::get(self, job_id).await
+    }
+
+    pub async fn len(&self) -> usize {
+        self.inner.read().await.jobs.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.jobs.is_empty()
+    }
+
+    pub async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        DetachedJobStore::list_for_origin(self, realm_id, origin_session_id, limit).await
+    }
+
+    pub const fn is_persistent(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+impl DetachedJobStore for MemoryDetachedJobStore {
+    async fn insert_deduplicated(
+        &self,
+        job: StoredJob,
+    ) -> Result<InsertJobOutcome, DetachedJobError> {
+        validate_stored_job(&job)?;
+        let mut guard = self.inner.write().await;
+        let index_key = (job.spec.realm_id.clone(), job.spec.submission_key.clone());
+        if let Some(existing_id) = guard.submission_index.get(&index_key) {
+            let existing = guard.jobs.get(existing_id).ok_or_else(|| {
+                DetachedJobError::Store(format!(
+                    "submission index points to missing job {existing_id}"
+                ))
+            })?;
+            if !existing.spec.equivalent_submission(&job.spec) {
+                return Err(DetachedJobError::SubmissionConflict);
+            }
+            return Ok(InsertJobOutcome::Existing(existing.clone()));
+        }
+        if guard.jobs.contains_key(&job.job_id) {
+            return Err(DetachedJobError::Store(format!(
+                "generated job id {} already exists",
+                job.job_id
+            )));
+        }
+        guard.submission_index.insert(index_key, job.job_id.clone());
+        guard.jobs.insert(job.job_id.clone(), job.clone());
+        Ok(InsertJobOutcome::Inserted(job))
+    }
+
+    async fn get(&self, job_id: &JobId) -> Result<Option<StoredJob>, DetachedJobError> {
+        Ok(self.inner.read().await.jobs.get(job_id).cloned())
+    }
+
+    async fn compare_and_swap(
+        &self,
+        expected_revision: u64,
+        mut replacement: StoredJob,
+    ) -> Result<StoredJob, DetachedJobError> {
+        let mut guard = self.inner.write().await;
+        let current = guard
+            .jobs
+            .get(&replacement.job_id)
+            .ok_or_else(|| DetachedJobError::NotFound(replacement.job_id.clone()))?;
+        if current.revision != expected_revision {
+            return Err(DetachedJobError::StaleRevision {
+                job_id: replacement.job_id.clone(),
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+        if current.spec.submission_key != replacement.spec.submission_key
+            || !current.spec.equivalent_submission(&replacement.spec)
+        {
+            return Err(DetachedJobError::Store(
+                "compare-and-swap cannot change the submitted job specification".into(),
+            ));
+        }
+        validate_stored_job(&replacement)?;
+        replacement.revision = next_revision(expected_revision)?;
+        guard
+            .jobs
+            .insert(replacement.job_id.clone(), replacement.clone());
+        Ok(replacement)
+    }
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<JobOutboxEntry>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let guard = self.inner.read().await;
+        Ok(guard
+            .jobs
+            .values()
+            .flat_map(|job| job.outbox.iter())
+            .filter(|entry| !entry.applied)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .inner
+            .read()
+            .await
+            .jobs
+            .values()
+            .filter(|job| {
+                job.spec.realm_id == realm_id && &job.spec.origin_session_id == origin_session_id
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .inner
+            .read()
+            .await
+            .jobs
+            .values()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    fn is_persistent(&self) -> bool {
+        false
+    }
+}
+
+pub(crate) fn next_revision(current: u64) -> Result<u64, DetachedJobError> {
+    current.checked_add(1).ok_or_else(|| {
+        DetachedJobError::Store("detached job revision exhausted u64 authority".into())
+    })
+}
+
+pub(crate) fn validate_stored_job(job: &StoredJob) -> Result<(), DetachedJobError> {
+    let state = &job.machine_state;
+    if state.job_id != job.job_id.as_str() {
+        return Err(DetachedJobError::Store(format!(
+            "job {} disagrees with generated authority identity {}",
+            job.job_id, state.job_id
+        )));
+    }
+    if state.restart_class != job.spec.restart_class {
+        return Err(DetachedJobError::Store(format!(
+            "job {} restart class disagrees with generated authority",
+            job.job_id
+        )));
+    }
+    DetachedJobMachineAuthority::recover_from_state(state.clone()).map_err(|error| {
+        DetachedJobError::Store(format!(
+            "job {} contains invalid generated authority state: {error:?}",
+            job.job_id
+        ))
+    })?;
+    match (&job.progress, state.progress_cursor) {
+        (None, 0) => {}
+        (Some(progress), cursor) if progress.cursor == cursor => {}
+        _ => {
+            return Err(DetachedJobError::Store(format!(
+                "job {} progress projection disagrees with generated authority",
+                job.job_id
+            )));
+        }
+    }
+    let mut subscription_ids = BTreeSet::new();
+    for subscription in &job.subscriptions {
+        if !subscription_ids.insert(subscription.subscription_id().as_str()) {
+            return Err(DetachedJobError::Store(format!(
+                "job {} contains duplicate active subscription {}",
+                job.job_id,
+                subscription.subscription_id()
+            )));
+        }
+    }
+    let mut sequences = BTreeSet::new();
+    for entry in &job.outbox {
+        if entry.job_id != job.job_id
+            || entry.delivery_sequence == 0
+            || entry.delivery_sequence > state.delivery_sequence
+            || !sequences.insert(entry.delivery_sequence)
+        {
+            return Err(DetachedJobError::Store(format!(
+                "job {} outbox identity or delivery sequence disagrees with generated authority",
+                job.job_id
+            )));
+        }
+        let mut target_ids = BTreeSet::new();
+        for target in &entry.targets {
+            if !target_ids.insert(target.subscription_id().as_str()) {
+                return Err(DetachedJobError::Store(format!(
+                    "job {} delivery {} contains duplicate subscription target {}",
+                    job.job_id,
+                    entry.delivery_sequence,
+                    target.subscription_id()
+                )));
+            }
+        }
+    }
+    if job.outbox.len() != usize::try_from(state.delivery_sequence).unwrap_or(usize::MAX) {
+        return Err(DetachedJobError::Store(format!(
+            "job {} outbox cardinality disagrees with generated delivery sequence",
+            job.job_id
+        )));
+    }
+
+    let notifications = job
+        .outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            JobOutboxPayload::Notification(notification) => Some((entry, notification)),
+            JobOutboxPayload::Terminal(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if notifications.len() != state.notification_ids.len() {
+        return Err(DetachedJobError::Store(format!(
+            "job {} notification outbox cardinality disagrees with generated authority",
+            job.job_id
+        )));
+    }
+    for (entry, notification) in notifications {
+        let notification_id = notification.notification_id().as_str();
+        let idempotency_key = notification.idempotency_key();
+        if entry.delivery_id != notification_id
+            || !state.notification_ids.contains(notification_id)
+            || !state
+                .notification_idempotency_keys
+                .contains(idempotency_key)
+            || state
+                .notification_id_by_key
+                .get(idempotency_key)
+                .map(String::as_str)
+                != Some(notification_id)
+            || state
+                .notification_delivery_ids
+                .get(notification_id)
+                .map(String::as_str)
+                != Some(entry.runtime_delivery_id().as_str())
+            || state.notification_sequences.get(notification_id).copied()
+                != Some(entry.delivery_sequence)
+            || state.notification_applied.contains(notification_id) != entry.applied
+        {
+            return Err(DetachedJobError::Store(format!(
+                "job {} notification outbox projection disagrees with generated authority",
+                job.job_id
+            )));
+        }
+    }
+
+    let terminal_entries = job
+        .outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            JobOutboxPayload::Terminal(result) => Some((entry, result)),
+            JobOutboxPayload::Notification(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match (
+        state.terminal_kind,
+        &job.terminal_result,
+        terminal_entries.as_slice(),
+    ) {
+        (None, None, []) => {}
+        (Some(kind), Some(result), [(entry, payload)])
+            if result.kind() == kind
+                && *payload == result
+                && entry.delivery_id == "terminal"
+                && entry.delivery_sequence == state.terminal_delivery_sequence
+                && entry.applied == state.terminal_delivery_applied => {}
+        _ => {
+            return Err(DetachedJobError::Store(format!(
+                "job {} terminal result/outbox projection disagrees with generated authority",
+                job.job_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn revision_increment_fails_closed_at_u64_max() {
+        assert!(super::next_revision(u64::MAX).is_err());
+    }
+}

@@ -2539,9 +2539,20 @@ impl CompletionTerminalExpectation {
                 output: String::new(),
                 structured_output: None,
             },
-            CompletionOutcome::CallbackPending { tool_name, args } => Self::Failed {
+            CompletionOutcome::CallbackPending {
+                tool_name, args, ..
+            } => Self::Failed {
                 kind: Some(TurnTerminalKind::InteractionCallbackPending),
                 reason: format!("callback pending for tool '{tool_name}': {args}"),
+            },
+            CompletionOutcome::CallbackBatchPending { pending_tool_calls } => Self::Failed {
+                kind: Some(TurnTerminalKind::InteractionCallbackPending),
+                reason: format!(
+                    "callback pending for {} tools: {}",
+                    pending_tool_calls.len(),
+                    serde_json::to_string(&pending_tool_calls)
+                        .unwrap_or_else(|_| "<unserializable>".to_string())
+                ),
             },
             CompletionOutcome::Cancelled => Self::Failed {
                 kind: None,

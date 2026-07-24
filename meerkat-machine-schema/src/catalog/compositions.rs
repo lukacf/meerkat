@@ -239,6 +239,209 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
     }
 }
 
+/// Durable two-store delivery composition for detached-job outbox entries.
+///
+/// The outbound route is enqueued because job terminalization and the runtime
+/// inbox cannot share a database transaction. The runtime machine mints or
+/// reuses the durable sequence; only its committed/reused acknowledgement is
+/// routed back to `MarkDeliveryApplied`.
+pub fn job_runtime_delivery_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: comp_id("job_runtime_delivery"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("job"),
+                machine_name: mach_id("DetachedJobMachine"),
+                actor: act_id("job_authority"),
+            },
+            MachineInstance {
+                instance_id: mi_id("runtime_delivery"),
+                machine_name: mach_id("RuntimeDeliveryMachine"),
+                actor: act_id("runtime_delivery_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("job_authority"),
+            machine_actor("runtime_delivery_authority"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes: vec![
+            Route {
+                name: route_id("job_terminal_enters_runtime_inbox"),
+                from_machine: mi_id("job"),
+                effect_variant: ev_id("TerminalCommitted"),
+                to: RouteTarget::new(
+                    mi_id("runtime_delivery"),
+                    rv(RouteTargetKind::Input, "CommitDelivery"),
+                ),
+                bindings: vec![
+                    bind("delivery_id", "job_id"),
+                    bind("source_sequence", "delivery_sequence"),
+                ],
+                delivery: RouteDelivery::Enqueue,
+                teardown: None,
+            },
+            Route {
+                name: route_id("job_notification_enters_runtime_inbox"),
+                from_machine: mi_id("job"),
+                effect_variant: ev_id("NotificationCommitted"),
+                to: RouteTarget::new(
+                    mi_id("runtime_delivery"),
+                    rv(RouteTargetKind::Input, "CommitDelivery"),
+                ),
+                bindings: vec![
+                    bind("delivery_id", "runtime_delivery_id"),
+                    bind("source_sequence", "delivery_sequence"),
+                ],
+                delivery: RouteDelivery::Enqueue,
+                teardown: None,
+            },
+            Route {
+                name: route_id("runtime_delivery_commit_acknowledges_job_outbox"),
+                from_machine: mi_id("runtime_delivery"),
+                effect_variant: ev_id("DeliveryCommitted"),
+                to: RouteTarget::new(
+                    mi_id("job"),
+                    rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
+                ),
+                bindings: vec![
+                    bind("delivery_id", "delivery_id"),
+                    bind("delivery_sequence", "source_sequence"),
+                ],
+                delivery: RouteDelivery::Enqueue,
+                teardown: None,
+            },
+            Route {
+                name: route_id("runtime_delivery_reuse_acknowledges_job_outbox"),
+                from_machine: mi_id("runtime_delivery"),
+                effect_variant: ev_id("DeliveryReused"),
+                to: RouteTarget::new(
+                    mi_id("job"),
+                    rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
+                ),
+                bindings: vec![
+                    bind("delivery_id", "delivery_id"),
+                    bind("delivery_sequence", "source_sequence"),
+                ],
+                delivery: RouteDelivery::Enqueue,
+                teardown: None,
+            },
+        ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![
+            transaction_plan(
+                "job_result_and_outbox",
+                "commit_job_delivery",
+                "job delivery payload and pending outbox row commit atomically under generated job authority",
+                "DetachedJobStore::compare_and_swap",
+                &[],
+            ),
+            transaction_plan(
+                "runtime_delivery_identity_and_sequence",
+                "commit_runtime_delivery",
+                "runtime delivery identity, generated sequence authority, and inbox row commit atomically",
+                "RuntimeStore::compare_and_swap_runtime_delivery_authority",
+                &[
+                    "job_terminal_enters_runtime_inbox",
+                    "job_notification_enters_runtime_inbox",
+                ],
+            ),
+            transaction_plan(
+                "job_outbox_acknowledgement",
+                "acknowledge_runtime_delivery",
+                "job outbox acknowledgement commits only after the runtime insert or exact replay succeeds",
+                "DetachedJobStore::compare_and_swap",
+                &[
+                    "runtime_delivery_commit_acknowledges_job_outbox",
+                    "runtime_delivery_reuse_acknowledges_job_outbox",
+                ],
+            ),
+        ],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "job_terminal_reaches_runtime_delivery_authority".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("job"),
+                    effect_variant: ev_id("TerminalCommitted"),
+                    to_machine: mi_id("runtime_delivery"),
+                    input_variant: rv(RouteTargetKind::Input, "CommitDelivery"),
+                },
+                statement: "job terminal outbox entries enter generated runtime delivery authority before any acknowledgement".into(),
+                references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
+                references_actors: vec![
+                    act_id("job_authority"),
+                    act_id("runtime_delivery_authority"),
+                ],
+            },
+            CompositionInvariant {
+                name: "job_notification_reaches_runtime_delivery_authority".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("job"),
+                    effect_variant: ev_id("NotificationCommitted"),
+                    to_machine: mi_id("runtime_delivery"),
+                    input_variant: rv(RouteTargetKind::Input, "CommitDelivery"),
+                },
+                statement: "job notification outbox entries enter generated runtime delivery authority before any acknowledgement".into(),
+                references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
+                references_actors: vec![
+                    act_id("job_authority"),
+                    act_id("runtime_delivery_authority"),
+                ],
+            },
+            CompositionInvariant {
+                name: "runtime_commit_ack_is_the_job_delivery_ack_source".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: route_id(
+                        "runtime_delivery_commit_acknowledges_job_outbox",
+                    ),
+                    to_machine: mi_id("job"),
+                    input_variant: rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
+                    from_machine: mi_id("runtime_delivery"),
+                    effect_variant: ev_id("DeliveryCommitted"),
+                },
+                statement: "a fresh job outbox acknowledgement originates from the generated runtime delivery commit effect".into(),
+                references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
+                references_actors: vec![
+                    act_id("job_authority"),
+                    act_id("runtime_delivery_authority"),
+                ],
+            },
+            CompositionInvariant {
+                name: "runtime_reuse_ack_is_the_retry_ack_source".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: route_id(
+                        "runtime_delivery_reuse_acknowledges_job_outbox",
+                    ),
+                    to_machine: mi_id("job"),
+                    input_variant: rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
+                    from_machine: mi_id("runtime_delivery"),
+                    effect_variant: ev_id("DeliveryReused"),
+                },
+                statement: "a replayed projector acknowledgement originates from exact generated runtime delivery reuse".into(),
+                references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
+                references_actors: vec![
+                    act_id("job_authority"),
+                    act_id("runtime_delivery_authority"),
+                ],
+            },
+        ],
+        witnesses: vec![
+            runtime_delivery_first_commit_witness(),
+            runtime_delivery_notification_commit_witness(),
+            runtime_delivery_crash_retry_reuse_witness(),
+        ],
+        deep_domain_cardinality: 3,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
+    }
+}
+
 pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("schedule_runtime_bundle"),
@@ -1560,6 +1763,169 @@ fn default_ci_limits() -> CompositionStateLimits {
         seq_limit: 0,
         set_limit: 0,
         map_limit: 0,
+    }
+}
+
+fn job_terminal_witness_inputs() -> Vec<CompositionWitnessInput> {
+    vec![
+        witness_input(
+            "job",
+            "Submit",
+            vec![
+                witness_field("job_id", Expr::String("job_1".into())),
+                witness_field(
+                    "restart_class",
+                    named_variant("DetachedJobRestartClass", "Adoptable"),
+                ),
+            ],
+        ),
+        witness_input(
+            "job",
+            "ClaimAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("worker_id", Expr::String("worker_1".into())),
+                witness_field("claimed_at_ms", Expr::U64(1)),
+                witness_field("lease_expires_at_ms", Expr::U64(2)),
+                witness_field("runner_handle", Expr::String("runner_1".into())),
+            ],
+        ),
+        witness_input(
+            "job",
+            "CompleteAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("fence", Expr::U64(1)),
+                witness_field("completed_at_ms", Expr::U64(2)),
+            ],
+        ),
+    ]
+}
+
+fn runtime_delivery_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 12,
+        pending_input_limit: 8,
+        pending_route_limit: 4,
+        delivered_route_limit: 3,
+        emitted_effect_limit: 6,
+        seq_limit: 0,
+        set_limit: 2,
+        map_limit: 2,
+    }
+}
+
+fn runtime_delivery_first_commit_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("runtime_delivery_first_commit"),
+        preload_inputs: job_terminal_witness_inputs(),
+        expected_routes: vec![
+            route_id("job_terminal_enters_runtime_inbox"),
+            route_id("runtime_delivery_commit_acknowledges_job_outbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("job", "SubmitQueued"),
+            witness_transition("job", "ClaimQueued"),
+            witness_transition("job", "CompleteRunningAttempt"),
+            witness_transition("runtime_delivery", "CommitNewDelivery"),
+            witness_transition("job", "ApplySucceededDelivery"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: runtime_delivery_witness_limits(),
+    }
+}
+
+fn runtime_delivery_notification_commit_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("runtime_delivery_notification_commit"),
+        preload_inputs: vec![
+            witness_input(
+                "job",
+                "Submit",
+                vec![
+                    witness_field("job_id", Expr::String("job_1".into())),
+                    witness_field(
+                        "restart_class",
+                        named_variant("DetachedJobRestartClass", "CheckpointResumable"),
+                    ),
+                ],
+            ),
+            witness_input(
+                "job",
+                "ClaimAttempt",
+                vec![
+                    witness_field("attempt_id", Expr::String("attempt_1".into())),
+                    witness_field("worker_id", Expr::String("worker_1".into())),
+                    witness_field("claimed_at_ms", Expr::U64(1)),
+                    witness_field("lease_expires_at_ms", Expr::U64(2)),
+                    witness_field("runner_handle", Expr::String("runner_1".into())),
+                ],
+            ),
+            witness_input(
+                "job",
+                "EmitNotification",
+                vec![
+                    witness_field("attempt_id", Expr::String("attempt_1".into())),
+                    witness_field("fence", Expr::U64(1)),
+                    witness_field("notification_id", Expr::String("notification_1".into())),
+                    witness_field("idempotency_key", Expr::String("key_1".into())),
+                    witness_field(
+                        "runtime_delivery_id",
+                        Expr::String("job_1:notification:notification_1".into()),
+                    ),
+                    witness_field("observed_at_ms", Expr::U64(2)),
+                ],
+            ),
+        ],
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("runtime_delivery_commit_acknowledges_job_outbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("job", "SubmitQueued"),
+            witness_transition("job", "ClaimQueued"),
+            witness_transition("job", "EmitRunningNotification"),
+            witness_transition("runtime_delivery", "CommitNewDelivery"),
+            witness_transition("job", "ApplyRunningNotificationDelivery"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: runtime_delivery_witness_limits(),
+    }
+}
+
+fn runtime_delivery_crash_retry_reuse_witness() -> CompositionWitness {
+    let mut preload_inputs = job_terminal_witness_inputs();
+    preload_inputs.push(witness_input(
+        "runtime_delivery",
+        "CommitDelivery",
+        vec![
+            witness_field("delivery_id", Expr::String("job_1".into())),
+            witness_field("source_sequence", Expr::U64(1)),
+        ],
+    ));
+    CompositionWitness {
+        name: witness_id("runtime_delivery_crash_retry_reuse"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_terminal_enters_runtime_inbox"),
+            route_id("runtime_delivery_reuse_acknowledges_job_outbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("runtime_delivery", "CommitNewDelivery"),
+            witness_transition("job", "SubmitQueued"),
+            witness_transition("job", "ClaimQueued"),
+            witness_transition("job", "CompleteRunningAttempt"),
+            witness_transition("runtime_delivery", "ReuseCommittedDelivery"),
+            witness_transition("job", "ApplySucceededDelivery"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: runtime_delivery_witness_limits(),
     }
 }
 

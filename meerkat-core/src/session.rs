@@ -1618,6 +1618,11 @@ pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
 
+/// Metadata key for a mixed local/external callback batch whose completed
+/// sibling outcomes must remain hidden until the external callback result can
+/// complete the provider-adjacent `ToolResults` set.
+pub(crate) const SESSION_PENDING_CALLBACK_BATCH_KEY: &str = "session_pending_callback_batch_v1";
+
 /// Metadata key used to store recoverable build-only session state.
 pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
 
@@ -3261,6 +3266,171 @@ pub struct PendingToolResultsMessage {
     pub accepted_at: SystemTime,
 }
 
+/// Typed refusal at the deferred callback-result ingress seam.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeferredToolResultsIngressError {
+    #[error("callback result ingress contains duplicate tool id '{0}'")]
+    DuplicateToolUseId(String),
+    #[error("callback result for tool id '{0}' conflicts with its staged payload")]
+    ConflictingRedelivery(String),
+    #[error("callback result tool id '{0}' is outside the staged pending set")]
+    WrongToolUseId(String),
+}
+
+/// Durable staging record for one assistant tool-use batch that contains one
+/// or more external callbacks and optional locally completed siblings.
+///
+/// Nothing in this record is provider-visible until the callback result is
+/// admitted. The completed results and transcript-producing effects are
+/// published together as one complete adjacent batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct PendingCallbackToolBatch {
+    pub run_id: RunId,
+    pub tool_use_order: Vec<String>,
+    pub pending_tool_use_ids: Vec<String>,
+    pub completed_results: Vec<ToolResult>,
+    pub session_effects: Vec<crate::ops::SessionEffect>,
+    pub async_ops: Vec<crate::ops::AsyncOpRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum CallbackToolBatchState {
+    Pending {
+        batch: PendingCallbackToolBatch,
+    },
+    Applied {
+        tool_use_order: Vec<String>,
+        results: Vec<ToolResult>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        async_ops: Vec<crate::ops::AsyncOpRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        post_tool_messages: Vec<Message>,
+        #[serde(default)]
+        post_tool_messages_applied: bool,
+    },
+}
+
+pub(crate) enum ResolvedPendingCallbackToolResults {
+    NoState,
+    Pending {
+        batch: PendingCallbackToolBatch,
+        ordered_results: Vec<ToolResult>,
+    },
+    AlreadyApplied {
+        async_ops: Vec<crate::ops::AsyncOpRef>,
+    },
+}
+
+/// Admission verdict for callback results presented at a session-service
+/// boundary before they enter deferred-turn state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum CallbackResultIngress {
+    /// The session has no durable callback batch; legacy callers may use their
+    /// ordinary deferred-input policy.
+    NoPendingBatch,
+    /// The exact result set belongs to the pending batch.
+    Pending { pending_tool_use_ids: Vec<String> },
+    /// The identical callback payload was already committed.
+    AlreadyApplied,
+}
+
+/// Typed failures at the durable callback-batch staging/apply seam.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PendingCallbackBatchError {
+    #[error("a pending callback batch is already staged")]
+    AlreadyStaged,
+    #[error("no pending callback batch is staged")]
+    Missing,
+    #[error("pending callback batch is malformed: {0}")]
+    Malformed(String),
+    #[error("callback results contain duplicate tool id '{0}'")]
+    DuplicateResult(String),
+    #[error("mob authority replacement cannot cross a durable callback staging boundary")]
+    NonDurableAuthorityEffect,
+    #[error("callback result ids {actual:?} do not match pending ids {expected:?}")]
+    ResultSetMismatch {
+        expected: BTreeSet<String>,
+        actual: BTreeSet<String>,
+    },
+    #[error("callback result redelivery conflicts with the already applied payload")]
+    ConflictingRedelivery,
+}
+
+fn unique_tool_results(
+    results: Vec<ToolResult>,
+) -> Result<BTreeMap<String, ToolResult>, PendingCallbackBatchError> {
+    let mut by_id = BTreeMap::new();
+    for result in results {
+        let id = result.tool_use_id.clone();
+        if by_id.insert(id.clone(), result).is_some() {
+            return Err(PendingCallbackBatchError::DuplicateResult(id));
+        }
+    }
+    Ok(by_id)
+}
+
+fn validate_pending_callback_batch(
+    messages: &[Message],
+    batch: &PendingCallbackToolBatch,
+) -> Result<(), PendingCallbackBatchError> {
+    let Some(assistant) = messages.last() else {
+        return Err(PendingCallbackBatchError::Malformed(
+            "staged callback batch has no assistant transcript tail".to_string(),
+        ));
+    };
+    let assistant_order = assistant_tool_use_ids(assistant)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if assistant_order != batch.tool_use_order {
+        return Err(PendingCallbackBatchError::Malformed(format!(
+            "assistant tool ids {assistant_order:?} do not match staged order {:?}",
+            batch.tool_use_order
+        )));
+    }
+    let assistant_set = assistant_order.iter().cloned().collect::<BTreeSet<_>>();
+    if assistant_set.len() != assistant_order.len() {
+        return Err(PendingCallbackBatchError::Malformed(
+            "assistant tool-use batch contains duplicate ids".to_string(),
+        ));
+    }
+    let pending_set = batch
+        .pending_tool_use_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if pending_set.len() != batch.pending_tool_use_ids.len() || pending_set.is_empty() {
+        return Err(PendingCallbackBatchError::Malformed(
+            "staged callback batch must contain at least one unique pending tool id".to_string(),
+        ));
+    }
+    let completed = unique_tool_results(batch.completed_results.clone())?;
+    let completed_set = completed.keys().cloned().collect::<BTreeSet<_>>();
+    if !pending_set.is_disjoint(&completed_set)
+        || pending_set
+            .union(&completed_set)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != assistant_set
+    {
+        return Err(PendingCallbackBatchError::Malformed(format!(
+            "pending ids {pending_set:?} plus completed ids {completed_set:?} do not partition assistant ids {assistant_set:?}"
+        )));
+    }
+    if batch.session_effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::ops::SessionEffect::ReplaceMobToolAuthorityContext { .. }
+        )
+    }) {
+        return Err(PendingCallbackBatchError::NonDurableAuthorityEffect);
+    }
+    Ok(())
+}
+
 impl PartialEq for PendingToolResultsMessage {
     fn eq(&self, other: &Self) -> bool {
         self.accepted_at == other.accepted_at
@@ -3677,11 +3847,53 @@ impl SessionDeferredTurnState {
     }
 
     /// Stage one callback tool-results message for the next turn.
-    pub fn stage_tool_results(
+    pub fn try_stage_tool_results(
         &mut self,
         results: Vec<ToolResult>,
         accepted_at: SystemTime,
-    ) -> usize {
+    ) -> Result<usize, DeferredToolResultsIngressError> {
+        let mut incoming_by_id = BTreeMap::new();
+        for result in &results {
+            if incoming_by_id
+                .insert(result.tool_use_id.clone(), result)
+                .is_some()
+            {
+                return Err(DeferredToolResultsIngressError::DuplicateToolUseId(
+                    result.tool_use_id.clone(),
+                ));
+            }
+        }
+
+        let mut staged_by_id = BTreeMap::new();
+        for pending in &self.pending_tool_results {
+            for result in &pending.results {
+                match staged_by_id.insert(result.tool_use_id.clone(), result) {
+                    Some(previous) if previous != result => {
+                        return Err(DeferredToolResultsIngressError::ConflictingRedelivery(
+                            result.tool_use_id.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !staged_by_id.is_empty() {
+            for (id, incoming) in &incoming_by_id {
+                match staged_by_id.get(id) {
+                    Some(staged) if *staged == *incoming => {}
+                    Some(_) => {
+                        return Err(DeferredToolResultsIngressError::ConflictingRedelivery(
+                            id.clone(),
+                        ));
+                    }
+                    None => {
+                        return Err(DeferredToolResultsIngressError::WrongToolUseId(id.clone()));
+                    }
+                }
+            }
+            return Ok(0);
+        }
+
         let (mut authority, key) = self.document_authority();
         let accepted = match authority.stage_session_tool_results(key, usize_to_u64(results.len()))
         {
@@ -3696,24 +3908,41 @@ impl SessionDeferredTurnState {
                     error = %err,
                     "generated session document authority rejected tool-results stage"
                 );
-                return 0;
+                return Ok(0);
             }
         };
         let Some(accepted) = accepted else {
             tracing::warn!(
                 "generated session document authority returned no tool-results decision"
             );
-            return 0;
+            return Ok(0);
         };
         if accepted == 0 {
-            return 0;
+            return Ok(0);
         }
         let accepted = usize::try_from(accepted).unwrap_or(usize::MAX);
         self.pending_tool_results.push(PendingToolResultsMessage {
             results,
             accepted_at,
         });
-        accepted
+        Ok(accepted)
+    }
+
+    /// Compatibility projection for callers that cannot surface a typed
+    /// ingress refusal. Public session-service ingress uses
+    /// [`Self::try_stage_tool_results`] and preserves the error.
+    pub fn stage_tool_results(
+        &mut self,
+        results: Vec<ToolResult>,
+        accepted_at: SystemTime,
+    ) -> usize {
+        match self.try_stage_tool_results(results, accepted_at) {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::warn!(%error, "deferred callback-result ingress was rejected");
+                0
+            }
+        }
     }
 
     /// Whether any callback tool results are currently staged.
@@ -4476,6 +4705,34 @@ mod system_context_authority {
 }
 
 impl Session {
+    /// Validate callback-result ingress against the exact durable callback
+    /// batch without mutating transcript or deferred-turn state.
+    #[doc(hidden)]
+    pub fn classify_callback_result_ingress(
+        &self,
+        incoming: &[ToolResult],
+    ) -> Result<CallbackResultIngress, crate::error::AgentError> {
+        match self
+            .resolve_pending_callback_tool_results(incoming.to_vec())
+            .map_err(|error| {
+                crate::error::AgentError::ConfigError(format!(
+                    "callback result ingress was rejected: {error}"
+                ))
+            })? {
+            ResolvedPendingCallbackToolResults::NoState => {
+                Ok(CallbackResultIngress::NoPendingBatch)
+            }
+            ResolvedPendingCallbackToolResults::AlreadyApplied { .. } => {
+                Ok(CallbackResultIngress::AlreadyApplied)
+            }
+            ResolvedPendingCallbackToolResults::Pending { batch, .. } => {
+                Ok(CallbackResultIngress::Pending {
+                    pending_tool_use_ids: batch.pending_tool_use_ids,
+                })
+            }
+        }
+    }
+
     /// Create a new empty session
     pub fn new() -> Self {
         let now = SystemTime::now();
@@ -5682,6 +5939,218 @@ impl Session {
             Ok(state) => state,
             Err(err) => fail_closed_generated_restore("deferred-turn", err),
         }
+    }
+
+    /// Stage an external-callback batch without publishing any
+    /// provider-visible tool results or sibling transcript effects.
+    pub(crate) fn stage_pending_callback_tool_batch(
+        &mut self,
+        batch: PendingCallbackToolBatch,
+    ) -> Result<(), PendingCallbackBatchError> {
+        if matches!(
+            self.callback_tool_batch_state()?,
+            Some(CallbackToolBatchState::Pending { .. })
+        ) {
+            return Err(PendingCallbackBatchError::AlreadyStaged);
+        }
+        validate_pending_callback_batch(self.messages(), &batch)?;
+        let value = serde_json::to_value(CallbackToolBatchState::Pending { batch })
+            .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
+        Ok(())
+    }
+
+    fn callback_tool_batch_state(
+        &self,
+    ) -> Result<Option<CallbackToolBatchState>, PendingCallbackBatchError> {
+        self.metadata
+            .get(SESSION_PENDING_CALLBACK_BATCH_KEY)
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))
+            })
+            .transpose()
+    }
+
+    /// Restore the typed callback batch. A corrupt durable record is a typed
+    /// refusal, never "no pending callback".
+    pub(crate) fn pending_callback_tool_batch(
+        &self,
+    ) -> Result<Option<PendingCallbackToolBatch>, PendingCallbackBatchError> {
+        match self.callback_tool_batch_state()? {
+            Some(CallbackToolBatchState::Pending { batch }) => {
+                validate_pending_callback_batch(self.messages(), &batch)?;
+                Ok(Some(batch))
+            }
+            Some(CallbackToolBatchState::Applied { .. }) | None => Ok(None),
+        }
+    }
+
+    /// Validate external callback results and combine them with staged sibling
+    /// results in the original assistant tool-use order, without mutation.
+    pub(crate) fn resolve_pending_callback_tool_results(
+        &self,
+        incoming: Vec<ToolResult>,
+    ) -> Result<ResolvedPendingCallbackToolResults, PendingCallbackBatchError> {
+        let Some(state) = self.callback_tool_batch_state()? else {
+            return Ok(ResolvedPendingCallbackToolResults::NoState);
+        };
+        let batch = match state {
+            CallbackToolBatchState::Pending { batch } => batch,
+            CallbackToolBatchState::Applied {
+                tool_use_order,
+                results,
+                async_ops,
+                ..
+            } => {
+                let incoming_by_id = unique_tool_results(incoming)?;
+                let expected = tool_use_order.iter().cloned().collect::<BTreeSet<_>>();
+                let actual = incoming_by_id.keys().cloned().collect::<BTreeSet<_>>();
+                if actual != expected {
+                    return Err(PendingCallbackBatchError::ResultSetMismatch { expected, actual });
+                }
+                let delivered = tool_use_order
+                    .iter()
+                    .map(|id| incoming_by_id.get(id).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        PendingCallbackBatchError::Malformed(
+                            "applied callback receipt is missing an ordered result".to_string(),
+                        )
+                    })?;
+                return if delivered == results {
+                    Ok(ResolvedPendingCallbackToolResults::AlreadyApplied { async_ops })
+                } else {
+                    Err(PendingCallbackBatchError::ConflictingRedelivery)
+                };
+            }
+        };
+        validate_pending_callback_batch(self.messages(), &batch)?;
+        let incoming_by_id = unique_tool_results(incoming)?;
+        let expected = batch
+            .pending_tool_use_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = incoming_by_id.keys().cloned().collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(PendingCallbackBatchError::ResultSetMismatch { expected, actual });
+        }
+        let mut all_by_id = unique_tool_results(batch.completed_results.clone())?;
+        all_by_id.extend(incoming_by_id);
+        let ordered = batch
+            .tool_use_order
+            .iter()
+            .map(|id| {
+                all_by_id.remove(id).ok_or_else(|| {
+                    PendingCallbackBatchError::Malformed(format!(
+                        "no result is available for assistant tool id '{id}'"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !all_by_id.is_empty() {
+            return Err(PendingCallbackBatchError::Malformed(format!(
+                "results contain ids absent from assistant tool-use order: {:?}",
+                all_by_id.keys().collect::<Vec<_>>()
+            )));
+        }
+        Ok(ResolvedPendingCallbackToolResults::Pending {
+            batch,
+            ordered_results: ordered,
+        })
+    }
+
+    /// Publish the already-resolved full `ToolResults` set and any
+    /// transcript-producing sibling effects as one adjacent message batch,
+    /// then replace the durable staging record with an idempotency receipt.
+    pub(crate) fn commit_pending_callback_tool_results(
+        &mut self,
+        batch: &PendingCallbackToolBatch,
+        ordered_results: Vec<ToolResult>,
+        post_tool_messages: Vec<Message>,
+    ) -> Result<(), PendingCallbackBatchError> {
+        let current = self
+            .pending_callback_tool_batch()?
+            .ok_or(PendingCallbackBatchError::Missing)?;
+        if &current != batch {
+            return Err(PendingCallbackBatchError::Malformed(
+                "pending callback batch changed between prepare and commit".to_string(),
+            ));
+        }
+        let actual_order = ordered_results
+            .iter()
+            .map(|result| result.tool_use_id.clone())
+            .collect::<Vec<_>>();
+        if actual_order != batch.tool_use_order {
+            return Err(PendingCallbackBatchError::Malformed(format!(
+                "resolved result order {actual_order:?} does not match assistant order {:?}",
+                batch.tool_use_order
+            )));
+        }
+        self.push(Message::tool_results(ordered_results.clone()));
+        let pending_ids = batch
+            .pending_tool_use_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let applied_callback_results = ordered_results
+            .into_iter()
+            .filter(|result| pending_ids.contains(&result.tool_use_id))
+            .collect();
+        let value = serde_json::to_value(CallbackToolBatchState::Applied {
+            tool_use_order: batch.pending_tool_use_ids.clone(),
+            results: applied_callback_results,
+            async_ops: batch.async_ops.clone(),
+            post_tool_messages,
+            post_tool_messages_applied: false,
+        })
+        .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
+        Ok(())
+    }
+
+    /// Apply callback-staged post-tool transcript effects only after the
+    /// ToolResults tail has been admitted as a pending continuation. This
+    /// preserves provider adjacency and prevents the effects from hiding the
+    /// continuation boundary from session admission.
+    pub(crate) fn apply_pending_callback_resume_effects(
+        &mut self,
+    ) -> Result<Vec<crate::event::AssistantImageEvent>, PendingCallbackBatchError> {
+        let Some(CallbackToolBatchState::Applied {
+            tool_use_order,
+            results,
+            async_ops,
+            post_tool_messages,
+            post_tool_messages_applied,
+        }) = self.callback_tool_batch_state()?
+        else {
+            return Ok(Vec::new());
+        };
+        if post_tool_messages_applied {
+            return Ok(Vec::new());
+        }
+        let image_events = post_tool_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::BlockAssistant(assistant) => Some(assistant.blocks.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
+            .collect::<Vec<_>>();
+        let applied_state = CallbackToolBatchState::Applied {
+            tool_use_order,
+            results,
+            async_ops,
+            post_tool_messages: post_tool_messages.clone(),
+            post_tool_messages_applied: true,
+        };
+        let value = serde_json::to_value(applied_state)
+            .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        self.push_batch(post_tool_messages);
+        self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
+        Ok(image_events)
     }
 
     /// Realize the typed session lifecycle-terminal projection in the session
@@ -11919,6 +12388,86 @@ mod tests {
         assert_eq!(meta.id, *session.id());
         assert_eq!(meta.message_count, 2);
         assert_eq!(meta.total_tokens, 15);
+    }
+
+    #[test]
+    fn deferred_tool_result_redelivery_is_idempotent_per_exact_payload() {
+        let mut state = SessionDeferredTurnState::default();
+        let results = vec![
+            ToolResult::new("callback-a".to_string(), "a".to_string(), false),
+            ToolResult::new("callback-b".to_string(), "b".to_string(), false),
+        ];
+        assert_eq!(
+            state.stage_tool_results(results.clone(), SystemTime::UNIX_EPOCH),
+            2
+        );
+        let before = serde_json::to_value(&state).expect("serialize staged state");
+
+        assert_eq!(
+            state.stage_tool_results(
+                results,
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ),
+            0,
+            "identical redelivery must coalesce without restaging"
+        );
+        assert_eq!(
+            serde_json::to_value(&state).expect("serialize redelivered state"),
+            before,
+            "duplicate ingress must be a byte-identical no-op"
+        );
+    }
+
+    #[test]
+    fn deferred_tool_result_conflict_and_wrong_id_fail_without_poison_after_replay() {
+        let mut state = SessionDeferredTurnState::default();
+        state
+            .try_stage_tool_results(
+                vec![ToolResult::new(
+                    "callback-a".to_string(),
+                    "approved".to_string(),
+                    false,
+                )],
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("first callback payload should stage");
+        let mut replayed: SessionDeferredTurnState = serde_json::from_value(
+            serde_json::to_value(&state).expect("serialize deferred callback state"),
+        )
+        .expect("restore deferred callback state");
+        let before = serde_json::to_value(&replayed).expect("serialize replayed state");
+
+        assert!(matches!(
+            replayed.try_stage_tool_results(
+                vec![ToolResult::new(
+                    "callback-a".to_string(),
+                    "denied".to_string(),
+                    false,
+                )],
+                SystemTime::UNIX_EPOCH,
+            ),
+            Err(DeferredToolResultsIngressError::ConflictingRedelivery(id))
+                if id == "callback-a"
+        ));
+        assert_eq!(serde_json::to_value(&replayed).unwrap(), before);
+
+        assert!(matches!(
+            replayed.try_stage_tool_results(
+                vec![ToolResult::new(
+                    "callback-b".to_string(),
+                    "wrong".to_string(),
+                    false,
+                )],
+                SystemTime::UNIX_EPOCH,
+            ),
+            Err(DeferredToolResultsIngressError::WrongToolUseId(id))
+                if id == "callback-b"
+        ));
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            before,
+            "typed ingress refusals must leave the valid pending continuation intact"
+        );
     }
 
     #[test]

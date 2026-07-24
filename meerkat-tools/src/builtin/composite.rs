@@ -1,7 +1,7 @@
 //! Composite dispatcher that combines multiple dispatchers into one.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::builtin::shell::{JobManager, ShellConfig};
+use crate::builtin::shell::{DurableShellJobRuntime, JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
@@ -102,6 +102,8 @@ pub struct CompositeDispatcher {
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     #[cfg(not(target_arch = "wasm32"))]
+    durable_shell_runtime: Option<DurableShellJobRuntime>,
+    #[cfg(not(target_arch = "wasm32"))]
     image_generation_runtime: Option<ImageGenerationToolBinding>,
     #[cfg(not(target_arch = "wasm32"))]
     web_search_runtime: Option<WebSearchToolBinding>,
@@ -176,6 +178,31 @@ impl CompositeDispatcher {
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<Self, CompositeDispatcherError> {
+        Self::new_with_ops_lifecycle_and_durable_shell(
+            task_store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+            ops_lifecycle,
+            None,
+        )
+    }
+
+    /// Create a composite with session-canonical operation and detached-job authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ops_lifecycle_and_durable_shell(
+        task_store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+        durable_shell_runtime: Option<DurableShellJobRuntime>,
+    ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
         // The project root is a concrete authority threaded by the caller (the
@@ -225,9 +252,13 @@ impl CompositeDispatcher {
                 if let Some(registry) = ops_lifecycle {
                     manager = manager.with_ops_registry(registry);
                 }
+                if let Some(runtime) = durable_shell_runtime.clone() {
+                    manager = manager.with_durable_job_runtime(runtime);
+                }
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
-                    ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
+                    MonitorStartTool, ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool,
+                    ShellTool,
                 };
                 // Use with_job_manager to share the same JobManager between ShellTool
                 // and job control tools. This ensures background jobs spawned via
@@ -239,6 +270,7 @@ impl CompositeDispatcher {
                 builtin_tools.push(Arc::new(ShellJobStatusTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobsListTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobCancelTool::new(mgr.clone())));
+                builtin_tools.push(Arc::new(MonitorStartTool::new(cfg.clone(), mgr.clone())));
                 Some(mgr)
             } else {
                 None
@@ -271,6 +303,7 @@ impl CompositeDispatcher {
             shell_config,
             session_id: shell_session_id,
             job_manager,
+            durable_shell_runtime,
             image_generation_runtime: None,
             web_search_runtime: None,
             blob_tools: None,
@@ -532,15 +565,21 @@ impl CompositeDispatcher {
         tool: &dyn BuiltinTool,
         call: ToolCallView<'_>,
         args: Value,
+        context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let output = tool.call(args).await.map_err(|e| match e {
-            BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                name: call.name.into(),
-                reason: msg,
-            },
-            BuiltinToolError::ExecutionFailed(msg) => ToolError::ExecutionFailed { message: msg },
-            BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
-        })?;
+        let output = tool
+            .call_with_context(call, args, context)
+            .await
+            .map_err(|e| match e {
+                BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
+                    name: call.name.into(),
+                    reason: msg,
+                },
+                BuiltinToolError::ExecutionFailed(msg) => {
+                    ToolError::ExecutionFailed { message: msg }
+                }
+                BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+            })?;
         let async_ops = tool.async_ops_for_output(&output);
         match output {
             ToolOutput::Json(value) => {
@@ -676,7 +715,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 self.resolve_tool_owner(tool.name()),
                 ResolvedToolOwner::Builtin(_)
             ) {
-                catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
+                catalog.push(
+                    ToolCatalogEntry::session_inline(Arc::new(tool.def()), true)
+                        .with_execution_contract(tool.execution_contract()),
+                );
             }
         }
 
@@ -687,7 +729,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     self.resolve_tool_owner(tool.name()),
                     ResolvedToolOwner::Skill(_)
                 ) {
-                    catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
+                    catalog.push(
+                        ToolCatalogEntry::session_inline(Arc::new(tool.def()), true)
+                            .with_execution_contract(tool.execution_contract()),
+                    );
                 }
             }
         }
@@ -724,6 +769,83 @@ impl AgentToolDispatcher for CompositeDispatcher {
         catalog.into()
     }
 
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        let fingerprint = meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+            .with_live_authority(0, 0);
+        match self.resolve_tool_owner(tool_name) {
+            ResolvedToolOwner::External => {
+                let external = self.external.as_ref().ok_or_else(|| {
+                    meerkat_core::ToolExecutionResolutionError::NotFound {
+                        tool_name: tool_name.to_string(),
+                    }
+                })?;
+                Ok(
+                    fingerprint
+                        .with_dependency(&external.execution_binding_fingerprint(tool_name)?),
+                )
+            }
+            ResolvedToolOwner::Builtin(_) => Ok(fingerprint),
+            #[cfg(feature = "skills")]
+            ResolvedToolOwner::Skill(_) => Ok(fingerprint),
+            ResolvedToolOwner::PolicyDenied => {
+                Err(meerkat_core::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: tool_name.to_string(),
+                })
+            }
+            ResolvedToolOwner::NotFound => {
+                Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                    tool_name: tool_name.to_string(),
+                })
+            }
+        }
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        match self.resolve_tool_owner(call.name) {
+            ResolvedToolOwner::Builtin(tool) => {
+                tool.resolve_execution_plan(call, resolution_context)
+            }
+            #[cfg(feature = "skills")]
+            ResolvedToolOwner::Skill(tool) => tool.resolve_execution_plan(call, resolution_context),
+            ResolvedToolOwner::External => self
+                .external
+                .as_ref()
+                .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                })?
+                .resolve_execution_plan(call, dispatch_context, resolution_context),
+            ResolvedToolOwner::PolicyDenied => {
+                Err(meerkat_core::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: call.name.to_string(),
+                })
+            }
+            ResolvedToolOwner::NotFound => {
+                Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                })
+            }
+        }
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         self.dispatch_with_context(call, &ToolDispatchContext::default())
             .await
@@ -746,9 +868,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // is policy-disabled — with no other owner for the name — is denied,
         // not missing, so surfaces can distinguish 403 from 404.
         match self.resolve_tool_owner(call.name) {
-            ResolvedToolOwner::Builtin(tool) => self.call_local_tool(tool, call, args).await,
+            ResolvedToolOwner::Builtin(tool) => {
+                self.call_local_tool(tool, call, args, context).await
+            }
             #[cfg(feature = "skills")]
-            ResolvedToolOwner::Skill(tool) => self.call_local_tool(tool, call, args).await,
+            ResolvedToolOwner::Skill(tool) => self.call_local_tool(tool, call, args, context).await,
             ResolvedToolOwner::External => {
                 let Some(ext) = self.external.as_ref() else {
                     // `External` is only resolved when an external dispatcher
@@ -766,6 +890,68 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                 }
                 ext.dispatch_with_context(call, context).await
+            }
+            ResolvedToolOwner::PolicyDenied => Err(ToolError::AccessDenied {
+                name: call.name.into(),
+            }),
+            ResolvedToolOwner::NotFound => Err(ToolError::NotFound {
+                name: call.name.into(),
+            }),
+        }
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let args: Value =
+            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
+                name: call.name.into(),
+                reason: e.to_string(),
+            })?;
+        match self.resolve_tool_owner(call.name) {
+            ResolvedToolOwner::Builtin(tool) => {
+                if !tool
+                    .execution_contract()
+                    .supported_modes()
+                    .contains(&plan.mode())
+                {
+                    return Err(ToolError::unavailable(
+                        call.name,
+                        meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                    ));
+                }
+                self.call_local_tool(tool, call, args, context).await
+            }
+            #[cfg(feature = "skills")]
+            ResolvedToolOwner::Skill(tool) => {
+                if plan.mode() != meerkat_core::ToolExecutionMode::Fast {
+                    return Err(ToolError::unavailable(
+                        call.name,
+                        meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                    ));
+                }
+                self.call_local_tool(tool, call, args, context).await
+            }
+            ResolvedToolOwner::External => {
+                let Some(external) = self.external.as_ref() else {
+                    return Err(ToolError::NotFound {
+                        name: call.name.into(),
+                    });
+                };
+                if external.tool_catalog_capabilities().exact_catalog {
+                    let catalog = external.tool_catalog();
+                    if let Some(entry) = catalog.iter().find(|entry| entry.tool.name == call.name)
+                        && let Some(reason) = entry.callability.unavailable_reason()
+                    {
+                        return Err(ToolError::unavailable(call.name, reason));
+                    }
+                }
+                external
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await
             }
             ResolvedToolOwner::PolicyDenied => Err(ToolError::AccessDenied {
                 name: call.name.into(),
@@ -854,7 +1040,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
 
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
-            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
+            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle_and_durable_shell(
                 Arc::clone(&owned.task_store),
                 &owned.builtin_config,
                 owned.project_root.clone(),
@@ -862,6 +1048,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 rebound_external,
                 Some(owner_bridge_session_id.to_string()),
                 Some(registry),
+                owned.durable_shell_runtime.clone(),
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
@@ -1182,6 +1369,10 @@ mod tests {
         catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
     }
 
+    struct HybridExactExternalDispatcher {
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
     impl ExactExternalDispatcher {
         fn new(entries: &[(&str, bool)]) -> Self {
             let catalog: Vec<meerkat_core::ToolCatalogEntry> = entries
@@ -1224,6 +1415,42 @@ mod tests {
                     }),
                     true,
                 )]),
+            }
+        }
+    }
+
+    impl HybridExactExternalDispatcher {
+        fn new() -> Self {
+            use std::collections::BTreeSet;
+            use std::time::Duration;
+
+            let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+                meerkat_core::RunnerIdentity::new("test.hybrid", "v1").unwrap(),
+                meerkat_core::RestartClass::NonResumable,
+                meerkat_core::IdempotencyScope::ToolCall,
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            let contract = meerkat_core::ToolExecutionContract::new(
+                BTreeSet::from([
+                    meerkat_core::ToolExecutionMode::Fast,
+                    meerkat_core::ToolExecutionMode::Detached,
+                ]),
+                meerkat_core::ToolExecutionMode::Fast,
+                None,
+                Some(detached),
+            )
+            .unwrap();
+            Self {
+                catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(
+                    Arc::new(ToolDef::new(
+                        "hybrid_external",
+                        "hybrid external tool",
+                        json!({"type": "object"}),
+                    )),
+                    true,
+                )
+                .with_execution_contract(contract)]),
             }
         }
     }
@@ -1309,6 +1536,73 @@ mod tests {
                 false,
             )
             .into())
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for HybridExactExternalDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &ToolDispatchContext,
+            resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        ) -> Result<
+            meerkat_core::ResolvedToolExecutionPlan,
+            meerkat_core::ToolExecutionResolutionError,
+        > {
+            let arguments: serde_json::Value =
+                serde_json::from_str(call.args.get()).map_err(|error| {
+                    meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                        tool_name: call.name.to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            let mode = if arguments["detach"].as_bool() == Some(true) {
+                meerkat_core::ToolExecutionMode::Detached
+            } else {
+                meerkat_core::ToolExecutionMode::Fast
+            };
+            self.catalog[0]
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &ToolDispatchContext,
+            plan: &meerkat_core::ResolvedToolExecutionPlan,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            if plan.mode() != meerkat_core::ToolExecutionMode::Detached {
+                return Err(ToolError::execution_failed(
+                    "test detached owner received the wrong plan",
+                ));
+            }
+            self.dispatch(call).await
         }
     }
 
@@ -1812,6 +2106,48 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&result.result.text_content()).expect("tool result JSON");
         assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn execution_plan_resolution_forwards_to_hybrid_external_winner() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> = Arc::new(HybridExactExternalDispatcher::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            Some(external),
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"detach":true}"#.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "hybrid-plan",
+            name: "hybrid_external",
+            args: &call_json,
+        };
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .unwrap(),
+        );
+
+        let context = ToolDispatchContext::default();
+        let plan = dispatcher
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("hybrid external plan should resolve through the winner");
+
+        assert_eq!(plan.mode(), meerkat_core::ToolExecutionMode::Detached);
+        dispatcher
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect("composite forwards the resolved plan to the selected external owner");
     }
 
     #[tokio::test]
@@ -2406,7 +2742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_ops_lifecycle_rebuilds_shell_tools_with_canonical_registry() {
+    async fn ops_binding_alone_does_not_enable_volatile_background_shell() {
         let temp_dir = TempDir::new().unwrap();
         let store = Arc::new(MemoryTaskStore::new());
         let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -2441,34 +2777,11 @@ mod tests {
             name: "shell",
             args: &call_json,
         };
-        let outcome = rebound
+        let error = rebound
             .dispatch(call)
             .await
-            .expect("background shell dispatch");
-        assert_eq!(
-            outcome.async_ops.len(),
-            1,
-            "rebound shell dispatcher must emit canonical async op refs"
-        );
-
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).expect("json result");
-        let cancel_json = serde_json::value::RawValue::from_string(
-            serde_json::json!({
-                "job_id": payload["job_id"].as_str().expect("job id"),
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let cancel = ToolCallView {
-            id: "shell-cancel",
-            name: "shell_job_cancel",
-            args: &cancel_json,
-        };
-        let _ = rebound
-            .dispatch(cancel)
-            .await
-            .expect("background shell cancel");
+            .expect_err("operation binding without durable stores must fail closed");
+        assert!(error.to_string().contains("durable storage binding"));
     }
 
     #[tokio::test]

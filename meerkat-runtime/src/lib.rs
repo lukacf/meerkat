@@ -48,6 +48,7 @@ pub mod comms_trust_reconcile;
 pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;
+pub mod delivery_inbox;
 pub mod driver;
 pub(crate) mod effect;
 #[doc(hidden)]
@@ -511,6 +512,10 @@ pub use coalescing::{
 pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
+pub use delivery_inbox::{
+    RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind,
+    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
@@ -835,8 +840,11 @@ pub use runtime_event::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::SessionServiceRuntimeExt;
+#[cfg(feature = "sqlite-store")]
+pub use store::SqliteRuntimeStore;
 pub use store::{
-    InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
+    InMemoryRuntimeStore, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord,
+    RuntimeDeliveryStoreRecord, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SessionDelta,
 };
 pub use traits::{

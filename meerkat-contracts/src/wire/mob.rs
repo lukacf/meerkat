@@ -2073,6 +2073,12 @@ pub struct MobMemberStatusResult {
     pub resolved_capabilities: Option<crate::wire::WireResolvedModelCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<WireMemberProgressSnapshot>,
+    /// Execution activity is separate from member lifecycle status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::wire::JobExecutionActivity>,
+    /// Durable detached work owned by this member's current session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_jobs: Option<crate::wire::DetachedJobsActivitySummary>,
     // Multi-host projections (SD-5): placement and reachability are TYPED
     // fields here — never smuggled inside the opaque `external_member`
     // value. All optional + absent-omitted for byte-compat with released
@@ -2182,6 +2188,8 @@ mod member_status_capability_tests {
             external_member: None,
             resolved_capabilities: Some(capabilities.clone()),
             progress: None,
+            activity: None,
+            detached_jobs: None,
             placement: None,
             control_reachability: None,
             comms_reachability: None,
@@ -3817,6 +3825,8 @@ mod tests {
             external_member: None,
             resolved_capabilities: None,
             progress: None,
+            activity: None,
+            detached_jobs: None,
             placement: None,
             control_reachability: None,
             comms_reachability: None,

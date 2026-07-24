@@ -414,6 +414,13 @@ pub struct AgentBuildConfig {
     pub recoverable_tool_defs: Option<Vec<meerkat_core::ToolDef>>,
     /// Optional blob store override used for image externalization/hydration.
     pub blob_store_override: Option<Arc<dyn BlobStore>>,
+    /// Persistent detached-job authority used by the durable shell runner.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub detached_job_store_override: Option<Arc<dyn meerkat_jobs::DetachedJobStore>>,
+    /// Mechanical projector from job terminal outbox rows into runtime delivery.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub shell_job_delivery_projector_override:
+        Option<Arc<dyn meerkat_tools::builtin::shell::ShellJobDeliveryProjector>>,
     /// Optional runtime machine handle for the generated-image builtin.
     pub image_generation_machine_override:
         Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
@@ -747,6 +754,10 @@ impl AgentBuildConfig {
             external_tools: None,
             recoverable_tool_defs: None,
             blob_store_override: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            detached_job_store_override: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            shell_job_delivery_projector_override: None,
             image_generation_machine_override: None,
             image_generation_executor_override: None,
             web_search_executor_override: None,
@@ -4118,6 +4129,7 @@ impl AgentFactory {
             ToolCategoryOverride::Inherit,
             None,
             ToolCategoryOverride::Inherit,
+            None,
         )
         .await
     }
@@ -4146,6 +4158,7 @@ impl AgentFactory {
         image_generation_visibility: ToolCategoryOverride,
         web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
         web_search_visibility: ToolCategoryOverride,
+        durable_shell_runtime: Option<meerkat_tools::builtin::shell::DurableShellJobRuntime>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -4178,17 +4191,16 @@ impl AgentFactory {
             .or_else(|| Some(self.shell_project_root()));
 
         #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
-        let mut composite = self
-            .build_composite_dispatcher(
-                store,
-                &config,
-                project_root,
-                shell_config,
-                external,
-                session_id.clone(),
-                ops_lifecycle,
-            )
-            .await?;
+        let mut composite = CompositeDispatcher::new_with_ops_lifecycle_and_durable_shell(
+            store,
+            &config,
+            project_root,
+            shell_config,
+            external,
+            session_id.clone(),
+            ops_lifecycle,
+            durable_shell_runtime,
+        )?;
 
         #[cfg(feature = "skills")]
         if let Some(engine) = skill_engine {
@@ -5016,6 +5028,33 @@ impl AgentFactory {
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let initial_tool_filter = build_config.initial_tool_filter.take();
         let _session_id = session.id().to_string();
+        #[cfg(not(target_arch = "wasm32"))]
+        let durable_shell_runtime = if effective_shell {
+            match (
+                build_config.realm_id.as_ref(),
+                build_config.detached_job_store_override.clone(),
+                build_config.blob_store_override.clone(),
+                build_config.shell_job_delivery_projector_override.clone(),
+            ) {
+                (Some(realm_id), Some(job_store), Some(blob_store), Some(projector))
+                    if job_store.is_persistent() && blob_store.is_persistent() =>
+                {
+                    Some(
+                        meerkat_tools::builtin::shell::DurableShellJobRuntime::new(
+                            realm_id.as_str(),
+                            session.id().clone(),
+                            job_store,
+                            blob_store,
+                            projector,
+                        )
+                        .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                    )
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let resolved_mode = &build_config.runtime_build_mode;
         // Inject pre-resolved metadata entries after runtime binding
@@ -5308,6 +5347,7 @@ impl AgentFactory {
                         } else {
                             build_config.override_web_search
                         },
+                        durable_shell_runtime,
                     )
                     .await?
                 }
@@ -12732,6 +12772,7 @@ mod tests {
                 ToolCategoryOverride::Inherit,
                 None,
                 ToolCategoryOverride::Inherit,
+                None,
             )
             .await
             .expect("dispatcher should build with blob store");
@@ -12795,6 +12836,7 @@ mod tests {
                 ToolCategoryOverride::Inherit,
                 None,
                 ToolCategoryOverride::Inherit,
+                None,
             )
             .await
             .expect("dispatcher should build without blob store");
@@ -12839,6 +12881,7 @@ impl AgentFactory {
         image_generation_visibility: ToolCategoryOverride,
         web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
         web_search_visibility: ToolCategoryOverride,
+        durable_shell_runtime: Option<meerkat_tools::builtin::shell::DurableShellJobRuntime>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         let compose_image_generation =
             image_generation_visibility.resolve(false) && image_generation_machine.is_some();
@@ -12923,6 +12966,7 @@ impl AgentFactory {
                 image_generation_visibility,
                 web_search_executor,
                 web_search_visibility,
+                durable_shell_runtime,
             )
             .await?;
 

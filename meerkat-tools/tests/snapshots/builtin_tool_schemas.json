@@ -26,7 +26,7 @@
     "properties": {
       "background": {
         "default": false,
-        "description": "If true, run in background and return job ID immediately",
+        "description": "If true, durably submit a non-resumable shell job and return its job receipt immediately",
         "type": "boolean"
       },
       "command": {

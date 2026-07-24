@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::{ArtifactStore, BlobStore, DurabilityDeclaration, RealmLocator, StorageLayout};
+use meerkat_jobs::DetachedJobStore;
 use meerkat_runtime::RuntimeStore;
 use meerkat_schedule::ScheduleStore;
 use meerkat_workgraph::WorkGraphStore;
@@ -53,6 +54,7 @@ pub struct RealmStoreSet {
     pub runtime_store: Arc<dyn RuntimeStore>,
     pub schedule_store: Arc<dyn ScheduleStore>,
     pub workgraph_store: Arc<dyn WorkGraphStore>,
+    pub job_store: Arc<dyn DetachedJobStore>,
     pub blob_store: Arc<dyn BlobStore>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// The factory `store_path` for this realm (feature-owned relative
@@ -86,11 +88,12 @@ pub trait RealmStorageProvider: Send + Sync {
 /// The store slots every provider must declare durability for — one
 /// declaration per slot, no omissions (an omitted declaration would bypass
 /// the fail-closed rule entirely).
-pub const REQUIRED_DURABILITY_DOMAINS: [&str; 6] = [
+pub const REQUIRED_DURABILITY_DOMAINS: [&str; 7] = [
     "sessions",
     "runtime",
     "schedule",
     "workgraph",
+    "jobs",
     "blobs",
     "artifacts",
 ];

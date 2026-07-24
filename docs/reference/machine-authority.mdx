@@ -20,6 +20,8 @@ The canonical registry is `canonical_machine_schemas()` in
 | `MobMachine` | `meerkat-mob` | Mob lifecycle, roster, member runtime bindings, wiring, flows, tasks, and supervisor handoffs. |
 | `AuthMachine` | `meerkat-runtime` auth handles | Per-binding auth lease and OAuth flow lifecycle. |
 | `ApprovalLifecycleMachine` | `meerkat-core` | Approval request and decision lifecycle and gating. |
+| `DetachedJobMachine` | `meerkat-jobs` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
+| `RuntimeDeliveryMachine` | `meerkat-runtime` | Stable durable-inbox identity, monotonic delivery/feed sequence assignment, exact replay, and ordered application cursor. |
 | `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, pending-continuation lifecycle, and the session lifecycle terminal fact for all profiles. |
 | `SessionTurnAdmissionMachine` | `meerkat-session` | Per-turn input admission and classification lifecycle. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule` | Schedule definition lifecycle, trigger state, and revision handling. |
@@ -27,10 +29,11 @@ The canonical registry is `canonical_machine_schemas()` in
 | `WorkGraphLifecycleMachine` | `meerkat-workgraph` | Work item lifecycle, readiness, dependency eligibility, claim leases, terminal state, and evidence revision handling. |
 | `WorkAttentionLifecycleMachine` | `meerkat-workgraph` | Goal attention binding lifecycle, pause/resume/supersession/stop state, and binding revision handling. |
 
-`MeerkatMachine` and `MobMachine` are the two runtime kernels. Auth and
-scheduling are auxiliary authority machines that protect specific perimeter
-state. WorkGraph is an optional subsystem authority for durable agent
-commitments, dependency-aware claim state, and goal attention bindings.
+`MeerkatMachine` and `MobMachine` are the two runtime kernels. Auth,
+scheduling, durable jobs, and runtime delivery are auxiliary authority machines that protect
+specific perimeter state. WorkGraph is an optional subsystem authority for
+durable agent commitments, dependency-aware claim state, and goal attention
+bindings.
 
 One scoped authority sits outside the canonical registry:
 `MobHostBindingAuthority` (catalog DSL source
@@ -73,6 +76,7 @@ The canonical registry is `canonical_composition_schemas()` in
 | --- | --- |
 | `meerkat_mob_seam` | Session-runtime and mob-runtime handoffs. |
 | `auth_lease_bundle` | Auth authority publication into runtime credential consumers. |
+| `job_runtime_delivery` | Durable job-terminal outbox transfer into runtime-owned delivery identity, sequence, and application-cursor authority. |
 | `schedule_bundle` | Schedule and occurrence lifecycle coordination. |
 | `schedule_runtime_bundle` | Occurrence delivery into runtime sessions. |
 | `schedule_mob_bundle` | Occurrence delivery into mob runs. |

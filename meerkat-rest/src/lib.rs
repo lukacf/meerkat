@@ -3918,10 +3918,34 @@ fn run_result_to_response(
 fn callback_pending_api_error(
     session_id: &SessionId,
     realm: &meerkat_core::RealmId,
+    tool_use_id: String,
     tool_name: String,
     args: Value,
     session_created: bool,
 ) -> ApiError {
+    callback_batch_pending_api_error(
+        session_id,
+        realm,
+        vec![meerkat_core::error::PendingCallbackToolCall {
+            tool_use_id,
+            tool_name,
+            args,
+        }],
+        session_created,
+    )
+}
+
+fn callback_batch_pending_api_error(
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
+    session_created: bool,
+) -> ApiError {
+    let first = pending_tool_calls.first();
+    let tool_name = first
+        .map(|call| call.tool_name.clone())
+        .unwrap_or_else(|| "callback_batch".to_string());
+    let args = first.map(|call| call.args.clone()).unwrap_or(Value::Null);
     ApiError::InternalWithData {
         message: format!("callback pending for tool '{tool_name}'"),
         code: "CALLBACK_PENDING".to_string(),
@@ -3932,6 +3956,7 @@ fn callback_pending_api_error(
             "resumable": true,
             "tool_name": tool_name,
             "args": args,
+            "pending_tool_calls": pending_tool_calls,
         }),
     }
 }
@@ -3980,9 +4005,26 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
             ApiError::Internal("turn completed without result".to_string()),
         ),
-        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
-            callback_pending_api_error(session_id, realm, tool_name, args, session_created),
-        ),
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        } => Err(callback_pending_api_error(
+            session_id,
+            realm,
+            tool_use_id,
+            tool_name,
+            args,
+            session_created,
+        )),
+        meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls,
+        } => Err(callback_batch_pending_api_error(
+            session_id,
+            realm,
+            pending_tool_calls,
+            session_created,
+        )),
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
@@ -13613,6 +13655,7 @@ mod tests {
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
         let err = completion_outcome_to_api_result(
             meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
             },
@@ -13634,6 +13677,7 @@ mod tests {
         assert_eq!(message, "callback pending for tool 'external_mock'");
         assert_eq!(code, "CALLBACK_PENDING");
         assert_eq!(details["session_id"], session_id.to_string());
+        assert_eq!(details["pending_tool_calls"][0]["tool_use_id"], "call-1");
         assert_eq!(
             details["session_ref"],
             format_session_ref(&realm, &session_id)

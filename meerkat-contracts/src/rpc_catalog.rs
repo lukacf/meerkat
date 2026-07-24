@@ -102,6 +102,107 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "ToolsRegisterResult",
         ),
         RpcMethodDescriptor::typed(
+            "jobs/get",
+            "Get a safe detached-job projection",
+            "JobsGetParams",
+            "JobsGetResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/list",
+            "List detached jobs for an origin session",
+            "JobsListParams",
+            "JobsListResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/cancel",
+            "Request machine-authorized detached-job cancellation",
+            "JobsCancelParams",
+            "JobsCancelResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/progress",
+            "Read a safe detached-job progress projection",
+            "JobsProgressParams",
+            "JobsProgressResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/result",
+            "Read a safe detached-job terminal result projection",
+            "JobsResultParams",
+            "JobsResultResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/artifacts",
+            "List safe artifact references produced by a detached job",
+            "JobsArtifactsParams",
+            "JobsArtifactsResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/retry",
+            "Schedule a machine-authorized retry after observed worker loss",
+            "JobsRetryParams",
+            "JobsRetryResult",
+        ),
+        RpcMethodDescriptor::result_only(
+            "jobs/health",
+            "Read detached-job operational health",
+            "JobsHealthResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "monitors/start",
+            "Start a high-trust durable script monitor",
+            "MonitorsStartParams",
+            "MonitorsStartResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/subscribe",
+            "Add a durable detached-job delivery subscription",
+            "JobsSubscribeParams",
+            "JobsSubscribeResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "jobs/unsubscribe",
+            "Remove a durable detached-job delivery subscription",
+            "JobsUnsubscribeParams",
+            "JobsUnsubscribeResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/heartbeat",
+            "Renew a detached callback attempt lease under its current fence",
+            "MobkitJobHeartbeatParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/progress",
+            "Commit detached callback progress under its current fence",
+            "MobkitJobProgressParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/checkpoint",
+            "Commit a detached callback checkpoint under its current fence",
+            "MobkitJobCheckpointParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/complete",
+            "Complete a detached callback attempt under its current fence",
+            "MobkitJobCompleteParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/fail",
+            "Fail a detached callback attempt under its current fence",
+            "MobkitJobFailParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "mobkit/jobs/cancel_ack",
+            "Acknowledge detached callback cancellation under its current fence",
+            "MobkitJobCancelAckParams",
+            "MobkitJobMutationResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
             "CreateSessionParams",
@@ -1089,6 +1190,12 @@ mod tests {
         assert!(methods.iter().any(|m| m == "runtime/host_info"));
         assert!(methods.iter().any(|m| m == "runtime/capabilities"));
         assert!(methods.iter().any(|m| m == "runtime/health"));
+        assert!(methods.iter().any(|m| m == "jobs/progress"));
+        assert!(methods.iter().any(|m| m == "jobs/result"));
+        assert!(methods.iter().any(|m| m == "jobs/artifacts"));
+        assert!(methods.iter().any(|m| m == "jobs/retry"));
+        assert!(methods.iter().any(|m| m == "jobs/health"));
+        assert!(methods.iter().any(|m| m == "monitors/start"));
         assert!(methods.iter().any(|m| m == "events/latest_cursor"));
         assert!(methods.iter().any(|m| m == "events/list_since"));
         assert!(methods.iter().any(|m| m == "events/snapshot"));

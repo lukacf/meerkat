@@ -52,6 +52,12 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "AuthMachine",
             // Approval lifecycle owns approval status/result truth.
             "ApprovalLifecycleMachine",
+            // Detached jobs own fenced attempt, lease, retry/loss,
+            // terminality, and delivery-acknowledgement truth.
+            "DetachedJobMachine",
+            // Runtime delivery owns stable inbox identity, monotonic feed
+            // sequence, and ordered application cursor truth.
+            "RuntimeDeliveryMachine",
             // SessionDocument owns per-session session-document lifecycle
             // truth (currently the first-turn region) in its own per-session
             // `Map` registry. Folds the former non-canonical
@@ -477,6 +483,7 @@ fn canonical_composition_registry_contains_kernel_seam_and_schedule_perimeter_en
         names,
         vec![
             "meerkat_mob_seam",
+            "job_runtime_delivery",
             "schedule_bundle",
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
@@ -731,6 +738,7 @@ fn kernel_seam_retains_coverage_metadata() {
         coverage_names,
         vec![
             "meerkat_mob_seam",
+            "job_runtime_delivery",
             "schedule_bundle",
             "schedule_runtime_bundle",
             "schedule_mob_bundle",

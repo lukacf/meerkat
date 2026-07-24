@@ -45,6 +45,66 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
             .into()
     }
 
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.inner
+            .tool_catalog()
+            .iter()
+            .filter(|entry| !self.excluded.contains(entry.tool.name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        if self.excluded.contains(tool_name) {
+            return Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            });
+        }
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(
+            meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+                .with_live_authority(0, 0)
+                .with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?),
+        )
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        if self.excluded.contains(call.name) {
+            return Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            });
+        }
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
@@ -62,6 +122,20 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
             return Err(ToolError::not_found(call.name));
         }
         self.inner.dispatch_with_context(call, context).await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if self.excluded.contains(call.name) {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
     }
 
     async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
@@ -128,6 +202,22 @@ impl McpProvenanceFilter {
             _ => true,
         }
     }
+
+    fn visibility_for_name(&self, name: &str) -> Option<bool> {
+        if self.inner.tool_catalog_capabilities().exact_catalog {
+            self.inner
+                .tool_catalog()
+                .iter()
+                .find(|entry| entry.tool.name.as_str() == name)
+                .map(|entry| self.is_visible(&entry.tool))
+        } else {
+            self.inner
+                .tools()
+                .iter()
+                .find(|tool| tool.name.as_str() == name)
+                .map(|tool| self.is_visible(tool))
+        }
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -138,6 +228,72 @@ impl AgentToolDispatcher for McpProvenanceFilter {
             .tools()
             .iter()
             .filter(|tool| self.is_visible(tool))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.inner
+            .tool_catalog()
+            .iter()
+            .filter(|entry| self.is_visible(&entry.tool))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        if self.visibility_for_name(tool_name) == Some(false) {
+            return Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            });
+        }
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(
+            meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+                .with_live_authority(0, 0)
+                .with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?),
+        )
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        if self.visibility_for_name(call.name) == Some(false) {
+            return Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: call.name.to_string(),
+            });
+        }
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner
+            .pending_catalog_sources()
+            .iter()
+            .filter(|source| self.allowlist.contains(source.as_str()))
             .cloned()
             .collect::<Vec<_>>()
             .into()
@@ -159,13 +315,24 @@ impl AgentToolDispatcher for McpProvenanceFilter {
         // Resolve the called tool against the inner catalog so we can apply
         // the same provenance gate at dispatch time. If the tool isn't there,
         // forward to inner and let it produce the canonical NotFound.
-        let live = self.inner.tools();
-        if let Some(tool) = live.iter().find(|tool| tool.name.as_str() == call.name)
-            && !self.is_visible(tool)
-        {
+        if self.visibility_for_name(call.name) == Some(false) {
             return Err(ToolError::not_found(call.name));
         }
         self.inner.dispatch_with_context(call, context).await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if self.visibility_for_name(call.name) == Some(false) {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
     }
 
     async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {

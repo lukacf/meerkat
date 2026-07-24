@@ -3173,6 +3173,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartOpStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RollbackUnreturnedOpIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackUnreturnedOpAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackUnreturnedOpRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackUnreturnedOpRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackUnreturnedOpStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6062,6 +6077,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `NotifyOpWatcher`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnreturnedOpRolledBack`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ExposeOperationPeer`

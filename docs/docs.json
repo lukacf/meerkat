@@ -197,6 +197,9 @@
                   "architecture/workgraph-attention-goals",
                   "architecture/delivery-interaction-operations",
                   "plans/storage-unification-plan",
+                  "plans/durable-tool-execution-and-background-jobs-v1",
+                  "plans/durable-tool-execution-and-background-jobs-v1-deferred-findings",
+                  "plans/durable-tool-execution-deferred-findings",
                   "reference/mob-architecture",
                   "reference/design-philosophy"
                 ]

@@ -10,6 +10,7 @@ use super::job_cancel_tool::ShellJobCancelTool;
 use super::job_manager::JobManager;
 use super::job_status_tool::ShellJobStatusTool;
 use super::jobs_list_tool::ShellJobsListTool;
+use super::monitor_tool::MonitorStartTool;
 use super::tool::ShellTool;
 use crate::builtin::BuiltinTool;
 
@@ -27,6 +28,8 @@ pub struct ShellToolSet {
     pub jobs_list: ShellJobsListTool,
     /// Tool for cancelling jobs
     pub job_cancel: ShellJobCancelTool,
+    /// High-trust durable script monitor tool.
+    pub monitor_start: MonitorStartTool,
     /// Shared job manager (for external access if needed)
     pub job_manager: Arc<JobManager>,
 }
@@ -39,10 +42,11 @@ impl ShellToolSet {
         let job_manager = Arc::new(JobManager::new(config.clone()));
 
         Self {
-            shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),
+            shell: ShellTool::with_job_manager(config.clone(), Arc::clone(&job_manager)),
             job_status: ShellJobStatusTool::new(Arc::clone(&job_manager)),
             jobs_list: ShellJobsListTool::new(Arc::clone(&job_manager)),
             job_cancel: ShellJobCancelTool::new(Arc::clone(&job_manager)),
+            monitor_start: MonitorStartTool::new(config, Arc::clone(&job_manager)),
             job_manager,
         }
     }
@@ -56,6 +60,7 @@ impl ShellToolSet {
             &self.job_status as &dyn BuiltinTool,
             &self.jobs_list as &dyn BuiltinTool,
             &self.job_cancel as &dyn BuiltinTool,
+            &self.monitor_start as &dyn BuiltinTool,
         ]
     }
 
@@ -73,6 +78,7 @@ You have access to tools for executing shell commands. Use these carefully and r
 - `shell_job_status` - Check the status of a background job
 - `shell_jobs` - List all background jobs
 - `shell_job_cancel` - Cancel a running background job
+- `monitor_start` - Start a high-trust durable script monitor with typed output frames
 
 ## Best Practices
 
@@ -83,8 +89,8 @@ You have access to tools for executing shell commands. Use these carefully and r
 - Check command exit codes in the response to verify success
 
 ### Background Jobs
-- Use `background: true` for long-running commands (builds, tests, downloads)
-- Background jobs continue running while you do other work
+- `background: true` requires a persistent realm job/blob runtime and commits a durable receipt before returning
+- The shell worker is explicitly non-resumable: job truth survives restart, but a lost worker becomes `worker_lost` instead of being replayed
 - Check `shell_job_status` to get results when done
 - Don't poll job status too frequently - wait at least 5-10 seconds between checks
 
@@ -125,6 +131,7 @@ mod tests {
         assert_eq!(tool_set.job_status.name(), "shell_job_status");
         assert_eq!(tool_set.jobs_list.name(), "shell_jobs");
         assert_eq!(tool_set.job_cancel.name(), "shell_job_cancel");
+        assert_eq!(tool_set.monitor_start.name(), "monitor_start");
 
         // Job manager should exist
         assert!(Arc::strong_count(&tool_set.job_manager) >= 1);
@@ -162,8 +169,8 @@ mod tests {
 
         // All job tools should share the same JobManager
         // We can verify this by checking the Arc reference count
-        // 5 references: tool_set.job_manager + shell + job_status + jobs_list + job_cancel
-        assert_eq!(Arc::strong_count(&tool_set.job_manager), 5);
+        // 6 references: tool_set.job_manager + shell + monitor + three job tools
+        assert_eq!(Arc::strong_count(&tool_set.job_manager), 6);
     }
 
     // ==================== ShellToolSet::tools Tests ====================
@@ -175,8 +182,8 @@ mod tests {
 
         let tools = tool_set.tools();
 
-        // Should have all 4 tools
-        assert_eq!(tools.len(), 4);
+        // Should have all 5 tools
+        assert_eq!(tools.len(), 5);
 
         // Verify tool names
         let names: Vec<_> = tools.iter().map(|t| t.name()).collect();
@@ -184,6 +191,7 @@ mod tests {
         assert!(names.contains(&"shell_job_status"));
         assert!(names.contains(&"shell_jobs"));
         assert!(names.contains(&"shell_job_cancel"));
+        assert!(names.contains(&"monitor_start"));
     }
 
     #[test]
@@ -209,10 +217,20 @@ mod tests {
 
         let tools = tool_set.tools();
 
-        // Order should be: shell, job_status, jobs_list, job_cancel
+        // Order should keep compatibility tools first, followed by monitor.
         assert_eq!(tools[0].name(), "shell");
         assert_eq!(tools[1].name(), "shell_job_status");
         assert_eq!(tools[2].name(), "shell_jobs");
         assert_eq!(tools[3].name(), "shell_job_cancel");
+        assert_eq!(tools[4].name(), "monitor_start");
+    }
+
+    #[test]
+    fn background_usage_instructions_state_durable_non_resumable_contract() {
+        let instructions = ShellToolSet::usage_instructions();
+
+        assert!(instructions.contains("persistent realm job/blob runtime"));
+        assert!(instructions.contains("explicitly non-resumable"));
+        assert!(instructions.contains("worker_lost"));
     }
 }

@@ -38,10 +38,12 @@ fn assert_construction_is_cached(
 fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::approval_lifecycle::ApprovalLifecycleMachineState;
     use dsl::auth_machine::AuthMachineState;
+    use dsl::detached_job::DetachedJobMachineState;
     use dsl::meerkat_machine::MeerkatMachineState;
     use dsl::mob_host_binding_authority::MobHostBindingAuthorityState;
     use dsl::mob_machine::MobMachineState;
     use dsl::occurrence_lifecycle::OccurrenceLifecycleMachineState;
+    use dsl::runtime_delivery::RuntimeDeliveryMachineState;
     use dsl::schedule_lifecycle::ScheduleLifecycleMachineState;
     use dsl::session_document::SessionDocumentMachineState;
     use dsl::session_persistence_version_authority::SessionPersistenceVersionAuthorityMachineState;
@@ -63,6 +65,11 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         ApprovalLifecycleMachineState::schema_static,
         "ApprovalLifecycleMachine",
+    );
+    assert_construction_is_cached(DetachedJobMachineState::schema_static, "DetachedJobMachine");
+    assert_construction_is_cached(
+        RuntimeDeliveryMachineState::schema_static,
+        "RuntimeDeliveryMachine",
     );
     assert_construction_is_cached(
         SessionDocumentMachineState::schema_static,

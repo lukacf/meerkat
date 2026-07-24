@@ -137,6 +137,7 @@ pub struct RealmPaths {
     pub sessions_sqlite_path: PathBuf,
     pub sessions_jsonl_dir: PathBuf,
     pub runtime_sqlite_path: PathBuf,
+    pub jobs_sqlite_path: PathBuf,
 }
 
 pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
@@ -315,6 +316,7 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
         sessions_sqlite_path: root.join("sessions.sqlite3"),
         sessions_jsonl_dir: root.join("sessions_jsonl"),
         runtime_sqlite_path: root.join("runtime.sqlite3"),
+        jobs_sqlite_path: root.join("jobs.sqlite3"),
         root,
     }
 }
@@ -2047,6 +2049,15 @@ mod tests {
         assert_eq!(
             source.config_doc_path(&team),
             realm_paths_in(Path::new("/state/realms"), "team").config_path,
+        );
+    }
+
+    #[test]
+    fn realm_paths_own_the_canonical_jobs_database() {
+        let paths = realm_paths_in(Path::new("/state/realms"), "team");
+        assert_eq!(
+            paths.jobs_sqlite_path,
+            PathBuf::from("/state/realms/team/jobs.sqlite3")
         );
     }
 

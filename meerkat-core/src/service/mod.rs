@@ -1472,6 +1472,21 @@ pub struct StageToolResultsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageToolResultsResult {
     pub accepted_result_count: usize,
+    /// Durable ingress disposition. `AlreadyStaged` remains runnable: it means
+    /// a prior attempt committed the callback payload but may have crashed
+    /// before starting the pending continuation. Only `AlreadyApplied` proves
+    /// that continuation effects were committed.
+    pub disposition: StageToolResultsDisposition,
+}
+
+/// Durable outcome of callback-result ingress.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StageToolResultsDisposition {
+    Staged,
+    AlreadyStaged,
+    AlreadyApplied,
 }
 
 /// Outcome of an append-system-context request.

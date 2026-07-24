@@ -1,0 +1,42 @@
+[package]
+name = "meerkat-jobs"
+description = "Generated-authority durable detached jobs for Meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+meerkat-core = { workspace = true }
+meerkat-machine-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-sqlite = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
+machine-schema-exports = []
+
+[lints]
+workspace = true

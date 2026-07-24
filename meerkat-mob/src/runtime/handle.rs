@@ -875,6 +875,8 @@ impl MobMemberSnapshot {
                     },
                 }
             }),
+            activity: None,
+            detached_jobs: None,
             // Placement (phase 7, ADJ-P7-2): the `member_placement` machine
             // fact, attached to the snapshot by the status projection.
             placement: self
@@ -1686,7 +1688,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::StorageError(_) => mob_dsl::MobSpawnManyFailureObservationKind::StorageError,
         MobError::SessionError(_) => mob_dsl::MobSpawnManyFailureObservationKind::SessionError,
         MobError::CommsError(_) => mob_dsl::MobSpawnManyFailureObservationKind::CommsError,
-        MobError::CallbackPending { .. } => {
+        MobError::CallbackPending { .. } | MobError::CallbackBatchPending { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::CallbackPending
         }
         MobError::StaleFenceToken { .. } | MobError::StaleMemberOperatorAuthority { .. } => {

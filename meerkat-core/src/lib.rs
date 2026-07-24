@@ -80,6 +80,7 @@ pub mod storage_layout;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
+pub mod tool_execution;
 pub mod tool_execution_policy;
 pub mod tool_scope;
 pub mod turn_boundary;
@@ -97,6 +98,7 @@ pub use agent::{
     CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
     FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError,
     StickyModelFallbackActivationProof, SystemContextStateError, ToolDispatchContext,
+    dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
     select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
@@ -310,10 +312,11 @@ pub use service::{
     SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
     SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
-    SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
-    StageToolResultsResult, StartTurnRequest, TranscriptEditError, TranscriptEditRunningBehavior,
-    TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
+    SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TranscriptEditError,
+    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteCommit,
+    TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptRewriteSemantic,
+    TurnToolOverlay,
 };
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
@@ -361,6 +364,16 @@ pub use tool_catalog::{
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
     ToolUnavailableReason, deferred_session_entry_count, deferred_session_schema_volume,
     select_catalog_mode_from_snapshot,
+};
+pub use tool_execution::{
+    DeadlineChainError, DeadlineChainExtensionError, DetachedToolExecutionPolicy,
+    EphemeralToolBindingFingerprint, IdempotencyScope, ResolvedExecutionKind,
+    ResolvedToolExecutionPlan, RestartClass, RunnerIdentity, StreamingToolExecutionPolicy,
+    ToolCredentialContextRef, ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+    ToolExecutionApplicability, ToolExecutionContract, ToolExecutionContractError,
+    ToolExecutionDeclarationError, ToolExecutionMode, ToolExecutionOwnerWitness,
+    ToolExecutionResolutionContext, ToolExecutionResolutionError, ToolOutputPolicy,
+    ToolProgressPolicy, ephemeral_tool_catalog_binding_fingerprint,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolExecutionPolicy, ToolExecutionPolicyError,

@@ -11,6 +11,7 @@ mod event;
 mod help;
 mod host;
 mod image_generation;
+pub mod jobs;
 mod live;
 mod mcp_live;
 mod mob;
@@ -103,6 +104,7 @@ pub use image_generation::{
     WireScopedModelOverride, WireSessionModelRoutingStatus, WireSwitchTurnControlResult,
     WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
+pub use jobs::*;
 pub use live::{
     LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams,
     LiveCommitInputResult, LiveCommitInputStatus, LiveInputChunkWire, LiveInterruptResult,

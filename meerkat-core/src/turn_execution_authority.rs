@@ -219,7 +219,9 @@ impl TurnFailureSourceKind {
             AgentError::StickyModelFallbackAuthorityUnknown { .. } => Self::InternalError,
             AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
-            AgentError::CallbackPending { .. } => Self::CallbackPending,
+            AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
+                Self::CallbackPending
+            }
             AgentError::StructuredOutputValidationFailed { .. } => {
                 Self::StructuredOutputValidationFailed
             }

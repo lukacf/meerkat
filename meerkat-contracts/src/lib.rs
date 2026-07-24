@@ -46,8 +46,10 @@ pub use rpc_catalog::{
 };
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
+pub use wire::CallbackToolDefinition;
 #[cfg(not(target_arch = "wasm32"))]
 pub use wire::ConfigWriteResult;
+pub use wire::jobs::*;
 pub use wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,

@@ -493,6 +493,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `CancelOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
 - `AbortOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
+- `RollbackUnreturnedOp`(operation_id: String)
 - `PeerReadyOp`(operation_id: String)
 - `ProgressReportedOp`(operation_id: String)
 - `RetireRequestedOp`(operation_id: String)
@@ -699,6 +700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordBoundarySequence`
 - `SubmitOpEvent`(operation_id: String)
 - `NotifyOpWatcher`(operation_id: String)
+- `UnreturnedOpRolledBack`(operation_id: String)
 - `ExposeOperationPeer`(operation_id: String)
 - `RetainTerminalRecord`(operation_id: String)
 - `DiscardRecoveredOperationRecord`(operation_id: String)
@@ -10949,6 +10951,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_registered`
   - `from_status_valid`
 - Emits: `SubmitOpEvent`
+- To: `Stopped`
+
+### `RollbackUnreturnedOpIdle`
+- From: `Idle`
+- On: `RollbackUnreturnedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `from_status_valid`
+- Emits: `UnreturnedOpRolledBack`
+- To: `Idle`
+
+### `RollbackUnreturnedOpAttached`
+- From: `Attached`
+- On: `RollbackUnreturnedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `from_status_valid`
+- Emits: `UnreturnedOpRolledBack`
+- To: `Attached`
+
+### `RollbackUnreturnedOpRunning`
+- From: `Running`
+- On: `RollbackUnreturnedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `from_status_valid`
+- Emits: `UnreturnedOpRolledBack`
+- To: `Running`
+
+### `RollbackUnreturnedOpRetired`
+- From: `Retired`
+- On: `RollbackUnreturnedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `from_status_valid`
+- Emits: `UnreturnedOpRolledBack`
+- To: `Retired`
+
+### `RollbackUnreturnedOpStopped`
+- From: `Stopped`
+- On: `RollbackUnreturnedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `from_status_valid`
+- Emits: `UnreturnedOpRolledBack`
 - To: `Stopped`
 
 ### `CompleteOpIdle`

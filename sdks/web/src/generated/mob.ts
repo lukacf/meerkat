@@ -115,9 +115,11 @@ export interface MobEventsResult {
   events: unknown[];
 }
 
+export type WireHandlingMode = "queue" | "steer";
+
 export interface MobMemberSendResult {
   agent_identity: string;
-  handling_mode: "queue" | "steer";
+  handling_mode: WireHandlingMode;
   member_ref: WireMemberRef;
   mob_id: string;
 }
@@ -148,9 +150,11 @@ export interface WireResolvedModelCapabilities {
 }
 
 export interface MobMemberStatusResult {
+  activity?: Record<string, unknown> | null;
   comms_reachability?: WireReachability | null;
   control_reachability?: WireReachability | null;
   current_session_id?: string | null;
+  detached_jobs?: Record<string, unknown> | null;
   error?: string | null;
   external_member?: unknown;
   freshness_reason?: string | null;

@@ -113,8 +113,12 @@ pub(crate) enum InteractionTerminalCandidate {
     },
     CompletedWithoutResult,
     CallbackPending {
+        tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+    },
+    CallbackBatchPending {
+        pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
     },
     /// The runtime executor observed that the agent's generated turn machine
     /// had already reached a typed hard-failure terminal.  The metadata is
@@ -137,10 +141,20 @@ impl InteractionTerminalCandidate {
         match self {
             Self::RunResult { result } => Some(CoreApplyTerminal::RunResult(result.clone())),
             Self::CompletedWithoutResult => Some(CoreApplyTerminal::NoPendingBoundary),
-            Self::CallbackPending { tool_name, args } => Some(CoreApplyTerminal::CallbackPending {
+            Self::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
             }),
+            Self::CallbackBatchPending { pending_tool_calls } => {
+                Some(CoreApplyTerminal::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
+                })
+            }
             Self::MachineTerminalFailure { error } => {
                 Some(CoreApplyTerminal::MachineTerminalFailure {
                     error: error.clone(),
@@ -156,7 +170,9 @@ impl InteractionTerminalCandidate {
         use crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation;
         match self {
             Self::RunResult { .. } => RuntimeCompletionTerminalObservation::RunResult,
-            Self::CallbackPending { .. } => RuntimeCompletionTerminalObservation::CallbackPending,
+            Self::CallbackPending { .. } | Self::CallbackBatchPending { .. } => {
+                RuntimeCompletionTerminalObservation::CallbackPending
+            }
             Self::RuntimeTerminated { .. } => {
                 RuntimeCompletionTerminalObservation::RuntimeTerminated
             }
@@ -293,11 +309,15 @@ pub(crate) fn interaction_terminal_event_for_id(
             structured_output: structured_output.clone(),
         }),
         AgentEvent::InteractionCallbackPending {
-            tool_name, args, ..
+            tool_name,
+            args,
+            pending_tool_calls,
+            ..
         } => Some(AgentEvent::InteractionCallbackPending {
             interaction_id,
             tool_name: tool_name.clone(),
             args: args.clone(),
+            pending_tool_calls: pending_tool_calls.clone(),
         }),
         AgentEvent::InteractionFailed { reason, .. } => Some(AgentEvent::InteractionFailed {
             interaction_id,
@@ -545,6 +565,7 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
             ) | (
                 InteractionTerminalCandidate::CompletedWithoutResult
                     | InteractionTerminalCandidate::CallbackPending { .. }
+                    | InteractionTerminalCandidate::CallbackBatchPending { .. }
                     | InteractionTerminalCandidate::MachineTerminalFailure { .. },
                 AgentEvent::InteractionFailed {
                     reason: InteractionFailureReason::Abandoned { .. },
@@ -592,13 +613,34 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
             },
         ) => result.is_empty() && structured_output.is_none(),
         (
-            InteractionTerminalCandidate::CallbackPending { tool_name, args },
+            InteractionTerminalCandidate::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            },
             AgentEvent::InteractionCallbackPending {
                 tool_name: event_tool,
                 args: event_args,
+                pending_tool_calls,
                 ..
             },
-        ) => tool_name == event_tool && args == event_args,
+        ) => {
+            tool_name == event_tool
+                && args == event_args
+                && pending_tool_calls.as_slice()
+                    == [meerkat_core::error::PendingCallbackToolCall {
+                        tool_use_id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
+                    }]
+        }
+        (
+            InteractionTerminalCandidate::CallbackBatchPending { pending_tool_calls },
+            AgentEvent::InteractionCallbackPending {
+                pending_tool_calls: event_pending,
+                ..
+            },
+        ) => pending_tool_calls == event_pending,
         (
             InteractionTerminalCandidate::MachineTerminalFailure { error },
             AgentEvent::InteractionFailed {
@@ -1320,6 +1362,31 @@ mod tests {
             InputTerminalOutcome::Abandoned {
                 reason: InputAbandonReason::Retired,
             }
+        ));
+    }
+
+    #[test]
+    fn callback_batch_candidate_accepts_abandoned_projection_on_finalization_failure() {
+        let interaction_id = InteractionId(uuid::Uuid::new_v4());
+        let candidate = InteractionTerminalCandidate::CallbackBatchPending {
+            pending_tool_calls: vec![meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "external".to_string(),
+                args: serde_json::json!({"value": 1}),
+            }],
+        };
+        let event = AgentEvent::InteractionFailed {
+            interaction_id,
+            reason: meerkat_core::event::InteractionFailureReason::abandoned(
+                "terminal publication failed",
+            ),
+        };
+
+        assert!(interaction_terminal_candidate_matches_event(
+            &candidate,
+            interaction_id,
+            &event,
+            true,
         ));
     }
 

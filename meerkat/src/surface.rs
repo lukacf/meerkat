@@ -420,6 +420,7 @@ pub struct RuntimeHostSurfaceOptions {
     pub schedules: bool,
     pub skills: bool,
     pub approvals: bool,
+    pub durable_jobs: bool,
     pub rpc_transport: Option<String>,
     pub rest_base_url: Option<String>,
     pub rpc_methods: Vec<String>,
@@ -473,6 +474,7 @@ impl RuntimeHostSurfaceOptions {
             schedules: false,
             skills: false,
             approvals: false,
+            durable_jobs: false,
             rpc_transport: None,
             rest_base_url: None,
             rpc_methods: Vec::new(),
@@ -552,6 +554,7 @@ pub fn build_runtime_host_capabilities(
             // than an alias for generic mob availability. This keeps the
             // projection honest in compositions that ship local mobs only.
             multi_host_mobs: options.multi_host_mobs,
+            durable_jobs: options.durable_jobs,
         },
     }
 }

@@ -440,6 +440,19 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         id: &OperationId,
         reason: Option<String>,
     ) -> Result<(), OpsLifecycleError>;
+    /// Reconcile an operation whose submission future ended before returning
+    /// its public handle.
+    ///
+    /// This is not a public cancellation or completion. Implementations must
+    /// remove the never-returned operation without minting a terminal outcome,
+    /// completion sequence, watcher notification, or completion-feed entry.
+    /// Callers may invoke it only after external execution containment is
+    /// proven.
+    fn rollback_unreturned_operation(&self, _id: &OperationId) -> Result<(), OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "rollback_unreturned_operation".into(),
+        ))
+    }
     fn cancel_operation(
         &self,
         id: &OperationId,

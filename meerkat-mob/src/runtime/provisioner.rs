@@ -2584,13 +2584,22 @@ fn runtime_completion_to_mob_result(
     match completion {
         meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
-        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
-            Err(MobError::CallbackPending {
-                session_id: session_id.clone(),
-                tool_name,
-                args,
-            })
-        }
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+            tool_use_id,
+            tool_name,
+            args,
+        } => Err(MobError::CallbackPending {
+            session_id: session_id.clone(),
+            tool_use_id,
+            tool_name,
+            args,
+        }),
+        meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls,
+        } => Err(MobError::CallbackBatchPending {
+            session_id: session_id.clone(),
+            pending_tool_calls,
+        }),
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(MobError::Internal("turn cancelled".to_string()))
         }
@@ -2635,9 +2644,10 @@ fn deferred_turn_outcome_from_completion(
             meerkat_runtime::completion::CompletionOutcome::Completed(_)
             | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult,
         ) => DeferredTurnEventOutcome::Succeeded,
-        Ok(meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }) => {
-            DeferredTurnEventOutcome::CallbackPending
-        }
+        Ok(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }
+            | meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending { .. },
+        ) => DeferredTurnEventOutcome::CallbackPending,
         Ok(
             meerkat_runtime::completion::CompletionOutcome::Cancelled
             | meerkat_runtime::completion::CompletionOutcome::Abandoned { .. }
@@ -2654,12 +2664,20 @@ fn deferred_turn_outcome_from_completion(
 fn session_turn_error_to_mob_error(bridge_session_id: &SessionId, error: SessionError) -> MobError {
     match error {
         SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+            tool_use_id,
             tool_name,
             args,
         }) => MobError::CallbackPending {
             session_id: bridge_session_id.clone(),
+            tool_use_id,
             tool_name,
             args,
+        },
+        SessionError::Agent(meerkat_core::error::AgentError::CallbackBatchPending {
+            pending_tool_calls,
+        }) => MobError::CallbackBatchPending {
+            session_id: bridge_session_id.clone(),
+            pending_tool_calls,
         },
         other => other.into(),
     }
@@ -4984,6 +5002,7 @@ mod tests {
             &session_id,
             Ok(
                 meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                    tool_use_id: "call-1".to_string(),
                     tool_name: "external_mock".to_string(),
                     args: json!({ "value": "browser" }),
                 },
@@ -4994,10 +5013,12 @@ mod tests {
         match err {
             MobError::CallbackPending {
                 session_id: actual_session_id,
+                tool_use_id,
                 tool_name,
                 args,
             } => {
                 assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "external_mock");
                 assert_eq!(args, json!({ "value": "browser" }));
             }
@@ -5033,6 +5054,7 @@ mod tests {
         let err = session_turn_error_to_mob_error(
             &session_id,
             SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+                tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
             }),
@@ -5041,14 +5063,50 @@ mod tests {
         match err {
             MobError::CallbackPending {
                 session_id: actual_session_id,
+                tool_use_id,
                 tool_name,
                 args,
             } => {
                 assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "external_mock");
                 assert_eq!(args, json!({ "value": "browser" }));
             }
             other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_session_callback_batch_preserves_complete_pending_set() {
+        let session_id = SessionId::new();
+        let calls = vec![
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "callback-a".to_string(),
+                tool_name: "ask_a".to_string(),
+                args: json!({"tool_use_id": "callback-a"}),
+            },
+            meerkat_core::error::PendingCallbackToolCall {
+                tool_use_id: "callback-b".to_string(),
+                tool_name: "ask_b".to_string(),
+                args: json!({"tool_use_id": "callback-b"}),
+            },
+        ];
+        let err = session_turn_error_to_mob_error(
+            &session_id,
+            SessionError::Agent(meerkat_core::error::AgentError::CallbackBatchPending {
+                pending_tool_calls: calls.clone(),
+            }),
+        );
+
+        match err {
+            MobError::CallbackBatchPending {
+                session_id: actual_session_id,
+                pending_tool_calls,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(pending_tool_calls, calls);
+            }
+            other => panic!("expected callback-batch mob error, got {other:?}"),
         }
     }
 
@@ -5340,6 +5398,7 @@ mod tests {
                 interaction_id,
                 tool_name: "external".to_string(),
                 args: json!({"value": 1}),
+                pending_tool_calls: Vec::new(),
             },
             DeferredTurnEventOutcome::CallbackPending,
         )

@@ -15,6 +15,7 @@
 //! - [`ShellTool`] - Built-in tool for shell command execution
 //! - [`ShellOutput`] - Output from shell command execution
 //! - [`JobManager`] - Manager for background job execution
+//! - [`CancelJobDisposition`] - Request versus terminal cancellation acknowledgement
 //! - [`ShellJobStatusTool`] - Tool to check background job status
 //! - [`ShellJobsListTool`] - Tool to list all background jobs
 //! - [`ShellJobCancelTool`] - Tool to cancel a background job
@@ -25,6 +26,9 @@ mod job_cancel_tool;
 mod job_manager;
 mod job_status_tool;
 mod jobs_list_tool;
+mod monitor_protocol;
+mod monitor_tool;
+mod process_lifecycle;
 mod security;
 mod tool;
 mod tool_set;
@@ -32,9 +36,17 @@ mod types;
 
 pub use config::{ShellConfig, ShellError};
 pub use job_cancel_tool::ShellJobCancelTool;
-pub use job_manager::JobManager;
+pub use job_manager::{
+    CancelJobDisposition, DurableShellJobRuntime, JobManager, MonitorStartOptions,
+    ShellJobDeliveryProjector,
+};
 pub use job_status_tool::ShellJobStatusTool;
 pub use jobs_list_tool::ShellJobsListTool;
+pub use monitor_protocol::{
+    MonitorAction, MonitorLineOutcome, MonitorOutputProtocol, MonitorProtocolDecoder,
+    MonitorProtocolError, MonitorProtocolHealth, MonitorProtocolLimits, MonitorSuppressionReason,
+};
+pub use monitor_tool::MonitorStartTool;
 pub use security::{CommandInvocation, SecurityEngine, SecurityMode};
 pub use tool::{ShellOutput, ShellTool};
 pub use tool_set::ShellToolSet;

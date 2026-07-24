@@ -228,6 +228,78 @@ pub struct SessionDelta {
     pub session_snapshot: Vec<u8>,
 }
 
+/// Opaque generated runtime-delivery authority persisted by a
+/// [`RuntimeStore`].
+///
+/// Stores compare the mechanical revision and retain the bytes exactly. They
+/// do not interpret delivery lifecycle, sequence assignment, or cursor
+/// semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDeliveryAuthorityRecord {
+    revision: u64,
+    state_json: Vec<u8>,
+}
+
+impl RuntimeDeliveryAuthorityRecord {
+    #[doc(hidden)]
+    pub fn from_parts(revision: u64, state_json: Vec<u8>) -> Self {
+        Self {
+            revision,
+            state_json,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn state_json(&self) -> &[u8] {
+        &self.state_json
+    }
+}
+
+/// Opaque runtime-inbox row committed alongside generated delivery authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDeliveryStoreRecord {
+    delivery_id: String,
+    sequence: u64,
+    submission_json: Vec<u8>,
+}
+
+impl RuntimeDeliveryStoreRecord {
+    #[doc(hidden)]
+    pub fn from_parts(
+        delivery_id: impl Into<String>,
+        sequence: u64,
+        submission_json: Vec<u8>,
+    ) -> Self {
+        Self {
+            delivery_id: delivery_id.into(),
+            sequence,
+            submission_json,
+        }
+    }
+
+    pub fn delivery_id(&self) -> &str {
+        &self.delivery_id
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn submission_json(&self) -> &[u8] {
+        &self.submission_json
+    }
+}
+
+/// Mechanical compare-and-swap result for runtime-delivery authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeDeliveryAuthorityCasOutcome {
+    Applied(RuntimeDeliveryAuthorityRecord),
+    Conflict(Option<RuntimeDeliveryAuthorityRecord>),
+}
+
 fn validated_compaction_projection_intents(
     session: &meerkat_core::Session,
 ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
@@ -2386,6 +2458,66 @@ pub trait RuntimeStore: Send + Sync {
     /// handles for the same durable store.
     fn auth_authority_key(&self) -> Option<String> {
         None
+    }
+
+    /// Load the exact generated runtime-delivery authority record.
+    async fn load_runtime_delivery_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeDeliveryAuthorityRecord>, RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "load_runtime_delivery_authority".into(),
+        ))
+    }
+
+    /// Load one durable runtime-delivery inbox row by stable identity.
+    async fn load_runtime_delivery_record(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+        let _ = (runtime_id, delivery_id);
+        Err(RuntimeStoreError::Unsupported(
+            "load_runtime_delivery_record".into(),
+        ))
+    }
+
+    /// Compare-and-swap generated delivery authority and optionally insert one
+    /// inbox row in the same atomic boundary.
+    ///
+    /// `expected_revision = None` means the authority row must be absent.
+    /// Stores enforce only exact CAS, row uniqueness, and atomicity; the
+    /// generated machine decides sequence allocation and application order.
+    async fn compare_and_swap_runtime_delivery_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
+    ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
+        let _ = (
+            runtime_id,
+            expected_revision,
+            replacement,
+            inserted_delivery,
+        );
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_runtime_delivery_authority".into(),
+        ))
+    }
+
+    /// List durable inbox rows in generated sequence order.
+    async fn list_runtime_delivery_records(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+        let _ = (runtime_id, after_sequence, limit);
+        Err(RuntimeStoreError::Unsupported(
+            "list_runtime_delivery_records".into(),
+        ))
     }
 
     /// Persist the runtime-owned OAuth login-flow payload snapshot.

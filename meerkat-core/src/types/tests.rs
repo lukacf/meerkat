@@ -663,6 +663,22 @@ fn test_tool_def_serialization() {
     assert_eq!(parsed.description, "A test tool");
     assert_eq!(parsed.input_schema["type"], "object");
     assert_eq!(parsed.input_schema["required"], json!(["arg1"]));
+
+    let value = serde_json::to_value(&tool_def).unwrap();
+    let keys = value
+        .as_object()
+        .expect("ToolDef must serialize as an object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        ["description", "input_schema", "name"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "internal execution metadata must never enter provider-facing ToolDef"
+    );
 }
 
 #[test]

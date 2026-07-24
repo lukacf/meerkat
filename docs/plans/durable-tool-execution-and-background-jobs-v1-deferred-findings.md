@@ -6,12 +6,15 @@ not be absorbed into current work without re-triage.
 
 ## Open
 
-- Phase 2B: define the SQLite serialization envelope for job specifications,
-  generated machine state, typed results, and outbox entries; add pending-outbox
-  enumeration and prove it through the shared store-conformance suite.
 - Phase 3A/3B: runner-owned progress/artifact reporting must add typed artifact
   references without turning the store or worker shell into lifecycle
   authority.
+- Storage-provider follow-up: the shared doctor inventories higher-owned
+  schema domains such as `jobs`, `runtime-store`, and `workgraph`, but cannot
+  certify their supported versions without inverting crate ownership. Normal
+  store open and `storage migrate --apply` still refuse future versions typed;
+  a future provider-aware certification registry should close the read-only
+  doctor gap for all higher-owned domains together.
 
 ## Resolved in scope
 
@@ -37,3 +40,12 @@ not be absorbed into current work without re-triage.
   keys could alias malformed or cross-realm identities. Revision exhaustion
   now fails closed; realm identities and realm-scoped deduplication are
   validated.
+- Phase 2B: the SQLite store now uses a versioned typed serialization envelope
+  for job specifications, generated authority state, typed terminal results,
+  and outbox entries. Pending outbox enumeration and exact reopen recovery are
+  pinned by the SQLite store-conformance suite.
+- Phase 2B: SQLite revision storage originally used SQLite's signed integer
+  range for a `u64` domain, flattened shared SQLite error classification, and
+  bypassed the shared TEXT/BLOB JSON codec. Revisions now use an eight-byte
+  big-endian CAS token, SQLite errors stay typed, both JSON storage classes are
+  accepted, and memory/SQLite share pending-outbox acknowledgement conformance.

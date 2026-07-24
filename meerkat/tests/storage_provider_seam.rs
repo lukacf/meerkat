@@ -39,6 +39,11 @@ async fn disk_provider_composes_a_working_sqlite_realm() {
         bundle.event_projection().is_some(),
         "disk realms get event projection"
     );
+    assert!(
+        tmp.path().join("team").join("jobs.sqlite3").is_file(),
+        "the provider must materialize the canonical jobs database"
+    );
+    let _job_store = bundle.job_store();
     // The session store round-trips through the composed bundle.
     let session = meerkat_core::Session::new();
     bundle
@@ -80,6 +85,7 @@ fn memory_store_set() -> RealmStoreSet {
         runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
         schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
         workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+        job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
         blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
         artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
         store_path: std::path::PathBuf::from("."),
@@ -89,6 +95,7 @@ fn memory_store_set() -> RealmStoreSet {
             "runtime",
             "schedule",
             "workgraph",
+            "jobs",
             "blobs",
             "artifacts",
         ]
@@ -259,13 +266,19 @@ impl RealmStorageProvider for UndeclaredEphemeralProvider {
         // Complete declarations for every slot — but blobs resolves
         // non-persistent WITHOUT a declaration: the exact silent-fallback
         // class the rule refuses.
-        let mut durability: Vec<DurabilityDeclaration> =
-            ["sessions", "runtime", "schedule", "workgraph", "artifacts"]
-                .iter()
-                .map(|domain| {
-                    DurabilityDeclaration::durable(domain, DurabilityResolution::DeclaredEphemeral)
-                })
-                .collect();
+        let mut durability: Vec<DurabilityDeclaration> = [
+            "sessions",
+            "runtime",
+            "schedule",
+            "workgraph",
+            "jobs",
+            "artifacts",
+        ]
+        .iter()
+        .map(|domain| {
+            DurabilityDeclaration::durable(domain, DurabilityResolution::DeclaredEphemeral)
+        })
+        .collect();
         durability.push(DurabilityDeclaration::durable(
             "blobs",
             DurabilityResolution::NonPersistent,
@@ -275,6 +288,7 @@ impl RealmStorageProvider for UndeclaredEphemeralProvider {
             runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
             schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
             workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+            job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             store_path: std::path::PathBuf::from("."),
@@ -318,6 +332,7 @@ fn omitted_durability_declarations_are_refused() {
         runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
         schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
         workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+        job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
         blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
         artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
         store_path: std::path::PathBuf::from("."),
@@ -330,6 +345,19 @@ fn omitted_durability_declarations_are_refused() {
         matches!(err, PersistenceError::DurabilityViolation { .. }),
         "{err}"
     );
+}
+
+#[test]
+fn jobs_durability_declaration_is_required_fail_closed() {
+    let mut set = memory_store_set();
+    set.durability
+        .retain(|declaration| declaration.domain != "jobs");
+    let err = enforce_fail_closed_durability(&set, &[])
+        .expect_err("an external provider cannot omit the jobs durability slot");
+    assert!(matches!(
+        err,
+        PersistenceError::DurabilityViolation { domain } if domain.starts_with("jobs ")
+    ));
 }
 
 #[test]
@@ -350,6 +378,7 @@ fn manifest_ephemeral_declaration_admits_the_slot() {
         runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
         schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
         workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+        job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
         blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
         artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
         store_path: std::path::PathBuf::from("."),
@@ -359,7 +388,14 @@ fn manifest_ephemeral_declaration_admits_the_slot() {
                 "blobs",
                 DurabilityResolution::NonPersistent,
             )];
-            for domain in ["sessions", "runtime", "schedule", "workgraph", "artifacts"] {
+            for domain in [
+                "sessions",
+                "runtime",
+                "schedule",
+                "workgraph",
+                "jobs",
+                "artifacts",
+            ] {
                 declarations.push(DurabilityDeclaration::durable(
                     domain,
                     DurabilityResolution::DeclaredEphemeral,
@@ -401,6 +437,7 @@ impl RealmStorageProvider for FakeRemoteProvider {
             runtime_store: Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
             schedule_store: Arc::new(meerkat_schedule::MemoryScheduleStore::new()),
             workgraph_store: Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+            job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             blob_store: Arc::new(meerkat_store::MemoryBlobStore::new()),
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             store_path: std::path::PathBuf::from("."),
@@ -410,6 +447,7 @@ impl RealmStorageProvider for FakeRemoteProvider {
                 "runtime",
                 "schedule",
                 "workgraph",
+                "jobs",
                 "blobs",
                 "artifacts",
             ]

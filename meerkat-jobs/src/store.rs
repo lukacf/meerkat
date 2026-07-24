@@ -42,6 +42,11 @@ pub trait DetachedJobStore: Send + Sync {
         expected_revision: u64,
         replacement: StoredJob,
     ) -> Result<StoredJob, DetachedJobError>;
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<JobOutboxEntry>, DetachedJobError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,15 +192,33 @@ impl DetachedJobStore for MemoryDetachedJobStore {
             .insert(replacement.job_id.clone(), replacement.clone());
         Ok(replacement)
     }
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<JobOutboxEntry>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let guard = self.inner.read().await;
+        Ok(guard
+            .jobs
+            .values()
+            .flat_map(|job| job.outbox.iter())
+            .filter(|entry| !entry.applied)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
 }
 
-fn next_revision(current: u64) -> Result<u64, DetachedJobError> {
+pub(crate) fn next_revision(current: u64) -> Result<u64, DetachedJobError> {
     current.checked_add(1).ok_or_else(|| {
         DetachedJobError::Store("detached job revision exhausted u64 authority".into())
     })
 }
 
-fn validate_stored_job(job: &StoredJob) -> Result<(), DetachedJobError> {
+pub(crate) fn validate_stored_job(job: &StoredJob) -> Result<(), DetachedJobError> {
     let state = &job.machine_state;
     if state.job_id != job.job_id.as_str() {
         return Err(DetachedJobError::Store(format!(

@@ -18,12 +18,17 @@ chrono = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 uuid = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-sqlite = { workspace = true }
+rusqlite = { workspace = true }
+
 [dev-dependencies]
-serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]

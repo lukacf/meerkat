@@ -225,8 +225,8 @@ owns.
 Every store slot a realm composes carries a machine-readable durability
 class (`durable` / `rebuildable_cache` / `scratch`) and its resolution.
 Declarations are complete by construction: a storage provider must declare
-exactly one class for each of the six domains (`sessions`, `runtime`,
-`schedule`, `workgraph`, `blobs`, `artifacts`), so no slot dodges the rule
+exactly one class for each of the seven domains (`sessions`, `runtime`,
+`schedule`, `workgraph`, `jobs`, `blobs`, `artifacts`), so no slot dodges the rule
 by omission. A durable slot resolving to a non-persistent store without the
 realm manifest declaring that domain ephemeral is a startup error — never a
 silent in-memory fallback. Deployment tooling can rely on the classes (for

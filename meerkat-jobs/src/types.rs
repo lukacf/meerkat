@@ -260,7 +260,7 @@ impl JobSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptClaim {
     pub worker_id: WorkerId,
     pub claimed_at_ms: u64,
@@ -284,7 +284,7 @@ impl AttemptClaim {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptClaimReceipt {
     pub attempt_id: AttemptId,
     pub attempt_count: u64,
@@ -293,7 +293,7 @@ pub struct AttemptClaimReceipt {
     pub resume_checkpoint: Option<CheckpointRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptWriteAuthority {
     pub attempt_id: AttemptId,
     pub fence: FenceToken,
@@ -308,7 +308,7 @@ impl From<&AttemptClaimReceipt> for AttemptWriteAuthority {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobProgress {
     pub cursor: u64,
     pub detail: String,
@@ -344,7 +344,7 @@ pub struct JobOutboxEntry {
     pub applied: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobTerminalResult {
     Succeeded {
         result_ref: Option<JobResultRef>,

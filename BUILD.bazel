@@ -434,6 +434,7 @@ test_suite(
         "//meerkat-jobs:machine_contract_test",
         "//meerkat-jobs:meerkat_jobs_unit_test",
         "//meerkat-jobs:recovery_fencing_test",
+        "//meerkat-jobs:sqlite_store_conformance_test",
         "//meerkat-jobs:store_contract_test",
         "//meerkat-jobs:terminal_outbox_test",
         "//meerkat-live:meerkat_live_unit_test",

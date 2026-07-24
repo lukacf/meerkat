@@ -22,6 +22,9 @@ pub enum DetachedJobError {
     },
     #[error("detached job {job_id} transition was rejected: {detail}")]
     InvalidTransition { job_id: JobId, detail: String },
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(transparent)]
+    Sqlite(#[from] meerkat_sqlite::SqliteStoreError),
     #[error("detached job store failed: {0}")]
     Store(String),
 }

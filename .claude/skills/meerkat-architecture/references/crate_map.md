@@ -79,7 +79,7 @@ RuntimeBootstrap (surface flags)
      the built-in — realm manifest v2 pin: builtin backend or external
      provider pin, refused typed on mismatch/future format)
   → RealmStoreSet (one provider supplies session/runtime/schedule/workgraph/
-     blob/artifact stores + one DurabilityDeclaration per slot;
+     jobs/blob/artifact stores + one DurabilityDeclaration per slot;
      enforce_fail_closed_durability refuses undeclared non-persistent
      durable slots at startup)
   → PersistenceBundle (facade composition; store-only seam — mob storage
@@ -145,7 +145,7 @@ profiles; the in-repo stores run the same suite in
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the six required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
+| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the seven required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
 
 ### Mob traits (defined in meerkat-mob)
 

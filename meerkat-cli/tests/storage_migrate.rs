@@ -201,6 +201,10 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
     assert_eq!(stamped.len(), 1, "{report:#}");
     assert_eq!(stamped[0]["action"], "stamped");
     assert_eq!(stamped[0]["after"], 1);
+    let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
+    assert_eq!(jobs.len(), 1, "{report:#}");
+    assert_eq!(jobs[0]["action"], "stamped");
+    assert_eq!(jobs[0]["after"], 1);
     let adoption = &realms[0]["adoption"];
     assert_eq!(adoption["scanned"], 1, "{report:#}");
     assert_eq!(adoption["adopted"], 1, "{report:#}");
@@ -245,6 +249,8 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
     let realms = report["realms"].as_array().expect("realms array");
     let entries = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
     assert_eq!(entries[0]["action"], "already-current");
+    let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
+    assert_eq!(jobs[0]["action"], "already-current");
     let adoption = &realms[0]["adoption"];
     assert_eq!(adoption["adopted"], 0, "{report:#}");
     assert_eq!(adoption["already_verified"], 1, "{report:#}");

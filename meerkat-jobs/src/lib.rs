@@ -5,6 +5,8 @@
 
 mod error;
 mod service;
+#[cfg(not(target_arch = "wasm32"))]
+mod sqlite_store;
 mod store;
 mod types;
 
@@ -12,6 +14,8 @@ pub mod machines;
 
 pub use error::DetachedJobError;
 pub use service::DetachedJobService;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sqlite_store::{JOBS_DOMAIN, SqliteDetachedJobStore};
 pub use store::{
     DetachedJobStore, InsertJobOutcome, MemoryDetachedJobStore, MemoryDetachedJobStoreSnapshot,
     StoredJob,

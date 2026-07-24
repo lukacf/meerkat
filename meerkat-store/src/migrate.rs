@@ -61,6 +61,7 @@ pub const REALM_SQLITE_FILES: &[&str] = &[
     "sessions.sqlite3",
     "runtime.sqlite3",
     "workgraph.sqlite3",
+    "jobs.sqlite3",
     "memory/memory.sqlite3",
     "tasks.db",
     "sessions_jsonl/session_index.sqlite3",

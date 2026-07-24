@@ -51,6 +51,39 @@ rust_library(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_jobs_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-jobs"),
+    crate_name = "meerkat_jobs",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -98,6 +131,7 @@ rust_test(
     deps = [
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -147,6 +181,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-jobs:meerkat_jobs",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -196,6 +231,57 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-jobs:meerkat_jobs",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
+    ] + all_crate_deps(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "sqlite_store_conformance_test",
+    aliases = aliases(
+        package_name = "meerkat-jobs",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "sqlite_store_conformance",
+    crate_root = "tests/sqlite_store_conformance.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/sqlite_store_conformance.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "sqlite_store_conformance",
+        "CARGO_MANIFEST_DIR": "./meerkat-jobs",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-jobs",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-jobs:meerkat_jobs",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -245,6 +331,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-jobs:meerkat_jobs",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -294,6 +381,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-jobs:meerkat_jobs",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
         package_name = "meerkat-jobs",
         normal = True,
@@ -307,6 +395,7 @@ test_suite(
         ":machine_contract_test",
         ":meerkat_jobs_unit_test",
         ":recovery_fencing_test",
+        ":sqlite_store_conformance_test",
         ":store_contract_test",
         ":terminal_outbox_test",
     ],

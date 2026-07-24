@@ -306,6 +306,11 @@ pub use meerkat_core::{
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_jobs::SqliteDetachedJobStore;
+pub use meerkat_jobs::{
+    DetachedJobError, DetachedJobService, DetachedJobStore, MemoryDetachedJobStore,
+};
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;

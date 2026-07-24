@@ -4,6 +4,7 @@
 //! uniqueness, atomic compare-and-swap, and outbox atomicity only.
 
 mod error;
+mod predicate;
 mod service;
 #[cfg(not(target_arch = "wasm32"))]
 mod sqlite_store;
@@ -13,6 +14,11 @@ mod types;
 pub mod machines;
 
 pub use error::DetachedJobError;
+pub use predicate::{
+    PredicateCheckpoint, PredicateComparison, PredicateEvaluation, PredicateObservation,
+    PredicatePollingPolicy, PredicateSource, PredicateWatch, PredicateWatchError, PredicateWatchId,
+    ScheduleIdRef,
+};
 pub use service::DetachedJobService;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite_store::{JOBS_DOMAIN, SqliteDetachedJobStore};
@@ -22,10 +28,13 @@ pub use store::{
 };
 pub use types::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
-    CheckpointRef, ExecutionIntentId, FenceToken, InteractionLineageId, JobFailureCode, JobId,
-    JobOutboxEntry, JobPhase, JobProgress, JobReceipt, JobResultRef, JobSnapshot, JobSpec,
-    JobSubmissionKey, JobTerminalKind, JobTerminalResult, OriginMemberId, RestartClass,
-    RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
+    CheckpointRef, ExecutionIntentId, FenceToken, InteractionLineageId, JobDeliveryKind,
+    JobFailureCode, JobHealthCondition, JobId, JobNotification, JobNotificationReceipt,
+    JobOutboxEntry, JobOutboxPayload, JobPhase, JobProgress, JobProgressKind, JobReceipt,
+    JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
+    JobTerminalKind, JobTerminalResult, NotificationId, NotificationIdempotencyKey, OriginMemberId,
+    PredicateEvaluationReceipt, RestartClass, RunnerHandleRef, RunnerIdentity,
+    RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 
 #[doc(hidden)]

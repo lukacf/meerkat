@@ -257,7 +257,8 @@ impl CompositeDispatcher {
                 }
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
-                    ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
+                    MonitorStartTool, ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool,
+                    ShellTool,
                 };
                 // Use with_job_manager to share the same JobManager between ShellTool
                 // and job control tools. This ensures background jobs spawned via
@@ -269,6 +270,7 @@ impl CompositeDispatcher {
                 builtin_tools.push(Arc::new(ShellJobStatusTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobsListTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobCancelTool::new(mgr.clone())));
+                builtin_tools.push(Arc::new(MonitorStartTool::new(cfg.clone(), mgr.clone())));
                 Some(mgr)
             } else {
                 None

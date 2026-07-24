@@ -42,6 +42,13 @@ machine! {
             lease_expired: bool,
             retry_due_at_ms: Option<u64>,
             cancel_requested: bool,
+            delivery_sequence: u64,
+            notification_ids: Set<String>,
+            notification_idempotency_keys: Set<String>,
+            notification_id_by_key: Map<String, String>,
+            notification_delivery_ids: Map<String, String>,
+            notification_sequences: Map<String, u64>,
+            notification_applied: Set<String>,
             terminal_kind: Option<Enum<DetachedJobTerminalKind>>,
             terminal_delivery_sequence: u64,
             terminal_delivery_applied: bool,
@@ -62,6 +69,13 @@ machine! {
             lease_expired = false,
             retry_due_at_ms = None,
             cancel_requested = false,
+            delivery_sequence = 0,
+            notification_ids = EmptySet,
+            notification_idempotency_keys = EmptySet,
+            notification_id_by_key = EmptyMap,
+            notification_delivery_ids = EmptyMap,
+            notification_sequences = EmptyMap,
+            notification_applied = EmptySet,
             terminal_kind = None,
             terminal_delivery_sequence = 0,
             terminal_delivery_applied = false,
@@ -106,6 +120,14 @@ machine! {
                 attempt_id: String,
                 fence: u64,
                 cursor: u64,
+                observed_at_ms: u64,
+            },
+            EmitNotification {
+                attempt_id: String,
+                fence: u64,
+                notification_id: String,
+                idempotency_key: String,
+                runtime_delivery_id: String,
                 observed_at_ms: u64,
             },
             RecordCheckpoint {
@@ -155,6 +177,7 @@ machine! {
                 observed_at_ms: u64,
             },
             MarkDeliveryApplied {
+                delivery_id: String,
                 delivery_sequence: u64,
             },
         }
@@ -174,6 +197,18 @@ machine! {
             ProgressAccepted {
                 cursor: u64,
             },
+            NotificationCommitted {
+                notification_id: String,
+                idempotency_key: String,
+                runtime_delivery_id: String,
+                delivery_sequence: u64,
+            },
+            NotificationSuppressed {
+                notification_id: String,
+                idempotency_key: String,
+                runtime_delivery_id: String,
+                delivery_sequence: u64,
+            },
             CheckpointAccepted {
                 checkpoint_ref: String,
             },
@@ -190,6 +225,7 @@ machine! {
                 delivery_sequence: u64,
             },
             DeliveryApplied {
+                delivery_id: String,
                 delivery_sequence: u64,
             },
         }
@@ -239,8 +275,20 @@ machine! {
             )
             || (
                 self.terminal_kind != None
-                && self.terminal_delivery_sequence > 0
+                    && self.terminal_delivery_sequence > 0
+                    && self.terminal_delivery_sequence <= self.delivery_sequence
             )
+        }
+
+        invariant notification_identity_and_sequence_cardinality_match {
+            self.notification_ids.len() == self.notification_idempotency_keys.len()
+                && self.notification_ids.len() == self.notification_id_by_key.len()
+                && self.notification_ids.len() == self.notification_delivery_ids.len()
+                && self.notification_ids.len() == self.notification_sequences.len()
+        }
+
+        invariant applied_notifications_are_committed {
+            self.notification_applied.len() <= self.notification_ids.len()
         }
 
         invariant nonterminal_has_no_terminal_delivery {
@@ -262,6 +310,8 @@ machine! {
         disposition AttemptClaimed => local seam SurfaceResultAlignment,
         disposition LeaseRenewed => local seam SurfaceResultAlignment,
         disposition ProgressAccepted => local seam SurfaceResultAlignment,
+        disposition NotificationCommitted => routed [RuntimeDeliveryMachine] seam NoOwnerRealization,
+        disposition NotificationSuppressed => local seam SurfaceResultAlignment,
         disposition CheckpointAccepted => local seam SurfaceResultAlignment,
         disposition ExternalWaitAccepted => local seam SurfaceResultAlignment,
         disposition RunningResumed => local seam SurfaceResultAlignment,
@@ -460,6 +510,154 @@ machine! {
             emit ProgressAccepted { cursor: cursor }
         }
 
+        transition EmitRunningNotification {
+            on input EmitNotification {
+                attempt_id,
+                fence,
+                notification_id,
+                idempotency_key,
+                runtime_delivery_id,
+                observed_at_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::Running
+                && self.current_attempt_id == Some(attempt_id)
+                && self.current_fence == fence
+                && self.lease_expired == false
+                && self.lease_expires_at_ms != None
+                && observed_at_ms <= self.lease_expires_at_ms.get("value")
+                && notification_id != ""
+                && idempotency_key != ""
+                && runtime_delivery_id != ""
+                && self.notification_ids.contains(notification_id) == false
+                && self.notification_idempotency_keys.contains(idempotency_key) == false
+                && self.delivery_sequence < u64::MAX
+            }
+            update {
+                self.delivery_sequence += 1;
+                self.notification_ids.insert(notification_id);
+                self.notification_idempotency_keys.insert(idempotency_key);
+                self.notification_id_by_key.insert(idempotency_key, notification_id);
+                self.notification_delivery_ids.insert(notification_id, runtime_delivery_id);
+                self.notification_sequences.insert(notification_id, self.delivery_sequence);
+            }
+            to Running
+            emit NotificationCommitted {
+                notification_id: notification_id,
+                idempotency_key: idempotency_key,
+                runtime_delivery_id: runtime_delivery_id,
+                delivery_sequence: self.delivery_sequence
+            }
+        }
+
+        transition EmitExternalWaitNotification {
+            on input EmitNotification {
+                attempt_id,
+                fence,
+                notification_id,
+                idempotency_key,
+                runtime_delivery_id,
+                observed_at_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::WaitingExternal
+                && self.current_attempt_id == Some(attempt_id)
+                && self.current_fence == fence
+                && self.lease_expired == false
+                && self.lease_expires_at_ms != None
+                && observed_at_ms <= self.lease_expires_at_ms.get("value")
+                && notification_id != ""
+                && idempotency_key != ""
+                && runtime_delivery_id != ""
+                && self.notification_ids.contains(notification_id) == false
+                && self.notification_idempotency_keys.contains(idempotency_key) == false
+                && self.delivery_sequence < u64::MAX
+            }
+            update {
+                self.delivery_sequence += 1;
+                self.notification_ids.insert(notification_id);
+                self.notification_idempotency_keys.insert(idempotency_key);
+                self.notification_id_by_key.insert(idempotency_key, notification_id);
+                self.notification_delivery_ids.insert(notification_id, runtime_delivery_id);
+                self.notification_sequences.insert(notification_id, self.delivery_sequence);
+            }
+            to WaitingExternal
+            emit NotificationCommitted {
+                notification_id: notification_id,
+                idempotency_key: idempotency_key,
+                runtime_delivery_id: runtime_delivery_id,
+                delivery_sequence: self.delivery_sequence
+            }
+        }
+
+        transition SuppressRunningNotificationReplay {
+            on input EmitNotification {
+                attempt_id,
+                fence,
+                notification_id,
+                idempotency_key,
+                runtime_delivery_id,
+                observed_at_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::Running
+                && self.current_attempt_id == Some(attempt_id)
+                && self.current_fence == fence
+                && self.lease_expired == false
+                && self.lease_expires_at_ms != None
+                && observed_at_ms <= self.lease_expires_at_ms.get("value")
+                && notification_id != ""
+                && runtime_delivery_id != ""
+                && self.notification_idempotency_keys.contains(idempotency_key)
+            }
+            update {}
+            to Running
+            emit NotificationSuppressed {
+                notification_id: self.notification_id_by_key.get_cloned(idempotency_key).get("value"),
+                idempotency_key: idempotency_key,
+                runtime_delivery_id: self.notification_delivery_ids.get_cloned(
+                    self.notification_id_by_key.get_cloned(idempotency_key).get("value")
+                ).get("value"),
+                delivery_sequence: self.notification_sequences.get_cloned(
+                    self.notification_id_by_key.get_cloned(idempotency_key).get("value")
+                ).get("value")
+            }
+        }
+
+        transition SuppressExternalWaitNotificationReplay {
+            on input EmitNotification {
+                attempt_id,
+                fence,
+                notification_id,
+                idempotency_key,
+                runtime_delivery_id,
+                observed_at_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::WaitingExternal
+                && self.current_attempt_id == Some(attempt_id)
+                && self.current_fence == fence
+                && self.lease_expired == false
+                && self.lease_expires_at_ms != None
+                && observed_at_ms <= self.lease_expires_at_ms.get("value")
+                && notification_id != ""
+                && runtime_delivery_id != ""
+                && self.notification_idempotency_keys.contains(idempotency_key)
+            }
+            update {}
+            to WaitingExternal
+            emit NotificationSuppressed {
+                notification_id: self.notification_id_by_key.get_cloned(idempotency_key).get("value"),
+                idempotency_key: idempotency_key,
+                runtime_delivery_id: self.notification_delivery_ids.get_cloned(
+                    self.notification_id_by_key.get_cloned(idempotency_key).get("value")
+                ).get("value"),
+                delivery_sequence: self.notification_sequences.get_cloned(
+                    self.notification_id_by_key.get_cloned(idempotency_key).get("value")
+                ).get("value")
+            }
+        }
+
         transition RecordRunningCheckpoint {
             on input RecordCheckpoint {
                 attempt_id,
@@ -602,7 +800,8 @@ machine! {
             update {
                 self.cancel_requested = true;
                 self.terminal_kind = Some(DetachedJobTerminalKind::Cancelled);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Cancelled
             emit TerminalCommitted {
@@ -620,7 +819,8 @@ machine! {
             update {
                 self.cancel_requested = true;
                 self.terminal_kind = Some(DetachedJobTerminalKind::Cancelled);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Cancelled
             emit TerminalCommitted {
@@ -638,7 +838,8 @@ machine! {
             update {
                 self.cancel_requested = true;
                 self.terminal_kind = Some(DetachedJobTerminalKind::Cancelled);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Cancelled
             emit TerminalCommitted {
@@ -713,7 +914,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::WorkerLost);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to WorkerLost
             emit TerminalCommitted {
@@ -735,7 +937,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Succeeded);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Succeeded
             emit TerminalCommitted {
@@ -757,7 +960,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Succeeded);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Succeeded
             emit TerminalCommitted {
@@ -779,7 +983,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Failed);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Failed
             emit TerminalCommitted {
@@ -801,7 +1006,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Failed);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Failed
             emit TerminalCommitted {
@@ -824,7 +1030,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Cancelled);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Cancelled
             emit TerminalCommitted {
@@ -847,7 +1054,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::Cancelled);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to Cancelled
             emit TerminalCommitted {
@@ -865,7 +1073,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::NeedsAttention);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to NeedsAttention
             emit TerminalCommitted {
@@ -883,7 +1092,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::NeedsAttention);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to NeedsAttention
             emit TerminalCommitted {
@@ -901,7 +1111,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::NeedsAttention);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to NeedsAttention
             emit TerminalCommitted {
@@ -919,7 +1130,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::NeedsAttention);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to NeedsAttention
             emit TerminalCommitted {
@@ -937,7 +1149,8 @@ machine! {
             }
             update {
                 self.terminal_kind = Some(DetachedJobTerminalKind::NeedsAttention);
-                self.terminal_delivery_sequence += 1;
+                self.terminal_delivery_sequence = self.delivery_sequence + 1;
+                self.delivery_sequence += 1;
             }
             to NeedsAttention
             emit TerminalCommitted {
@@ -948,9 +1161,10 @@ machine! {
         }
 
         transition ApplySucceededDelivery {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Succeeded
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied == false
                 && delivery_sequence == self.terminal_delivery_sequence
             }
@@ -958,13 +1172,14 @@ machine! {
                 self.terminal_delivery_applied = true;
             }
             to Succeeded
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ApplyFailedDelivery {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Failed
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied == false
                 && delivery_sequence == self.terminal_delivery_sequence
             }
@@ -972,13 +1187,14 @@ machine! {
                 self.terminal_delivery_applied = true;
             }
             to Failed
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ApplyCancelledDelivery {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Cancelled
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied == false
                 && delivery_sequence == self.terminal_delivery_sequence
             }
@@ -986,13 +1202,14 @@ machine! {
                 self.terminal_delivery_applied = true;
             }
             to Cancelled
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ApplyWorkerLostDelivery {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::WorkerLost
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied == false
                 && delivery_sequence == self.terminal_delivery_sequence
             }
@@ -1000,13 +1217,14 @@ machine! {
                 self.terminal_delivery_applied = true;
             }
             to WorkerLost
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ApplyNeedsAttentionDelivery {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::NeedsAttention
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied == false
                 && delivery_sequence == self.terminal_delivery_sequence
             }
@@ -1014,67 +1232,324 @@ machine! {
                 self.terminal_delivery_applied = true;
             }
             to NeedsAttention
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ObserveSucceededDeliveryAlreadyApplied {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Succeeded
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied
                 && delivery_sequence == self.terminal_delivery_sequence
             }
             update {}
             to Succeeded
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ObserveFailedDeliveryAlreadyApplied {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Failed
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied
                 && delivery_sequence == self.terminal_delivery_sequence
             }
             update {}
             to Failed
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ObserveCancelledDeliveryAlreadyApplied {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::Cancelled
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied
                 && delivery_sequence == self.terminal_delivery_sequence
             }
             update {}
             to Cancelled
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ObserveWorkerLostDeliveryAlreadyApplied {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::WorkerLost
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied
                 && delivery_sequence == self.terminal_delivery_sequence
             }
             update {}
             to WorkerLost
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
 
         transition ObserveNeedsAttentionDeliveryAlreadyApplied {
-            on input MarkDeliveryApplied { delivery_sequence }
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
             guard {
                 self.lifecycle_phase == Phase::NeedsAttention
+                && delivery_id == "terminal"
                 && self.terminal_delivery_applied
                 && delivery_sequence == self.terminal_delivery_sequence
             }
             update {}
             to NeedsAttention
-            emit DeliveryApplied { delivery_sequence: delivery_sequence }
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyRunningNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Running
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to Running
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyWaitingExternalNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::WaitingExternal
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to WaitingExternal
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyLossObservedNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::LossObserved
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to LossObserved
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyRetryScheduledNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::RetryScheduled
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to RetryScheduled
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplySucceededNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Succeeded
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to Succeeded
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyFailedNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Failed
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to Failed
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyCancelledNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Cancelled
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to Cancelled
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyWorkerLostNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::WorkerLost
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to WorkerLost
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ApplyNeedsAttentionNotificationDelivery {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::NeedsAttention
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id) == false
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {
+                self.notification_applied.insert(delivery_id);
+            }
+            to NeedsAttention
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveRunningNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Running
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to Running
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveWaitingExternalNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::WaitingExternal
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to WaitingExternal
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveLossObservedNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::LossObserved
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to LossObserved
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveRetryScheduledNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::RetryScheduled
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to RetryScheduled
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveSucceededNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Succeeded
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to Succeeded
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveFailedNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Failed
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to Failed
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveCancelledNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::Cancelled
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to Cancelled
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveWorkerLostNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::WorkerLost
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to WorkerLost
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
+        }
+
+        transition ObserveNeedsAttentionNotificationDeliveryAlreadyApplied {
+            on input MarkDeliveryApplied { delivery_id, delivery_sequence }
+            guard {
+                self.lifecycle_phase == Phase::NeedsAttention
+                && self.notification_ids.contains(delivery_id)
+                && self.notification_applied.contains(delivery_id)
+                && self.notification_sequences.get_cloned(delivery_id).get("value") == delivery_sequence
+            }
+            update {}
+            to NeedsAttention
+            emit DeliveryApplied { delivery_id: delivery_id, delivery_sequence: delivery_sequence }
         }
     }
 }

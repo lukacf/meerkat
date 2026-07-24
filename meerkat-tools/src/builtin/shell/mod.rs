@@ -26,6 +26,8 @@ mod job_cancel_tool;
 mod job_manager;
 mod job_status_tool;
 mod jobs_list_tool;
+mod monitor_protocol;
+mod monitor_tool;
 mod process_lifecycle;
 mod security;
 mod tool;
@@ -35,10 +37,16 @@ mod types;
 pub use config::{ShellConfig, ShellError};
 pub use job_cancel_tool::ShellJobCancelTool;
 pub use job_manager::{
-    CancelJobDisposition, DurableShellJobRuntime, JobManager, ShellJobDeliveryProjector,
+    CancelJobDisposition, DurableShellJobRuntime, JobManager, MonitorStartOptions,
+    ShellJobDeliveryProjector,
 };
 pub use job_status_tool::ShellJobStatusTool;
 pub use jobs_list_tool::ShellJobsListTool;
+pub use monitor_protocol::{
+    MonitorAction, MonitorLineOutcome, MonitorOutputProtocol, MonitorProtocolDecoder,
+    MonitorProtocolError, MonitorProtocolHealth, MonitorProtocolLimits, MonitorSuppressionReason,
+};
+pub use monitor_tool::MonitorStartTool;
 pub use security::{CommandInvocation, SecurityEngine, SecurityMode};
 pub use tool::{ShellOutput, ShellTool};
 pub use tool_set::ShellToolSet;

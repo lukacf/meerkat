@@ -23,7 +23,8 @@ use meerkat_core::{BlobId, BlobStore, ExecutionPlacement};
 use meerkat_jobs::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, DetachedJobError,
     DetachedJobService, DetachedJobStore, ExecutionIntentId, InteractionLineageId, JobFailureCode,
-    JobPhase, JobResultRef, JobSpec, JobSubmissionKey, JobTerminalResult, RestartClass,
+    JobHealthCondition, JobNotification, JobPhase, JobProgress, JobResultRef, JobSpec,
+    JobSubmissionKey, JobSubscription, JobSubscriptionId, JobTerminalResult, RestartClass,
     RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
@@ -35,6 +36,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::monitor_protocol::{
+    MonitorAction, MonitorLineOutcome, MonitorOutputProtocol, MonitorProtocolDecoder,
+    MonitorProtocolLimits,
+};
 use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded};
 use super::types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
 
@@ -126,6 +131,34 @@ struct ShellRunnerSpecification {
     working_dir: String,
     placement: ExecutionPlacement,
     timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    monitor: Option<MonitorRunnerSpecification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MonitorRunnerSpecification {
+    protocol: MonitorOutputProtocol,
+    limits: MonitorProtocolLimits,
+    delivery: meerkat_jobs::JobDeliveryKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorStartOptions {
+    pub protocol: MonitorOutputProtocol,
+    pub restart_class: RestartClass,
+    pub limits: MonitorProtocolLimits,
+    pub delivery: meerkat_jobs::JobDeliveryKind,
+}
+
+impl Default for MonitorStartOptions {
+    fn default() -> Self {
+        Self {
+            protocol: MonitorOutputProtocol::FramedJsonl,
+            restart_class: RestartClass::NonResumable,
+            limits: MonitorProtocolLimits::default(),
+            delivery: meerkat_jobs::JobDeliveryKind::Notification,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,7 +292,6 @@ impl JobManager {
         let now = unix_time_ms();
         for job in &jobs {
             if job.machine_state.lifecycle_phase == JobPhase::Running
-                && job.spec.restart_class == RestartClass::NonResumable
                 && job
                     .machine_state
                     .lease_expires_at_ms
@@ -284,11 +316,81 @@ impl JobManager {
                     .observe_lease_expired(&job.job_id, write, now)
                     .await
                     .map_err(shell_job_error)?;
-                service
-                    .classify_worker_loss(&job.job_id, now)
-                    .await
-                    .map_err(shell_job_error)?;
             }
+        }
+        let loss_observed = durable
+            .job_store
+            .list_for_origin(&durable.realm_id, &durable.origin_session_id, usize::MAX)
+            .await
+            .map_err(shell_job_error)?;
+        for job in &loss_observed {
+            if job.machine_state.lifecycle_phase != JobPhase::LossObserved {
+                continue;
+            }
+            match job.spec.restart_class {
+                RestartClass::Replayable => {
+                    service
+                        .schedule_retry(&job.job_id, now)
+                        .await
+                        .map_err(shell_job_error)?;
+                }
+                RestartClass::CheckpointResumable if job.machine_state.checkpoint_ref.is_some() => {
+                    service
+                        .schedule_retry(&job.job_id, now)
+                        .await
+                        .map_err(shell_job_error)?;
+                }
+                RestartClass::CheckpointResumable => {
+                    service
+                        .mark_needs_attention(
+                            &job.job_id,
+                            now,
+                            JobFailureCode::new("monitor_checkpoint_missing")
+                                .map_err(shell_job_error)?,
+                        )
+                        .await
+                        .map_err(shell_job_error)?;
+                }
+                RestartClass::Adoptable => {
+                    service
+                        .mark_needs_attention(
+                            &job.job_id,
+                            now,
+                            JobFailureCode::new("adoptable_runner_reconciliation_unavailable")
+                                .map_err(shell_job_error)?,
+                        )
+                        .await
+                        .map_err(shell_job_error)?;
+                }
+                RestartClass::NonResumable => {
+                    service
+                        .classify_worker_loss(&job.job_id, now)
+                        .await
+                        .map_err(shell_job_error)?;
+                }
+            }
+        }
+        let restartable = durable
+            .job_store
+            .list_for_origin(&durable.realm_id, &durable.origin_session_id, usize::MAX)
+            .await
+            .map_err(shell_job_error)?;
+        for job in restartable {
+            if !matches!(
+                job.machine_state.lifecycle_phase,
+                JobPhase::Queued | JobPhase::RetryScheduled
+            ) || !matches!(
+                job.spec.restart_class,
+                RestartClass::Replayable | RestartClass::CheckpointResumable
+            ) {
+                continue;
+            }
+            let runner_spec = load_runner_spec(durable, &job).await?;
+            let Some(monitor) = runner_spec.monitor.clone() else {
+                continue;
+            };
+            self.start_recovered_monitor(durable.clone(), job, runner_spec, monitor)
+                .await?;
         }
         let recovered = durable
             .job_store
@@ -425,6 +527,64 @@ impl JobManager {
         timeout_secs: u64,
         tool_call_id: &str,
     ) -> Result<JobId, ShellError> {
+        self.spawn_runner_for_call(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            None,
+            RestartClass::NonResumable,
+        )
+        .await
+    }
+
+    pub async fn spawn_monitor_for_call(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        options: MonitorStartOptions,
+    ) -> Result<JobId, ShellError> {
+        if options.restart_class == RestartClass::Adoptable {
+            return Err(shell_io(
+                "agent-authored script monitors cannot claim adoptable restart semantics",
+            ));
+        }
+        if options.protocol == MonitorOutputProtocol::Lines
+            && options.restart_class != RestartClass::NonResumable
+        {
+            return Err(shell_io(
+                "line monitor protocol is non-resumable because it has no caller-stable \
+                 notification identity; use framed_jsonl with stable keys for recovery",
+            ));
+        }
+        MonitorProtocolDecoder::new(options.protocol, options.limits)
+            .map_err(|error| shell_io(error.to_string()))?;
+        self.spawn_runner_for_call(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            Some(MonitorRunnerSpecification {
+                protocol: options.protocol,
+                limits: options.limits,
+                delivery: options.delivery,
+            }),
+            options.restart_class,
+        )
+        .await
+    }
+
+    async fn spawn_runner_for_call(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        monitor: Option<MonitorRunnerSpecification>,
+        restart_class: RestartClass,
+    ) -> Result<JobId, ShellError> {
         if !self.exports_canonical_async_ops() {
             return Err(shell_io(
                 "detached shell requires canonical session, operation, and durable storage binding",
@@ -443,12 +603,23 @@ impl JobManager {
             .execution_placement_for_working_dir_async(&resolved_dir)
             .await?;
         let shell_path = self.resolved_shell_path().await?;
+        let redactions = configured_redactions(&self.config);
+        if redactions
+            .iter()
+            .any(|resolved_value| command.contains(resolved_value))
+        {
+            return Err(shell_io(
+                "detached command contains a resolved environment value; reference the \
+                 environment variable instead of persisting credential material",
+            ));
+        }
         let submitted_at_unix = unix_time_secs();
         let runner_spec = ShellRunnerSpecification {
             command: command.to_string(),
             working_dir: resolved_dir.display().to_string(),
             placement: placement.clone(),
             timeout_secs,
+            monitor: monitor.clone(),
         };
         let encoded_spec = serde_json::to_string(&runner_spec).map_err(|error| {
             shell_io(format!("cannot encode shell runner specification: {error}"))
@@ -467,25 +638,43 @@ impl JobManager {
         let canonical_arguments_hash =
             CanonicalArgumentsHash::new(spec_blob.blob_id.to_string()).map_err(shell_job_error)?;
         let stable_call = validate_call_identity(tool_call_id)?;
+        let runner_label = if monitor.is_some() {
+            "monitor"
+        } else {
+            "shell"
+        };
         let execution_intent_id =
-            ExecutionIntentId::from_string(format!("shell-call:{stable_call}"))
+            ExecutionIntentId::from_string(format!("{runner_label}-call:{stable_call}"))
                 .map_err(shell_job_error)?;
         let interaction_lineage_id = InteractionLineageId::from_string(format!(
-            "shell-session:{}",
+            "{runner_label}-session:{}",
             durable.origin_session_id
         ))
         .map_err(shell_job_error)?;
-        let submission_key =
-            JobSubmissionKey::new(format!("shell:{}:{stable_call}", durable.origin_session_id))
-                .map_err(shell_job_error)?;
+        let submission_key = JobSubmissionKey::new(format!(
+            "{runner_label}:{}:{stable_call}",
+            durable.origin_session_id
+        ))
+        .map_err(shell_job_error)?;
+        let (tool, runner) = if monitor.is_some() {
+            (
+                ToolIdentity::new("monitor_start", "v1").map_err(shell_job_error)?,
+                RunnerIdentity::new("meerkat.monitor_script", "v1").map_err(shell_job_error)?,
+            )
+        } else {
+            (
+                ToolIdentity::new("shell", "v1").map_err(shell_job_error)?,
+                RunnerIdentity::new("meerkat.shell", "v1").map_err(shell_job_error)?,
+            )
+        };
         let spec = JobSpec::new(
             durable.realm_id.clone(),
             durable.origin_session_id.clone(),
             execution_intent_id,
             interaction_lineage_id,
-            ToolIdentity::new("shell", "v1").map_err(shell_job_error)?,
-            RunnerIdentity::new("meerkat.shell", "v1").map_err(shell_job_error)?,
-            RestartClass::NonResumable,
+            tool,
+            runner,
+            restart_class,
             canonical_arguments_hash,
             submission_key,
         )
@@ -503,6 +692,19 @@ impl JobManager {
                 return Ok(public_job_id);
             }
         }
+        if let Some(monitor) = &monitor {
+            service
+                .subscribe(
+                    &receipt.job_id,
+                    JobSubscription::new(
+                        JobSubscriptionId::new("monitor-origin").map_err(shell_job_error)?,
+                        durable.origin_session_id.clone(),
+                        monitor.delivery.clone(),
+                    ),
+                )
+                .await
+                .map_err(shell_job_error)?;
+        }
 
         let claimed_at_ms = unix_time_ms();
         let lease_expires_at_ms = attempt_lease_expiry_ms(claimed_at_ms, timeout_secs);
@@ -510,11 +712,11 @@ impl JobManager {
             .claim_attempt(
                 &receipt.job_id,
                 AttemptClaim::new(
-                    WorkerId::new(format!("shell-worker:{}", std::process::id()))
+                    WorkerId::new(format!("{runner_label}-worker:{}", std::process::id()))
                         .map_err(shell_job_error)?,
                     claimed_at_ms,
                     lease_expires_at_ms,
-                    RunnerHandleRef::new(format!("inproc-shell:{}", receipt.job_id))
+                    RunnerHandleRef::new(format!("inproc-{runner_label}:{}", receipt.job_id))
                         .map_err(shell_job_error)?,
                 ),
             )
@@ -565,6 +767,15 @@ impl JobManager {
         command_builder.current_dir(&resolved_dir);
         command_builder.env("PWD", &resolved_dir);
         command_builder.envs(&self.config.env_vars);
+        if monitor.is_some() {
+            command_builder.env(
+                "MEERKAT_MONITOR_SUBMISSION_KEY",
+                format!("{runner_label}:{}:{stable_call}", durable.origin_session_id),
+            );
+            if let Some(checkpoint) = &claim.resume_checkpoint {
+                command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
+            }
+        }
         command_builder.stdout(Stdio::piped());
         command_builder.stderr(Stdio::piped());
         command_builder.kill_on_drop(true);
@@ -629,7 +840,7 @@ impl JobManager {
             .await
             .insert(public_job_id.clone(), JobProjection { view });
         let cancel = Arc::new(Notify::new());
-        let task = spawn_attempt_task(AttemptTask {
+        let attempt = AttemptTask {
             job_id: receipt.job_id,
             public_job_id: public_job_id.clone(),
             write,
@@ -642,7 +853,13 @@ impl JobManager {
             active_attempts: self.active_attempts.clone(),
             ops_registry: self.ops_registry.clone(),
             operation_id,
-        });
+            redactions,
+            resume_progress_cursor: 0,
+        };
+        let task = match monitor {
+            Some(monitor) => spawn_monitor_attempt_task(attempt, monitor),
+            None => spawn_attempt_task(attempt),
+        };
         self.active_attempts.lock().await.insert(
             public_job_id.clone(),
             ActiveAttempt {
@@ -650,8 +867,128 @@ impl JobManager {
                 _task: task,
             },
         );
-        info!(job_id = %public_job_id, "durable shell attempt started");
+        info!(job_id = %public_job_id, runner = runner_label, "durable attempt started");
         Ok(public_job_id)
+    }
+
+    async fn start_recovered_monitor(
+        &self,
+        durable: DurableShellJobRuntime,
+        stored: meerkat_jobs::StoredJob,
+        runner_spec: ShellRunnerSpecification,
+        monitor: MonitorRunnerSpecification,
+    ) -> Result<(), ShellError> {
+        let public_job_id = JobId::from_string(stored.job_id.as_str());
+        if self
+            .active_attempts
+            .lock()
+            .await
+            .contains_key(&public_job_id)
+        {
+            return Ok(());
+        }
+        let resolved_dir = self
+            .config
+            .validate_working_dir_async(Path::new(&runner_spec.working_dir))
+            .await?;
+        let shell_path = self.resolved_shell_path().await?;
+        let service = durable.service();
+        let claimed_at_ms = unix_time_ms();
+        let claim = service
+            .claim_attempt(
+                &stored.job_id,
+                AttemptClaim::new(
+                    WorkerId::new(format!("monitor-worker:{}", std::process::id()))
+                        .map_err(shell_job_error)?,
+                    claimed_at_ms,
+                    attempt_lease_expiry_ms(claimed_at_ms, runner_spec.timeout_secs),
+                    RunnerHandleRef::new(format!("inproc-monitor:{}", stored.job_id))
+                        .map_err(shell_job_error)?,
+                ),
+            )
+            .await
+            .map_err(shell_job_error)?;
+        let write = AttemptWriteAuthority::from(&claim);
+        let operation_id = self.register_operation(&public_job_id)?;
+        let mut command_builder = Command::new(&shell_path);
+        command_builder.arg("-c").arg(&runner_spec.command);
+        command_builder.current_dir(&resolved_dir);
+        command_builder.env("PWD", &resolved_dir);
+        command_builder.envs(&self.config.env_vars);
+        let redactions = configured_redactions(&self.config);
+        command_builder.env(
+            "MEERKAT_MONITOR_SUBMISSION_KEY",
+            stored.spec.submission_key.as_str(),
+        );
+        if let Some(checkpoint) = &claim.resume_checkpoint {
+            command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
+        }
+        command_builder.stdout(Stdio::piped());
+        command_builder.stderr(Stdio::piped());
+        command_builder.kill_on_drop(true);
+        #[cfg(unix)]
+        command_builder.process_group(0);
+        let child = match command_builder.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                terminal_fail(
+                    &service,
+                    &stored.job_id,
+                    write,
+                    "monitor_recovery_spawn_failed",
+                )
+                .await;
+                return Err(ShellError::Io(error));
+            }
+        };
+        let process_group = OwnedProcessGroup::new(&child);
+        let started_at_unix = unix_time_secs();
+        self.projections.lock().await.insert(
+            public_job_id.clone(),
+            JobProjection {
+                view: BackgroundJob {
+                    id: public_job_id.clone(),
+                    command: runner_spec.command,
+                    working_dir: Some(resolved_dir.display().to_string()),
+                    placement: Some(runner_spec.placement),
+                    timeout_secs: runner_spec.timeout_secs,
+                    started_at_unix,
+                    status: JobStatus::Running { started_at_unix },
+                },
+            },
+        );
+        let cancel = Arc::new(Notify::new());
+        let resume_progress_cursor = stored
+            .progress
+            .as_ref()
+            .map_or(0, |progress| progress.cursor);
+        let task = spawn_monitor_attempt_task(
+            AttemptTask {
+                job_id: stored.job_id,
+                public_job_id: public_job_id.clone(),
+                write,
+                timeout_secs: runner_spec.timeout_secs,
+                child,
+                process_group,
+                cancel: cancel.clone(),
+                durable,
+                projections: self.projections.clone(),
+                active_attempts: self.active_attempts.clone(),
+                ops_registry: self.ops_registry.clone(),
+                operation_id,
+                redactions,
+                resume_progress_cursor,
+            },
+            monitor,
+        );
+        self.active_attempts.lock().await.insert(
+            public_job_id,
+            ActiveAttempt {
+                cancel,
+                _task: task,
+            },
+        );
+        Ok(())
     }
 
     pub async fn get_status(&self, job_id: &JobId) -> Result<Option<BackgroundJob>, ShellError> {
@@ -914,6 +1251,660 @@ struct AttemptTask {
     active_attempts: Arc<Mutex<HashMap<JobId, ActiveAttempt>>>,
     ops_registry: Arc<dyn OpsLifecycleRegistry>,
     operation_id: OperationId,
+    /// Attempt-local resolved values that must never enter durable job state.
+    redactions: Vec<String>,
+    resume_progress_cursor: u64,
+}
+
+enum MonitorStreamItem {
+    Line(String),
+    LineTooLong { actual: usize },
+    ReadFailed(String),
+}
+
+fn spawn_monitor_attempt_task(
+    task: AttemptTask,
+    monitor: MonitorRunnerSpecification,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let AttemptTask {
+            job_id,
+            public_job_id,
+            write,
+            timeout_secs,
+            mut child,
+            mut process_group,
+            cancel,
+            durable,
+            projections,
+            active_attempts,
+            ops_registry,
+            operation_id,
+            redactions,
+            resume_progress_cursor,
+        } = task;
+        let started = Instant::now();
+        let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel(64);
+        let stdout_task = child.stdout.take().map(|stdout| {
+            tokio::spawn(read_monitor_lines(
+                stdout,
+                monitor.limits.max_line_bytes,
+                stdout_tx,
+            ))
+        });
+        let stderr_task = child.stderr.take().map(|stderr| {
+            tokio::spawn(read_stream_with_limit(
+                stderr,
+                monitor.limits.max_retained_diagnostic_bytes,
+            ))
+        });
+        let mut decoder = match MonitorProtocolDecoder::new(monitor.protocol, monitor.limits) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                warn!(job_id = %public_job_id, %error, "persisted monitor protocol is invalid");
+                active_attempts.lock().await.remove(&public_job_id);
+                return;
+            }
+        };
+        enum MonitorWaitOutcome {
+            Exited(Option<i32>),
+            ExplicitComplete,
+            WaitFailed(String),
+            ProtocolFailed(String),
+            TimedOut,
+            Cancelled,
+        }
+        let service = durable.service();
+        let mut last_progress_cursor = resume_progress_cursor;
+        let mut stdout_open = true;
+        let wait_outcome = {
+            let child_wait = child.wait();
+            tokio::pin!(child_wait);
+            let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
+            tokio::pin!(timeout);
+            let mut heartbeat = tokio::time::interval(lease_heartbeat_interval());
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            heartbeat.tick().await;
+            let mut child_exit = None;
+            let mut child_wait_open = true;
+            loop {
+                if !stdout_open && let Some(outcome) = child_exit.take() {
+                    break outcome;
+                }
+                tokio::select! {
+                    () = cancel.notified() => break MonitorWaitOutcome::Cancelled,
+                    result = &mut child_wait, if child_wait_open => {
+                        child_wait_open = false;
+                        child_exit = Some(match result {
+                            Ok(status) => MonitorWaitOutcome::Exited(status.code()),
+                            Err(error) => MonitorWaitOutcome::WaitFailed(error.to_string()),
+                        });
+                    }
+                    () = &mut timeout => break MonitorWaitOutcome::TimedOut,
+                    item = stdout_rx.recv(), if stdout_open => {
+                        let Some(item) = item else {
+                            stdout_open = false;
+                            continue;
+                        };
+                        match item {
+                            MonitorStreamItem::Line(line) => {
+                                let line = redact_sensitive(&line, &redactions);
+                                match decoder.decode_stdout_line_at(&line, unix_time_ms()) {
+                                    Ok(MonitorLineOutcome::Action(MonitorAction::Notify {
+                                        key,
+                                        title,
+                                        message,
+                                    })) => {
+                                        let notification_id = monitor_notification_id(&job_id, &key);
+                                        match JobNotification::new(
+                                            notification_id,
+                                            key,
+                                            title,
+                                            message,
+                                        )
+                                        .map_err(shell_job_error)
+                                        {
+                                            Ok(notification) => {
+                                                match service
+                                                    .emit_notification(
+                                                        &job_id,
+                                                        write.clone(),
+                                                        unix_time_ms(),
+                                                        notification,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(_) => {
+                                                        if let Err(error) = durable
+                                                            .delivery_projector
+                                                            .project_job(public_job_id.as_ref())
+                                                            .await
+                                                        {
+                                                            warn!(
+                                                                job_id = %public_job_id,
+                                                                %error,
+                                                                "monitor notification remains pending in the durable job outbox"
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        break MonitorWaitOutcome::WaitFailed(
+                                                            format!(
+                                                                "monitor notification commit failed: {error}"
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                report_monitor_health(
+                                                    &service,
+                                                    &job_id,
+                                                    &write,
+                                                    &mut last_progress_cursor,
+                                                    JobHealthCondition::MonitorMalformedOutput,
+                                                    format!("monitor_malformed_notification:{error}"),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    Ok(MonitorLineOutcome::Action(MonitorAction::Checkpoint {
+                                        value,
+                                    })) => {
+                                        let checkpoint = match meerkat_jobs::CheckpointRef::new(value) {
+                                            Ok(checkpoint) => checkpoint,
+                                            Err(error) => {
+                                                report_monitor_health(
+                                                    &service,
+                                                    &job_id,
+                                                    &write,
+                                                    &mut last_progress_cursor,
+                                                    JobHealthCondition::MonitorMalformedOutput,
+                                                    format!("monitor_malformed_checkpoint:{error}"),
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        };
+                                        if let Err(error) = service
+                                            .record_checkpoint(
+                                                &job_id,
+                                                write.clone(),
+                                                checkpoint,
+                                                unix_time_ms(),
+                                            )
+                                            .await
+                                        {
+                                            break MonitorWaitOutcome::WaitFailed(format!(
+                                                "monitor checkpoint commit failed: {error}"
+                                            ));
+                                        }
+                                    }
+                                    Ok(MonitorLineOutcome::Action(MonitorAction::Progress {
+                                        cursor,
+                                        message,
+                                    })) => {
+                                        if cursor <= last_progress_cursor {
+                                            report_monitor_health(
+                                                &service,
+                                                &job_id,
+                                                &write,
+                                                &mut last_progress_cursor,
+                                                JobHealthCondition::MonitorMalformedOutput,
+                                                format!(
+                                                    "monitor_nonmonotonic_progress:received={cursor}"
+                                                ),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                        let progress = match JobProgress::new(cursor, message) {
+                                            Ok(progress) => progress,
+                                            Err(error) => {
+                                                report_monitor_health(
+                                                    &service,
+                                                    &job_id,
+                                                    &write,
+                                                    &mut last_progress_cursor,
+                                                    JobHealthCondition::MonitorMalformedOutput,
+                                                    format!("monitor_malformed_progress:{error}"),
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        };
+                                        match service
+                                            .report_progress(
+                                                &job_id,
+                                                write.clone(),
+                                                progress,
+                                                unix_time_ms(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => last_progress_cursor = cursor,
+                                            Err(error) => {
+                                                break MonitorWaitOutcome::WaitFailed(format!(
+                                                    "monitor progress commit failed: {error}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Ok(MonitorLineOutcome::Action(MonitorAction::Complete)) => {
+                                        break MonitorWaitOutcome::ExplicitComplete;
+                                    }
+                                    Ok(MonitorLineOutcome::Diagnostic) => {}
+                                    Ok(MonitorLineOutcome::Suppressed {
+                                        reason,
+                                        total_suppressed,
+                                    }) => {
+                                        report_monitor_health(
+                                            &service,
+                                            &job_id,
+                                            &write,
+                                            &mut last_progress_cursor,
+                                            JobHealthCondition::MonitorNotificationRateLimited {
+                                                total_suppressed,
+                                            },
+                                            format!(
+                                                "monitor_notification_suppressed:{reason:?}:total={total_suppressed}"
+                                            ),
+                                        )
+                                        .await;
+                                    }
+                                    Err(error) => {
+                                        report_monitor_health(
+                                            &service,
+                                            &job_id,
+                                            &write,
+                                            &mut last_progress_cursor,
+                                            JobHealthCondition::MonitorMalformedOutput,
+                                            format!("monitor_protocol_error:{error}"),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                            MonitorStreamItem::LineTooLong { actual } => {
+                                report_monitor_health(
+                                    &service,
+                                    &job_id,
+                                    &write,
+                                    &mut last_progress_cursor,
+                                    JobHealthCondition::MonitorOutputTruncated {
+                                        dropped_bytes: u64::try_from(
+                                            actual.saturating_sub(
+                                                monitor.limits.max_line_bytes
+                                            ),
+                                        )
+                                        .unwrap_or(u64::MAX),
+                                    },
+                                    format!(
+                                        "monitor_line_too_long:actual={actual}:limit={}",
+                                        monitor.limits.max_line_bytes
+                                    ),
+                                )
+                                .await;
+                            }
+                            MonitorStreamItem::ReadFailed(error) => {
+                                break MonitorWaitOutcome::ProtocolFailed(format!(
+                                    "monitor_stdout_read_failed:{error}"
+                                ));
+                            }
+                        }
+                    }
+                    _ = heartbeat.tick() => {
+                        let heartbeat_at_ms = unix_time_ms();
+                        let lease_expires_at_ms =
+                            attempt_lease_expiry_ms(heartbeat_at_ms, timeout_secs);
+                        if let Err(error) = service
+                            .renew_lease(
+                                &job_id,
+                                write.clone(),
+                                heartbeat_at_ms,
+                                lease_expires_at_ms,
+                            )
+                            .await
+                        {
+                            break MonitorWaitOutcome::WaitFailed(format!(
+                                "monitor lease renewal failed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+        // Once the monitor has explicitly completed, timed out, or been
+        // cancelled, no later stdout frame is admissible. Drop the receiver
+        // before containment so a producer cannot remain pipe-blocked behind
+        // post-completion output while the process group is asked to exit.
+        drop(stdout_rx);
+        loop {
+            match process_group.terminate(&mut child).await {
+                Ok(()) => break,
+                Err(error) => {
+                    warn!(job_id = %public_job_id, %error, "monitor containment unproven; retrying");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        if let Some(task) = stdout_task {
+            let _ = task.await;
+        }
+        let stderr = match stderr_task {
+            Some(task) => join_output_bounded(task, "durable monitor stderr").await,
+            None => Vec::new(),
+        };
+        let diagnostics = decoder.retained_diagnostics();
+        let protocol_health = decoder.health();
+        if protocol_health.diagnostic_bytes_dropped > 0 {
+            report_monitor_health(
+                &service,
+                &job_id,
+                &write,
+                &mut last_progress_cursor,
+                JobHealthCondition::MonitorOutputTruncated {
+                    dropped_bytes: protocol_health.diagnostic_bytes_dropped,
+                },
+                format!(
+                    "monitor_diagnostics_truncated:dropped_bytes={}",
+                    protocol_health.diagnostic_bytes_dropped
+                ),
+            )
+            .await;
+        }
+        let stderr = redact_sensitive(
+            &truncate_output_tail(&stderr, monitor.limits.max_retained_diagnostic_bytes),
+            &redactions,
+        );
+        let duration_secs = started.elapsed().as_secs_f64();
+        let completed_at_ms = unix_time_ms();
+        let (view_status, terminal) = match wait_outcome {
+            MonitorWaitOutcome::Exited(Some(0)) | MonitorWaitOutcome::ExplicitComplete => {
+                let result = ShellResultRecord {
+                    exit_code: Some(0),
+                    stdout: diagnostics.clone(),
+                    stderr: stderr.clone(),
+                    duration_secs,
+                };
+                match persist_result(&durable, &result).await {
+                    Ok(result_ref) => (
+                        JobStatus::Completed {
+                            exit_code: Some(0),
+                            stdout: diagnostics,
+                            stderr,
+                            duration_secs,
+                        },
+                        service
+                            .complete_attempt(
+                                &job_id,
+                                write.clone(),
+                                completed_at_ms,
+                                Some(result_ref),
+                            )
+                            .await,
+                    ),
+                    Err(error) => (
+                        JobStatus::Failed {
+                            error: error.to_string(),
+                            duration_secs,
+                        },
+                        fail_shell_attempt(
+                            &service,
+                            &job_id,
+                            write.clone(),
+                            completed_at_ms,
+                            "monitor_result_persistence_failed",
+                        )
+                        .await,
+                    ),
+                }
+            }
+            MonitorWaitOutcome::Cancelled => (
+                JobStatus::Cancelled { duration_secs },
+                service
+                    .acknowledge_cancel(&job_id, write.clone(), completed_at_ms)
+                    .await,
+            ),
+            MonitorWaitOutcome::TimedOut => (
+                JobStatus::Failed {
+                    error: "monitor timed out".into(),
+                    duration_secs,
+                },
+                fail_shell_attempt(
+                    &service,
+                    &job_id,
+                    write.clone(),
+                    completed_at_ms,
+                    "monitor_timeout",
+                )
+                .await,
+            ),
+            MonitorWaitOutcome::Exited(exit_code) => (
+                JobStatus::Failed {
+                    error: format!("monitor exited with {exit_code:?}"),
+                    duration_secs,
+                },
+                fail_shell_attempt(
+                    &service,
+                    &job_id,
+                    write.clone(),
+                    completed_at_ms,
+                    "monitor_exit_nonzero",
+                )
+                .await,
+            ),
+            MonitorWaitOutcome::WaitFailed(error) | MonitorWaitOutcome::ProtocolFailed(error) => (
+                JobStatus::Failed {
+                    error,
+                    duration_secs,
+                },
+                fail_shell_attempt(
+                    &service,
+                    &job_id,
+                    write.clone(),
+                    completed_at_ms,
+                    "monitor_runner_failed",
+                )
+                .await,
+            ),
+        };
+        finalize_attempt_projection(
+            &public_job_id,
+            view_status,
+            terminal,
+            &durable,
+            &projections,
+            &*ops_registry,
+            &operation_id,
+        )
+        .await;
+        active_attempts.lock().await.remove(&public_job_id);
+    })
+}
+
+async fn report_monitor_health(
+    service: &DetachedJobService,
+    job_id: &meerkat_jobs::JobId,
+    write: &AttemptWriteAuthority,
+    last_progress_cursor: &mut u64,
+    condition: JobHealthCondition,
+    detail: String,
+) {
+    let cursor = last_progress_cursor.saturating_add(1);
+    if cursor == *last_progress_cursor {
+        return;
+    }
+    let Ok(progress) = JobProgress::health(cursor, condition, detail) else {
+        return;
+    };
+    match service
+        .report_progress(job_id, write.clone(), progress, unix_time_ms())
+        .await
+    {
+        Ok(_) => *last_progress_cursor = cursor,
+        Err(error) => {
+            warn!(job_id = %job_id, %error, "monitor health projection remains stale");
+        }
+    }
+}
+
+fn monitor_notification_id(job_id: &meerkat_jobs::JobId, key: &str) -> String {
+    format!(
+        "notification_{}",
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{}:{key}", job_id.as_str()).as_bytes(),
+        )
+    )
+}
+
+fn configured_redactions(config: &ShellConfig) -> Vec<String> {
+    let mut values = config
+        .env_vars
+        .values()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_sensitive(input: &str, redactions: &[String]) -> String {
+    redactions
+        .iter()
+        .fold(input.to_string(), |redacted, value| {
+            redacted.replace(value, "[REDACTED]")
+        })
+}
+
+async fn read_monitor_lines<R>(
+    mut reader: R,
+    max_line_bytes: usize,
+    sender: tokio::sync::mpsc::Sender<MonitorStreamItem>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut line = Vec::new();
+    let mut actual = 0_usize;
+    let mut discarding = false;
+    loop {
+        let read = match reader.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(error) => {
+                let _ = sender
+                    .send(MonitorStreamItem::ReadFailed(error.to_string()))
+                    .await;
+                return;
+            }
+        };
+        if read == 0 {
+            if actual > 0 {
+                let item = finish_monitor_line(&mut line, actual, discarding);
+                let _ = sender.send(item).await;
+            }
+            return;
+        }
+        for byte in &chunk[..read] {
+            if *byte == b'\n' {
+                let item = finish_monitor_line(&mut line, actual, discarding);
+                if sender.send(item).await.is_err() {
+                    return;
+                }
+                actual = 0;
+                discarding = false;
+                continue;
+            }
+            actual = actual.saturating_add(1);
+            if !discarding {
+                if line.len() < max_line_bytes {
+                    line.push(*byte);
+                } else {
+                    discarding = true;
+                }
+            }
+        }
+    }
+}
+
+fn finish_monitor_line(line: &mut Vec<u8>, actual: usize, discarding: bool) -> MonitorStreamItem {
+    if discarding {
+        line.clear();
+        return MonitorStreamItem::LineTooLong { actual };
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    let decoded = String::from_utf8_lossy(line).into_owned();
+    line.clear();
+    MonitorStreamItem::Line(decoded)
+}
+
+async fn finalize_attempt_projection(
+    public_job_id: &JobId,
+    view_status: JobStatus,
+    terminal: Result<meerkat_jobs::JobSnapshot, DetachedJobError>,
+    durable: &DurableShellJobRuntime,
+    projections: &Arc<Mutex<HashMap<JobId, JobProjection>>>,
+    ops_registry: &dyn OpsLifecycleRegistry,
+    operation_id: &OperationId,
+) {
+    match terminal {
+        Ok(snapshot) => {
+            if let Some(projection) = projections.lock().await.get_mut(public_job_id) {
+                projection.view.status = view_status.clone();
+            }
+            match durable
+                .delivery_projector
+                .project_job(public_job_id.as_ref())
+                .await
+            {
+                Ok(()) => {
+                    if let Err(error) =
+                        project_legacy_operation(ops_registry, operation_id, &view_status)
+                    {
+                        warn!(
+                            job_id = %public_job_id,
+                            %error,
+                            "runtime delivery committed but completion projection remains pending"
+                        );
+                    } else if let Err(error) = durable
+                        .delivery_projector
+                        .acknowledge_applied(public_job_id.as_ref())
+                        .await
+                    {
+                        warn!(
+                            job_id = %public_job_id,
+                            %error,
+                            "completion projection committed but runtime delivery acknowledgement remains pending"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        job_id = %public_job_id,
+                        %error,
+                        "durable job delivery remains pending; refusing early completion projection"
+                    );
+                }
+            }
+            debug!(
+                job_id = %public_job_id,
+                phase = ?snapshot.phase,
+                "durable attempt terminal committed"
+            );
+        }
+        Err(error) => {
+            warn!(
+                job_id = %public_job_id,
+                %error,
+                "durable attempt terminal commit failed; refusing volatile terminal projection"
+            );
+        }
+    }
 }
 
 fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
@@ -931,6 +1922,8 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             active_attempts,
             ops_registry,
             operation_id,
+            redactions,
+            resume_progress_cursor: _,
         } = task;
         let started = Instant::now();
         let stdout = child.stdout.take();
@@ -1022,8 +2015,14 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             join_output_bounded(stdout_task, "durable shell stdout"),
             join_output_bounded(stderr_task, "durable shell stderr")
         );
-        let stdout = truncate_output_tail(&stdout, DEFAULT_MAX_OUTPUT_BYTES);
-        let stderr = truncate_output_tail(&stderr, DEFAULT_MAX_OUTPUT_BYTES);
+        let stdout = redact_sensitive(
+            &truncate_output_tail(&stdout, DEFAULT_MAX_OUTPUT_BYTES),
+            &redactions,
+        );
+        let stderr = redact_sensitive(
+            &truncate_output_tail(&stderr, DEFAULT_MAX_OUTPUT_BYTES),
+            &redactions,
+        );
         let duration_secs = started.elapsed().as_secs_f64();
         let completed_at_ms = unix_time_ms();
         let (view_status, terminal) = match wait_outcome {
@@ -1242,19 +2241,9 @@ async fn hydrate_job(
     durable: &DurableShellJobRuntime,
     stored: meerkat_jobs::StoredJob,
 ) -> Result<BackgroundJob, ShellError> {
-    let specification_ref = stored
-        .spec
-        .runner_specification_ref
-        .as_ref()
-        .ok_or_else(|| shell_io(format!("job {} has no runner specification", stored.job_id)))?;
-    let payload = durable
-        .blob_store
-        .get(&BlobId::new(specification_ref.as_str()))
-        .await
-        .map_err(|error| shell_io(format!("cannot read shell runner specification: {error}")))?;
-    let spec: ShellRunnerSpecification = serde_json::from_str(&payload.data)
-        .map_err(|error| shell_io(format!("shell runner specification is corrupt: {error}")))?;
+    let spec = load_runner_spec(durable, &stored).await?;
     let started_at_unix = stored.machine_state.heartbeat_at_ms.unwrap_or_default() / 1_000;
+    let is_monitor = spec.monitor.is_some();
     let status = match stored.terminal_result {
         None if stored.machine_state.lifecycle_phase == JobPhase::Queued => JobStatus::Queued,
         None => JobStatus::Running { started_at_unix },
@@ -1273,6 +2262,14 @@ async fn hydrate_job(
                 stdout: result.stdout,
                 stderr: result.stderr,
                 duration_secs: result.duration_secs,
+            }
+        }
+        Some(JobTerminalResult::Succeeded { result_ref: None }) if is_monitor => {
+            JobStatus::Completed {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_secs: 0.0,
             }
         }
         Some(JobTerminalResult::Succeeded { result_ref: None }) => JobStatus::Failed {
@@ -1300,6 +2297,25 @@ async fn hydrate_job(
         started_at_unix,
         status,
     })
+}
+
+async fn load_runner_spec(
+    durable: &DurableShellJobRuntime,
+    stored: &meerkat_jobs::StoredJob,
+) -> Result<ShellRunnerSpecification, ShellError> {
+    let specification_ref = stored
+        .spec
+        .runner_specification_ref
+        .as_ref()
+        .ok_or_else(|| shell_io(format!("job {} has no runner specification", stored.job_id)))?;
+    let payload = durable
+        .blob_store
+        .get(&BlobId::new(specification_ref.as_str()))
+        .await
+        .map_err(|error| shell_io(format!("cannot read shell runner specification: {error}")))?;
+    let spec: ShellRunnerSpecification = serde_json::from_str(&payload.data)
+        .map_err(|error| shell_io(format!("shell runner specification is corrupt: {error}")))?;
+    Ok(spec)
 }
 
 async fn terminal_fail(
@@ -1469,6 +2485,7 @@ impl CompletionEnrichmentProvider for JobManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod durable_tests {
     use super::*;
     use meerkat_jobs::{DetachedJobService, SqliteDetachedJobStore};
@@ -1713,6 +2730,428 @@ mod durable_tests {
     }
 
     #[tokio::test]
+    async fn framed_monitor_notifies_checkpoints_and_continues_until_explicit_completion() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let service = DetachedJobService::new(job_store);
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+            .with_durable_job_runtime(runtime);
+        let command = concat!(
+            "printf '%s\\n' ",
+            "'{\"type\":\"notify\",\"key\":\"release:v1\",\"message\":\"v1\"}' ",
+            "'{\"type\":\"checkpoint\",\"value\":\"etag:v1\"}'; ",
+            "sleep 0.05; ",
+            "printf '%s\\n' ",
+            "'{\"type\":\"notify\",\"key\":\"release:v2\",\"message\":\"v2\"}' ",
+            "'{\"type\":\"complete\"}'"
+        );
+        let public_job_id = manager
+            .spawn_monitor_for_call(
+                command,
+                None,
+                5,
+                "monitor-call-1",
+                MonitorStartOptions {
+                    restart_class: RestartClass::CheckpointResumable,
+                    ..MonitorStartOptions::default()
+                },
+            )
+            .await
+            .expect("spawn monitor");
+        let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = service.get(&job_id).await.expect("read").expect("job");
+                if !snapshot.outbox.is_empty() && snapshot.checkpoint_ref.is_some() {
+                    assert!(
+                        snapshot.terminal_result.is_none(),
+                        "a notification frame alone must not terminalize the monitor"
+                    );
+                    assert_eq!(
+                        snapshot.checkpoint_ref.as_ref().map(|value| value.as_str()),
+                        Some("etag:v1")
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first notification");
+
+        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = service.get(&job_id).await.expect("read").expect("job");
+                if snapshot.terminal_result.is_some() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor completion");
+        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(completed.current_fence.get(), 1);
+        assert_eq!(completed.outbox.len(), 3);
+        assert!(matches!(
+            &completed.outbox[0].payload,
+            meerkat_jobs::JobOutboxPayload::Notification(notification)
+                if notification.idempotency_key() == "release:v1"
+        ));
+        assert!(matches!(
+            &completed.outbox[1].payload,
+            meerkat_jobs::JobOutboxPayload::Notification(notification)
+                if notification.idempotency_key() == "release:v2"
+        ));
+        assert!(matches!(
+            &completed.outbox[2].payload,
+            meerkat_jobs::JobOutboxPayload::Terminal(JobTerminalResult::Succeeded { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolved_monitor_credentials_are_redacted_without_entering_durable_spec_or_output() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, mut config) = durable_fixture(&temp, session_id.clone());
+        let secret = "credential-redaction-canary-7f4c";
+        config
+            .env_vars
+            .insert("MONITOR_TEST_TOKEN".into(), secret.into());
+        let service = DetachedJobService::new(job_store.clone());
+        let blob_store = runtime.blob_store.clone();
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+            .with_durable_job_runtime(runtime);
+        let command = concat!(
+            "printf '%s\\n' ",
+            "\"{\\\"type\\\":\\\"notify\\\",\\\"key\\\":\\\"key:$MONITOR_TEST_TOKEN\\\",",
+            "\\\"message\\\":\\\"body:$MONITOR_TEST_TOKEN\\\"}\" ",
+            "\"diagnostic:$MONITOR_TEST_TOKEN\" ",
+            "'{\"type\":\"complete\"}'; ",
+            "printf 'stderr:%s\\n' \"$MONITOR_TEST_TOKEN\" >&2"
+        );
+        let public_job_id = manager
+            .spawn_monitor_for_call(
+                command,
+                None,
+                5,
+                "monitor-redaction-call",
+                MonitorStartOptions::default(),
+            )
+            .await
+            .expect("spawn monitor");
+        let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
+        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = service.get(&job_id).await.expect("read").expect("job");
+                if snapshot.terminal_result.is_some() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor completion");
+
+        let stored = job_store
+            .get(&job_id)
+            .await
+            .expect("stored job")
+            .expect("job");
+        assert!(
+            stored
+                .progress
+                .as_ref()
+                .is_none_or(|progress| !progress.detail.contains(secret))
+        );
+        let notification = stored
+            .outbox
+            .iter()
+            .find_map(|entry| match &entry.payload {
+                meerkat_jobs::JobOutboxPayload::Notification(notification) => Some(notification),
+                meerkat_jobs::JobOutboxPayload::Terminal(_) => None,
+            })
+            .expect("notification");
+        assert!(!notification.idempotency_key().contains(secret));
+        assert!(!notification.title().contains(secret));
+        assert!(!notification.body().contains(secret));
+        assert!(notification.body().contains("[REDACTED]"));
+
+        let runner_blob_id = BlobId::new(
+            stored
+                .spec
+                .runner_specification_ref
+                .as_ref()
+                .expect("runner spec")
+                .as_str(),
+        );
+        let runner_blob = blob_store.get(&runner_blob_id).await.expect("runner blob");
+        assert!(!runner_blob.data.contains(secret));
+
+        let result_ref = match completed.terminal_result.expect("terminal result") {
+            JobTerminalResult::Succeeded {
+                result_ref: Some(result_ref),
+            } => result_ref,
+            other => panic!("unexpected terminal result: {other:?}"),
+        };
+        let result_blob = blob_store
+            .get(&BlobId::new(result_ref.as_str()))
+            .await
+            .expect("result blob");
+        assert!(!result_blob.data.contains(secret));
+        assert!(result_blob.data.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn resolved_monitor_credential_literal_is_rejected_before_job_or_spec_persistence() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, mut config) = durable_fixture(&temp, session_id.clone());
+        let secret = "credential-persistence-canary-94d1";
+        config
+            .env_vars
+            .insert("MONITOR_TEST_TOKEN".into(), secret.into());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(
+                session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(runtime);
+        let error = manager
+            .spawn_monitor_for_call(
+                &format!("printf '%s\\n' '{secret}'"),
+                None,
+                5,
+                "monitor-secret-literal",
+                MonitorStartOptions::default(),
+            )
+            .await
+            .expect_err("resolved literal must fail closed");
+        assert!(error.to_string().contains("resolved environment value"));
+        assert!(
+            job_store
+                .list_for_origin("test-realm", &session_id, 10)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_completion_cannot_deadlock_behind_post_complete_stdout_flood() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let service = DetachedJobService::new(job_store);
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+            .with_durable_job_runtime(runtime);
+        let public_job_id = manager
+            .spawn_monitor_for_call(
+                "printf '%s\\n' '{\"type\":\"complete\"}'; \
+                 i=0; while test \"$i\" -lt 200; do printf 'after-complete-%s\\n' \"$i\"; \
+                 i=$((i + 1)); done",
+                None,
+                5,
+                "monitor-complete-flood",
+                MonitorStartOptions::default(),
+            )
+            .await
+            .expect("spawn monitor");
+        let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = service.get(&job_id).await.expect("read").expect("job");
+                if snapshot.terminal_result.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("explicit completion must not deadlock");
+    }
+
+    #[tokio::test]
+    async fn line_protocol_refuses_restart_classes_that_cannot_preserve_line_identity() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(
+                session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(runtime);
+        let error = manager
+            .spawn_monitor_for_call(
+                "printf 'notification\\n'",
+                None,
+                5,
+                "line-restart",
+                MonitorStartOptions {
+                    protocol: MonitorOutputProtocol::Lines,
+                    restart_class: RestartClass::Replayable,
+                    ..MonitorStartOptions::default()
+                },
+            )
+            .await
+            .expect_err("line restart must fail closed");
+        assert!(error.to_string().contains("non-resumable"));
+        assert!(
+            job_store
+                .list_for_origin("test-realm", &session_id, 10)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_monitor_recovery_claims_once_after_loss_and_resumes_from_committed_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let service = DetachedJobService::new(job_store);
+        let resolved_dir = config
+            .default_working_dir_async()
+            .await
+            .expect("working dir");
+        let placement = config
+            .execution_placement_for_working_dir_async(&resolved_dir)
+            .await
+            .expect("placement");
+        let command = concat!(
+            "test \"$MEERKAT_MONITOR_CHECKPOINT\" = 'baseline:v1' || exit 9; ",
+            "printf '%s\\n' ",
+            "'{\"type\":\"progress\",\"cursor\":10,\"message\":\"resumed\"}' ",
+            "'{\"type\":\"notify\",\"key\":\"observation:v2\",\"message\":\"v2\"}' ",
+            "'{\"type\":\"checkpoint\",\"value\":\"baseline:v2\"}' ",
+            "'{\"type\":\"notify\",\"key\":\"observation:v3\",\"message\":\"v3\"}' ",
+            "'{\"type\":\"checkpoint\",\"value\":\"baseline:v3\"}' ",
+            "'{\"type\":\"complete\"}'"
+        );
+        let runner_spec = ShellRunnerSpecification {
+            command: command.to_string(),
+            working_dir: resolved_dir.display().to_string(),
+            placement,
+            timeout_secs: 5,
+            monitor: Some(MonitorRunnerSpecification {
+                protocol: MonitorOutputProtocol::FramedJsonl,
+                limits: MonitorProtocolLimits::default(),
+                delivery: meerkat_jobs::JobDeliveryKind::Record,
+            }),
+        };
+        let encoded = serde_json::to_string(&runner_spec).expect("encode");
+        let blob = runtime
+            .blob_store
+            .put_artifact(SHELL_RUNNER_MEDIA_TYPE, &encoded)
+            .await
+            .expect("persist runner spec");
+        let receipt = service
+            .submit(
+                JobSpec::new(
+                    "test-realm",
+                    session_id.clone(),
+                    ExecutionIntentId::from_string("monitor-recovery-intent").expect("intent"),
+                    InteractionLineageId::from_string("monitor-recovery-lineage").expect("lineage"),
+                    ToolIdentity::new("monitor_start", "v1").expect("tool"),
+                    RunnerIdentity::new("meerkat.monitor_script", "v1").expect("runner"),
+                    RestartClass::CheckpointResumable,
+                    CanonicalArgumentsHash::new(blob.blob_id.to_string()).expect("hash"),
+                    JobSubmissionKey::new("monitor-recovery-submission").expect("key"),
+                )
+                .with_runner_specification_ref(
+                    RunnerSpecificationRef::new(blob.blob_id.to_string()).expect("ref"),
+                ),
+            )
+            .await
+            .expect("submit");
+        let first = service
+            .claim_attempt(
+                &receipt.job_id,
+                AttemptClaim::new(
+                    WorkerId::new("monitor-before-crash").expect("worker"),
+                    1,
+                    10,
+                    RunnerHandleRef::new("inproc-monitor:lost").expect("handle"),
+                ),
+            )
+            .await
+            .expect("claim");
+        service
+            .record_checkpoint(
+                &receipt.job_id,
+                (&first).into(),
+                meerkat_jobs::CheckpointRef::new("baseline:v1").expect("checkpoint"),
+                2,
+            )
+            .await
+            .expect("baseline");
+        service
+            .report_progress(
+                &receipt.job_id,
+                (&first).into(),
+                JobProgress::new(9, "before restart").expect("progress"),
+                3,
+            )
+            .await
+            .expect("baseline progress");
+
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+            .with_durable_job_runtime(runtime);
+        manager.ensure_recovered().await.expect("recover and claim");
+        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = service
+                    .get(&receipt.job_id)
+                    .await
+                    .expect("read")
+                    .expect("job");
+                if snapshot.terminal_result.is_some() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recovered monitor completion");
+        assert_eq!(completed.attempt_count, 2);
+        assert_eq!(completed.current_fence.get(), 2);
+        assert_ne!(
+            completed.current_attempt_id.as_ref(),
+            Some(&first.attempt_id)
+        );
+        assert_eq!(
+            completed
+                .checkpoint_ref
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("baseline:v3")
+        );
+        assert_eq!(
+            completed.progress.as_ref().map(|progress| progress.cursor),
+            Some(10)
+        );
+        let keys = completed
+            .outbox
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                meerkat_jobs::JobOutboxPayload::Notification(notification) => {
+                    Some(notification.idempotency_key())
+                }
+                meerkat_jobs::JobOutboxPayload::Terminal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["observation:v2", "observation:v3"]);
+    }
+
+    #[tokio::test]
     async fn running_shell_attempt_renews_its_committed_lease() {
         let temp = TempDir::new().expect("tempdir");
         let session_id = SessionId::new();
@@ -1763,6 +3202,7 @@ mod durable_tests {
             working_dir: resolved_dir.display().to_string(),
             placement,
             timeout_secs: 5,
+            monitor: None,
         };
         let encoded = serde_json::to_string(&runner_spec).expect("encode");
         let blob = runtime

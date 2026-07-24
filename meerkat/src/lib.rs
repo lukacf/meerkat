@@ -147,8 +147,18 @@ mod agent_builder;
 pub use agent_builder::AgentBuilder;
 mod job_delivery;
 pub use job_delivery::{
-    JobOutboxProjectionError, JobOutboxProjector, JobTerminalDeliveryPayload, PreparedJobDelivery,
+    AppliedRuntimeJobDelivery, JobDeliveryApplication, JobDeliveryContent, JobDeliverySink,
+    JobNotificationDeliveryPayload, JobOutboxProjectionError, JobOutboxProjector,
+    JobRuntimeDeliveryApplier, JobTerminalDeliveryPayload, PreparedJobDelivery,
     ProjectedJobDelivery,
+};
+#[cfg(feature = "schedule")]
+mod predicate_schedule;
+#[cfg(feature = "schedule")]
+pub use predicate_schedule::{
+    PredicateObservationProvider, PredicateSourceObservationError,
+    SCHEDULED_PREDICATE_RUNNABLE_NAME, ScheduledPredicateParams, ScheduledPredicateRunnable,
+    scheduled_predicate_runnable_name, scheduled_predicate_runner_handle,
 };
 
 // Config store types (filesystem-dependent — not available on wasm32)
@@ -316,10 +326,11 @@ pub use meerkat_jobs::SqliteDetachedJobStore;
 pub use meerkat_jobs::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
     CheckpointRef, DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId,
-    FenceToken, InteractionLineageId, JobFailureCode, JobId, JobOutboxEntry, JobPhase, JobProgress,
-    JobReceipt, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobTerminalKind,
-    JobTerminalResult, MemoryDetachedJobStore, OriginMemberId, RestartClass, RunnerHandleRef,
-    RunnerIdentity, ToolIdentity, WorkerId,
+    FenceToken, InteractionLineageId, JobDeliveryKind, JobFailureCode, JobHealthCondition, JobId,
+    JobNotification, JobOutboxEntry, JobPhase, JobProgress, JobProgressKind, JobReceipt,
+    JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
+    JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore, OriginMemberId, RestartClass,
+    RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 
 use crate::machines::detached_job::{DetachedJobMachineAuthority, DetachedJobMachineState};
 use crate::{
-    DetachedJobError, JobId, JobOutboxEntry, JobProgress, JobSpec, JobSubmissionKey,
-    JobTerminalResult,
+    DetachedJobError, JobId, JobOutboxEntry, JobOutboxPayload, JobProgress, JobSpec,
+    JobSubmissionKey, JobTerminalResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,7 @@ pub struct StoredJob {
     pub machine_state: DetachedJobMachineState,
     pub progress: Option<JobProgress>,
     pub terminal_result: Option<JobTerminalResult>,
+    pub subscriptions: Vec<crate::JobSubscription>,
     pub outbox: Vec<JobOutboxEntry>,
 }
 
@@ -298,16 +299,110 @@ pub(crate) fn validate_stored_job(job: &StoredJob) -> Result<(), DetachedJobErro
             )));
         }
     }
-    match (state.terminal_kind, &job.terminal_result) {
-        (None, None) if job.outbox.is_empty() => {}
-        (Some(kind), Some(result))
+    let mut subscription_ids = BTreeSet::new();
+    for subscription in &job.subscriptions {
+        if !subscription_ids.insert(subscription.subscription_id().as_str()) {
+            return Err(DetachedJobError::Store(format!(
+                "job {} contains duplicate active subscription {}",
+                job.job_id,
+                subscription.subscription_id()
+            )));
+        }
+    }
+    let mut sequences = BTreeSet::new();
+    for entry in &job.outbox {
+        if entry.job_id != job.job_id
+            || entry.delivery_sequence == 0
+            || entry.delivery_sequence > state.delivery_sequence
+            || !sequences.insert(entry.delivery_sequence)
+        {
+            return Err(DetachedJobError::Store(format!(
+                "job {} outbox identity or delivery sequence disagrees with generated authority",
+                job.job_id
+            )));
+        }
+        let mut target_ids = BTreeSet::new();
+        for target in &entry.targets {
+            if !target_ids.insert(target.subscription_id().as_str()) {
+                return Err(DetachedJobError::Store(format!(
+                    "job {} delivery {} contains duplicate subscription target {}",
+                    job.job_id,
+                    entry.delivery_sequence,
+                    target.subscription_id()
+                )));
+            }
+        }
+    }
+    if job.outbox.len() != usize::try_from(state.delivery_sequence).unwrap_or(usize::MAX) {
+        return Err(DetachedJobError::Store(format!(
+            "job {} outbox cardinality disagrees with generated delivery sequence",
+            job.job_id
+        )));
+    }
+
+    let notifications = job
+        .outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            JobOutboxPayload::Notification(notification) => Some((entry, notification)),
+            JobOutboxPayload::Terminal(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if notifications.len() != state.notification_ids.len() {
+        return Err(DetachedJobError::Store(format!(
+            "job {} notification outbox cardinality disagrees with generated authority",
+            job.job_id
+        )));
+    }
+    for (entry, notification) in notifications {
+        let notification_id = notification.notification_id().as_str();
+        let idempotency_key = notification.idempotency_key();
+        if entry.delivery_id != notification_id
+            || !state.notification_ids.contains(notification_id)
+            || !state
+                .notification_idempotency_keys
+                .contains(idempotency_key)
+            || state
+                .notification_id_by_key
+                .get(idempotency_key)
+                .map(String::as_str)
+                != Some(notification_id)
+            || state
+                .notification_delivery_ids
+                .get(notification_id)
+                .map(String::as_str)
+                != Some(entry.runtime_delivery_id().as_str())
+            || state.notification_sequences.get(notification_id).copied()
+                != Some(entry.delivery_sequence)
+            || state.notification_applied.contains(notification_id) != entry.applied
+        {
+            return Err(DetachedJobError::Store(format!(
+                "job {} notification outbox projection disagrees with generated authority",
+                job.job_id
+            )));
+        }
+    }
+
+    let terminal_entries = job
+        .outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            JobOutboxPayload::Terminal(result) => Some((entry, result)),
+            JobOutboxPayload::Notification(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match (
+        state.terminal_kind,
+        &job.terminal_result,
+        terminal_entries.as_slice(),
+    ) {
+        (None, None, []) => {}
+        (Some(kind), Some(result), [(entry, payload)])
             if result.kind() == kind
-                && job.outbox.len() == 1
-                && job.outbox[0].job_id == job.job_id
-                && job.outbox[0].delivery_sequence == state.terminal_delivery_sequence
-                && job.outbox[0].terminal_kind == kind
-                && job.outbox[0].terminal_result == *result
-                && job.outbox[0].applied == state.terminal_delivery_applied => {}
+                && *payload == result
+                && entry.delivery_id == "terminal"
+                && entry.delivery_sequence == state.terminal_delivery_sequence
+                && entry.applied == state.terminal_delivery_applied => {}
         _ => {
             return Err(DetachedJobError::Store(format!(
                 "job {} terminal result/outbox projection disagrees with generated authority",

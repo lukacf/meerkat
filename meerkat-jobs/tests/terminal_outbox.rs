@@ -5,9 +5,9 @@ use std::sync::Arc;
 use meerkat_core::SessionId;
 use meerkat_jobs::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, DetachedJobService,
-    ExecutionIntentId, InteractionLineageId, JobFailureCode, JobResultRef, JobSpec,
-    JobSubmissionKey, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore, RestartClass,
-    RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
+    ExecutionIntentId, InteractionLineageId, JobFailureCode, JobOutboxPayload, JobResultRef,
+    JobSpec, JobSubmissionKey, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore,
+    RestartClass, RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
 };
 
 fn spec(key: &str, restart_class: RestartClass) -> JobSpec {
@@ -80,8 +80,8 @@ async fn success_and_its_typed_outbox_entry_commit_atomically_and_survive_reopen
     assert_eq!(completed.outbox.len(), 1);
     assert!(!completed.outbox[0].applied);
     assert_eq!(
-        completed.outbox[0].terminal_result,
-        completed.terminal_result.clone().expect("terminal result")
+        completed.outbox[0].payload,
+        JobOutboxPayload::Terminal(completed.terminal_result.clone().expect("terminal result"))
     );
 
     let reopened = DetachedJobService::new(Arc::new(
@@ -166,10 +166,9 @@ async fn failure_cancel_loss_and_attention_all_use_the_same_typed_outbox_protoco
     ] {
         assert_eq!(snapshot.terminal_kind, Some(expected));
         assert_eq!(snapshot.outbox.len(), 1);
-        assert_eq!(snapshot.outbox[0].terminal_kind, expected);
         assert_eq!(
-            snapshot.outbox[0].terminal_result,
-            snapshot.terminal_result.expect("typed terminal result")
+            snapshot.outbox[0].payload,
+            JobOutboxPayload::Terminal(snapshot.terminal_result.expect("typed terminal result"))
         );
         assert!(!snapshot.outbox[0].applied);
     }

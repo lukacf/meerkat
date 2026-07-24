@@ -261,6 +261,42 @@ fn sqlite_open_stamps_the_jobs_schema_domain() {
 }
 
 #[test]
+fn sqlite_open_upgrades_the_legacy_jobs_document_schema_before_new_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.sqlite3");
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    conn.execute_batch(
+        "CREATE TABLE meerkat_schema (
+             domain TEXT PRIMARY KEY,
+             version INTEGER NOT NULL
+         );
+         INSERT INTO meerkat_schema (domain, version) VALUES ('jobs', 1);
+         CREATE TABLE detached_jobs (
+             job_id TEXT PRIMARY KEY,
+             realm_id TEXT NOT NULL,
+             submission_key TEXT NOT NULL,
+             revision BLOB NOT NULL CHECK (length(revision) = 8),
+             has_pending_outbox INTEGER NOT NULL CHECK (has_pending_outbox IN (0, 1)),
+             job_json BLOB NOT NULL,
+             UNIQUE (realm_id, submission_key)
+         );
+         CREATE INDEX idx_detached_jobs_pending_outbox
+             ON detached_jobs (has_pending_outbox, job_id);",
+    )
+    .expect("legacy schema");
+    drop(conn);
+
+    SqliteDetachedJobStore::open(&path).expect("upgrade");
+    let version = meerkat_sqlite::domain_version(
+        &meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+            .expect("read-only open"),
+        meerkat_jobs::JOBS_DOMAIN.name,
+    )
+    .expect("domain version");
+    assert_eq!(version, Some(2));
+}
+
+#[test]
 fn sqlite_open_refuses_a_future_jobs_schema() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.sqlite3");
@@ -283,7 +319,7 @@ fn sqlite_open_refuses_a_future_jobs_schema() {
             meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture {
                 ref domain,
                 found: 999,
-                supported: 1
+                supported: 2
             }
         ) if domain == "jobs"
     ));

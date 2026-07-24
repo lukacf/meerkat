@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -11,9 +12,9 @@ use crate::machines::detached_job::{
 use crate::store::{next_revision, validate_stored_job};
 use crate::{
     CanonicalArgumentsHash, DetachedJobError, DetachedJobStore, ExecutionIntentId,
-    InsertJobOutcome, InteractionLineageId, JobId, JobOutboxEntry, JobProgress, JobSpec,
-    JobSubmissionKey, JobTerminalResult, OriginMemberId, RunnerIdentity, RunnerSpecificationRef,
-    StoredJob, ToolIdentity,
+    InsertJobOutcome, InteractionLineageId, JobId, JobOutboxEntry, JobOutboxPayload, JobProgress,
+    JobSpec, JobSubmissionKey, JobSubscription, JobTerminalResult, OriginMemberId, RunnerIdentity,
+    RunnerSpecificationRef, StoredJob, ToolIdentity,
 };
 
 const STORED_JOB_FORMAT_VERSION: u32 = 1;
@@ -32,6 +33,8 @@ struct PersistedStoredJob {
     machine_state: PersistedMachineState,
     progress: Option<JobProgress>,
     terminal_result: Option<JobTerminalResult>,
+    #[serde(default)]
+    subscriptions: Vec<JobSubscription>,
     outbox: Vec<PersistedJobOutboxEntry>,
 }
 
@@ -117,6 +120,20 @@ struct PersistedMachineState {
     lease_expired: bool,
     retry_due_at_ms: Option<u64>,
     cancel_requested: bool,
+    #[serde(default)]
+    delivery_sequence: u64,
+    #[serde(default)]
+    notification_ids: BTreeSet<String>,
+    #[serde(default)]
+    notification_idempotency_keys: BTreeSet<String>,
+    #[serde(default)]
+    notification_id_by_key: BTreeMap<String, String>,
+    #[serde(default)]
+    notification_delivery_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    notification_sequences: BTreeMap<String, u64>,
+    #[serde(default)]
+    notification_applied: BTreeSet<String>,
     terminal_kind: Option<PersistedTerminalKind>,
     terminal_delivery_sequence: u64,
     terminal_delivery_applied: bool,
@@ -125,19 +142,34 @@ struct PersistedMachineState {
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedJobOutboxEntry {
     job_id: JobId,
+    #[serde(default)]
+    delivery_id: Option<String>,
     delivery_sequence: u64,
-    terminal_kind: PersistedTerminalKind,
-    terminal_result: JobTerminalResult,
+    #[serde(default)]
+    payload: Option<JobOutboxPayload>,
+    #[serde(default)]
+    terminal_kind: Option<PersistedTerminalKind>,
+    #[serde(default)]
+    terminal_result: Option<JobTerminalResult>,
+    #[serde(default)]
+    targets: Vec<JobSubscription>,
     applied: bool,
 }
 
 pub const JOBS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "jobs",
-    migrations: &[meerkat_sqlite::Migration {
-        version: 1,
-        name: "base-schema",
-        apply: migration_0001_jobs_schema,
-    }],
+    migrations: &[
+        meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_jobs_schema,
+        },
+        meerkat_sqlite::Migration {
+            version: 2,
+            name: "notification-outbox-and-subscriptions",
+            apply: migration_0002_notification_outbox_and_subscriptions,
+        },
+    ],
 };
 
 fn migration_0001_jobs_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -156,6 +188,16 @@ fn migration_0001_jobs_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Erro
             ON detached_jobs (has_pending_outbox, job_id);
         ",
     )
+}
+
+fn migration_0002_notification_outbox_and_subscriptions(
+    _tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    // The durable document remains in the existing job_json envelope, but
+    // v2 stamps the first writer that may persist notification/subscription
+    // fields. Older binaries therefore refuse the database before attempting
+    // to decode a row they cannot understand.
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -515,6 +557,7 @@ impl From<&StoredJob> for PersistedStoredJob {
             machine_state: PersistedMachineState::from(&job.machine_state),
             progress: job.progress.clone(),
             terminal_result: job.terminal_result.clone(),
+            subscriptions: job.subscriptions.clone(),
             outbox: job
                 .outbox
                 .iter()
@@ -535,7 +578,12 @@ impl TryFrom<PersistedStoredJob> for StoredJob {
             machine_state: DetachedJobMachineState::from(job.machine_state),
             progress: job.progress,
             terminal_result: job.terminal_result,
-            outbox: job.outbox.into_iter().map(JobOutboxEntry::from).collect(),
+            subscriptions: job.subscriptions,
+            outbox: job
+                .outbox
+                .into_iter()
+                .map(JobOutboxEntry::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
@@ -722,6 +770,13 @@ impl From<&DetachedJobMachineState> for PersistedMachineState {
             lease_expired: state.lease_expired,
             retry_due_at_ms: state.retry_due_at_ms,
             cancel_requested: state.cancel_requested,
+            delivery_sequence: state.delivery_sequence,
+            notification_ids: state.notification_ids.clone(),
+            notification_idempotency_keys: state.notification_idempotency_keys.clone(),
+            notification_id_by_key: state.notification_id_by_key.clone(),
+            notification_delivery_ids: state.notification_delivery_ids.clone(),
+            notification_sequences: state.notification_sequences.clone(),
+            notification_applied: state.notification_applied.clone(),
             terminal_kind: state.terminal_kind.map(PersistedTerminalKind::from),
             terminal_delivery_sequence: state.terminal_delivery_sequence,
             terminal_delivery_applied: state.terminal_delivery_applied,
@@ -730,7 +785,10 @@ impl From<&DetachedJobMachineState> for PersistedMachineState {
 }
 
 impl From<PersistedMachineState> for DetachedJobMachineState {
-    fn from(state: PersistedMachineState) -> Self {
+    fn from(mut state: PersistedMachineState) -> Self {
+        if state.delivery_sequence == 0 && state.terminal_delivery_sequence > 0 {
+            state.delivery_sequence = state.terminal_delivery_sequence;
+        }
         Self {
             lifecycle_phase: DetachedJobPhase::from(state.lifecycle_phase),
             job_id: state.job_id,
@@ -747,6 +805,13 @@ impl From<PersistedMachineState> for DetachedJobMachineState {
             lease_expired: state.lease_expired,
             retry_due_at_ms: state.retry_due_at_ms,
             cancel_requested: state.cancel_requested,
+            delivery_sequence: state.delivery_sequence,
+            notification_ids: state.notification_ids,
+            notification_idempotency_keys: state.notification_idempotency_keys,
+            notification_id_by_key: state.notification_id_by_key,
+            notification_delivery_ids: state.notification_delivery_ids,
+            notification_sequences: state.notification_sequences,
+            notification_applied: state.notification_applied,
             terminal_kind: state.terminal_kind.map(DetachedJobTerminalKind::from),
             terminal_delivery_sequence: state.terminal_delivery_sequence,
             terminal_delivery_applied: state.terminal_delivery_applied,
@@ -758,23 +823,60 @@ impl From<&JobOutboxEntry> for PersistedJobOutboxEntry {
     fn from(entry: &JobOutboxEntry) -> Self {
         Self {
             job_id: entry.job_id.clone(),
+            delivery_id: Some(entry.delivery_id.clone()),
             delivery_sequence: entry.delivery_sequence,
-            terminal_kind: PersistedTerminalKind::from(entry.terminal_kind),
-            terminal_result: entry.terminal_result.clone(),
+            payload: Some(entry.payload.clone()),
+            terminal_kind: None,
+            terminal_result: None,
+            targets: entry.targets.clone(),
             applied: entry.applied,
         }
     }
 }
 
-impl From<PersistedJobOutboxEntry> for JobOutboxEntry {
-    fn from(entry: PersistedJobOutboxEntry) -> Self {
-        Self {
+impl TryFrom<PersistedJobOutboxEntry> for JobOutboxEntry {
+    type Error = DetachedJobError;
+
+    fn try_from(entry: PersistedJobOutboxEntry) -> Result<Self, Self::Error> {
+        let payload = match (entry.payload, entry.terminal_result) {
+            (Some(payload), None) => payload,
+            (None, Some(result)) => {
+                if entry
+                    .terminal_kind
+                    .map(DetachedJobTerminalKind::from)
+                    .is_some_and(|kind| kind != result.kind())
+                {
+                    return Err(DetachedJobError::Store(
+                        "legacy terminal outbox kind disagrees with result".into(),
+                    ));
+                }
+                JobOutboxPayload::Terminal(result)
+            }
+            (Some(_), Some(_)) => {
+                return Err(DetachedJobError::Store(
+                    "stored outbox entry contains both current and legacy payloads".into(),
+                ));
+            }
+            (None, None) => {
+                return Err(DetachedJobError::Store(
+                    "stored outbox entry has no payload".into(),
+                ));
+            }
+        };
+        let delivery_id = entry.delivery_id.unwrap_or_else(|| match &payload {
+            JobOutboxPayload::Terminal(_) => "terminal".to_string(),
+            JobOutboxPayload::Notification(notification) => {
+                notification.notification_id().as_str().to_string()
+            }
+        });
+        Ok(Self {
             job_id: entry.job_id,
+            delivery_id,
             delivery_sequence: entry.delivery_sequence,
-            terminal_kind: DetachedJobTerminalKind::from(entry.terminal_kind),
-            terminal_result: entry.terminal_result,
+            payload,
+            targets: entry.targets,
             applied: entry.applied,
-        }
+        })
     }
 }
 

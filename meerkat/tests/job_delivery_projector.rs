@@ -4,14 +4,31 @@ use std::sync::Arc;
 
 use meerkat::{
     AttemptClaim, CanonicalArgumentsHash, DetachedJobService, DetachedJobStore,
-    InteractionLineageId, JobId, JobOutboxProjector, JobResultRef, JobSpec, JobSubmissionKey,
+    InteractionLineageId, JobDeliveryApplication, JobDeliveryKind, JobDeliverySink, JobId,
+    JobNotification, JobNotificationDeliveryPayload, JobOutboxProjector, JobResultRef,
+    JobRuntimeDeliveryApplier, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
     JobTerminalDeliveryPayload, JobTerminalResult, MemoryDetachedJobStore, RestartClass,
     RunnerHandleRef, RunnerIdentity, SessionId, ToolIdentity, WorkerId,
 };
+use meerkat_core::HandlingMode;
 use meerkat_runtime::{
     InMemoryRuntimeStore, LogicalRuntimeId, RuntimeDeliveryId, RuntimeDeliveryInbox,
 };
 use meerkat_tools::builtin::shell::ShellJobDeliveryProjector;
+use tokio::sync::Mutex;
+
+#[derive(Default)]
+struct RecordingDeliverySink {
+    applications: Mutex<Vec<JobDeliveryApplication>>,
+}
+
+#[async_trait::async_trait]
+impl JobDeliverySink for RecordingDeliverySink {
+    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+        self.applications.lock().await.push(application);
+        Ok(())
+    }
+}
 
 fn spec(key: &str, session_id: SessionId) -> JobSpec {
     JobSpec::new(
@@ -50,6 +67,179 @@ async fn completed_job(jobs: &DetachedJobService, session_id: SessionId, key: &s
     .await
     .expect("complete");
     receipt.job_id
+}
+
+async fn notified_job(jobs: &DetachedJobService, session_id: SessionId, key: &str) -> JobId {
+    let receipt = jobs.submit(spec(key, session_id)).await.expect("submit");
+    let claim = jobs
+        .claim_attempt(
+            &receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("monitor-worker").expect("worker"),
+                1,
+                100,
+                RunnerHandleRef::new("monitor-handle").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    jobs.emit_notification(
+        &receipt.job_id,
+        (&claim).into(),
+        2,
+        JobNotification::new(
+            "notification-1",
+            "monitor:release:v1",
+            "Release observed",
+            "Meerkat v1 is available.",
+        )
+        .expect("notification"),
+    )
+    .await
+    .expect("emit notification");
+    receipt.job_id
+}
+
+#[tokio::test]
+async fn nonterminal_notification_is_durable_and_replays_after_runtime_insert_crash() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let job_id = notified_job(&jobs, session_id.clone(), "notification-replay").await;
+    let pending = job_store
+        .list_pending_outbox(10)
+        .await
+        .expect("job outbox")
+        .pop()
+        .expect("notification delivery");
+
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store.clone(), inbox.clone());
+    let prepared = projector
+        .prepare(&pending)
+        .await
+        .expect("prepare notification");
+    assert_eq!(
+        prepared.submission.kind(),
+        meerkat_runtime::RuntimeDeliveryKind::JobNotification
+    );
+    assert_eq!(
+        prepared.submission.delivery_id(),
+        &RuntimeDeliveryId::new(format!("{job_id}:notification:notification-1"))
+            .expect("delivery id")
+    );
+    let first = inbox
+        .submit(&prepared.runtime_id, prepared.submission.clone())
+        .await
+        .expect("runtime commit");
+
+    let projected = projector.project_pending(10).await.expect("retry project");
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].runtime_sequence, first.sequence);
+    assert!(projected[0].runtime_deduplicated);
+
+    let job = jobs.get(&job_id).await.expect("load").expect("job");
+    assert!(job.terminal_result.is_none());
+    assert!(job.outbox[0].applied);
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let runtime_entries = inbox
+        .list_pending(&runtime_id, 10)
+        .await
+        .expect("runtime inbox");
+    assert_eq!(runtime_entries.len(), 1);
+    let payload: JobNotificationDeliveryPayload =
+        serde_json::from_slice(runtime_entries[0].submission.payload()).expect("typed payload");
+    assert_eq!(payload.job_id, job_id);
+    assert_eq!(payload.delivery_sequence, 1);
+    assert_eq!(payload.notification.title(), "Release observed");
+    assert_eq!(payload.notification.body(), "Meerkat v1 is available.");
+}
+
+#[tokio::test]
+async fn subscription_application_keeps_notifications_turn_free_and_events_canonical() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let origin = SessionId::new();
+    let event_session = SessionId::new();
+    let receipt = jobs
+        .submit(spec("subscription-application", origin.clone()))
+        .await
+        .expect("submit");
+    jobs.subscribe(
+        &receipt.job_id,
+        JobSubscription::new(
+            JobSubscriptionId::new("notify-origin").expect("id"),
+            origin.clone(),
+            JobDeliveryKind::Notification,
+        ),
+    )
+    .await
+    .expect("subscribe notification");
+    jobs.subscribe(
+        &receipt.job_id,
+        JobSubscription::new(
+            JobSubscriptionId::new("event-peer").expect("id"),
+            event_session.clone(),
+            JobDeliveryKind::Event {
+                handling_mode: HandlingMode::Queue,
+            },
+        ),
+    )
+    .await
+    .expect("subscribe event");
+    let claim = jobs
+        .claim_attempt(
+            &receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("monitor-worker").expect("worker"),
+                1,
+                100,
+                RunnerHandleRef::new("monitor-handle").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    jobs.emit_notification(
+        &receipt.job_id,
+        (&claim).into(),
+        2,
+        JobNotification::new("n1", "condition:1", "Condition met", "Review me")
+            .expect("notification"),
+    )
+    .await
+    .expect("emit");
+
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store, inbox.clone());
+    projector.project_pending(10).await.expect("project");
+    let sink = Arc::new(RecordingDeliverySink::default());
+    let applier = JobRuntimeDeliveryApplier::new(inbox.clone(), sink.clone());
+    let runtime_id = LogicalRuntimeId::for_session(&origin);
+    let applied = applier.apply_pending(&runtime_id, 10).await.expect("apply");
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].applications, 2);
+    assert!(
+        applier
+            .apply_pending(&runtime_id, 10)
+            .await
+            .expect("idempotent retry")
+            .is_empty()
+    );
+
+    let applications = sink.applications.lock().await.clone();
+    assert!(matches!(
+        &applications[0],
+        JobDeliveryApplication::Notification { subscription, .. }
+            if subscription.session_id() == &origin
+    ));
+    assert!(matches!(
+        &applications[1],
+        JobDeliveryApplication::Event {
+            subscription,
+            handling_mode: HandlingMode::Queue,
+            ..
+        } if subscription.session_id() == &event_session
+    ));
 }
 
 #[tokio::test]

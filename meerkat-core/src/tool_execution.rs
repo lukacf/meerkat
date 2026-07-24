@@ -257,7 +257,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// Restart behavior declared by a detached runner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RestartClass {
     Adoptable,
     CheckpointResumable,
@@ -637,6 +637,9 @@ pub enum ToolExecutionContractError {
     RequestedModeUnsupported {
         requested_mode: ToolExecutionMode,
     },
+    RequestedRestartClassUnsupported {
+        restart_class: RestartClass,
+    },
     ResolvedPlanFacetMismatch {
         mode: ToolExecutionMode,
         facet: &'static str,
@@ -668,6 +671,10 @@ impl std::fmt::Display for ToolExecutionContractError {
             Self::RequestedModeUnsupported { requested_mode } => write!(
                 formatter,
                 "requested tool execution mode {requested_mode:?} is not supported"
+            ),
+            Self::RequestedRestartClassUnsupported { restart_class } => write!(
+                formatter,
+                "requested detached restart class {restart_class:?} is not supported"
             ),
             Self::ResolvedPlanFacetMismatch { mode, facet } => write!(
                 formatter,
@@ -873,6 +880,7 @@ pub struct ToolExecutionContract {
     default_mode: ToolExecutionMode,
     streaming_policy: Option<StreamingToolExecutionPolicy>,
     detached_policy: Option<DetachedToolExecutionPolicy>,
+    detached_restart_classes: BTreeSet<RestartClass>,
 }
 
 impl Default for ToolExecutionContract {
@@ -882,6 +890,7 @@ impl Default for ToolExecutionContract {
             default_mode: ToolExecutionMode::Fast,
             streaming_policy: None,
             detached_policy: None,
+            detached_restart_classes: BTreeSet::new(),
         }
     }
 }
@@ -915,11 +924,16 @@ impl ToolExecutionContract {
             (false, true) => return Err(ToolExecutionContractError::UnexpectedDetachedPolicy),
             _ => {}
         }
+        let detached_restart_classes = detached_policy
+            .as_ref()
+            .map(|policy| BTreeSet::from([policy.restart_class()]))
+            .unwrap_or_default();
         Ok(Self {
             supported_modes,
             default_mode,
             streaming_policy,
             detached_policy,
+            detached_restart_classes,
         })
     }
 
@@ -937,6 +951,29 @@ impl ToolExecutionContract {
 
     pub fn detached_policy(&self) -> Option<&DetachedToolExecutionPolicy> {
         self.detached_policy.as_ref()
+    }
+
+    pub fn detached_restart_classes(&self) -> &BTreeSet<RestartClass> {
+        &self.detached_restart_classes
+    }
+
+    pub fn with_detached_restart_classes(
+        mut self,
+        restart_classes: BTreeSet<RestartClass>,
+    ) -> Result<Self, ToolExecutionContractError> {
+        let policy = self
+            .detached_policy
+            .as_ref()
+            .ok_or(ToolExecutionContractError::MissingDetachedPolicy)?;
+        if !restart_classes.contains(&policy.restart_class()) {
+            return Err(
+                ToolExecutionContractError::RequestedRestartClassUnsupported {
+                    restart_class: policy.restart_class(),
+                },
+            );
+        }
+        self.detached_restart_classes = restart_classes;
+        Ok(self)
     }
 
     pub fn resolve_default(
@@ -1032,6 +1069,27 @@ impl ToolExecutionContract {
         })
     }
 
+    pub fn resolve_detached_with_restart_class(
+        &self,
+        restart_class: RestartClass,
+        deadlines: ToolDeadlineChain,
+    ) -> Result<ResolvedToolExecutionPlan, ToolExecutionContractError> {
+        if !self.detached_restart_classes.contains(&restart_class) {
+            return Err(
+                ToolExecutionContractError::RequestedRestartClassUnsupported { restart_class },
+            );
+        }
+        let mut policy = self
+            .detached_policy
+            .clone()
+            .ok_or(ToolExecutionContractError::MissingDetachedPolicy)?;
+        policy.restart_class = restart_class;
+        let mut plan = self.resolve(ToolExecutionMode::Detached, deadlines)?;
+        plan.kind = ResolvedExecutionKind::Detached(policy);
+        plan.restart_class = ToolExecutionApplicability::Applicable(restart_class);
+        Ok(plan)
+    }
+
     /// Validate that a resolver's selected mode and every mode-derived facet
     /// stay within this advertised catalog contract.
     ///
@@ -1055,7 +1113,17 @@ impl ToolExecutionContract {
                 ToolDeadlineOwner::Dispatcher,
             )],
         };
-        let expected = self.resolve(mode, comparison_deadline)?;
+        let expected = if mode == ToolExecutionMode::Detached {
+            let ToolExecutionApplicability::Applicable(restart_class) = plan.restart_class else {
+                return Err(ToolExecutionContractError::ResolvedPlanFacetMismatch {
+                    mode,
+                    facet: "restart_class",
+                });
+            };
+            self.resolve_detached_with_restart_class(restart_class, comparison_deadline)?
+        } else {
+            self.resolve(mode, comparison_deadline)?
+        };
 
         macro_rules! require_facet {
             ($field:ident) => {
@@ -1841,6 +1909,54 @@ mod tests {
         assert_eq!(
             fast.progress_policy(),
             &ToolExecutionApplicability::NotApplicable
+        );
+    }
+
+    #[test]
+    fn detached_contract_can_advertise_and_validate_call_resolved_restart_classes() {
+        let policy = DetachedToolExecutionPolicy::new(
+            RunnerIdentity::new("meerkat.monitor_script", "v1").expect("runner"),
+            RestartClass::NonResumable,
+            IdempotencyScope::ToolCall,
+            Duration::from_secs(30),
+        )
+        .expect("policy");
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Detached]),
+            ToolExecutionMode::Detached,
+            None,
+            Some(policy),
+        )
+        .expect("contract")
+        .with_detached_restart_classes(BTreeSet::from([
+            RestartClass::Replayable,
+            RestartClass::CheckpointResumable,
+            RestartClass::NonResumable,
+        ]))
+        .expect("restart set");
+        let deadlines =
+            ToolDeadlineChain::new(vec![finite(ToolDeadlineOwner::CoreToolDispatch, 600)])
+                .expect("deadlines");
+        let resolved = contract
+            .resolve_detached_with_restart_class(
+                RestartClass::CheckpointResumable,
+                deadlines.clone(),
+            )
+            .expect("resolved");
+        assert_eq!(
+            resolved.restart_class(),
+            ToolExecutionApplicability::Applicable(RestartClass::CheckpointResumable)
+        );
+        contract
+            .validate_resolved_plan(&resolved)
+            .expect("resolved class remains within the advertised contract");
+        assert_eq!(
+            contract.resolve_detached_with_restart_class(RestartClass::Adoptable, deadlines),
+            Err(
+                ToolExecutionContractError::RequestedRestartClassUnsupported {
+                    restart_class: RestartClass::Adoptable
+                }
+            )
         );
     }
 

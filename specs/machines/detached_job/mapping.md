@@ -36,6 +36,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReportExternalWaitProgress`
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
+- `EmitRunningNotification`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `EmitExternalWaitNotification`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `SuppressRunningNotificationReplay`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `SuppressExternalWaitNotificationReplay`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
 - `RecordRunningCheckpoint`
   - anchors: `detached_job_authority`
   - scenarios: `detached_job_reopen_preserves_committed_authority`
@@ -147,6 +159,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveNeedsAttentionDeliveryAlreadyApplied`
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
+- `ApplyRunningNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyWaitingExternalNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyLossObservedNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyRetryScheduledNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplySucceededNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyFailedNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyCancelledNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyWorkerLostNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ApplyNeedsAttentionNotificationDelivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveRunningNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveWaitingExternalNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveLossObservedNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveRetryScheduledNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveSucceededNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveFailedNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveCancelledNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveWorkerLostNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `ObserveNeedsAttentionNotificationDeliveryAlreadyApplied`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
 
 ### Effects
 - `JobSubmitted`
@@ -159,6 +225,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
 - `ProgressAccepted`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `NotificationCommitted`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `NotificationSuppressed`
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
 - `CheckpointAccepted`
@@ -200,6 +272,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
 - `terminal_requires_delivery`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `notification_identity_and_sequence_cardinality_match`
+  - anchors: `detached_job_authority`
+  - scenarios: (unclaimed)
+- `applied_notifications_are_committed`
   - anchors: `detached_job_authority`
   - scenarios: (unclaimed)
 - `nonterminal_has_no_terminal_delivery`

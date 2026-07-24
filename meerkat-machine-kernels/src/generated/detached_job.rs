@@ -172,6 +172,13 @@ pub struct State {
     pub lease_expired: bool,
     pub retry_due_at_ms: Option<u64>,
     pub cancel_requested: bool,
+    pub delivery_sequence: u64,
+    pub notification_ids: std::collections::BTreeSet<String>,
+    pub notification_idempotency_keys: std::collections::BTreeSet<String>,
+    pub notification_id_by_key: std::collections::BTreeMap<String, String>,
+    pub notification_delivery_ids: std::collections::BTreeMap<String, String>,
+    pub notification_sequences: std::collections::BTreeMap<String, u64>,
+    pub notification_applied: std::collections::BTreeSet<String>,
     pub terminal_kind: Option<DetachedJobTerminalKind>,
     pub terminal_delivery_sequence: u64,
     pub terminal_delivery_applied: bool,
@@ -210,6 +217,15 @@ pub mod inputs {
         pub attempt_id: String,
         pub fence: u64,
         pub cursor: u64,
+        pub observed_at_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EmitNotification {
+        pub attempt_id: String,
+        pub fence: u64,
+        pub notification_id: String,
+        pub idempotency_key: String,
+        pub runtime_delivery_id: String,
         pub observed_at_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -271,6 +287,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkDeliveryApplied {
+        pub delivery_id: String,
         pub delivery_sequence: u64,
     }
 }
@@ -281,6 +298,7 @@ pub enum Input {
     ClaimAttempt(inputs::ClaimAttempt),
     RenewLease(inputs::RenewLease),
     ReportProgress(inputs::ReportProgress),
+    EmitNotification(inputs::EmitNotification),
     RecordCheckpoint(inputs::RecordCheckpoint),
     WaitExternal(inputs::WaitExternal),
     ResumeRunning(inputs::ResumeRunning),
@@ -301,6 +319,7 @@ impl Input {
             Self::ClaimAttempt(_) => InputKind::ClaimAttempt,
             Self::RenewLease(_) => InputKind::RenewLease,
             Self::ReportProgress(_) => InputKind::ReportProgress,
+            Self::EmitNotification(_) => InputKind::EmitNotification,
             Self::RecordCheckpoint(_) => InputKind::RecordCheckpoint,
             Self::WaitExternal(_) => InputKind::WaitExternal,
             Self::ResumeRunning(_) => InputKind::ResumeRunning,
@@ -322,6 +341,7 @@ pub enum InputKind {
     ClaimAttempt,
     RenewLease,
     ReportProgress,
+    EmitNotification,
     RecordCheckpoint,
     WaitExternal,
     ResumeRunning,
@@ -360,6 +380,20 @@ pub mod effects {
         pub cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct NotificationCommitted {
+        pub notification_id: String,
+        pub idempotency_key: String,
+        pub runtime_delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct NotificationSuppressed {
+        pub notification_id: String,
+        pub idempotency_key: String,
+        pub runtime_delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CheckpointAccepted {
         pub checkpoint_ref: String,
     }
@@ -383,6 +417,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryApplied {
+        pub delivery_id: String,
         pub delivery_sequence: u64,
     }
 }
@@ -393,6 +428,8 @@ pub enum Effect {
     AttemptClaimed(effects::AttemptClaimed),
     LeaseRenewed(effects::LeaseRenewed),
     ProgressAccepted(effects::ProgressAccepted),
+    NotificationCommitted(effects::NotificationCommitted),
+    NotificationSuppressed(effects::NotificationSuppressed),
     CheckpointAccepted(effects::CheckpointAccepted),
     ExternalWaitAccepted(effects::ExternalWaitAccepted),
     RunningResumed(effects::RunningResumed),
@@ -408,6 +445,8 @@ pub enum EffectKind {
     AttemptClaimed,
     LeaseRenewed,
     ProgressAccepted,
+    NotificationCommitted,
+    NotificationSuppressed,
     CheckpointAccepted,
     ExternalWaitAccepted,
     RunningResumed,
@@ -428,6 +467,10 @@ pub enum TransitionId {
     RenewExternalWaitLease,
     ReportRunningProgress,
     ReportExternalWaitProgress,
+    EmitRunningNotification,
+    EmitExternalWaitNotification,
+    SuppressRunningNotificationReplay,
+    SuppressExternalWaitNotificationReplay,
     RecordRunningCheckpoint,
     RecordExternalWaitCheckpoint,
     WaitExternalFromRunning,
@@ -465,6 +508,24 @@ pub enum TransitionId {
     ObserveCancelledDeliveryAlreadyApplied,
     ObserveWorkerLostDeliveryAlreadyApplied,
     ObserveNeedsAttentionDeliveryAlreadyApplied,
+    ApplyRunningNotificationDelivery,
+    ApplyWaitingExternalNotificationDelivery,
+    ApplyLossObservedNotificationDelivery,
+    ApplyRetryScheduledNotificationDelivery,
+    ApplySucceededNotificationDelivery,
+    ApplyFailedNotificationDelivery,
+    ApplyCancelledNotificationDelivery,
+    ApplyWorkerLostNotificationDelivery,
+    ApplyNeedsAttentionNotificationDelivery,
+    ObserveRunningNotificationDeliveryAlreadyApplied,
+    ObserveWaitingExternalNotificationDeliveryAlreadyApplied,
+    ObserveLossObservedNotificationDeliveryAlreadyApplied,
+    ObserveRetryScheduledNotificationDeliveryAlreadyApplied,
+    ObserveSucceededNotificationDeliveryAlreadyApplied,
+    ObserveFailedNotificationDeliveryAlreadyApplied,
+    ObserveCancelledNotificationDeliveryAlreadyApplied,
+    ObserveWorkerLostNotificationDeliveryAlreadyApplied,
+    ObserveNeedsAttentionNotificationDeliveryAlreadyApplied,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -551,6 +612,13 @@ pub fn initial_state() -> State {
         lease_expired: false,
         retry_due_at_ms: None,
         cancel_requested: false,
+        delivery_sequence: 0,
+        notification_ids: Default::default(),
+        notification_idempotency_keys: Default::default(),
+        notification_id_by_key: Default::default(),
+        notification_delivery_ids: Default::default(),
+        notification_sequences: Default::default(),
+        notification_applied: Default::default(),
         terminal_kind: None,
         terminal_delivery_sequence: 0,
         terminal_delivery_applied: false,

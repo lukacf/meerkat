@@ -50,6 +50,9 @@ string_id!(RunnerSpecificationRef, "runner specification reference");
 string_id!(JobResultRef, "job result reference");
 string_id!(JobFailureCode, "job failure code");
 string_id!(OriginMemberId, "origin member id");
+string_id!(NotificationId, "notification id");
+string_id!(NotificationIdempotencyKey, "notification idempotency key");
+string_id!(JobSubscriptionId, "job subscription id");
 
 impl JobId {
     pub fn generated() -> Self {
@@ -201,6 +204,20 @@ fn validate_component(label: &str, value: String) -> Result<String, DetachedJobE
     Ok(trimmed.to_string())
 }
 
+fn validate_bounded_component(
+    label: &str,
+    value: String,
+    max_bytes: usize,
+) -> Result<String, DetachedJobError> {
+    let value = validate_component(label, value)?;
+    if value.len() > max_bytes {
+        return Err(DetachedJobError::InvalidInput(format!(
+            "{label} exceeds the {max_bytes}-byte limit"
+        )));
+    }
+    Ok(value)
+}
+
 pub type RestartClass = dsl::DetachedJobRestartClass;
 pub type JobPhase = dsl::DetachedJobPhase;
 pub type JobTerminalKind = dsl::DetachedJobTerminalKind;
@@ -338,6 +355,28 @@ impl From<&AttemptClaimReceipt> for AttemptWriteAuthority {
 pub struct JobProgress {
     pub cursor: u64,
     pub detail: String,
+    #[serde(default)]
+    pub kind: JobProgressKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JobProgressKind {
+    #[default]
+    Progress,
+    Health {
+        condition: JobHealthCondition,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "condition", rename_all = "snake_case")]
+pub enum JobHealthCondition {
+    Healthy,
+    MonitorNotificationRateLimited { total_suppressed: u64 },
+    MonitorMalformedOutput,
+    MonitorOutputTruncated { dropped_bytes: u64 },
+    PredicateSourceUnavailable { retry_after_secs: u64 },
 }
 
 impl JobProgress {
@@ -350,7 +389,18 @@ impl JobProgress {
         Ok(Self {
             cursor,
             detail: validate_component("progress detail", detail.into())?,
+            kind: JobProgressKind::Progress,
         })
+    }
+
+    pub fn health(
+        cursor: u64,
+        condition: JobHealthCondition,
+        detail: impl Into<String>,
+    ) -> Result<Self, DetachedJobError> {
+        let mut progress = Self::new(cursor, detail)?;
+        progress.kind = JobProgressKind::Health { condition };
+        Ok(progress)
     }
 }
 
@@ -364,10 +414,133 @@ pub struct JobReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobOutboxEntry {
     pub job_id: JobId,
+    pub delivery_id: String,
     pub delivery_sequence: u64,
-    pub terminal_kind: JobTerminalKind,
-    pub terminal_result: JobTerminalResult,
+    pub payload: JobOutboxPayload,
+    pub targets: Vec<JobSubscription>,
     pub applied: bool,
+}
+
+impl JobOutboxEntry {
+    pub fn runtime_delivery_id(&self) -> String {
+        match &self.payload {
+            JobOutboxPayload::Terminal(_) => self.job_id.to_string(),
+            JobOutboxPayload::Notification(_) => {
+                format!("{}:notification:{}", self.job_id, self.delivery_id)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobOutboxPayload {
+    Terminal(JobTerminalResult),
+    Notification(JobNotification),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobDeliveryKind {
+    Record,
+    Notification,
+    Event {
+        handling_mode: meerkat_core::HandlingMode,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobSubscription {
+    subscription_id: JobSubscriptionId,
+    session_id: SessionId,
+    delivery: JobDeliveryKind,
+}
+
+impl JobSubscription {
+    pub fn new(
+        subscription_id: JobSubscriptionId,
+        session_id: SessionId,
+        delivery: JobDeliveryKind,
+    ) -> Self {
+        Self {
+            subscription_id,
+            session_id,
+            delivery,
+        }
+    }
+
+    pub fn subscription_id(&self) -> &JobSubscriptionId {
+        &self.subscription_id
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn delivery(&self) -> &JobDeliveryKind {
+        &self.delivery
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobNotification {
+    notification_id: NotificationId,
+    idempotency_key: NotificationIdempotencyKey,
+    title: String,
+    body: String,
+}
+
+impl JobNotification {
+    pub fn new(
+        notification_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Result<Self, DetachedJobError> {
+        let notification_id =
+            validate_bounded_component("notification id", notification_id.into(), 1_024)?;
+        let idempotency_key = validate_bounded_component(
+            "notification idempotency key",
+            idempotency_key.into(),
+            4 * 1_024,
+        )?;
+        Ok(Self {
+            notification_id: NotificationId::new(notification_id)?,
+            idempotency_key: NotificationIdempotencyKey::new(idempotency_key)?,
+            title: validate_bounded_component("notification title", title.into(), 4 * 1_024)?,
+            body: validate_bounded_component("notification body", body.into(), 64 * 1_024)?,
+        })
+    }
+
+    pub fn notification_id(&self) -> &NotificationId {
+        &self.notification_id
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        self.idempotency_key.as_str()
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobNotificationReceipt {
+    pub snapshot: JobSnapshot,
+    pub notification_id: NotificationId,
+    pub delivery_sequence: u64,
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredicateEvaluationReceipt {
+    pub evaluation: crate::PredicateEvaluation,
+    pub notification: Option<JobNotificationReceipt>,
+    pub snapshot: JobSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,5 +586,6 @@ pub struct JobSnapshot {
     pub cancel_requested: bool,
     pub terminal_kind: Option<JobTerminalKind>,
     pub terminal_result: Option<JobTerminalResult>,
+    pub subscriptions: Vec<JobSubscription>,
     pub outbox: Vec<JobOutboxEntry>,
 }

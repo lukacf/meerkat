@@ -239,7 +239,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
     }
 }
 
-/// Durable two-store delivery composition for detached-job terminals.
+/// Durable two-store delivery composition for detached-job outbox entries.
 ///
 /// The outbound route is enqueued because job terminalization and the runtime
 /// inbox cannot share a database transaction. The runtime machine mints or
@@ -283,6 +283,21 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                 teardown: None,
             },
             Route {
+                name: route_id("job_notification_enters_runtime_inbox"),
+                from_machine: mi_id("job"),
+                effect_variant: ev_id("NotificationCommitted"),
+                to: RouteTarget::new(
+                    mi_id("runtime_delivery"),
+                    rv(RouteTargetKind::Input, "CommitDelivery"),
+                ),
+                bindings: vec![
+                    bind("delivery_id", "runtime_delivery_id"),
+                    bind("source_sequence", "delivery_sequence"),
+                ],
+                delivery: RouteDelivery::Enqueue,
+                teardown: None,
+            },
+            Route {
                 name: route_id("runtime_delivery_commit_acknowledges_job_outbox"),
                 from_machine: mi_id("runtime_delivery"),
                 effect_variant: ev_id("DeliveryCommitted"),
@@ -290,7 +305,10 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                     mi_id("job"),
                     rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
                 ),
-                bindings: vec![bind("delivery_sequence", "source_sequence")],
+                bindings: vec![
+                    bind("delivery_id", "delivery_id"),
+                    bind("delivery_sequence", "source_sequence"),
+                ],
                 delivery: RouteDelivery::Enqueue,
                 teardown: None,
             },
@@ -302,7 +320,10 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                     mi_id("job"),
                     rv(RouteTargetKind::Input, "MarkDeliveryApplied"),
                 ),
-                bindings: vec![bind("delivery_sequence", "source_sequence")],
+                bindings: vec![
+                    bind("delivery_id", "delivery_id"),
+                    bind("delivery_sequence", "source_sequence"),
+                ],
                 delivery: RouteDelivery::Enqueue,
                 teardown: None,
             },
@@ -311,9 +332,9 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
         driver: None,
         transaction_plans: vec![
             transaction_plan(
-                "job_terminal_result_and_outbox",
-                "terminalize_job",
-                "job terminal result and pending outbox row commit atomically under generated job authority",
+                "job_result_and_outbox",
+                "commit_job_delivery",
+                "job delivery payload and pending outbox row commit atomically under generated job authority",
                 "DetachedJobStore::compare_and_swap",
                 &[],
             ),
@@ -322,7 +343,10 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                 "commit_runtime_delivery",
                 "runtime delivery identity, generated sequence authority, and inbox row commit atomically",
                 "RuntimeStore::compare_and_swap_runtime_delivery_authority",
-                &["job_terminal_enters_runtime_inbox"],
+                &[
+                    "job_terminal_enters_runtime_inbox",
+                    "job_notification_enters_runtime_inbox",
+                ],
             ),
             transaction_plan(
                 "job_outbox_acknowledgement",
@@ -347,6 +371,21 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
                     input_variant: rv(RouteTargetKind::Input, "CommitDelivery"),
                 },
                 statement: "job terminal outbox entries enter generated runtime delivery authority before any acknowledgement".into(),
+                references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
+                references_actors: vec![
+                    act_id("job_authority"),
+                    act_id("runtime_delivery_authority"),
+                ],
+            },
+            CompositionInvariant {
+                name: "job_notification_reaches_runtime_delivery_authority".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("job"),
+                    effect_variant: ev_id("NotificationCommitted"),
+                    to_machine: mi_id("runtime_delivery"),
+                    input_variant: rv(RouteTargetKind::Input, "CommitDelivery"),
+                },
+                statement: "job notification outbox entries enter generated runtime delivery authority before any acknowledgement".into(),
                 references_machines: vec![mi_id("job"), mi_id("runtime_delivery")],
                 references_actors: vec![
                     act_id("job_authority"),
@@ -392,6 +431,7 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
         ],
         witnesses: vec![
             runtime_delivery_first_commit_witness(),
+            runtime_delivery_notification_commit_witness(),
             runtime_delivery_crash_retry_reuse_witness(),
         ],
         deep_domain_cardinality: 3,
@@ -1791,6 +1831,66 @@ fn runtime_delivery_first_commit_witness() -> CompositionWitness {
             witness_transition("job", "CompleteRunningAttempt"),
             witness_transition("runtime_delivery", "CommitNewDelivery"),
             witness_transition("job", "ApplySucceededDelivery"),
+        ],
+        expected_transition_order: vec![],
+        state_limits: runtime_delivery_witness_limits(),
+    }
+}
+
+fn runtime_delivery_notification_commit_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("runtime_delivery_notification_commit"),
+        preload_inputs: vec![
+            witness_input(
+                "job",
+                "Submit",
+                vec![
+                    witness_field("job_id", Expr::String("job_1".into())),
+                    witness_field(
+                        "restart_class",
+                        named_variant("DetachedJobRestartClass", "CheckpointResumable"),
+                    ),
+                ],
+            ),
+            witness_input(
+                "job",
+                "ClaimAttempt",
+                vec![
+                    witness_field("attempt_id", Expr::String("attempt_1".into())),
+                    witness_field("worker_id", Expr::String("worker_1".into())),
+                    witness_field("claimed_at_ms", Expr::U64(1)),
+                    witness_field("lease_expires_at_ms", Expr::U64(2)),
+                    witness_field("runner_handle", Expr::String("runner_1".into())),
+                ],
+            ),
+            witness_input(
+                "job",
+                "EmitNotification",
+                vec![
+                    witness_field("attempt_id", Expr::String("attempt_1".into())),
+                    witness_field("fence", Expr::U64(1)),
+                    witness_field("notification_id", Expr::String("notification_1".into())),
+                    witness_field("idempotency_key", Expr::String("key_1".into())),
+                    witness_field(
+                        "runtime_delivery_id",
+                        Expr::String("job_1:notification:notification_1".into()),
+                    ),
+                    witness_field("observed_at_ms", Expr::U64(2)),
+                ],
+            ),
+        ],
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("runtime_delivery_commit_acknowledges_job_outbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("job", "SubmitQueued"),
+            witness_transition("job", "ClaimQueued"),
+            witness_transition("job", "EmitRunningNotification"),
+            witness_transition("runtime_delivery", "CommitNewDelivery"),
+            witness_transition("job", "ApplyRunningNotificationDelivery"),
         ],
         expected_transition_order: vec![],
         state_limits: runtime_delivery_witness_limits(),

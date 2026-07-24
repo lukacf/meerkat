@@ -45,6 +45,7 @@ impl std::fmt::Display for RuntimeDeliveryId {
 #[non_exhaustive]
 pub enum RuntimeDeliveryKind {
     JobTerminal,
+    JobNotification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

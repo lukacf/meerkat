@@ -4,8 +4,11 @@ use crate::machines::detached_job as dsl;
 use crate::store::{InsertJobOutcome, StoredJob};
 use crate::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CheckpointRef,
-    DetachedJobError, DetachedJobStore, FenceToken, JobFailureCode, JobId, JobOutboxEntry,
-    JobProgress, JobReceipt, JobResultRef, JobSnapshot, JobTerminalResult,
+    DetachedJobError, DetachedJobStore, FenceToken, JobFailureCode, JobHealthCondition, JobId,
+    JobNotification, JobNotificationReceipt, JobOutboxEntry, JobOutboxPayload, JobProgress,
+    JobReceipt, JobResultRef, JobSnapshot, JobSubscription, JobSubscriptionId, JobTerminalResult,
+    NotificationId, PredicateEvaluation, PredicateEvaluationReceipt, PredicateObservation,
+    PredicateWatch,
 };
 
 #[derive(Clone)]
@@ -53,6 +56,7 @@ impl DetachedJobService {
             machine_state: authority.state().clone(),
             progress: None,
             terminal_result: None,
+            subscriptions: Vec::new(),
             outbox: Vec::new(),
         };
         match self.store.insert_deduplicated(stored).await? {
@@ -71,6 +75,55 @@ impl DetachedJobService {
 
     pub async fn get(&self, job_id: &JobId) -> Result<Option<JobSnapshot>, DetachedJobError> {
         self.store.get(job_id).await?.map(job_snapshot).transpose()
+    }
+
+    pub async fn subscribe(
+        &self,
+        job_id: &JobId,
+        subscription: JobSubscription,
+    ) -> Result<JobSnapshot, DetachedJobError> {
+        let mut current = self.required(job_id).await?;
+        if let Some(existing) = current
+            .subscriptions
+            .iter()
+            .find(|existing| existing.subscription_id() == subscription.subscription_id())
+        {
+            if existing == &subscription {
+                return job_snapshot(current);
+            }
+            return Err(DetachedJobError::InvalidInput(format!(
+                "subscription {} is already bound to a different target",
+                subscription.subscription_id()
+            )));
+        }
+        current.subscriptions.push(subscription);
+        let expected_revision = current.revision;
+        let committed = self
+            .store
+            .compare_and_swap(expected_revision, current)
+            .await?;
+        job_snapshot(committed)
+    }
+
+    pub async fn unsubscribe(
+        &self,
+        job_id: &JobId,
+        subscription_id: &JobSubscriptionId,
+    ) -> Result<JobSnapshot, DetachedJobError> {
+        let mut current = self.required(job_id).await?;
+        let previous_len = current.subscriptions.len();
+        current
+            .subscriptions
+            .retain(|subscription| subscription.subscription_id() != subscription_id);
+        if current.subscriptions.len() == previous_len {
+            return job_snapshot(current);
+        }
+        let expected_revision = current.revision;
+        let committed = self
+            .store
+            .compare_and_swap(expected_revision, current)
+            .await?;
+        job_snapshot(committed)
     }
 
     pub async fn claim_attempt(
@@ -180,6 +233,147 @@ impl DetachedJobService {
         };
         let (stored, _) = self.apply_from(current, input, |_, _| Ok(())).await?;
         job_snapshot(stored)
+    }
+
+    pub async fn emit_notification(
+        &self,
+        job_id: &JobId,
+        write: AttemptWriteAuthority,
+        observed_at_ms: u64,
+        notification: JobNotification,
+    ) -> Result<JobNotificationReceipt, DetachedJobError> {
+        let current = self.required(job_id).await?;
+        ensure_current_writer(job_id, &current, &write)?;
+        let runtime_delivery_id =
+            format!("{}:notification:{}", job_id, notification.notification_id());
+        let input = dsl::DetachedJobInput::EmitNotification {
+            attempt_id: write.attempt_id.as_str().to_string(),
+            fence: write.fence.get(),
+            notification_id: notification.notification_id().as_str().to_string(),
+            idempotency_key: notification.idempotency_key().to_string(),
+            runtime_delivery_id,
+            observed_at_ms,
+        };
+        let projected = notification.clone();
+        let (stored, effects) = self
+            .apply_from(current, input, move |job, effects| {
+                project_notification(job, effects, &projected)
+            })
+            .await?;
+        let mut outcome = effects.iter().filter_map(|effect| match effect {
+            dsl::DetachedJobEffect::NotificationCommitted {
+                notification_id,
+                delivery_sequence,
+                ..
+            } => Some((notification_id.as_str(), *delivery_sequence, false)),
+            dsl::DetachedJobEffect::NotificationSuppressed {
+                notification_id,
+                delivery_sequence,
+                ..
+            } => Some((notification_id.as_str(), *delivery_sequence, true)),
+            _ => None,
+        });
+        let Some((notification_id, delivery_sequence, deduplicated)) = outcome.next() else {
+            return Err(DetachedJobError::InvalidTransition {
+                job_id: job_id.clone(),
+                detail: "machine emitted no notification disposition".into(),
+            });
+        };
+        if outcome.next().is_some() {
+            return Err(DetachedJobError::Store(
+                "machine emitted multiple notification dispositions".into(),
+            ));
+        }
+        Ok(JobNotificationReceipt {
+            snapshot: job_snapshot(stored)?,
+            notification_id: NotificationId::new(notification_id)?,
+            delivery_sequence,
+            deduplicated,
+        })
+    }
+
+    pub async fn evaluate_predicate(
+        &self,
+        job_id: &JobId,
+        write: AttemptWriteAuthority,
+        watch: &PredicateWatch,
+        observation: PredicateObservation,
+        observed_at_ms: u64,
+    ) -> Result<PredicateEvaluationReceipt, DetachedJobError> {
+        let current = self.required(job_id).await?;
+        ensure_current_writer(job_id, &current, &write)?;
+        let checkpoint = current
+            .machine_state
+            .checkpoint_ref
+            .as_deref()
+            .map(decode_predicate_checkpoint)
+            .transpose()?;
+        let evaluation = watch
+            .evaluate(checkpoint.as_ref(), observation)
+            .map_err(|error| DetachedJobError::InvalidInput(error.to_string()))?;
+        let notification = match evaluation.notification().cloned() {
+            Some(notification) => Some(
+                self.emit_notification(job_id, write.clone(), observed_at_ms, notification)
+                    .await?,
+            ),
+            None => None,
+        };
+        let snapshot = match evaluation.checkpoint() {
+            Some(checkpoint) => {
+                let encoded = serde_json::to_string(checkpoint).map_err(|error| {
+                    DetachedJobError::InvalidInput(format!(
+                        "cannot encode predicate checkpoint: {error}"
+                    ))
+                })?;
+                self.record_checkpoint(
+                    job_id,
+                    write.clone(),
+                    CheckpointRef::new(format!("predicate:{encoded}"))?,
+                    observed_at_ms,
+                )
+                .await?
+            }
+            None => self
+                .get(job_id)
+                .await?
+                .ok_or_else(|| DetachedJobError::NotFound(job_id.clone()))?,
+        };
+        let health_cursor = snapshot.progress.as_ref().map_or(Ok(1), |progress| {
+            progress.cursor.checked_add(1).ok_or_else(|| {
+                DetachedJobError::InvalidInput("predicate health cursor exhausted u64".into())
+            })
+        })?;
+        let (condition, detail) = match &evaluation {
+            PredicateEvaluation::SourceUnavailable {
+                reason,
+                retry_after_secs,
+                ..
+            } => (
+                JobHealthCondition::PredicateSourceUnavailable {
+                    retry_after_secs: *retry_after_secs,
+                },
+                format!("predicate_source_unavailable:{reason}"),
+            ),
+            PredicateEvaluation::Baseline { .. }
+            | PredicateEvaluation::Unchanged { .. }
+            | PredicateEvaluation::Crossed { .. } => (
+                JobHealthCondition::Healthy,
+                "predicate_source_healthy".to_string(),
+            ),
+        };
+        let snapshot = self
+            .report_progress(
+                job_id,
+                write,
+                JobProgress::health(health_cursor, condition, detail)?,
+                observed_at_ms,
+            )
+            .await?;
+        Ok(PredicateEvaluationReceipt {
+            evaluation,
+            notification,
+            snapshot,
+        })
     }
 
     pub async fn wait_external(
@@ -360,17 +554,33 @@ impl DetachedJobService {
         job_id: &JobId,
         delivery_sequence: u64,
     ) -> Result<JobSnapshot, DetachedJobError> {
+        let current = self.required(job_id).await?;
+        let entry = current
+            .outbox
+            .iter()
+            .find(|entry| entry.delivery_sequence == delivery_sequence)
+            .ok_or_else(|| {
+                DetachedJobError::Store(format!(
+                    "delivery {delivery_sequence} has no committed outbox entry"
+                ))
+            })?;
+        let delivery_id = entry.delivery_id.clone();
+        let machine_delivery_id = delivery_id.clone();
         let (stored, _) = self
-            .apply(
-                job_id,
-                dsl::DetachedJobInput::MarkDeliveryApplied { delivery_sequence },
+            .apply_from(
+                current,
+                dsl::DetachedJobInput::MarkDeliveryApplied {
+                    delivery_id: machine_delivery_id,
+                    delivery_sequence,
+                },
                 move |job, effects| {
                     let emitted = effects.iter().filter(|effect| {
                         matches!(
                             effect,
                             dsl::DetachedJobEffect::DeliveryApplied {
+                                delivery_id: emitted_id,
                                 delivery_sequence: emitted
-                            } if *emitted == delivery_sequence
+                            } if emitted_id == &delivery_id && *emitted == delivery_sequence
                         )
                     });
                     if emitted.count() != 1 {
@@ -492,6 +702,19 @@ fn ensure_current_writer(
     Ok(())
 }
 
+fn decode_predicate_checkpoint(
+    encoded: &str,
+) -> Result<crate::PredicateCheckpoint, DetachedJobError> {
+    let payload = encoded.strip_prefix("predicate:").ok_or_else(|| {
+        DetachedJobError::InvalidInput(
+            "predicate evaluator cannot consume a non-predicate checkpoint".into(),
+        )
+    })?;
+    serde_json::from_str(payload).map_err(|error| {
+        DetachedJobError::InvalidInput(format!("predicate checkpoint is invalid: {error}"))
+    })
+}
+
 fn project_optional_terminal(
     job: &mut StoredJob,
     effects: &[dsl::DetachedJobEffect],
@@ -525,7 +748,12 @@ fn project_optional_terminal(
             job.job_id
         )));
     }
-    if job.terminal_result.is_some() || !job.outbox.is_empty() {
+    if job.terminal_result.is_some()
+        || job
+            .outbox
+            .iter()
+            .any(|entry| matches!(&entry.payload, JobOutboxPayload::Terminal(_)))
+    {
         return Err(DetachedJobError::Store(
             "job already has terminal projection state".into(),
         ));
@@ -533,12 +761,134 @@ fn project_optional_terminal(
     job.terminal_result = Some(result.clone());
     job.outbox.push(JobOutboxEntry {
         job_id: job.job_id.clone(),
+        delivery_id: "terminal".to_string(),
         delivery_sequence,
-        terminal_kind,
-        terminal_result: result.clone(),
+        payload: JobOutboxPayload::Terminal(result.clone()),
+        targets: job.subscriptions.clone(),
         applied: false,
     });
     Ok(true)
+}
+
+fn project_notification(
+    job: &mut StoredJob,
+    effects: &[dsl::DetachedJobEffect],
+    notification: &JobNotification,
+) -> Result<(), DetachedJobError> {
+    let mut disposition = effects.iter().filter_map(|effect| match effect {
+        dsl::DetachedJobEffect::NotificationCommitted {
+            notification_id,
+            idempotency_key,
+            runtime_delivery_id,
+            delivery_sequence,
+        } => Some((
+            notification_id.as_str(),
+            idempotency_key.as_str(),
+            runtime_delivery_id.as_str(),
+            *delivery_sequence,
+            false,
+        )),
+        dsl::DetachedJobEffect::NotificationSuppressed {
+            notification_id,
+            idempotency_key,
+            runtime_delivery_id,
+            delivery_sequence,
+        } => Some((
+            notification_id.as_str(),
+            idempotency_key.as_str(),
+            runtime_delivery_id.as_str(),
+            *delivery_sequence,
+            true,
+        )),
+        _ => None,
+    });
+    let Some((
+        notification_id,
+        idempotency_key,
+        runtime_delivery_id,
+        delivery_sequence,
+        suppressed,
+    )) = disposition.next()
+    else {
+        return Err(DetachedJobError::Store(
+            "machine emitted no notification disposition".into(),
+        ));
+    };
+    if disposition.next().is_some() {
+        return Err(DetachedJobError::Store(
+            "machine emitted multiple notification dispositions".into(),
+        ));
+    }
+    if idempotency_key != notification.idempotency_key() {
+        return Err(DetachedJobError::Store(
+            "machine notification idempotency key disagrees with input".into(),
+        ));
+    }
+    if suppressed {
+        let entry = job
+            .outbox
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.payload,
+                    JobOutboxPayload::Notification(existing)
+                        if existing.idempotency_key() == idempotency_key
+                )
+            })
+            .ok_or_else(|| {
+                DetachedJobError::Store(
+                    "machine suppressed a notification without a committed outbox entry".into(),
+                )
+            })?;
+        let JobOutboxPayload::Notification(existing) = &entry.payload else {
+            return Err(DetachedJobError::Store(
+                "notification idempotency entry has a terminal payload".into(),
+            ));
+        };
+        if existing.title() != notification.title() || existing.body() != notification.body() {
+            return Err(DetachedJobError::InvalidInput(format!(
+                "notification idempotency key {idempotency_key} was reused with different content"
+            )));
+        }
+        if entry.delivery_id != notification_id
+            || entry.runtime_delivery_id() != runtime_delivery_id
+            || entry.delivery_sequence != delivery_sequence
+        {
+            return Err(DetachedJobError::Store(
+                "suppressed notification disagrees with committed identity or sequence".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if notification_id != notification.notification_id().as_str() {
+        return Err(DetachedJobError::Store(
+            "machine notification id disagrees with input".into(),
+        ));
+    }
+    let expected_runtime_delivery_id = format!("{}:notification:{notification_id}", job.job_id);
+    if runtime_delivery_id != expected_runtime_delivery_id {
+        return Err(DetachedJobError::Store(
+            "machine notification runtime delivery id disagrees with job identity".into(),
+        ));
+    }
+    if job
+        .outbox
+        .iter()
+        .any(|entry| entry.delivery_sequence == delivery_sequence)
+    {
+        return Err(DetachedJobError::Store(format!(
+            "notification delivery sequence {delivery_sequence} is already committed"
+        )));
+    }
+    job.outbox.push(JobOutboxEntry {
+        job_id: job.job_id.clone(),
+        delivery_id: notification_id.to_string(),
+        delivery_sequence,
+        payload: JobOutboxPayload::Notification(notification.clone()),
+        targets: job.subscriptions.clone(),
+        applied: false,
+    });
+    Ok(())
 }
 
 fn job_snapshot(job: StoredJob) -> Result<JobSnapshot, DetachedJobError> {
@@ -569,6 +919,7 @@ fn job_snapshot(job: StoredJob) -> Result<JobSnapshot, DetachedJobError> {
         cancel_requested: state.cancel_requested,
         terminal_kind: state.terminal_kind,
         terminal_result: job.terminal_result,
+        subscriptions: job.subscriptions,
         outbox: job.outbox,
     })
 }

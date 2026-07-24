@@ -204,7 +204,7 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
     let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
     assert_eq!(jobs.len(), 1, "{report:#}");
     assert_eq!(jobs[0]["action"], "stamped");
-    assert_eq!(jobs[0]["after"], 1);
+    assert_eq!(jobs[0]["after"], 2);
     let adoption = &realms[0]["adoption"];
     assert_eq!(adoption["scanned"], 1, "{report:#}");
     assert_eq!(adoption["adopted"], 1, "{report:#}");

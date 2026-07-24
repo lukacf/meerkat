@@ -21,6 +21,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `lease_expired`: `Bool`
 - `retry_due_at_ms`: `Option<u64>`
 - `cancel_requested`: `Bool`
+- `delivery_sequence`: `u64`
+- `notification_ids`: `Set<String>`
+- `notification_idempotency_keys`: `Set<String>`
+- `notification_id_by_key`: `Map<String, String>`
+- `notification_delivery_ids`: `Map<String, String>`
+- `notification_sequences`: `Map<String, u64>`
+- `notification_applied`: `Set<String>`
 - `terminal_kind`: `Option<DetachedJobTerminalKind>`
 - `terminal_delivery_sequence`: `u64`
 - `terminal_delivery_applied`: `Bool`
@@ -30,6 +37,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClaimAttempt`(attempt_id: String, worker_id: String, claimed_at_ms: u64, lease_expires_at_ms: u64, runner_handle: String)
 - `RenewLease`(attempt_id: String, fence: u64, heartbeat_at_ms: u64, lease_expires_at_ms: u64)
 - `ReportProgress`(attempt_id: String, fence: u64, cursor: u64, observed_at_ms: u64)
+- `EmitNotification`(attempt_id: String, fence: u64, notification_id: String, idempotency_key: String, runtime_delivery_id: String, observed_at_ms: u64)
 - `RecordCheckpoint`(attempt_id: String, fence: u64, checkpoint_ref: String, observed_at_ms: u64)
 - `WaitExternal`(attempt_id: String, fence: u64, observed_at_ms: u64)
 - `ResumeRunning`(attempt_id: String, fence: u64, observed_at_ms: u64)
@@ -41,7 +49,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ScheduleRetry`(retry_due_at_ms: u64)
 - `ClassifyWorkerLoss`(observed_at_ms: u64)
 - `MarkNeedsAttention`(observed_at_ms: u64)
-- `MarkDeliveryApplied`(delivery_sequence: u64)
+- `MarkDeliveryApplied`(delivery_id: String, delivery_sequence: u64)
 
 ## Signals
 
@@ -50,6 +58,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttemptClaimed`(attempt_id: String, attempt_count: u64, fence: u64, lease_expires_at_ms: u64, resume_checkpoint: Option<String>)
 - `LeaseRenewed`(lease_expires_at_ms: u64)
 - `ProgressAccepted`(cursor: u64)
+- `NotificationCommitted`(notification_id: String, idempotency_key: String, runtime_delivery_id: String, delivery_sequence: u64)
+- `NotificationSuppressed`(notification_id: String, idempotency_key: String, runtime_delivery_id: String, delivery_sequence: u64)
 - `CheckpointAccepted`(checkpoint_ref: String)
 - `ExternalWaitAccepted`
 - `RunningResumed`
@@ -57,7 +67,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LeaseExpiryRecorded`
 - `RetryScheduled`(retry_due_at_ms: u64)
 - `TerminalCommitted`(job_id: String, terminal_kind: DetachedJobTerminalKind, delivery_sequence: u64)
-- `DeliveryApplied`(delivery_sequence: u64)
+- `DeliveryApplied`(delivery_id: String, delivery_sequence: u64)
 
 ## Invariants
 - `fence_tracks_claim_count`
@@ -65,6 +75,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `checkpoint_requires_attempt`
 - `active_execution_requires_attempt_authority`
 - `terminal_requires_delivery`
+- `notification_identity_and_sequence_cardinality_match`
+- `applied_notifications_are_committed`
 - `nonterminal_has_no_terminal_delivery`
 
 ## Transitions
@@ -122,6 +134,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `ProgressAccepted`
+- To: `WaitingExternal`
+
+### `EmitRunningNotification`
+- From: `Running`
+- On: `EmitNotification`(attempt_id, fence, notification_id, idempotency_key, runtime_delivery_id, observed_at_ms)
+- Guards:
+  - ``
+- Emits: `NotificationCommitted`
+- To: `Running`
+
+### `EmitExternalWaitNotification`
+- From: `WaitingExternal`
+- On: `EmitNotification`(attempt_id, fence, notification_id, idempotency_key, runtime_delivery_id, observed_at_ms)
+- Guards:
+  - ``
+- Emits: `NotificationCommitted`
+- To: `WaitingExternal`
+
+### `SuppressRunningNotificationReplay`
+- From: `Running`
+- On: `EmitNotification`(attempt_id, fence, notification_id, idempotency_key, runtime_delivery_id, observed_at_ms)
+- Guards:
+  - ``
+- Emits: `NotificationSuppressed`
+- To: `Running`
+
+### `SuppressExternalWaitNotificationReplay`
+- From: `WaitingExternal`
+- On: `EmitNotification`(attempt_id, fence, notification_id, idempotency_key, runtime_delivery_id, observed_at_ms)
+- Guards:
+  - ``
+- Emits: `NotificationSuppressed`
 - To: `WaitingExternal`
 
 ### `RecordRunningCheckpoint`
@@ -334,7 +378,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplySucceededDelivery`
 - From: `Succeeded`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -342,7 +386,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplyFailedDelivery`
 - From: `Failed`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -350,7 +394,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplyCancelledDelivery`
 - From: `Cancelled`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -358,7 +402,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplyWorkerLostDelivery`
 - From: `WorkerLost`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -366,7 +410,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ApplyNeedsAttentionDelivery`
 - From: `NeedsAttention`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -374,7 +418,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveSucceededDeliveryAlreadyApplied`
 - From: `Succeeded`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -382,7 +426,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveFailedDeliveryAlreadyApplied`
 - From: `Failed`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -390,7 +434,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveCancelledDeliveryAlreadyApplied`
 - From: `Cancelled`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -398,7 +442,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveWorkerLostDeliveryAlreadyApplied`
 - From: `WorkerLost`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`
@@ -406,7 +450,151 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveNeedsAttentionDeliveryAlreadyApplied`
 - From: `NeedsAttention`
-- On: `MarkDeliveryApplied`(delivery_sequence)
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `NeedsAttention`
+
+### `ApplyRunningNotificationDelivery`
+- From: `Running`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Running`
+
+### `ApplyWaitingExternalNotificationDelivery`
+- From: `WaitingExternal`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `WaitingExternal`
+
+### `ApplyLossObservedNotificationDelivery`
+- From: `LossObserved`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `LossObserved`
+
+### `ApplyRetryScheduledNotificationDelivery`
+- From: `RetryScheduled`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `RetryScheduled`
+
+### `ApplySucceededNotificationDelivery`
+- From: `Succeeded`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Succeeded`
+
+### `ApplyFailedNotificationDelivery`
+- From: `Failed`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Failed`
+
+### `ApplyCancelledNotificationDelivery`
+- From: `Cancelled`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Cancelled`
+
+### `ApplyWorkerLostNotificationDelivery`
+- From: `WorkerLost`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `WorkerLost`
+
+### `ApplyNeedsAttentionNotificationDelivery`
+- From: `NeedsAttention`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `NeedsAttention`
+
+### `ObserveRunningNotificationDeliveryAlreadyApplied`
+- From: `Running`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Running`
+
+### `ObserveWaitingExternalNotificationDeliveryAlreadyApplied`
+- From: `WaitingExternal`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `WaitingExternal`
+
+### `ObserveLossObservedNotificationDeliveryAlreadyApplied`
+- From: `LossObserved`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `LossObserved`
+
+### `ObserveRetryScheduledNotificationDeliveryAlreadyApplied`
+- From: `RetryScheduled`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `RetryScheduled`
+
+### `ObserveSucceededNotificationDeliveryAlreadyApplied`
+- From: `Succeeded`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Succeeded`
+
+### `ObserveFailedNotificationDeliveryAlreadyApplied`
+- From: `Failed`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Failed`
+
+### `ObserveCancelledNotificationDeliveryAlreadyApplied`
+- From: `Cancelled`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `Cancelled`
+
+### `ObserveWorkerLostNotificationDeliveryAlreadyApplied`
+- From: `WorkerLost`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
+- Guards:
+  - ``
+- Emits: `DeliveryApplied`
+- To: `WorkerLost`
+
+### `ObserveNeedsAttentionNotificationDeliveryAlreadyApplied`
+- From: `NeedsAttention`
+- On: `MarkDeliveryApplied`(delivery_id, delivery_sequence)
 - Guards:
   - ``
 - Emits: `DeliveryApplied`

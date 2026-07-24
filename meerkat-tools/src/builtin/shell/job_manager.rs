@@ -382,7 +382,12 @@ impl JobManager {
             ) || !matches!(
                 job.spec.restart_class,
                 RestartClass::Replayable | RestartClass::CheckpointResumable
-            ) {
+            ) || (job.machine_state.lifecycle_phase == JobPhase::RetryScheduled
+                && job
+                    .machine_state
+                    .retry_due_at_ms
+                    .is_some_and(|retry_due_at_ms| now < retry_due_at_ms))
+            {
                 continue;
             }
             let runner_spec = load_runner_spec(durable, &job).await?;
@@ -2563,6 +2568,51 @@ mod durable_tests {
         )
     }
 
+    async fn test_monitor_job_spec(
+        runtime: &DurableShellJobRuntime,
+        session_id: SessionId,
+        submission_key: &str,
+    ) -> JobSpec {
+        let runner_spec = ShellRunnerSpecification {
+            command: "true".to_string(),
+            working_dir: ".".to_string(),
+            placement: ExecutionPlacement::new(
+                None::<String>,
+                None::<PathBuf>,
+                std::iter::empty::<PathBuf>(),
+                None::<String>,
+            )
+            .expect("placement"),
+            timeout_secs: 5,
+            monitor: Some(MonitorRunnerSpecification {
+                protocol: MonitorOutputProtocol::FramedJsonl,
+                limits: MonitorProtocolLimits::default(),
+                delivery: meerkat_jobs::JobDeliveryKind::Record,
+            }),
+        };
+        let encoded = serde_json::to_string(&runner_spec).expect("encode runner specification");
+        let blob = runtime
+            .blob_store
+            .put_artifact(SHELL_RUNNER_MEDIA_TYPE, &encoded)
+            .await
+            .expect("persist runner specification");
+        JobSpec::new(
+            "test-realm",
+            session_id,
+            ExecutionIntentId::from_string(format!("intent:{submission_key}")).expect("intent"),
+            InteractionLineageId::from_string(format!("lineage:{submission_key}"))
+                .expect("lineage"),
+            ToolIdentity::new("monitor_start", "v1").expect("tool"),
+            RunnerIdentity::new("meerkat.monitor_script", "v1").expect("runner"),
+            RestartClass::CheckpointResumable,
+            CanonicalArgumentsHash::new(blob.blob_id.to_string()).expect("hash"),
+            JobSubmissionKey::new(submission_key).expect("submission key"),
+        )
+        .with_runner_specification_ref(
+            RunnerSpecificationRef::new(blob.blob_id.to_string()).expect("runner ref"),
+        )
+    }
+
     #[tokio::test]
     async fn reopen_classifies_loss_without_advancing_attempt_or_fence() {
         let temp = TempDir::new().expect("tempdir");
@@ -2666,6 +2716,69 @@ mod durable_tests {
             Some(&claimed.attempt_id)
         );
         assert_eq!(recovered.current_fence, claimed.fence);
+    }
+
+    #[tokio::test]
+    async fn reopen_leaves_future_retry_committed_without_claiming_it() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let service = DetachedJobService::new(job_store.clone());
+        let receipt = service
+            .submit(test_monitor_job_spec(&runtime, session_id, "future-monitor-retry").await)
+            .await
+            .expect("submit");
+        let first = service
+            .claim_attempt(
+                &receipt.job_id,
+                AttemptClaim::new(
+                    WorkerId::new("worker-before-future-retry").expect("worker"),
+                    1,
+                    2,
+                    RunnerHandleRef::new("monitor-before-future-retry").expect("handle"),
+                ),
+            )
+            .await
+            .expect("claim");
+        service
+            .record_checkpoint(
+                &receipt.job_id,
+                (&first).into(),
+                meerkat_jobs::CheckpointRef::new("checkpoint:v1").expect("checkpoint"),
+                2,
+            )
+            .await
+            .expect("checkpoint");
+        service
+            .observe_lease_expired(&receipt.job_id, (&first).into(), 3)
+            .await
+            .expect("observe loss");
+        let retry_due_at_ms = unix_time_ms().saturating_add(60_000);
+        service
+            .schedule_retry(&receipt.job_id, retry_due_at_ms)
+            .await
+            .expect("schedule future retry");
+
+        let manager = JobManager::new(config).with_durable_job_runtime(runtime);
+        manager
+            .ensure_recovered()
+            .await
+            .expect("future retry is valid dormant recovery state");
+
+        let reopened = service
+            .get(&receipt.job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        assert_eq!(reopened.phase, JobPhase::RetryScheduled);
+        assert_eq!(reopened.attempt_count, 1);
+        assert_eq!(reopened.current_fence, first.fence);
+        let stored = job_store
+            .get(&receipt.job_id)
+            .await
+            .expect("read stored job")
+            .expect("stored job");
+        assert_eq!(stored.machine_state.retry_due_at_ms, Some(retry_due_at_ms));
     }
 
     #[tokio::test]

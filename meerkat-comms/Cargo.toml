@@ -61,7 +61,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = { workspace = true }
 ciborium = { workspace = true }
-meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-runtime = { path = "../meerkat-runtime", features = ["test-support"] }
 
 [features]
 default = ["capability"]

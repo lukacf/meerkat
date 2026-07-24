@@ -299,6 +299,11 @@ pub struct MobMcpState {
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     persistent_storage_root: Option<PathBuf>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
+    /// Bumped whenever the managed-mob handle set gains or loses an entry.
+    /// Interval-free observers (e.g. mobkit's agent-event stream reconcilers)
+    /// await this instead of polling `mob_handles_snapshot` on a timer. The
+    /// value is an opaque epoch, not a count; only "changed" is meaningful.
+    mob_set_epoch: tokio::sync::watch::Sender<u64>,
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
@@ -363,6 +368,7 @@ impl MobMcpState {
             external_tools_provider: None,
             persistent_storage_root: None,
             mobs: RwLock::new(BTreeMap::new()),
+            mob_set_epoch: tokio::sync::watch::Sender::new(0),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
             realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
@@ -745,6 +751,7 @@ impl MobMcpState {
                             handle,
                             storage_path: Some(path.clone()),
                         });
+                        self.note_mob_set_changed();
                     }
                     Entry::Occupied(_) => {
                         let _ = handle.destroy().await;
@@ -831,6 +838,7 @@ impl MobMcpState {
                     handle,
                     storage_path,
                 });
+                self.note_mob_set_changed();
                 Ok(mob_id)
             }
             Entry::Occupied(_) => {
@@ -903,6 +911,7 @@ impl MobMcpState {
                     handle,
                     storage_path,
                 });
+                self.note_mob_set_changed();
             }
             Entry::Occupied(_) => {
                 // Race-safe duplicate guard: avoid leaking the just-created runtime.
@@ -931,6 +940,19 @@ impl MobMcpState {
                 storage_path: None,
             },
         );
+        self.note_mob_set_changed();
+    }
+
+    /// Change signal over the managed-mob handle set: the receiver wakes when
+    /// a mob is registered or removed. Pair with per-handle
+    /// [`meerkat_mob::MobMachineStateChanges`] to observe the full mob tree
+    /// without interval polling.
+    pub fn mob_set_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.mob_set_epoch.subscribe()
+    }
+
+    fn note_mob_set_changed(&self) {
+        self.mob_set_epoch.send_modify(|epoch| *epoch += 1);
     }
 
     /// Return known mob handles without asking each mob actor for live status.
@@ -1087,6 +1109,9 @@ impl MobMcpState {
         match destroy_result {
             Ok(report) => {
                 let removed = self.mobs.write().await.remove(mob_id);
+                if removed.is_some() {
+                    self.note_mob_set_changed();
+                }
                 let storage_path = removed
                     .as_ref()
                     .and_then(|managed| managed.storage_path.clone())

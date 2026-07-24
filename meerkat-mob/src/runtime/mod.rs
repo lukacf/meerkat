@@ -176,13 +176,13 @@ pub use handle::{
     InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
     MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobDestroyError, MobDestroyReport,
     MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
-    MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
-    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
-    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    MobMachineStateChanges, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer,
+    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult,
+    SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport,
+    WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

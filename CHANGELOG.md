@@ -264,6 +264,35 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- **Idle busy-loop, part 2: the per-member idle drivers are gone.** The
+  0.8.5 schema-caching fix removed the idle spin's amplifier; the drivers —
+  fixed-cadence loops doing session-document- or fleet-state-scale work per
+  tick — remained and burned ~0.3 core per idle durable member as I/O and
+  serialization churn. Three drivers fixed:
+  - **Checkpoint re-verification is memoized.** Every 25 ms identity
+    reconcile pass re-verified full checkpoint-stamp digests (canonical
+    JSON + sha256 over the whole session document). A process-lifetime
+    bounded memo keyed on stamp digest and document shape now verifies each
+    (session, revision) once; recovery/write paths still verify in full.
+    `TranscriptHistoryState` gained a `digest_format` marker so decoding a
+    current-format document no longer pays the legacy-heal digest probe,
+    and slim head materialization is verified once per head revision. This
+    also cuts boot: production-scale restores paid the same redundant
+    digests on every read (~1.3 s/MB observed).
+  - **Converged identities skip per-pass session loads.** The mob actor's
+    identity reconcile keeps a convergence witness per member; steady-state
+    passes no longer load and re-serialize the session document at all
+    (full re-verify is retained on a 300 s interval and on any witness
+    invalidation).
+  - **Member-list projection no longer deep-clones machine state.** All
+    `list_members*` projections borrow the actor-published
+    `MobMachineState` watch inside sync blocks instead of cloning the full
+    (restore-scale) state per call — the former 250 ms monitor cadence in
+    mobkit cloned it 16×/s per handle. New opaque change seam
+    `MobHandle::machine_state_changes()` (`MobMachineStateChanges`) lets
+    interval observers go event-driven instead of polling projections on a
+    timer, and `MobMcpState::mob_set_changes()` signals managed-mob-set
+    changes without snapshot polling.
 - **Upgraded fleets whose continuity rows were adopted while runtime
   snapshots stayed legacy are no longer refused on every resume.** In
   mobkit identity-first fleets, sanctioned adoption (lazy-at-restore or the

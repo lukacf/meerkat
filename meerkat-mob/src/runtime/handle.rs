@@ -2326,6 +2326,35 @@ impl From<AgentIdentity> for PeerTarget {
 pub type FlowTargetProvisioner =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), MobError>> + Send>> + Send + Sync>;
 
+/// Opaque change signal over the actor-published [`mob_dsl::MobMachineState`]
+/// watch (see [`MobHandle::machine_state_changes`]).
+///
+/// Constraints: the underlying watch fires on EVERY applied machine input
+/// (including transitions that leave observable membership unchanged), so
+/// consumers must treat a wake as "re-project now", never as a semantic
+/// event. The wrapper exposes no state access by design — projections go
+/// through the `list_members*` surfaces, which borrow the watch value
+/// without cloning it.
+#[derive(Debug, Clone)]
+pub struct MobMachineStateChanges {
+    rx: tokio::sync::watch::Receiver<mob_dsl::MobMachineState>,
+}
+
+impl MobMachineStateChanges {
+    /// Completes when the actor publishes a state this receiver has not yet
+    /// observed. `Err` means the actor is gone (watch sender dropped); after
+    /// `Err` every subsequent call returns `Err` immediately, so callers
+    /// must stop selecting on a closed signal (see [`Self::is_closed`]).
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.rx.changed().await
+    }
+
+    /// Whether the publishing actor has dropped its sender.
+    pub fn is_closed(&self) -> bool {
+        self.rx.has_changed().is_err()
+    }
+}
+
 /// Clone-cheap, thread-safe handle for interacting with a running mob.
 ///
 /// All mutation commands are sent through an mpsc channel to the actor.
@@ -3861,6 +3890,21 @@ impl MobHandle {
         &self.definition.id
     }
 
+    /// Change-notification seam over the actor-published machine state.
+    ///
+    /// Interval observers that only need to know WHEN membership/binding
+    /// truth may have moved (not the state itself) should await
+    /// [`MobMachineStateChanges::changed`] instead of polling
+    /// `list_members*` on a timer: every poll pays a roster projection, and
+    /// the state watch fires on every applied machine input. The wrapper is
+    /// deliberately opaque so observers cannot clone the (potentially
+    /// restore-scale) state out of the watch.
+    pub fn machine_state_changes(&self) -> MobMachineStateChanges {
+        MobMachineStateChanges {
+            rx: self.machine_state_watch_rx.clone(),
+        }
+    }
+
     /// Snapshot of the current roster.
     pub async fn roster(&self) -> Roster {
         match self
@@ -3887,9 +3931,14 @@ impl MobHandle {
             .await?;
 
         let reachable_peer_count = 0usize;
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let unknown_peer_count =
-            Self::machine_wired_to_for_identity(&entry.agent_identity, &machine_state).len();
+        // Watch-borrow discipline: the borrow guard blocks the actor's next
+        // publish, so it must stay inside a sync block and never cross an
+        // await. The wired-to projection is O(edges), not O(state), so no
+        // full-state clone is needed here.
+        let unknown_peer_count = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            Self::machine_wired_to_for_identity(&entry.agent_identity, &machine_state).len()
+        };
         let unreachable_peers = Vec::new();
 
         Some(MobPeerConnectivitySnapshot {
@@ -3937,9 +3986,16 @@ impl MobHandle {
                 .map(|entry| (entry.agent_identity.clone(), entry))
                 .collect()
         };
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let entries = self
-            .project_member_list_entries_from_machine_state(entries_by_identity, &machine_state);
+        // Project under the watch borrow instead of cloning the whole
+        // MobMachineState: interval observers (mobkit's stream reconcilers,
+        // taint observer, console polling) call this at sub-second cadence,
+        // and on restore-scale mobs the full-state clone dominated idle CPU.
+        // Watch-borrow discipline: the guard stays inside this sync block and
+        // never crosses an await.
+        let entries = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            self.project_member_list_entries_from_machine_state(entries_by_identity, &machine_state)
+        };
         entries
             .into_iter()
             .filter(|entry| match entry.status {
@@ -3971,16 +4027,25 @@ impl MobHandle {
             .cloned()
             .map(|entry| (entry.agent_identity.clone(), entry))
             .collect();
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        // Clone-free projection under the watch borrow (sync block only; the
+        // guard must never cross an await).
+        let machine_state = self.machine_state_watch_rx.borrow();
         self.project_member_list_entries_from_machine_state(entries, &machine_state)
     }
 
     async fn inflight_retiring_member_list(&self) -> Option<Vec<MobMemberListEntry>> {
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        if !machine_state.identity_to_runtime.keys().any(|identity| {
-            machine_state.member_lifecycle_for_identity(identity).status
-                == mob_dsl::MobMemberLifecycleStatus::Retiring
-        }) {
+        // Cheap retiring probe under a short-lived borrow; the projection
+        // below re-borrows after the roster await, so it may observe a newer
+        // published state (this is an observation-only surface and was
+        // already racy against the roster read).
+        let any_retiring = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            machine_state.identity_to_runtime.keys().any(|identity| {
+                machine_state.member_lifecycle_for_identity(identity).status
+                    == mob_dsl::MobMemberLifecycleStatus::Retiring
+            })
+        };
+        if !any_retiring {
             return None;
         }
         let entries = self
@@ -3991,6 +4056,7 @@ impl MobHandle {
             .cloned()
             .map(|entry| (entry.agent_identity.clone(), entry))
             .collect();
+        let machine_state = self.machine_state_watch_rx.borrow();
         Some(self.project_member_list_entries_from_machine_state(entries, &machine_state))
     }
 

@@ -1198,6 +1198,8 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    ("rpc_deferred_catalog_session", "rpc-deferred-catalog-session"),`,
     `    ("cli_background_job_active_turn", "cli-background-job-active-turn"),`,
     `    ("cli_background_job_idle_keepalive", "cli-background-job-idle-keepalive"),`,
+    `    ("durable_jobs_workgraph_feed", "durable-jobs-workgraph-feed"),`,
+    `    ("durable_jobs_workgraph_recovery", "durable-jobs-workgraph-recovery"),`,
     `    ("mob_live_smoke", "mob-live-smoke"),`,
     `    ("mob_external_tcp_production_drain", "mob-external-tcp-production-drain"),`,
     `    ("mob_idle_burn", "mob-idle-burn"),`,

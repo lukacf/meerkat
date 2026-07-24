@@ -44,7 +44,7 @@ impl From<&meerkat_core::error::ToolError> for WireToolErrorClass {
             ToolError::NotFound { .. } => Self::NotFound,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
             ToolError::InvalidArguments { .. } => Self::InvalidArguments,
-            ToolError::Timeout { .. } => Self::Timeout,
+            ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             _ => Self::Internal,
         }
     }

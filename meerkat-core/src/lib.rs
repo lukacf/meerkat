@@ -77,6 +77,7 @@ pub mod state;
 pub mod storage_diagnostics;
 pub mod storage_durability;
 pub mod storage_layout;
+pub mod streaming_tool;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
@@ -169,6 +170,10 @@ pub use peer_correlation::{
 };
 pub use peer_meta::PeerMeta;
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
+pub use streaming_tool::{
+    ToolCancellationToken, ToolProgressFrame, ToolProgressFrameError, ToolProgressReportError,
+    ToolProgressSink, ToolStreamingDispatchContext,
+};
 pub use surface_metadata::{
     MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, ReservedMetadataKey, RuntimeMetadata,
     SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,

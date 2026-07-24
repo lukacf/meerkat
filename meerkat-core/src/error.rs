@@ -164,6 +164,10 @@ pub enum ToolError {
     #[error("Tool '{name}' timed out after {timeout_ms}ms")]
     Timeout { name: String, timeout_ms: u64 },
 
+    /// A declared streaming tool stopped producing accepted progress.
+    #[error("Streaming tool '{name}' stalled after {inactivity_ms}ms of inactivity")]
+    InactivityTimeout { name: String, inactivity_ms: u64 },
+
     /// Tool access was denied by policy
     #[error("Tool '{name}' is not allowed by policy")]
     AccessDenied { name: String },
@@ -194,6 +198,7 @@ impl ToolError {
                 "execution_failed"
             }
             Self::Timeout { .. } => "timeout",
+            Self::InactivityTimeout { .. } => "inactivity_timeout",
             Self::AccessDenied { .. } => "access_denied",
             Self::Other(_) => "tool_error",
             Self::CallbackPending { .. } => "callback_pending",
@@ -259,6 +264,12 @@ impl ToolError {
         Self::Timeout {
             name: name.into(),
             timeout_ms,
+        }
+    }
+    pub fn inactivity_timeout(name: impl Into<String>, inactivity_ms: u64) -> Self {
+        Self::InactivityTimeout {
+            name: name.into(),
+            inactivity_ms,
         }
     }
     pub fn access_denied(name: impl Into<String>) -> Self {

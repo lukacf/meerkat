@@ -427,6 +427,7 @@ pub struct ToolDispatchContext {
     turn_metadata: BTreeMap<String, serde_json::Value>,
     origin_session_id: Option<crate::types::SessionId>,
     interaction_lineage_id: Option<crate::interaction::InteractionId>,
+    streaming: Option<crate::ToolStreamingDispatchContext>,
 }
 
 /// Dispatch-context key carrying the current durable objective id.
@@ -443,6 +444,7 @@ impl ToolDispatchContext {
             turn_metadata: BTreeMap::new(),
             origin_session_id: None,
             interaction_lineage_id: None,
+            streaming: None,
         }
     }
 
@@ -491,6 +493,20 @@ impl ToolDispatchContext {
 
     pub const fn interaction_lineage_id(&self) -> Option<crate::interaction::InteractionId> {
         self.interaction_lineage_id
+    }
+
+    /// Streaming-only liveness surface minted by the canonical supervisor.
+    ///
+    /// Fast and detached dispatch contexts carry no streaming surface. A tool
+    /// that declared `Streaming` must fail closed if this is absent rather than
+    /// fabricating a progress sink or cancellation authority.
+    pub const fn streaming(&self) -> Option<&crate::ToolStreamingDispatchContext> {
+        self.streaming.as_ref()
+    }
+
+    pub(crate) fn with_streaming(mut self, streaming: crate::ToolStreamingDispatchContext) -> Self {
+        self.streaming = Some(streaming);
+        self
     }
 
     pub fn current_turn_image(
@@ -917,9 +933,33 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
             crate::ToolUnavailableReason::ExecutionOwnerChanged,
         ));
     }
-    dispatcher
-        .dispatch_resolved_with_context(call, context, plan)
-        .await
+    match plan.kind() {
+        crate::ResolvedExecutionKind::Streaming(policy) => {
+            let absolute_timeout = plan
+                .deadlines()
+                .effective_timeout()
+                .unwrap_or_else(|| policy.absolute_timeout());
+            crate::streaming_tool::supervise_streaming_tool(
+                call.name,
+                policy.inactivity_timeout(),
+                absolute_timeout,
+                |streaming| {
+                    let streaming_context = context.clone().with_streaming(streaming);
+                    async move {
+                        dispatcher
+                            .dispatch_resolved_with_context(call, &streaming_context, plan)
+                            .await
+                    }
+                },
+            )
+            .await
+        }
+        crate::ResolvedExecutionKind::Fast | crate::ResolvedExecutionKind::Detached(_) => {
+            dispatcher
+                .dispatch_resolved_with_context(call, context, plan)
+                .await
+        }
+    }
 }
 
 /// Compute whether the current exact catalog should stay inline or switch to deferred mode.
@@ -2048,6 +2088,11 @@ mod tests {
         catalog: Arc<[crate::ToolCatalogEntry]>,
     }
 
+    struct StreamingExecutionDispatcher {
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+        saw_streaming_context: Arc<std::sync::atomic::AtomicBool>,
+    }
+
     struct IdenticalMutationDispatcher {
         tool: ToolDef,
         epoch: std::sync::atomic::AtomicU64,
@@ -2206,6 +2251,68 @@ mod tests {
                 ));
             }
             self.dispatch(call).await
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for StreamingExecutionDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Err(crate::ToolError::unavailable(
+                call.name,
+                crate::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+            ))
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+            plan: &crate::ResolvedToolExecutionPlan,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            if plan.mode() != crate::ToolExecutionMode::Streaming {
+                return Err(crate::ToolError::execution_failed(
+                    "streaming owner received a non-streaming plan",
+                ));
+            }
+            let streaming = context.streaming().ok_or_else(|| {
+                crate::ToolError::unavailable(
+                    call.name,
+                    crate::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                )
+            })?;
+            streaming
+                .progress()
+                .try_report(
+                    crate::ToolProgressFrame::message("accepted through wrapper")
+                        .map_err(|error| crate::ToolError::other(error.to_string()))?,
+                )
+                .map_err(|error| crate::ToolError::other(error.to_string()))?;
+            self.saw_streaming_context
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolResult::new(call.id.to_string(), "stream complete".to_string(), false).into())
         }
     }
 
@@ -2465,6 +2572,149 @@ mod tests {
             .await
             .expect_err("the default dispatcher must not lower detached work to dispatch()");
 
+        assert!(matches!(
+            error,
+            crate::ToolError::Unavailable {
+                reason: crate::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fenced_streaming_dispatch_mints_context_and_filtered_wrapper_preserves_it() {
+        use crate::{
+            StreamingToolExecutionPolicy, ToolDeadlineChain, ToolDeadlineContributor,
+            ToolDeadlineOwner, ToolExecutionContract, ToolExecutionMode,
+            ToolExecutionResolutionContext,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Streaming]),
+            ToolExecutionMode::Streaming,
+            Some(
+                StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_secs(30))
+                    .unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let saw_streaming_context = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner = StreamingExecutionDispatcher {
+            catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "stream_scan",
+                    "stream scan",
+                    json!({"type": "object"}),
+                )),
+                true,
+            )
+            .with_execution_contract(contract)]),
+            saw_streaming_context: Arc::clone(&saw_streaming_context),
+        };
+        let dispatcher = Arc::new(FilteredToolDispatcher::new(
+            Arc::new(owner),
+            ["stream_scan"],
+        ));
+        let filtered_catalog = dispatcher.tool_catalog();
+        assert_eq!(
+            filtered_catalog[0].execution.default_mode(),
+            ToolExecutionMode::Streaming
+        );
+        let filtered_policy = filtered_catalog[0]
+            .execution
+            .streaming_policy()
+            .expect("wrapper preserves the streaming registration");
+        assert_eq!(filtered_policy.inactivity_timeout(), Duration::from_secs(5));
+        assert_eq!(filtered_policy.absolute_timeout(), Duration::from_secs(30));
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "stream-call",
+            name: "stream_scan",
+            args: &args,
+        };
+        let context = ToolDispatchContext::default();
+        assert!(
+            context.streaming().is_none(),
+            "callers cannot pre-mint the supervised streaming context"
+        );
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(60),
+            )])
+            .unwrap(),
+        );
+        let plan =
+            crate::resolve_tool_execution_plan_fenced(&dispatcher, call, &context, &resolution)
+                .expect("streaming plan resolves through wrapper");
+
+        let outcome =
+            crate::dispatch_tool_execution_plan_fenced(&dispatcher, call, &context, &plan)
+                .await
+                .expect("streaming dispatch completes");
+
+        assert_eq!(outcome.result.text_content(), "stream complete");
+        assert!(
+            saw_streaming_context.load(std::sync::atomic::Ordering::SeqCst),
+            "the wrapper must preserve the exact supervised context"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_streaming_without_a_mode_owner_fails_closed_before_plain_dispatch() {
+        use crate::{
+            StreamingToolExecutionPolicy, ToolDeadlineChain, ToolDeadlineContributor,
+            ToolDeadlineOwner, ToolExecutionContract, ToolExecutionMode,
+            ToolExecutionResolutionContext,
+        };
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let contract = ToolExecutionContract::new(
+            BTreeSet::from([ToolExecutionMode::Streaming]),
+            ToolExecutionMode::Streaming,
+            Some(
+                StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_secs(30))
+                    .unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let dispatcher = Arc::new(ExactExecutionDispatcher {
+            catalog: Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "ownerless_stream",
+                    "ownerless",
+                    json!({"type": "object"}),
+                )),
+                true,
+            )
+            .with_execution_contract(contract)]),
+        });
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ownerless-call",
+            name: "ownerless_stream",
+            args: &args,
+        };
+        let context = ToolDispatchContext::default();
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(60),
+            )])
+            .unwrap(),
+        );
+        let plan =
+            crate::resolve_tool_execution_plan_fenced(&dispatcher, call, &context, &resolution)
+                .expect("declaration resolves");
+
+        let error = crate::dispatch_tool_execution_plan_fenced(&dispatcher, call, &context, &plan)
+            .await
+            .expect_err("missing streaming owner must fail closed");
         assert!(matches!(
             error,
             crate::ToolError::Unavailable {

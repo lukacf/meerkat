@@ -41,7 +41,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.6",
+        "CARGO_PKG_VERSION": "0.8.7",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
     },
     proc_macro_deps = all_crate_deps(
@@ -71,7 +71,7 @@ rust_library(
         "//meerkat-mob-adaptive:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.6",
+        "CARGO_PKG_VERSION": "0.8.7",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
     },
     proc_macro_deps = all_crate_deps(
@@ -105,7 +105,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.6",
+        "CARGO_PKG_VERSION": "0.8.7",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-adaptive",
     },
     tags = [

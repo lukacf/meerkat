@@ -25,11 +25,11 @@ printf '%s\n' \
   meerkat-memory \
   meerkat-mcp \
   meerkat-hooks \
-  meerkat-comms \
   meerkat-anthropic \
   meerkat-gemini \
   meerkat-providers \
   meerkat-runtime \
+  meerkat-comms \
   meerkat-openai \
   meerkat-tools \
   meerkat-session \

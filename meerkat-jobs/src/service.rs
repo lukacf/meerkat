@@ -6,9 +6,9 @@ use crate::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CheckpointRef,
     DetachedJobError, DetachedJobStore, FenceToken, JobDescription, JobFailureCode,
     JobHealthCondition, JobHealthSnapshot, JobId, JobNotification, JobNotificationReceipt,
-    JobOutboxEntry, JobOutboxPayload, JobProgress, JobReceipt, JobResultRef, JobSnapshot,
-    JobSubscription, JobSubscriptionId, JobTerminalResult, NotificationId, PredicateEvaluation,
-    PredicateEvaluationReceipt, PredicateObservation, PredicateWatch,
+    JobOutboxEntry, JobOutboxPayload, JobProgress, JobReceipt, JobReference, JobResultRef,
+    JobSnapshot, JobSubscription, JobSubscriptionId, JobTerminalResult, NotificationId,
+    PredicateEvaluation, PredicateEvaluationReceipt, PredicateObservation, PredicateWatch,
 };
 
 #[derive(Clone)]
@@ -77,6 +77,44 @@ impl DetachedJobService {
 
     pub async fn get(&self, job_id: &JobId) -> Result<Option<JobSnapshot>, DetachedJobError> {
         self.store.get(job_id).await?.map(job_snapshot).transpose()
+    }
+
+    /// Resolve a realm-qualified job reference for its owning session.
+    ///
+    /// Cross-realm and cross-session references deliberately collapse to
+    /// `NotFound`, so callers cannot use the await surface as an existence
+    /// oracle for jobs they do not own.
+    pub async fn get_authorized_for_session(
+        &self,
+        reference: &JobReference,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<JobSnapshot, DetachedJobError> {
+        let stored = self
+            .store
+            .get(reference.job_id())
+            .await?
+            .filter(|job| {
+                job.spec.realm_id == reference.realm_id()
+                    && &job.spec.origin_session_id == session_id
+            })
+            .ok_or_else(|| DetachedJobError::NotFound(reference.job_id().clone()))?;
+        job_snapshot(stored)
+    }
+
+    /// Resolve a realm-qualified reference for a trusted cross-domain
+    /// projector. Public/session-facing callers should use
+    /// [`Self::get_authorized_for_session`] instead.
+    pub async fn get_for_reference(
+        &self,
+        reference: &JobReference,
+    ) -> Result<JobSnapshot, DetachedJobError> {
+        let stored = self
+            .store
+            .get(reference.job_id())
+            .await?
+            .filter(|job| job.spec.realm_id == reference.realm_id())
+            .ok_or_else(|| DetachedJobError::NotFound(reference.job_id().clone()))?;
+        job_snapshot(stored)
     }
 
     pub async fn describe(
@@ -190,27 +228,39 @@ impl DetachedJobService {
         job_id: &JobId,
         subscription: JobSubscription,
     ) -> Result<JobSnapshot, DetachedJobError> {
-        let mut current = self.required(job_id).await?;
-        if let Some(existing) = current
-            .subscriptions
-            .iter()
-            .find(|existing| existing.subscription_id() == subscription.subscription_id())
-        {
-            if existing == &subscription {
-                return job_snapshot(current);
+        loop {
+            let mut current = self.required(job_id).await?;
+            if let Some(existing) = current
+                .subscriptions
+                .iter()
+                .find(|existing| existing.subscription_id() == subscription.subscription_id())
+            {
+                if existing == &subscription {
+                    return job_snapshot(current);
+                }
+                return Err(DetachedJobError::InvalidInput(format!(
+                    "subscription {} is already bound to a different target",
+                    subscription.subscription_id()
+                )));
             }
-            return Err(DetachedJobError::InvalidInput(format!(
-                "subscription {} is already bound to a different target",
-                subscription.subscription_id()
-            )));
+            current.subscriptions.push(subscription.clone());
+            let expected_revision = current.revision;
+            match self
+                .store
+                .compare_and_swap(expected_revision, current)
+                .await
+            {
+                Ok(committed) => return job_snapshot(committed),
+                Err(DetachedJobError::StaleRevision { .. }) => {
+                    // Subscription registration composes with terminal
+                    // commitment. Reloading is mechanical: if terminality won
+                    // the race, the returned snapshot carries that generated
+                    // truth and the await owner can resolve from it directly.
+                    // No attempt, retry, or fence transition is invented here.
+                }
+                Err(error) => return Err(error),
+            }
         }
-        current.subscriptions.push(subscription);
-        let expected_revision = current.revision;
-        let committed = self
-            .store
-            .compare_and_swap(expected_revision, current)
-            .await?;
-        job_snapshot(committed)
     }
 
     pub async fn unsubscribe(

@@ -296,6 +296,28 @@ impl OperationId {
     pub fn new() -> Self {
         Self(crate::time_compat::new_uuid_v7())
     }
+
+    /// Derive the stable MeerkatMachine operation that owns one session's
+    /// explicit wait binding to a realm-qualified detached job.
+    ///
+    /// Determinism lets a reconstructed runtime re-register the same binding
+    /// after volatile non-terminal operation state is discarded. It does not
+    /// claim, retry, or otherwise mutate detached-job execution authority.
+    pub fn for_detached_job_wait(
+        session_id: &crate::types::SessionId,
+        realm_id: &str,
+        job_id: &str,
+    ) -> Self {
+        let name = format!(
+            "meerkat.detached_job_wait.v1:{}:{}:{}:{}:{}",
+            session_id,
+            realm_id.len(),
+            realm_id,
+            job_id.len(),
+            job_id
+        );
+        Self(Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes()))
+    }
 }
 
 impl Default for OperationId {

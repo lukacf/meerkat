@@ -589,6 +589,7 @@ test_suite(
         "//meerkat:cold_restart_resume_test",
         "//meerkat:embedded_skill_registration_test",
         "//meerkat:factory_build_agent_test",
+        "//meerkat:job_composition_test",
         "//meerkat:job_surface_test",
         "//meerkat:meerkat_unit_test",
         "//meerkat:persistence_contract_test",

@@ -34,6 +34,13 @@ not be absorbed into current work without re-triage.
   shrink-only coverage-gap roster. Their canonical TLA, contracts, mappings,
   kernels, TLC verification, and authority docs are present; bespoke
   large-format SVG layouts are a separate documentation slice.
+- Operation-timestamp persistence follow-up: recovered operation shell records
+  currently reconstruct wall-clock timestamps at reopen. Durable
+  `DetachedJobWait` identity, lifecycle, source, and job fencing remain exact,
+  but the member-status `activity.since_ms` projection restarts at recovery.
+  Preserving the original timestamp requires a versioned ops-snapshot format
+  change and store-conformance migration, so it is deferred from Phase 6 rather
+  than widening the composition slice.
 
 ## Resolved in scope
 

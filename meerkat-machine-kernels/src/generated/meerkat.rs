@@ -4039,6 +4039,8 @@ pub enum OperationKind {
     BackgroundToolOp,
     #[serde(rename = "BackgroundToolCapacitySlot")]
     BackgroundToolCapacitySlot,
+    #[serde(rename = "DetachedJobWait")]
+    DetachedJobWait,
 }
 impl OperationKind {
     pub fn as_str(&self) -> &'static str {
@@ -4046,6 +4048,7 @@ impl OperationKind {
             Self::MobMemberChild => "MobMemberChild",
             Self::BackgroundToolOp => "BackgroundToolOp",
             Self::BackgroundToolCapacitySlot => "BackgroundToolCapacitySlot",
+            Self::DetachedJobWait => "DetachedJobWait",
         }
     }
 }
@@ -4056,6 +4059,7 @@ impl std::convert::TryFrom<&str> for OperationKind {
             "MobMemberChild" => Ok(Self::MobMemberChild),
             "BackgroundToolOp" => Ok(Self::BackgroundToolOp),
             "BackgroundToolCapacitySlot" => Ok(Self::BackgroundToolCapacitySlot),
+            "DetachedJobWait" => Ok(Self::DetachedJobWait),
             other => Err(format!("invalid OperationKind value `{other}`")),
         }
     }

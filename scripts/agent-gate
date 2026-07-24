@@ -52,9 +52,15 @@ cd "${workspace_root}"
 
 case "${backend}" in
   cargo)
+    if [[ ${#args[@]} -eq 0 ]]; then
+      exec ./scripts/cargo-agent-gate
+    fi
     exec ./scripts/cargo-agent-gate "${args[@]}"
     ;;
   buildbuddy)
+    if [[ ${#args[@]} -eq 0 ]]; then
+      exec ./scripts/buildbuddy-agent-gate
+    fi
     exec ./scripts/buildbuddy-agent-gate "${args[@]}"
     ;;
   *)

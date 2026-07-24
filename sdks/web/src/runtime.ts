@@ -12,7 +12,7 @@ import { parseInitResult } from './generated/runtime.js';
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
-const EXPECTED_VERSION = '0.8.4';
+const EXPECTED_VERSION = '0.8.5';
 
 /**
  * Convert a camelCase config object to the snake_case expected by WASM.

@@ -619,7 +619,8 @@ impl ShellState {
     ) -> Option<SessionId> {
         match operation_source {
             Some(OperationSource::SessionChild { session_id }) => Some(session_id.clone()),
-            Some(OperationSource::BackendPeer { .. }) | None => None,
+            Some(OperationSource::BackendPeer { .. } | OperationSource::DetachedJob { .. })
+            | None => None,
         }
     }
 
@@ -2171,10 +2172,10 @@ impl RuntimeOpsLifecycleRegistry {
 
     /// Recover from a persisted snapshot.
     ///
-    /// Rebuilds DSL state (stripping non-terminal ops — only terminals
-    /// survive recovery), creates fresh shell records from specs, and seeds
-    /// the feed buffer only with completion entries accepted by generated
-    /// recovery authority.
+    /// Rebuilds DSL state, retaining terminal operations and running
+    /// `DetachedJobWait` bindings while stripping every other non-terminal
+    /// operation. Fresh shell records come from specs; completion entries are
+    /// seeded only after generated recovery authority accepts them.
     pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Result<Self, OpsLifecycleError> {
         let PersistedOpsSnapshot {
             authority_state,
@@ -2191,10 +2192,9 @@ impl RuntimeOpsLifecycleRegistry {
         let mut shell = ShellState::new(max_completed, max_concurrent);
 
         // Replay every persisted op through generated recovery authority.
-        // The transition accepts only terminal records with outcome and
-        // completion-sequence witnesses. Volatile non-terminal rows are not
-        // recovered; terminal/corrupt rows must fail closed instead of being
-        // projected into shell/public feed state.
+        // The transition accepts terminal records with outcome/sequence
+        // witnesses plus running DetachedJobWait records with their typed
+        // source. Other non-terminal rows remain volatile.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
         for (op_id, op_state) in authority_operations {
             let terminal_outcome = op_state
@@ -2237,12 +2237,8 @@ impl RuntimeOpsLifecycleRegistry {
                 completion_sequence: op_state.completion_sequence,
             };
             shell.dsl_apply(recovery, "RecoverOpRecord")?;
-            let recovered_seq = shell.completion_sequence(&op_id).ok_or_else(|| {
-                OpsLifecycleError::Internal(format!(
-                    "generated op recovery accepted {op_id} without completion sequence"
-                ))
-            })?;
-            if op_state.completion_sequence != Some(recovered_seq) {
+            let recovered_seq = shell.completion_sequence(&op_id);
+            if op_state.completion_sequence != recovered_seq {
                 return Err(OpsLifecycleError::Internal(format!(
                     "generated op recovery completion sequence mismatch for {op_id}"
                 )));
@@ -4291,6 +4287,52 @@ mod tests {
         let collected = recovered.collect_completed().unwrap();
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].0, completed_id);
+    }
+
+    #[test]
+    fn recovered_snapshot_retains_running_detached_job_wait_binding() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let owner_session_id = SessionId::new();
+        let job_id = "job_recovery_wait";
+        let operation_id = OperationId::for_detached_job_wait(&owner_session_id, "realm-a", job_id);
+        let source = OperationSource::detached_job("realm-a", job_id);
+        registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::DetachedJobWait,
+                owner_session_id: owner_session_id.clone(),
+                display_name: "await detached job".into(),
+                source_label: "await_job".into(),
+                operation_source: Some(source.clone()),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        let wait = recovered
+            .snapshot(&operation_id)
+            .unwrap()
+            .expect("running await binding survives recovery");
+
+        assert_eq!(wait.status, OperationStatus::Running);
+        assert_eq!(wait.owner_session_id, owner_session_id);
+        assert_eq!(wait.operation_source, Some(source));
+        assert!(wait.terminal_outcome.is_none());
+        assert!(
+            recovered
+                .completion_feed()
+                .expect("completion feed")
+                .list_since(0)
+                .entries
+                .is_empty(),
+            "recovery of a wait binding must not mint completion"
+        );
     }
 
     #[test]

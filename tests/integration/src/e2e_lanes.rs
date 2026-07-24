@@ -213,6 +213,8 @@ macro_rules! e2e_smoke_lane_entries {
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
             suite(e2e_smoke_cli_background_job_idle_keepalive, "cli-background-job-idle-keepalive");
+            suite(e2e_smoke_durable_jobs_workgraph_feed, "durable-jobs-workgraph-feed");
+            suite(e2e_smoke_durable_jobs_workgraph_recovery, "durable-jobs-workgraph-recovery");
             suite(e2e_smoke_mob_live_smoke, "mob-live-smoke");
             suite(e2e_smoke_mob_external_tcp_production_drain, "mob-external-tcp-production-drain");
             suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
@@ -5054,6 +5056,74 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        "durable-jobs-workgraph-feed" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Durable jobs WorkGraph multi-delivery feed",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[(
+                "RKAT_TEST_BIN_RKAT_RPC",
+                "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-feed/rkat-rpc",
+            )],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-feed",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat-rpc",
+                    "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-feed/rkat-rpc",
+                ],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "e2e_smoke_durable_jobs_workgraph_feed",
+                features: &[],
+                all_features: false,
+            },
+        }),
+        "durable-jobs-workgraph-recovery" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Durable jobs WorkGraph crash recovery",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[(
+                "RKAT_TEST_BIN_RKAT_RPC",
+                "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-recovery/rkat-rpc",
+            )],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-recovery",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat-rpc",
+                    "{cargo_target_dir}/e2e-bins/durable-jobs-workgraph-recovery/rkat-rpc",
+                ],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "e2e_smoke_durable_jobs_workgraph_recovery",
+                features: &[],
+                all_features: false,
+            },
+        }),
         "mob-live-smoke" => Some(&Spec {
             id: None,
             lane: Lane::Smoke,
@@ -5305,6 +5375,28 @@ mod tests {
         .unwrap();
         assert_eq!(plan.specs.len(), 1);
         assert_eq!(plan.specs[0].suite.as_deref(), Some("mob-live-smoke"));
+    }
+
+    #[test]
+    fn durable_jobs_workgraph_scenarios_are_first_class_smoke_suites() {
+        for (suite, test_name) in [
+            (
+                "durable-jobs-workgraph-feed",
+                "e2e_smoke_durable_jobs_workgraph_feed",
+            ),
+            (
+                "durable-jobs-workgraph-recovery",
+                "e2e_smoke_durable_jobs_workgraph_recovery",
+            ),
+        ] {
+            assert_eq!(
+                smoke_test_filter_for_selection(&E2eSelection::Suite(suite.to_string())).unwrap(),
+                Some(test_name.to_string()),
+            );
+            let plan = plan_for_selection(&E2eSelection::SmokeTest(test_name.to_string())).unwrap();
+            assert_eq!(plan.specs.len(), 1);
+            assert_eq!(plan.specs[0].suite.as_deref(), Some(suite));
+        }
     }
 
     #[test]

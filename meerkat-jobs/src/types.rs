@@ -60,6 +60,40 @@ impl JobId {
     }
 }
 
+/// Realm-qualified durable job identity used by cross-domain composition.
+///
+/// A bare [`JobId`] is intentionally insufficient at Schedule, WorkGraph, and
+/// session-await boundaries: those callers must carry the realm that owns the
+/// job and fail closed rather than searching across realms.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct JobReference {
+    realm_id: String,
+    job_id: JobId,
+}
+
+impl JobReference {
+    pub fn new(realm_id: impl Into<String>, job_id: JobId) -> Result<Self, DetachedJobError> {
+        let realm_id = realm_id.into();
+        if realm_id.trim() != realm_id {
+            return Err(DetachedJobError::InvalidInput(
+                "job reference realm id must be canonical".into(),
+            ));
+        }
+        Ok(Self {
+            realm_id: validate_component("job reference realm id", realm_id)?,
+            job_id,
+        })
+    }
+
+    pub fn realm_id(&self) -> &str {
+        &self.realm_id
+    }
+
+    pub fn job_id(&self) -> &JobId {
+        &self.job_id
+    }
+}
+
 impl AttemptId {
     pub fn generated() -> Self {
         Self(format!("attempt_{}", Uuid::now_v7()))

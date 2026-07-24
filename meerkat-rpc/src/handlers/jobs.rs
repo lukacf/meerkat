@@ -504,6 +504,12 @@ pub async fn handle_health(id: Option<RpcId>, runtime: &Arc<SessionRuntime>) -> 
                     return RpcResponse::error(id, error::INTERNAL_ERROR, error);
                 }
             };
+            let awaiting_members = match runtime.detached_job_awaiting_member_count().await {
+                Ok(awaiting_members) => awaiting_members,
+                Err(error) => {
+                    return RpcResponse::error(id, error.code, error.message);
+                }
+            };
             let delivery_backlog = health.delivery_backlog.saturating_add(runtime_backlog);
             RpcResponse::success(
                 id,
@@ -516,7 +522,7 @@ pub async fn handle_health(id: Option<RpcId>, runtime: &Arc<SessionRuntime>) -> 
                         },
                         queued: health.queued,
                         running: health.running,
-                        awaiting_members: health.awaiting_members,
+                        awaiting_members,
                         stale_leases: health.stale_leases,
                         needs_attention: health.needs_attention,
                         delivery_backlog,

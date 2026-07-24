@@ -21,14 +21,16 @@ pub enum OperationKind {
     MobMemberChild,
     BackgroundToolOp,
     BackgroundToolCapacitySlot,
+    DetachedJobWait,
 }
 
 impl OperationKind {
     /// Closed variant set mirrored from the generated MeerkatMachine named type.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::MobMemberChild,
         Self::BackgroundToolOp,
         Self::BackgroundToolCapacitySlot,
+        Self::DetachedJobWait,
     ];
 
     /// Generated named-type variant spelling used by drift ratchets.
@@ -37,6 +39,7 @@ impl OperationKind {
             Self::MobMemberChild => "MobMemberChild",
             Self::BackgroundToolOp => "BackgroundToolOp",
             Self::BackgroundToolCapacitySlot => "BackgroundToolCapacitySlot",
+            Self::DetachedJobWait => "DetachedJobWait",
         }
     }
 
@@ -57,6 +60,10 @@ pub enum OperationSource {
         peer_id: PeerId,
         address: PeerAddress,
     },
+    DetachedJob {
+        realm_id: String,
+        job_id: String,
+    },
 }
 
 impl OperationSource {
@@ -66,6 +73,13 @@ impl OperationSource {
 
     pub fn backend_peer(peer_id: PeerId, address: PeerAddress) -> Self {
         Self::BackendPeer { peer_id, address }
+    }
+
+    pub fn detached_job(realm_id: impl Into<String>, job_id: impl Into<String>) -> Self {
+        Self::DetachedJob {
+            realm_id: realm_id.into(),
+            job_id: job_id.into(),
+        }
     }
 }
 
@@ -602,5 +616,6 @@ mod tests {
         assert!(OperationKind::MobMemberChild.expects_peer_channel());
         assert!(!OperationKind::BackgroundToolOp.expects_peer_channel());
         assert!(!OperationKind::BackgroundToolCapacitySlot.expects_peer_channel());
+        assert!(!OperationKind::DetachedJobWait.expects_peer_channel());
     }
 }

@@ -144,6 +144,12 @@ impl OperationId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct DetachedJobRealmId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct DetachedJobId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct WaitRequestId(pub String);
 
 impl<T: Into<String>> From<T> for WaitRequestId {
@@ -172,6 +178,7 @@ pub enum OperationKind {
     MobMemberChild,
     BackgroundToolOp,
     BackgroundToolCapacitySlot,
+    DetachedJobWait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -179,6 +186,7 @@ pub enum OperationSourceKind {
     #[default]
     SessionChild,
     BackendPeer,
+    DetachedJob,
 }
 
 /// Typed source identity for an async operation. The lifecycle machine stores
@@ -190,6 +198,8 @@ pub struct OperationSource {
     pub session_id: Option<SessionId>,
     pub peer_id: Option<PeerId>,
     pub address: Option<PeerAddress>,
+    pub realm_id: Option<DetachedJobRealmId>,
+    pub job_id: Option<DetachedJobId>,
 }
 
 impl OperationSource {
@@ -200,6 +210,8 @@ impl OperationSource {
                 session_id: Some(SessionId::from_domain(session_id)),
                 peer_id: None,
                 address: None,
+                realm_id: None,
+                job_id: None,
             },
             meerkat_core::ops_lifecycle::OperationSource::BackendPeer { peer_id, address } => {
                 Self {
@@ -207,6 +219,18 @@ impl OperationSource {
                     session_id: None,
                     peer_id: Some(PeerId(peer_id.to_string())),
                     address: Some(PeerAddress(address.to_string())),
+                    realm_id: None,
+                    job_id: None,
+                }
+            }
+            meerkat_core::ops_lifecycle::OperationSource::DetachedJob { realm_id, job_id } => {
+                Self {
+                    kind: OperationSourceKind::DetachedJob,
+                    session_id: None,
+                    peer_id: None,
+                    address: None,
+                    realm_id: Some(DetachedJobRealmId(realm_id.clone())),
+                    job_id: Some(DetachedJobId(job_id.clone())),
                 }
             }
         }
@@ -245,6 +269,34 @@ impl OperationSource {
                     peer_id, address,
                 ))
             }
+            OperationSourceKind::DetachedJob => {
+                let realm_id = self
+                    .realm_id
+                    .as_ref()
+                    .ok_or_else(|| "detached job operation source missing realm_id".to_string())?;
+                let job_id = self
+                    .job_id
+                    .as_ref()
+                    .ok_or_else(|| "detached job operation source missing job_id".to_string())?;
+                if realm_id.0.is_empty()
+                    || realm_id.0.trim() != realm_id.0
+                    || realm_id.0.chars().any(char::is_control)
+                {
+                    return Err(
+                        "detached job operation source has invalid canonical realm_id".into(),
+                    );
+                }
+                if job_id.0.is_empty()
+                    || job_id.0.trim() != job_id.0
+                    || job_id.0.chars().any(char::is_control)
+                {
+                    return Err("detached job operation source has invalid canonical job_id".into());
+                }
+                Ok(meerkat_core::ops_lifecycle::OperationSource::detached_job(
+                    realm_id.0.clone(),
+                    job_id.0.clone(),
+                ))
+            }
         }
     }
 }
@@ -257,6 +309,7 @@ impl From<meerkat_core::ops_lifecycle::OperationKind> for OperationKind {
             meerkat_core::ops_lifecycle::OperationKind::BackgroundToolCapacitySlot => {
                 Self::BackgroundToolCapacitySlot
             }
+            meerkat_core::ops_lifecycle::OperationKind::DetachedJobWait => Self::DetachedJobWait,
         }
     }
 }
@@ -267,6 +320,7 @@ impl From<OperationKind> for meerkat_core::ops_lifecycle::OperationKind {
             OperationKind::MobMemberChild => Self::MobMemberChild,
             OperationKind::BackgroundToolOp => Self::BackgroundToolOp,
             OperationKind::BackgroundToolCapacitySlot => Self::BackgroundToolCapacitySlot,
+            OperationKind::DetachedJobWait => Self::DetachedJobWait,
         }
     }
 }

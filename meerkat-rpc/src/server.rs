@@ -3068,6 +3068,82 @@ mod tests {
         (Arc::new(runtime), config_store)
     }
 
+    /// Regression: one session whose delivery application fails must not
+    /// abort the realm-wide drain — every later session in the pass must
+    /// still be reached, with each failure reported in the summary instead
+    /// of an early drain error. Neither origin session is materialized here,
+    /// so BOTH deliveries fail at the sink; a drain that stops at the first
+    /// failing session reports only one of them (pre-fix it returned Err).
+    #[tokio::test]
+    async fn job_delivery_drain_reaches_every_session_past_a_failing_one() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, _config_store) = build_test_runtime(&temp);
+        let realm = meerkat_core::connection::RealmId::global();
+        runtime.set_realm_context(Some(realm.clone()), None, None);
+
+        let jobs = runtime.detached_job_service();
+        let session_a = meerkat::SessionId::new();
+        let session_b = meerkat::SessionId::new();
+        for (key, session_id) in [("drain-a", &session_a), ("drain-b", &session_b)] {
+            let spec = meerkat::JobSpec::new(
+                realm.as_str(),
+                session_id.clone(),
+                meerkat::ExecutionIntentId::new(),
+                meerkat::InteractionLineageId::new(),
+                meerkat::ToolIdentity::new("scan", "v1").expect("tool"),
+                meerkat::RunnerIdentity::new("runner.scan", "v1").expect("runner"),
+                meerkat::RestartClass::Adoptable,
+                meerkat::CanonicalArgumentsHash::new(format!("sha256:{key}")).expect("hash"),
+                meerkat::JobSubmissionKey::new(key).expect("submission key"),
+            );
+            let receipt = jobs.submit(spec).await.expect("submit");
+            let claim = jobs
+                .claim_attempt(
+                    &receipt.job_id,
+                    meerkat::AttemptClaim::new(
+                        meerkat::WorkerId::new(format!("worker-{key}")).expect("worker"),
+                        1,
+                        1_000,
+                        meerkat::RunnerHandleRef::new(format!("runner:{key}")).expect("handle"),
+                    ),
+                )
+                .await
+                .expect("claim");
+            jobs.complete_attempt(
+                &receipt.job_id,
+                meerkat::AttemptWriteAuthority::from(&claim),
+                2,
+                None,
+            )
+            .await
+            .expect("complete");
+        }
+
+        let summary = runtime
+            .drain_job_deliveries()
+            .await
+            .expect("a failing session is a reported failure, not a drain error");
+        assert_eq!(summary.projected, 2);
+        assert_eq!(summary.applied, 0);
+        assert_eq!(
+            summary.failures.len(),
+            2,
+            "every failing session must be reported: {:?}",
+            summary.failures
+        );
+        for session_id in [&session_a, &session_b] {
+            assert!(
+                summary
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains(&session_id.to_string())),
+                "drain must reach session {session_id} even when another session's \
+                 delivery fails first; failures: {:?}",
+                summary.failures
+            );
+        }
+    }
+
     struct NeverAppliedExecutor;
 
     #[async_trait]

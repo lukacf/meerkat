@@ -1816,6 +1816,146 @@ pub struct JobDeliveryDrainSummary {
     pub failures: Vec<String>,
 }
 
+/// Retry cadence for the durable job delivery driver.
+///
+/// A drain that keeps failing without progress must not retry at full
+/// cadence forever: the delay doubles per such pass and caps at
+/// [`Self::MAX_DELAY`], and it resets to [`Self::BASE_DELAY`] as soon as a
+/// pass is clean or moves deliveries. This bounds the idle burn of a
+/// persistently poisoned delivery row while keeping healthy delivery
+/// latency at the base cadence. The policy is a separate type so both
+/// halves of that contract — growth/cap AND reset — stay unit-testable;
+/// fixed-cadence retry loops with no backoff (and backoffs that stopped
+/// resetting) have shipped as idle-burn/latency defects before.
+#[derive(Debug)]
+struct JobDeliveryDriverBackoff {
+    delay: std::time::Duration,
+}
+
+impl JobDeliveryDriverBackoff {
+    const BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
+    fn new() -> Self {
+        Self {
+            delay: Self::BASE_DELAY,
+        }
+    }
+
+    /// Record one drain pass outcome and return the delay to sleep before
+    /// the next pass. A pass is at base cadence when it is clean (no
+    /// failures) or made progress (projected or applied anything); a failing
+    /// no-progress pass — including a drain-level error — doubles the delay.
+    fn observe_drain(
+        &mut self,
+        outcome: &Result<JobDeliveryDrainSummary, String>,
+    ) -> std::time::Duration {
+        let clean_or_progressing = match outcome {
+            Ok(summary) => {
+                summary.failures.is_empty() || summary.projected > 0 || summary.applied > 0
+            }
+            Err(_) => false,
+        };
+        self.delay = if clean_or_progressing {
+            Self::BASE_DELAY
+        } else {
+            Self::MAX_DELAY.min(self.delay.saturating_mul(2))
+        };
+        self.delay
+    }
+}
+
+#[cfg(test)]
+mod job_delivery_driver_backoff_tests {
+    use super::{JobDeliveryDrainSummary, JobDeliveryDriverBackoff};
+
+    fn failing_no_progress() -> Result<JobDeliveryDrainSummary, String> {
+        Ok(JobDeliveryDrainSummary {
+            projected: 0,
+            applied: 0,
+            failures: vec!["delivery d1 (sequence 3) for session s is blocked: poisoned".into()],
+        })
+    }
+
+    fn seconds_over(
+        backoff: &mut JobDeliveryDriverBackoff,
+        outcome: &Result<JobDeliveryDrainSummary, String>,
+        passes: usize,
+    ) -> Vec<u64> {
+        (0..passes)
+            .map(|_| backoff.observe_drain(outcome).as_secs())
+            .collect()
+    }
+
+    #[test]
+    fn repeated_failing_no_progress_passes_grow_the_delay_and_cap_at_max() {
+        let mut backoff = JobDeliveryDriverBackoff::new();
+        assert_eq!(
+            seconds_over(&mut backoff, &failing_no_progress(), 8),
+            vec![2, 4, 8, 16, 32, 60, 60, 60],
+            "a persistently failing no-progress drain must double its retry \
+             delay and cap at 60s — a fixed-cadence retry loop is an \
+             idle-burn defect"
+        );
+    }
+
+    #[test]
+    fn drain_level_errors_grow_the_delay_like_failing_passes() {
+        let mut backoff = JobDeliveryDriverBackoff::new();
+        let error: Result<JobDeliveryDrainSummary, String> =
+            Err("durable job delivery requires an active realm".into());
+        assert_eq!(
+            seconds_over(&mut backoff, &error, 7),
+            vec![2, 4, 8, 16, 32, 60, 60],
+            "drain-level errors must back off exactly like failing passes"
+        );
+    }
+
+    #[test]
+    fn a_clean_pass_resets_to_base_cadence_and_growth_restarts_from_base() {
+        let mut backoff = JobDeliveryDriverBackoff::new();
+        seconds_over(&mut backoff, &failing_no_progress(), 6);
+        let clean: Result<JobDeliveryDrainSummary, String> = Ok(JobDeliveryDrainSummary::default());
+        assert_eq!(
+            backoff.observe_drain(&clean).as_secs(),
+            1,
+            "a clean pass must reset to the 1s base cadence — a driver stuck \
+             at 60s still 'works' while delivery latency silently degrades"
+        );
+        assert_eq!(
+            seconds_over(&mut backoff, &failing_no_progress(), 2),
+            vec![2, 4],
+            "growth after a reset must restart from the base, not resume \
+             from the pre-reset delay"
+        );
+    }
+
+    #[test]
+    fn a_failing_pass_that_still_makes_progress_keeps_base_cadence() {
+        for progressing in [
+            Ok(JobDeliveryDrainSummary {
+                projected: 0,
+                applied: 3,
+                failures: vec!["one poisoned row".into()],
+            }),
+            Ok(JobDeliveryDrainSummary {
+                projected: 2,
+                applied: 0,
+                failures: vec!["one poisoned row".into()],
+            }),
+        ] {
+            let mut backoff = JobDeliveryDriverBackoff::new();
+            seconds_over(&mut backoff, &failing_no_progress(), 6);
+            assert_eq!(
+                backoff.observe_drain(&progressing).as_secs(),
+                1,
+                "a pass that moves deliveries must run at base cadence even \
+                 if a poisoned row remains: {progressing:?}"
+            );
+        }
+    }
+}
+
 struct ExternalEventRuntimeContext {
     handling_mode: meerkat_core::types::HandlingMode,
     idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
@@ -4549,40 +4689,24 @@ impl SessionRuntime {
         }
         let runtime = Arc::downgrade(self);
         tokio::spawn(async move {
-            // A drain that keeps failing without progress must not retry at
-            // full cadence forever: back off exponentially (capped) and
-            // reset as soon as a pass is clean or moves deliveries. This
-            // bounds the idle burn of a persistently poisoned delivery row
-            // while keeping healthy delivery latency at the base cadence.
-            const BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-            const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
-            let mut delay = BASE_DELAY;
+            let mut backoff = JobDeliveryDriverBackoff::new();
             loop {
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
-                let make_progress_or_clean = match runtime.drain_job_deliveries().await {
-                    Ok(summary) => {
-                        if !summary.failures.is_empty() {
-                            tracing::warn!(
-                                failures = ?summary.failures,
-                                "durable job delivery drain left rows pending"
-                            );
-                        }
-                        summary.failures.is_empty() || summary.projected > 0 || summary.applied > 0
-                    }
+                let outcome = runtime.drain_job_deliveries().await;
+                match &outcome {
+                    Ok(summary) if !summary.failures.is_empty() => tracing::warn!(
+                        failures = ?summary.failures,
+                        "durable job delivery drain left rows pending"
+                    ),
+                    Ok(_) => {}
                     Err(error) => {
                         tracing::warn!(%error, "durable job delivery drain failed");
-                        false
                     }
-                };
+                }
                 drop(runtime);
-                delay = if make_progress_or_clean {
-                    BASE_DELAY
-                } else {
-                    MAX_DELAY.min(delay.saturating_mul(2))
-                };
-                tokio::time::sleep(delay).await;
+                tokio::time::sleep(backoff.observe_drain(&outcome)).await;
             }
         });
     }

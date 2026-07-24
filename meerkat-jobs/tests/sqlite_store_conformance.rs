@@ -7,7 +7,7 @@ use meerkat_jobs::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, DetachedJobService,
     DetachedJobStore, ExecutionIntentId, InteractionLineageId, JobProgress, JobSpec,
     JobSubmissionKey, JobTerminalResult, MemoryDetachedJobStore, RestartClass, RunnerHandleRef,
-    RunnerIdentity, SqliteDetachedJobStore, ToolIdentity, WorkerId,
+    RunnerIdentity, RunnerSpecificationRef, SqliteDetachedJobStore, ToolIdentity, WorkerId,
 };
 
 fn spec(key: &str, restart_class: RestartClass) -> JobSpec {
@@ -21,6 +21,9 @@ fn spec(key: &str, restart_class: RestartClass) -> JobSpec {
         restart_class,
         CanonicalArgumentsHash::new("sha256:scan-a").expect("valid arguments hash"),
         JobSubmissionKey::new(key).expect("valid submission key"),
+    )
+    .with_runner_specification_ref(
+        RunnerSpecificationRef::new("sha256:shell-runner-spec").expect("runner specification ref"),
     )
 }
 
@@ -64,7 +67,7 @@ async fn sqlite_reopen_preserves_committed_writer_authority_without_advancing_it
     drop(store);
 
     let reopened_store = Arc::new(SqliteDetachedJobStore::open(&path).expect("reopen"));
-    let reopened = DetachedJobService::new(reopened_store);
+    let reopened = DetachedJobService::new(reopened_store.clone());
     let recovered = reopened
         .get(&receipt.job_id)
         .await
@@ -86,6 +89,18 @@ async fn sqlite_reopen_preserves_committed_writer_authority_without_advancing_it
             .map(RunnerHandleRef::as_str),
         Some("external:scan-42")
     );
+    assert_eq!(
+        reopened_store
+            .get(&receipt.job_id)
+            .await
+            .expect("stored job")
+            .expect("job")
+            .spec
+            .runner_specification_ref
+            .as_ref()
+            .map(RunnerSpecificationRef::as_str),
+        Some("sha256:shell-runner-spec")
+    );
 
     reopened
         .report_progress(
@@ -96,6 +111,30 @@ async fn sqlite_reopen_preserves_committed_writer_authority_without_advancing_it
         )
         .await
         .expect("reopen alone must not fence the latest committed writer");
+}
+
+#[tokio::test]
+async fn sqlite_origin_listing_survives_reopen_and_reports_persistent_storage() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.sqlite3");
+    let session_id = SessionId::new();
+    let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("open"));
+    let service = DetachedJobService::new(store.clone());
+    let mut submitted = spec("sqlite-list", RestartClass::NonResumable);
+    submitted.origin_session_id = session_id.clone();
+    let expected = service.submit(submitted).await.expect("submit").job_id;
+    drop(service);
+    drop(store);
+
+    let reopened = SqliteDetachedJobStore::open(&path).expect("reopen");
+    assert!(reopened.is_persistent());
+    let listed = reopened
+        .list_for_origin("realm-a", &session_id, 10)
+        .await
+        .expect("list");
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].job_id, expected);
 }
 
 #[tokio::test]

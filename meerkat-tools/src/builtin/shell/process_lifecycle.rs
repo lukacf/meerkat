@@ -154,6 +154,7 @@ impl OwnedProcessGroup {
     /// Best-effort synchronous fencing for cancellation during an admission
     /// future's drop path, where awaiting graceful acknowledgement is
     /// impossible.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn force_kill_now(&mut self) {
         #[cfg(unix)]
         {

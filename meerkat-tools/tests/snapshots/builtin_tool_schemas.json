@@ -26,7 +26,7 @@
     "properties": {
       "background": {
         "default": false,
-        "description": "If true, run in the process-local background and return a job ID immediately; current background jobs are volatile and do not survive a process restart",
+        "description": "If true, durably submit a non-resumable shell job and return its job receipt immediately",
         "type": "boolean"
       },
       "command": {

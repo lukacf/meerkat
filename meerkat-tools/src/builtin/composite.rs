@@ -1,7 +1,7 @@
 //! Composite dispatcher that combines multiple dispatchers into one.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::builtin::shell::{JobManager, ShellConfig};
+use crate::builtin::shell::{DurableShellJobRuntime, JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
@@ -102,6 +102,8 @@ pub struct CompositeDispatcher {
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     #[cfg(not(target_arch = "wasm32"))]
+    durable_shell_runtime: Option<DurableShellJobRuntime>,
+    #[cfg(not(target_arch = "wasm32"))]
     image_generation_runtime: Option<ImageGenerationToolBinding>,
     #[cfg(not(target_arch = "wasm32"))]
     web_search_runtime: Option<WebSearchToolBinding>,
@@ -176,6 +178,31 @@ impl CompositeDispatcher {
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<Self, CompositeDispatcherError> {
+        Self::new_with_ops_lifecycle_and_durable_shell(
+            task_store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+            ops_lifecycle,
+            None,
+        )
+    }
+
+    /// Create a composite with session-canonical operation and detached-job authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ops_lifecycle_and_durable_shell(
+        task_store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+        durable_shell_runtime: Option<DurableShellJobRuntime>,
+    ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
         // The project root is a concrete authority threaded by the caller (the
@@ -225,6 +252,9 @@ impl CompositeDispatcher {
                 if let Some(registry) = ops_lifecycle {
                     manager = manager.with_ops_registry(registry);
                 }
+                if let Some(runtime) = durable_shell_runtime.clone() {
+                    manager = manager.with_durable_job_runtime(runtime);
+                }
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
@@ -271,6 +301,7 @@ impl CompositeDispatcher {
             shell_config,
             session_id: shell_session_id,
             job_manager,
+            durable_shell_runtime,
             image_generation_runtime: None,
             web_search_runtime: None,
             blob_tools: None,
@@ -532,15 +563,21 @@ impl CompositeDispatcher {
         tool: &dyn BuiltinTool,
         call: ToolCallView<'_>,
         args: Value,
+        context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let output = tool.call(args).await.map_err(|e| match e {
-            BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                name: call.name.into(),
-                reason: msg,
-            },
-            BuiltinToolError::ExecutionFailed(msg) => ToolError::ExecutionFailed { message: msg },
-            BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
-        })?;
+        let output = tool
+            .call_with_context(call, args, context)
+            .await
+            .map_err(|e| match e {
+                BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
+                    name: call.name.into(),
+                    reason: msg,
+                },
+                BuiltinToolError::ExecutionFailed(msg) => {
+                    ToolError::ExecutionFailed { message: msg }
+                }
+                BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+            })?;
         let async_ops = tool.async_ops_for_output(&output);
         match output {
             ToolOutput::Json(value) => {
@@ -829,9 +866,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // is policy-disabled — with no other owner for the name — is denied,
         // not missing, so surfaces can distinguish 403 from 404.
         match self.resolve_tool_owner(call.name) {
-            ResolvedToolOwner::Builtin(tool) => self.call_local_tool(tool, call, args).await,
+            ResolvedToolOwner::Builtin(tool) => {
+                self.call_local_tool(tool, call, args, context).await
+            }
             #[cfg(feature = "skills")]
-            ResolvedToolOwner::Skill(tool) => self.call_local_tool(tool, call, args).await,
+            ResolvedToolOwner::Skill(tool) => self.call_local_tool(tool, call, args, context).await,
             ResolvedToolOwner::External => {
                 let Some(ext) = self.external.as_ref() else {
                     // `External` is only resolved when an external dispatcher
@@ -872,13 +911,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
             })?;
         match self.resolve_tool_owner(call.name) {
             ResolvedToolOwner::Builtin(tool) => {
-                if plan.mode() != meerkat_core::ToolExecutionMode::Fast {
+                if !tool
+                    .execution_contract()
+                    .supported_modes()
+                    .contains(&plan.mode())
+                {
                     return Err(ToolError::unavailable(
                         call.name,
                         meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
                     ));
                 }
-                self.call_local_tool(tool, call, args).await
+                self.call_local_tool(tool, call, args, context).await
             }
             #[cfg(feature = "skills")]
             ResolvedToolOwner::Skill(tool) => {
@@ -888,7 +931,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                         meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
                     ));
                 }
-                self.call_local_tool(tool, call, args).await
+                self.call_local_tool(tool, call, args, context).await
             }
             ResolvedToolOwner::External => {
                 let Some(external) = self.external.as_ref() else {
@@ -995,7 +1038,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
 
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
-            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
+            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle_and_durable_shell(
                 Arc::clone(&owned.task_store),
                 &owned.builtin_config,
                 owned.project_root.clone(),
@@ -1003,6 +1046,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 rebound_external,
                 Some(owner_bridge_session_id.to_string()),
                 Some(registry),
+                owned.durable_shell_runtime.clone(),
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
@@ -2696,7 +2740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_ops_lifecycle_rebuilds_shell_tools_with_canonical_registry() {
+    async fn ops_binding_alone_does_not_enable_volatile_background_shell() {
         let temp_dir = TempDir::new().unwrap();
         let store = Arc::new(MemoryTaskStore::new());
         let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -2731,34 +2775,11 @@ mod tests {
             name: "shell",
             args: &call_json,
         };
-        let outcome = rebound
+        let error = rebound
             .dispatch(call)
             .await
-            .expect("background shell dispatch");
-        assert_eq!(
-            outcome.async_ops.len(),
-            1,
-            "rebound shell dispatcher must emit canonical async op refs"
-        );
-
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).expect("json result");
-        let cancel_json = serde_json::value::RawValue::from_string(
-            serde_json::json!({
-                "job_id": payload["job_id"].as_str().expect("job id"),
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let cancel = ToolCallView {
-            id: "shell-cancel",
-            name: "shell_job_cancel",
-            args: &cancel_json,
-        };
-        let _ = rebound
-            .dispatch(cancel)
-            .await
-            .expect("background shell cancel");
+            .expect_err("operation binding without durable stores must fail closed");
+        assert!(error.to_string().contains("durable storage binding"));
     }
 
     #[tokio::test]

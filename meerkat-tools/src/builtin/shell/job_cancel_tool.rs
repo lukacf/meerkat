@@ -202,7 +202,7 @@ mod tests {
     // ==================== Error Tests ====================
 
     #[tokio::test]
-    async fn test_shell_job_cancel_tool_not_found() {
+    async fn test_shell_job_cancel_tool_requires_durable_runtime() {
         let config = ShellConfig::default();
         let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobCancelTool::new(manager);
@@ -217,7 +217,7 @@ mod tests {
         assert!(matches!(result, Err(BuiltinToolError::ExecutionFailed(_))));
 
         if let Err(BuiltinToolError::ExecutionFailed(msg)) = result {
-            assert!(msg.contains("not found") || msg.contains("Job not found"));
+            assert!(msg.contains("durable realm job/blob runtime"));
         }
     }
 

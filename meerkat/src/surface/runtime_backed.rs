@@ -65,6 +65,15 @@ pub fn build_runtime_backed_service_with_capacities(
     Arc<MeerkatMachine>,
 ) {
     let runtime_adapter = persistence.runtime_adapter();
+    #[cfg(not(target_arch = "wasm32"))]
+    let default_realm_id = persistence
+        .manifest()
+        .map(|manifest| manifest.realm.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    let detached_job_store = persistence.job_store();
+    #[cfg(not(target_arch = "wasm32"))]
+    let runtime_delivery_inbox =
+        meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     let event_projection = persistence.event_projection();
     let (store, runtime_store, blob_store) = persistence.into_parts();
@@ -73,6 +82,14 @@ pub fn build_runtime_backed_service_with_capacities(
         &store,
     ))));
     builder.default_blob_store = Some(blob_store.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        builder.default_realm_id = default_realm_id;
+        builder.default_detached_job_store = Some(detached_job_store.clone());
+        builder.default_shell_job_delivery_projector = Some(Arc::new(
+            crate::JobOutboxProjector::new(detached_job_store, runtime_delivery_inbox),
+        ));
+    }
     let mut service = PersistentSessionService::new_with_capacities(
         builder,
         active_session_capacity,

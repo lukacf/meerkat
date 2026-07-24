@@ -384,10 +384,12 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 Shell tools execute commands and manage background jobs. They are all `default_enabled: false` and require the factory-level `enable_shell` flag (or a `ToolPolicyLayer` override) to be active.
 
 <Warning>
-Current shell background jobs are process-local and volatile. `background: true`
-returns promptly and lets the command continue while the current Meerkat process
-is alive, but it does not provide restart-surviving execution. A process restart
-loses unfinished commands and their `shell_job_status` records.
+`background: true` is available only when the session has a persistent realm
+job store and blob store. Submission, status, result references, cancellation,
+and terminal delivery are durable. The shell worker itself is
+`non_resumable`: if its process is lost across restart, the committed attempt
+becomes `worker_lost` after its existing lease expires and is never silently
+replayed.
 </Warning>
 
 `command: "some-command &"` and `background: true` are different contracts.
@@ -398,9 +400,9 @@ ordinary foreground result, and does not create a job ID or a record visible to
 leaves running is unmanaged and its lifetime is not guaranteed.
 
 Use `background: true` when the command must be managed as a Meerkat shell job.
-It returns a job ID and enables status/list/cancel operations, but the current
-implementation remains process-local and volatile: neither form provides
-restart-surviving execution.
+It commits and returns a stable job ID and enables durable status/list/cancel
+operations. This does not claim that the subprocess survives a host restart:
+the durable record survives and reports the non-resumable worker loss.
 
 ### Timeout hierarchy
 
@@ -422,7 +424,8 @@ SDK/builder `ToolDispatcher`, or MobKit callback deadline. The foreground shell
 and dispatcher deadlines are distinct enforced layers, even though both
 defaults currently come from `ToolTimeoutPolicy`. Background shell submission
 returns within the normal tool call, but the spawned command keeps its own shell
-timeout and remains process-local.
+timeout. The command runs under one fenced non-resumable attempt; terminal state
+is committed before runtime notification delivery.
 
 <Accordion title="Shell configuration">
 Shell behavior is controlled by `ShellConfig`:
@@ -476,9 +479,9 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 </ParamField>
 
 <ParamField body="background" type="bool" default="false">
-  If `true`, run in the process-local background and return a job ID
-  immediately. This is volatile execution and does not survive a Meerkat process
-  restart.
+  If `true`, durably submit a non-resumable shell job and return its stable job
+  ID. Requires persistent realm job and blob stores. Job truth survives restart;
+  a lost subprocess is classified as `worker_lost`, not replayed.
 </ParamField>
 
 <CodeGroup>

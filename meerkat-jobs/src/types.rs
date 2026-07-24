@@ -46,6 +46,7 @@ string_id!(JobSubmissionKey, "job submission key");
 string_id!(CanonicalArgumentsHash, "canonical arguments hash");
 string_id!(CheckpointRef, "checkpoint reference");
 string_id!(RunnerHandleRef, "runner handle reference");
+string_id!(RunnerSpecificationRef, "runner specification reference");
 string_id!(JobResultRef, "job result reference");
 string_id!(JobFailureCode, "job failure code");
 string_id!(OriginMemberId, "origin member id");
@@ -71,6 +72,13 @@ impl ExecutionIntentId {
         Self(format!("intent_{}", Uuid::now_v7()))
     }
 
+    pub fn from_string(value: impl Into<String>) -> Result<Self, DetachedJobError> {
+        Ok(Self(validate_component(
+            "execution intent id",
+            value.into(),
+        )?))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -89,6 +97,13 @@ pub struct InteractionLineageId(String);
 impl InteractionLineageId {
     pub fn new() -> Self {
         Self(format!("interaction_{}", Uuid::now_v7()))
+    }
+
+    pub fn from_string(value: impl Into<String>) -> Result<Self, DetachedJobError> {
+        Ok(Self(validate_component(
+            "interaction lineage id",
+            value.into(),
+        )?))
     }
 
     pub fn as_str(&self) -> &str {
@@ -199,6 +214,7 @@ pub struct JobSpec {
     pub interaction_lineage_id: InteractionLineageId,
     pub tool: ToolIdentity,
     pub runner: RunnerIdentity,
+    pub runner_specification_ref: Option<RunnerSpecificationRef>,
     pub restart_class: RestartClass,
     pub canonical_arguments_hash: CanonicalArgumentsHash,
     pub credential_context_refs: Vec<ToolCredentialContextRef>,
@@ -226,6 +242,7 @@ impl JobSpec {
             interaction_lineage_id,
             tool,
             runner,
+            runner_specification_ref: None,
             restart_class,
             canonical_arguments_hash,
             credential_context_refs: Vec::new(),
@@ -235,6 +252,14 @@ impl JobSpec {
 
     pub fn with_origin_member_id(mut self, origin_member_id: OriginMemberId) -> Self {
         self.origin_member_id = Some(origin_member_id);
+        self
+    }
+
+    pub fn with_runner_specification_ref(
+        mut self,
+        runner_specification_ref: RunnerSpecificationRef,
+    ) -> Self {
+        self.runner_specification_ref = Some(runner_specification_ref);
         self
     }
 
@@ -254,6 +279,7 @@ impl JobSpec {
             && self.interaction_lineage_id == other.interaction_lineage_id
             && self.tool == other.tool
             && self.runner == other.runner
+            && self.runner_specification_ref == other.runner_specification_ref
             && self.restart_class == other.restart_class
             && self.canonical_arguments_hash == other.canonical_arguments_hash
             && self.credential_context_refs == other.credential_context_refs

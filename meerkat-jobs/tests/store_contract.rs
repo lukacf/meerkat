@@ -6,7 +6,7 @@ use meerkat_core::SessionId;
 use meerkat_jobs::{
     CanonicalArgumentsHash, DetachedJobService, ExecutionIntentId, InteractionLineageId, JobSpec,
     JobSubmissionKey, MemoryDetachedJobStore, OriginMemberId, RestartClass, RunnerIdentity,
-    ToolIdentity,
+    RunnerSpecificationRef, ToolIdentity,
 };
 
 fn spec(key: &str) -> JobSpec {
@@ -182,4 +182,55 @@ async fn duplicate_submission_key_returns_the_original_job_without_mutation() {
         "deduplication is a read of already committed authority"
     );
     assert_eq!(store.len().await, 1);
+}
+
+#[tokio::test]
+async fn runner_specification_reference_is_immutable_submission_identity() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let service = DetachedJobService::new(store);
+    let first = spec("runner-spec").with_runner_specification_ref(
+        RunnerSpecificationRef::new("sha256:runner-spec-a").expect("runner specification ref"),
+    );
+    let mut conflicting = first.clone();
+    conflicting.runner_specification_ref = Some(
+        RunnerSpecificationRef::new("sha256:runner-spec-b").expect("runner specification ref"),
+    );
+
+    service.submit(first).await.expect("first submit");
+    let error = service
+        .submit(conflicting)
+        .await
+        .expect_err("one submission key cannot alias a different runner specification");
+
+    assert!(matches!(
+        error,
+        meerkat_jobs::DetachedJobError::SubmissionConflict
+    ));
+}
+
+#[tokio::test]
+async fn list_for_origin_is_realm_and_session_scoped() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let service = DetachedJobService::new(store.clone());
+    let session_a = SessionId::new();
+    let session_b = SessionId::new();
+
+    let mut first = spec_in_realm("realm-a", "list-a");
+    first.origin_session_id = session_a.clone();
+    let mut other_session = spec_in_realm("realm-a", "list-b");
+    other_session.origin_session_id = session_b;
+    let mut other_realm = spec_in_realm("realm-b", "list-c");
+    other_realm.origin_session_id = session_a.clone();
+
+    let expected = service.submit(first).await.expect("first").job_id;
+    service.submit(other_session).await.expect("other session");
+    service.submit(other_realm).await.expect("other realm");
+
+    let listed = store
+        .list_for_origin("realm-a", &session_a, 10)
+        .await
+        .expect("list");
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].job_id, expected);
 }

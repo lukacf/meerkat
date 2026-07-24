@@ -148,3 +148,87 @@ impl JobOutboxProjector {
         Ok(projected)
     }
 }
+
+#[async_trait::async_trait]
+impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProjector {
+    async fn project_job(&self, job_id: &str) -> Result<(), String> {
+        let job_id = JobId::new(job_id).map_err(|error| error.to_string())?;
+        let Some(job) = self
+            .job_store
+            .get(&job_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err(format!("cannot project missing job {job_id}"));
+        };
+        let Some(entry) = job.outbox.iter().find(|entry| !entry.applied).cloned() else {
+            return Ok(());
+        };
+        let prepared = self
+            .prepare(&entry)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.runtime_inbox
+            .submit(&prepared.runtime_id, prepared.submission)
+            .await
+            .map_err(|error| error.to_string())?;
+        match self
+            .job_service
+            .mark_delivery_applied(&entry.job_id, entry.delivery_sequence)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let applied_by_racer = self
+                    .job_store
+                    .get(&job_id)
+                    .await
+                    .map_err(|reload_error| reload_error.to_string())?
+                    .is_some_and(|current| {
+                        current.outbox.iter().any(|candidate| {
+                            candidate.delivery_sequence == entry.delivery_sequence
+                                && candidate.applied
+                        })
+                    });
+                if applied_by_racer {
+                    Ok(())
+                } else {
+                    Err(error.to_string())
+                }
+            }
+        }
+    }
+
+    async fn acknowledge_applied(&self, job_id: &str) -> Result<(), String> {
+        let job_id = JobId::new(job_id).map_err(|error| error.to_string())?;
+        let Some(job) = self
+            .job_store
+            .get(&job_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err(format!("cannot acknowledge missing job {job_id}"));
+        };
+        let runtime_id = LogicalRuntimeId::for_session(&job.spec.origin_session_id);
+        let pending = self
+            .runtime_inbox
+            .list_pending(&runtime_id, usize::MAX)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(record) = pending
+            .into_iter()
+            .find(|record| record.submission.delivery_id().as_str() == job_id.as_str())
+        else {
+            return Ok(());
+        };
+        self.runtime_inbox
+            .mark_applied(
+                &runtime_id,
+                record.submission.delivery_id(),
+                record.sequence,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}

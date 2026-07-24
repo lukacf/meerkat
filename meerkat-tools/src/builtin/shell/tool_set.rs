@@ -83,8 +83,8 @@ You have access to tools for executing shell commands. Use these carefully and r
 - Check command exit codes in the response to verify success
 
 ### Background Jobs
-- Use `background: true` only for work that may safely be lost or restarted
-- Background jobs are process-local: they continue while the current Meerkat process is alive and do not survive a process restart
+- `background: true` requires a persistent realm job/blob runtime and commits a durable receipt before returning
+- The shell worker is explicitly non-resumable: job truth survives restart, but a lost worker becomes `worker_lost` instead of being replayed
 - Check `shell_job_status` to get results when done
 - Don't poll job status too frequently - wait at least 5-10 seconds between checks
 
@@ -217,14 +217,11 @@ mod tests {
     }
 
     #[test]
-    fn background_usage_instructions_state_process_local_volatility() {
+    fn background_usage_instructions_state_durable_non_resumable_contract() {
         let instructions = ShellToolSet::usage_instructions();
 
-        assert!(instructions.contains("process-local"));
-        assert!(instructions.contains("do not survive a process restart"));
-        assert!(
-            !instructions.contains("Background jobs continue running while you do other work\n"),
-            "unqualified continuation wording hides the current volatility contract"
-        );
+        assert!(instructions.contains("persistent realm job/blob runtime"));
+        assert!(instructions.contains("explicitly non-resumable"));
+        assert!(instructions.contains("worker_lost"));
     }
 }

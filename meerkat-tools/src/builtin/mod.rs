@@ -137,6 +137,19 @@ pub trait BuiltinTool: Send + Sync {
     /// * `Err(BuiltinToolError)` - If execution failed
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError>;
 
+    /// Execute with the exact admitted call identity and turn context.
+    ///
+    /// Detached built-ins use this seam for stable tool-call idempotency.
+    /// Ordinary built-ins inherit the context-free implementation.
+    async fn call_with_context(
+        &self,
+        _call: ToolCallView<'_>,
+        args: Value,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call(args).await
+    }
+
     /// Async operation IDs started by this tool call, if any.
     ///
     /// Default is none. Tools that start background or delegated work should

@@ -8,6 +8,7 @@ use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use meerkat_core::{ExecutionPlacement, ToolCallView, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -48,6 +49,7 @@ impl std::fmt::Debug for ForegroundProcessGroupTestConfig {
 /// This is measured in Unicode characters, not bytes.
 const MAX_OUTPUT_CHARS: usize = 100_000;
 const MAX_OUTPUT_BYTES: usize = MAX_OUTPUT_CHARS * 4;
+const DETACHED_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Truncate output to keep the tail (most recent output).
 ///
@@ -429,6 +431,84 @@ impl ShellTool {
             placement: Some(placement),
         })
     }
+
+    async fn call_with_tool_call_id(
+        &self,
+        args: Value,
+        tool_call_id: Option<&str>,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        let input: ShellInput = serde_json::from_value(args)
+            .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
+        let timeout_secs = self
+            .validated_timeout_secs(&input)
+            .map_err(BuiltinToolError::invalid_args)?;
+
+        info!(
+            background = input.background,
+            timeout_secs,
+            has_working_dir = input.working_dir.is_some(),
+            "Executing shell command"
+        );
+        let _invocation = self
+            .config
+            .check_allowlist(&input.command)
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+        let working_dir = if let Some(ref dir) = input.working_dir {
+            let resolved = self
+                .config
+                .validate_working_dir_async(std::path::Path::new(dir))
+                .await
+                .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            Some(resolved)
+        } else {
+            None
+        };
+
+        if input.background {
+            if !self.job_manager.exports_canonical_async_ops() {
+                return Err(BuiltinToolError::execution_failed(
+                    "background shell execution requires canonical session, operation, and durable storage binding",
+                ));
+            }
+            let job_id = match tool_call_id {
+                Some(tool_call_id) => {
+                    self.job_manager
+                        .spawn_job_for_call(
+                            &input.command,
+                            working_dir.as_deref(),
+                            timeout_secs,
+                            tool_call_id,
+                        )
+                        .await
+                }
+                None => {
+                    self.job_manager
+                        .spawn_job(&input.command, working_dir.as_deref(), timeout_secs)
+                        .await
+                }
+            }
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+
+            return Ok(ToolOutput::Json(serde_json::json!({
+                "job_id": job_id.to_string(),
+                "status": "queued",
+                "restart_class": "non_resumable",
+                "awaitable": true,
+                "message": format!("Durable shell job submitted with ID: {job_id}")
+            })));
+        }
+
+        let output = self
+            .execute_command(&input.command, working_dir.as_deref(), timeout_secs)
+            .await
+            .map_err(|error| {
+                warn!(%error, "Command execution failed");
+                BuiltinToolError::execution_failed(error.to_string())
+            })?;
+        Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
+            |error| BuiltinToolError::execution_failed(error.to_string()),
+        )?))
+    }
 }
 
 /// Output from a shell command execution
@@ -474,7 +554,7 @@ struct ShellInput {
     /// Run in background (optional, default false)
     #[serde(default)]
     #[schemars(
-        description = "If true, run in the process-local background and return a job ID immediately; current background jobs are volatile and do not survive a process restart"
+        description = "If true, durably submit a non-resumable shell job and return its job receipt immediately"
     )]
     background: bool,
 }
@@ -503,6 +583,33 @@ impl BuiltinTool for ShellTool {
         false
     }
 
+    fn execution_contract(&self) -> meerkat_core::ToolExecutionContract {
+        if !self.job_manager.exports_canonical_async_ops() {
+            return meerkat_core::ToolExecutionContract::default();
+        }
+        let Ok(runner) = meerkat_core::RunnerIdentity::new("meerkat.shell", "v1") else {
+            return meerkat_core::ToolExecutionContract::default();
+        };
+        let Ok(detached) = meerkat_core::DetachedToolExecutionPolicy::new(
+            runner,
+            meerkat_core::RestartClass::NonResumable,
+            meerkat_core::IdempotencyScope::ToolCall,
+            DETACHED_SUBMISSION_TIMEOUT,
+        ) else {
+            return meerkat_core::ToolExecutionContract::default();
+        };
+        meerkat_core::ToolExecutionContract::new(
+            BTreeSet::from([
+                meerkat_core::ToolExecutionMode::Fast,
+                meerkat_core::ToolExecutionMode::Detached,
+            ]),
+            meerkat_core::ToolExecutionMode::Fast,
+            None,
+            Some(detached),
+        )
+        .unwrap_or_default()
+    }
+
     fn resolve_execution_plan(
         &self,
         call: ToolCallView<'_>,
@@ -529,90 +636,28 @@ impl BuiltinTool for ShellTool {
                 Duration::from_secs(timeout_secs),
             ))?
         };
+        let mode = if input.background {
+            meerkat_core::ToolExecutionMode::Detached
+        } else {
+            meerkat_core::ToolExecutionMode::Fast
+        };
         self.execution_contract()
-            .resolve_default(resolved_context.deadlines().clone())
+            .resolve(mode, resolved_context.deadlines().clone())
             .map_err(Into::into)
     }
 
     #[instrument(skip(self, args), fields(tool = "shell"))]
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let input: ShellInput = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
-        let timeout_secs = self
-            .validated_timeout_secs(&input)
-            .map_err(BuiltinToolError::invalid_args)?;
+        self.call_with_tool_call_id(args, None).await
+    }
 
-        info!(
-            background = input.background,
-            timeout_secs,
-            has_working_dir = input.working_dir.is_some(),
-            "Executing shell command"
-        );
-
-        // Security validation: check policy (mode + patterns)
-        // We validate the command but execute the original to preserve shell syntax (pipes, redirections).
-        let _invocation = self
-            .config
-            .check_allowlist(&input.command)
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
-
-        // Validate and resolve working directory
-        let working_dir = if let Some(ref dir) = input.working_dir {
-            debug!("Validating configured working directory");
-            let path = std::path::Path::new(dir);
-            let resolved = self
-                .config
-                .validate_working_dir_async(path)
-                .await
-                .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
-            Some(resolved)
-        } else {
-            None
-        };
-
-        // Handle background execution
-        if input.background {
-            if !self.job_manager.exports_canonical_async_ops() {
-                return Err(BuiltinToolError::execution_failed(
-                    "background shell execution requires canonical session binding",
-                ));
-            }
-            let job_id = self
-                .job_manager
-                .spawn_job(&input.command, working_dir.as_deref(), timeout_secs)
-                .await
-                .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
-
-            return Ok(ToolOutput::Json(serde_json::json!({
-                "job_id": job_id.to_string(),
-                "status": "running",
-                "message": format!("Command started in background with job ID: {}", job_id)
-            })));
-        }
-
-        // Get timeout (use provided or config default)
-        debug!(timeout_secs = %timeout_secs, "Using timeout");
-
-        // Execute the ORIGINAL command (not re-quoted) to preserve shell syntax (pipes, redirections)
-        let output = self
-            .execute_command(&input.command, working_dir.as_deref(), timeout_secs)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Command execution failed");
-                BuiltinToolError::execution_failed(e.to_string())
-            })?;
-
-        debug!(
-            exit_code = ?output.exit_code,
-            timed_out = %output.timed_out,
-            duration_secs = %output.duration_secs,
-            "Command completed"
-        );
-
-        // Return structured JSON output
-        Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
-            |e| BuiltinToolError::execution_failed(e.to_string()),
-        )?))
+    async fn call_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        args: Value,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_with_tool_call_id(args, Some(call.id)).await
     }
 
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {
@@ -1066,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn background_child_runtime_timeout_is_not_a_submission_deadline() {
+    fn ephemeral_shell_does_not_advertise_detached_execution() {
         let tool = ShellTool::new(ShellConfig::default());
         let args = serde_json::value::RawValue::from_string(
             r#"{"command":"echo test","timeout_secs":7,"background":true}"#.to_string(),
@@ -1085,22 +1130,21 @@ mod tests {
         ])
         .unwrap();
 
-        let plan = tool
+        let error = tool
             .resolve_execution_plan(
                 call,
                 &meerkat_core::ToolExecutionResolutionContext::new(deadlines),
             )
-            .unwrap();
+            .expect_err("ephemeral shell must reject detached execution");
 
-        assert_eq!(
-            plan.deadlines().contributors().len(),
-            1,
-            "the child runtime limit must not shorten detached submission"
-        );
-        assert_eq!(
-            plan.deadlines().effective_timeout(),
-            Some(Duration::from_secs(600))
-        );
+        assert!(matches!(
+            error,
+            meerkat_core::ToolExecutionResolutionError::Contract(
+                meerkat_core::ToolExecutionContractError::RequestedModeUnsupported {
+                    requested_mode: meerkat_core::ToolExecutionMode::Detached
+                }
+            )
+        ));
     }
 
     #[tokio::test]
@@ -1418,7 +1462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_background_shell_output_produces_detached_async_op() {
+    async fn operation_binding_without_durable_storage_rejects_background_shell() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
@@ -1430,38 +1474,14 @@ mod tests {
         );
         let tool = ShellTool::with_job_manager(config, manager);
 
-        let output = tool
+        let error = tool
             .call(json!({
                 "command": "sleep 60",
                 "background": true
             }))
             .await
-            .expect("background shell call");
-
-        let json = output.clone().into_json().expect("json output");
-        let job_id = crate::builtin::shell::JobId::from_string(
-            json["job_id"].as_str().expect("job id string").to_string(),
-        );
-        assert!(
-            json.get("operation_id").is_none(),
-            "public shell background output must not expose raw operation_id"
-        );
-        let operation_id = tool
-            .job_manager
-            .canonical_operation_for_job(&job_id)
-            .expect("canonical operation for job");
-
-        let async_ops = tool.async_ops_for_output(&output);
-        assert_eq!(async_ops.len(), 1);
-        assert_eq!(
-            async_ops[0],
-            meerkat_core::ops::AsyncOpRef::detached(operation_id)
-        );
-
-        tool.job_manager
-            .cancel_job(&job_id)
-            .await
-            .expect("cancel background job");
+            .expect_err("background shell without durable stores must fail closed");
+        assert!(error.to_string().contains("durable storage binding"));
     }
 
     #[tokio::test]

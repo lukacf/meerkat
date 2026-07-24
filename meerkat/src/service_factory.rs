@@ -688,6 +688,16 @@ pub struct FactoryAgentBuilder {
         Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
     /// Default blob store injected into all builds.
     pub default_blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
+    /// Persistence-owned realm used when a session request does not carry an
+    /// explicit realm override.
+    pub default_realm_id: Option<meerkat_core::RealmId>,
+    /// Persistent detached-job store injected into shell-capable builds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub default_detached_job_store: Option<Arc<dyn meerkat_jobs::DetachedJobStore>>,
+    /// Mechanical terminal-delivery projector injected into shell-capable builds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub default_shell_job_delivery_projector:
+        Option<Arc<dyn meerkat_tools::builtin::shell::ShellJobDeliveryProjector>>,
     /// Default image-generation executor injected into all builds.
     pub default_image_generation_executor:
         Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
@@ -711,6 +721,11 @@ impl FactoryAgentBuilder {
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
             default_workgraph_tools: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
+            default_realm_id: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_detached_job_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_shell_job_delivery_projector: None,
             default_image_generation_executor: None,
         }
     }
@@ -740,6 +755,11 @@ impl FactoryAgentBuilder {
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
             default_workgraph_tools: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
+            default_realm_id: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_detached_job_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_shell_job_delivery_projector: None,
             default_image_generation_executor: None,
         }
     }
@@ -1006,6 +1026,23 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             && let Some(blob_store) = self.default_blob_store.clone()
         {
             build_config.blob_store_override = Some(blob_store);
+        }
+        if build_config.realm_id.is_none()
+            && let Some(realm_id) = self.default_realm_id.clone()
+        {
+            build_config.realm_id = Some(realm_id);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if build_config.detached_job_store_override.is_none()
+            && let Some(job_store) = self.default_detached_job_store.clone()
+        {
+            build_config.detached_job_store_override = Some(job_store);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if build_config.shell_job_delivery_projector_override.is_none()
+            && let Some(projector) = self.default_shell_job_delivery_projector.clone()
+        {
+            build_config.shell_job_delivery_projector_override = Some(projector);
         }
         if build_config.image_generation_executor_override.is_none()
             && let Some(executor) = self.default_image_generation_executor.clone()
@@ -1727,6 +1764,36 @@ mod tests {
             .session_metadata()
             .ok_or_else(|| "missing session metadata".to_string())?;
         assert_eq!(metadata.provider, Provider::Other);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_builder_applies_persistence_realm_when_request_has_none() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "override" }));
+        builder.default_realm_id =
+            Some(meerkat_core::RealmId::parse("durable-shell-realm").map_err(|e| e.to_string())?);
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let agent = builder
+            .build_agent(&make_session_request("mock-model"), event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .ok_or_else(|| "missing session metadata".to_string())?;
+
+        assert_eq!(
+            metadata
+                .realm_id
+                .as_ref()
+                .map(meerkat_core::RealmId::as_str),
+            Some("durable-shell-realm")
+        );
         Ok(())
     }
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::SessionId;
 use tokio::sync::RwLock;
 
 use crate::machines::detached_job::{DetachedJobMachineAuthority, DetachedJobMachineState};
@@ -47,6 +48,15 @@ pub trait DetachedJobStore: Send + Sync {
         &self,
         limit: usize,
     ) -> Result<Vec<JobOutboxEntry>, DetachedJobError>;
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError>;
+
+    fn is_persistent(&self) -> bool;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,6 +133,19 @@ impl MemoryDetachedJobStore {
 
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.jobs.is_empty()
+    }
+
+    pub async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        DetachedJobStore::list_for_origin(self, realm_id, origin_session_id, limit).await
+    }
+
+    pub const fn is_persistent(&self) -> bool {
+        false
     }
 }
 
@@ -209,6 +232,33 @@ impl DetachedJobStore for MemoryDetachedJobStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .inner
+            .read()
+            .await
+            .jobs
+            .values()
+            .filter(|job| {
+                job.spec.realm_id == realm_id && &job.spec.origin_session_id == origin_session_id
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    fn is_persistent(&self) -> bool {
+        false
     }
 }
 

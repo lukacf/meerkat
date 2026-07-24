@@ -11,6 +11,7 @@ use meerkat::{
 use meerkat_runtime::{
     InMemoryRuntimeStore, LogicalRuntimeId, RuntimeDeliveryId, RuntimeDeliveryInbox,
 };
+use meerkat_tools::builtin::shell::ShellJobDeliveryProjector;
 
 fn spec(key: &str, session_id: SessionId) -> JobSpec {
     JobSpec::new(
@@ -149,5 +150,82 @@ async fn crash_after_runtime_insert_before_job_ack_reuses_the_same_delivery_and_
     assert_eq!(
         runtime_entries[0].submission.delivery_id(),
         &RuntimeDeliveryId::new(job_id.as_str()).expect("delivery id")
+    );
+}
+
+#[tokio::test]
+async fn runtime_cursor_advances_only_after_completion_feed_projection_acknowledgement() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let job_id = completed_job(&jobs, session_id.clone(), "agent-applied").await;
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store, inbox.clone());
+
+    projector.project_pending(10).await.expect("runtime commit");
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    assert_eq!(
+        inbox
+            .list_pending(&runtime_id, 10)
+            .await
+            .expect("pending")
+            .len(),
+        1
+    );
+
+    projector
+        .acknowledge_applied(job_id.as_str())
+        .await
+        .expect("completion-feed projection acknowledgement");
+    projector
+        .acknowledge_applied(job_id.as_str())
+        .await
+        .expect("idempotent repeated acknowledgement");
+    assert!(
+        inbox
+            .list_pending(&runtime_id, 10)
+            .await
+            .expect("pending")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn shell_projection_targets_requested_job_beyond_a_global_batch_boundary() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let mut job_ids = Vec::new();
+    for index in 0..300 {
+        job_ids.push(completed_job(&jobs, session_id.clone(), &format!("batch-{index:03}")).await);
+    }
+    let target = job_ids.last().expect("target").clone();
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store.clone(), inbox.clone());
+
+    ShellJobDeliveryProjector::project_job(&projector, target.as_str())
+        .await
+        .expect("project exact job");
+
+    let target_job = jobs.get(&target).await.expect("load").expect("target job");
+    assert!(target_job.outbox[0].applied);
+    let first_job = jobs
+        .get(job_ids.first().expect("first"))
+        .await
+        .expect("load")
+        .expect("first job");
+    assert!(
+        !first_job.outbox[0].applied,
+        "exact projection must not claim success after projecting unrelated jobs"
+    );
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let runtime_entries = inbox
+        .list_pending(&runtime_id, 10)
+        .await
+        .expect("runtime inbox");
+    assert_eq!(runtime_entries.len(), 1);
+    assert_eq!(
+        runtime_entries[0].submission.delivery_id(),
+        &RuntimeDeliveryId::new(target.as_str()).expect("delivery id")
     );
 }

@@ -25,7 +25,7 @@ pub use types::{
     CheckpointRef, ExecutionIntentId, FenceToken, InteractionLineageId, JobFailureCode, JobId,
     JobOutboxEntry, JobPhase, JobProgress, JobReceipt, JobResultRef, JobSnapshot, JobSpec,
     JobSubmissionKey, JobTerminalKind, JobTerminalResult, OriginMemberId, RestartClass,
-    RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
+    RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 
 #[doc(hidden)]

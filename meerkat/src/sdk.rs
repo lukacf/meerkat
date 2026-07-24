@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_dispatcher_with_ops_lifecycle_emits_async_ops() {
+    async fn shell_dispatcher_with_ops_lifecycle_still_requires_durable_storage() {
         let temp_dir = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp_dir.path().join("sessions"));
         let shell_config =
@@ -1074,7 +1074,7 @@ mod tests {
         .await
         .unwrap();
 
-        let outcome = dispatch_outcome(
+        let error = dispatch_outcome(
             dispatcher.as_ref(),
             "shell",
             serde_json::json!({
@@ -1083,24 +1083,11 @@ mod tests {
             }),
         )
         .await
-        .unwrap();
-        assert_eq!(
-            outcome.async_ops.len(),
-            1,
-            "sdk helper must pass ops registry through to built-in async tools"
+        .expect_err("operation binding without durable stores must fail closed");
+        assert!(
+            error.to_string().contains("durable storage binding"),
+            "unexpected detached-shell error: {error}"
         );
-
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).expect("json result");
-        let _ = dispatch_json(
-            dispatcher.as_ref(),
-            "shell_job_cancel",
-            serde_json::json!({
-                "job_id": payload["job_id"].as_str().expect("job id"),
-            }),
-        )
-        .await
-        .unwrap();
     }
 
     #[test]

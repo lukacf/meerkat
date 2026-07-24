@@ -49,6 +49,8 @@ impl AsRef<str> for JobId {
 #[serde(tag = "status", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum JobStatus {
+    /// Submission is durable but no worker attempt has been claimed yet.
+    Queued,
     /// Job is currently executing
     Running {
         /// Unix timestamp when the job started
@@ -80,6 +82,16 @@ pub enum JobStatus {
         /// Duration before cancellation in seconds
         duration_secs: f64,
     },
+    /// The in-process non-resumable worker was lost across restart.
+    WorkerLost {
+        /// Typed operator-safe loss summary.
+        error: String,
+    },
+    /// The job requires explicit operator/agent action.
+    NeedsAttention {
+        /// Typed operator-safe reason.
+        error: String,
+    },
 }
 
 /// Lightweight lifecycle status for job list summaries.
@@ -87,6 +99,8 @@ pub enum JobStatus {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum JobSummaryStatus {
+    /// Submission is durable but has not been claimed.
+    Queued,
     /// Job is currently executing.
     Running,
     /// Job completed successfully.
@@ -95,15 +109,22 @@ pub enum JobSummaryStatus {
     Failed,
     /// Job was cancelled by user or lifecycle retirement.
     Cancelled,
+    /// The committed worker attempt was lost.
+    WorkerLost,
+    /// The job requires explicit attention.
+    NeedsAttention,
 }
 
 impl From<&JobStatus> for JobSummaryStatus {
     fn from(status: &JobStatus) -> Self {
         match status {
+            JobStatus::Queued => Self::Queued,
             JobStatus::Running { .. } => Self::Running,
             JobStatus::Completed { .. } => Self::Completed,
             JobStatus::Failed { .. } => Self::Failed,
             JobStatus::Cancelled { .. } => Self::Cancelled,
+            JobStatus::WorkerLost { .. } => Self::WorkerLost,
+            JobStatus::NeedsAttention { .. } => Self::NeedsAttention,
         }
     }
 }

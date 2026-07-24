@@ -12,7 +12,8 @@ use crate::store::{next_revision, validate_stored_job};
 use crate::{
     CanonicalArgumentsHash, DetachedJobError, DetachedJobStore, ExecutionIntentId,
     InsertJobOutcome, InteractionLineageId, JobId, JobOutboxEntry, JobProgress, JobSpec,
-    JobSubmissionKey, JobTerminalResult, OriginMemberId, RunnerIdentity, StoredJob, ToolIdentity,
+    JobSubmissionKey, JobTerminalResult, OriginMemberId, RunnerIdentity, RunnerSpecificationRef,
+    StoredJob, ToolIdentity,
 };
 
 const STORED_JOB_FORMAT_VERSION: u32 = 1;
@@ -43,6 +44,8 @@ struct PersistedJobSpec {
     interaction_lineage_id: InteractionLineageId,
     tool: ToolIdentity,
     runner: RunnerIdentity,
+    #[serde(default)]
+    runner_specification_ref: Option<RunnerSpecificationRef>,
     restart_class: PersistedRestartClass,
     canonical_arguments_hash: CanonicalArgumentsHash,
     credential_context_refs: Vec<PersistedCredentialContextRef>,
@@ -169,6 +172,19 @@ impl SqliteDetachedJobStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub const fn is_persistent(&self) -> bool {
+        true
+    }
+
+    pub async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        DetachedJobStore::list_for_origin(self, realm_id, origin_session_id, limit).await
     }
 
     fn with_connection<T>(
@@ -324,6 +340,46 @@ impl DetachedJobStore for SqliteDetachedJobStore {
             }
             Ok(pending)
         })
+    }
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT job_id, realm_id, submission_key, revision,
+                            has_pending_outbox, job_json
+                       FROM detached_jobs
+                      WHERE realm_id = ?1
+                      ORDER BY job_id",
+                )
+                .map_err(raw_sqlite_error)?;
+            let mut rows = statement.query([realm_id]).map_err(raw_sqlite_error)?;
+            // Recovery deliberately requests an unbounded origin view. Avoid
+            // turning that semantic limit into an impossible eager allocation.
+            let mut jobs = Vec::new();
+            while jobs.len() < limit {
+                let Some(row) = rows.next().map_err(raw_sqlite_error)? else {
+                    break;
+                };
+                let job = decode_job_row(row)?;
+                if &job.spec.origin_session_id == origin_session_id {
+                    jobs.push(job);
+                }
+            }
+            Ok(jobs)
+        })
+    }
+
+    fn is_persistent(&self) -> bool {
+        true
     }
 }
 
@@ -494,6 +550,7 @@ impl From<&JobSpec> for PersistedJobSpec {
             interaction_lineage_id: spec.interaction_lineage_id.clone(),
             tool: spec.tool.clone(),
             runner: spec.runner.clone(),
+            runner_specification_ref: spec.runner_specification_ref.clone(),
             restart_class: PersistedRestartClass::from(spec.restart_class),
             canonical_arguments_hash: spec.canonical_arguments_hash.clone(),
             credential_context_refs: spec
@@ -516,6 +573,7 @@ impl From<PersistedJobSpec> for JobSpec {
             interaction_lineage_id: spec.interaction_lineage_id,
             tool: spec.tool,
             runner: spec.runner,
+            runner_specification_ref: spec.runner_specification_ref,
             restart_class: DetachedJobRestartClass::from(spec.restart_class),
             canonical_arguments_hash: spec.canonical_arguments_hash,
             credential_context_refs: spec

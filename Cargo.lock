@@ -3373,6 +3373,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "chrono",
+ "cpu-time",
  "futures",
  "hmac 0.12.1",
  "indexmap",

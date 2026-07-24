@@ -95,6 +95,9 @@ meerkat-live = { workspace = true }
 # T-C2 drives the returned bootstrap URL over a real WS client (pinned to
 # meerkat-live's tungstenite major).
 tokio-tungstenite = "0.29"
+# Idle-CPU gate (smoke_mob_idle_burn): process CPU-time deltas, never wall
+# clock; safe wrapper over getrusage/GetProcessTimes.
+cpu-time = "1"
 
 # ## Features
 #
@@ -133,6 +136,11 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "smoke_mob_flow_runtime"
 path = "tests/smoke_mob_flow_runtime.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "smoke_mob_idle_burn"
+path = "tests/smoke_mob_idle_burn.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]

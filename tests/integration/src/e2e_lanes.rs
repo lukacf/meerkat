@@ -216,6 +216,7 @@ macro_rules! e2e_smoke_lane_entries {
             suite(e2e_smoke_mob_live_smoke, "mob-live-smoke");
             suite(e2e_smoke_mob_external_tcp_production_drain, "mob-external-tcp-production-drain");
             suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
+            suite(e2e_smoke_turbo_s_idle_burn, "mob-idle-burn");
         }
     };
 }
@@ -2214,6 +2215,7 @@ fn bazel_rust_test_path(
         "meerkat-mob:smoke_mob_generated_image_comms" => {
             "meerkat-mob/smoke_mob_generated_image_comms_test"
         }
+        "meerkat-mob:smoke_mob_idle_burn" => "meerkat-mob/smoke_mob_idle_burn_test",
         "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
         "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
         "meerkat:live_meerkat_regression" => "meerkat/live_meerkat_regression_test",
@@ -5143,6 +5145,33 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 package: "meerkat-mob",
                 test_target: "smoke_mob_flow_runtime",
                 test_name: "e2e_external_tcp_production_drain_bind_and_turn_smoke",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        "mob-idle-burn" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Mob idle-CPU burn gate",
+            // Each smoke scenario builds in its own isolated target dir, so
+            // this scenario cold-compiles the smoke_mob_idle_burn test binary
+            // first. The test then boots a persistent 3-member mob, seeds one
+            // ~12MB session document (the size-proportional idle-burn class
+            // is invisible with KB fixtures), waits up to 4 minutes for the
+            // trailing durable commits to quiesce, and measures a 30s idle
+            // CPU-time window. 900s covers cold compile plus that budget. No
+            // live provider: members run against a scripted LLM client.
+            timeout_secs: 900,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_idle_burn",
+                test_name: "e2e_smoke_mob_idle_burn_gate",
                 features: &["integration-real-tests"],
                 all_features: false,
             },

@@ -3412,6 +3412,750 @@ fn assert_homecore_workgraph_snapshot(
     Ok(())
 }
 
+async fn create_live_workgraph_item(
+    pump: &mut RpcEventPump,
+    rpc: &mut RpcProcess,
+    state_root: &Path,
+    realm_id: &str,
+    label: &str,
+    title: &str,
+) -> Result<
+    (
+        String,
+        meerkat::PersistenceBundle,
+        meerkat::WorkGraphService,
+        meerkat::WorkItem,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    pump.call(
+        rpc,
+        "initialize",
+        json!({
+            "client_info": {
+                "name": "durable-jobs-workgraph-smoke",
+                "version": "0.0.1",
+            },
+        }),
+        20,
+    )
+    .await?;
+    let created = pump
+        .call(
+            rpc,
+            "session/create",
+            json!({
+                "prompt": "Initialize a durable WorkGraph coordination session.",
+                "model": smoke_model(),
+                "provider": "anthropic",
+                "max_tokens": 1024,
+                "initial_turn": "deferred",
+                "enable_builtins": true,
+                "enable_shell": true,
+                "enable_workgraph": true,
+                "tool_filter": {
+                    "Allow": ["workgraph_create", "workgraph_ready"],
+                },
+            }),
+            30,
+        )
+        .await?;
+    let session_id = created["session_id"]
+        .as_str()
+        .ok_or_else(|| format!("session/create omitted session_id: {created}"))?
+        .to_string();
+    let turn = pump
+        .call(
+            rpc,
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "prompt": format!(
+                    "Use workgraph_create exactly once to create an open WorkGraph item titled \
+                     `{title}` with the exact label `{label}`. Then call workgraph_ready and \
+                     answer with exactly `{label}`."
+                ),
+                "turn_tool_overlay": {
+                    "allowed_tools": ["workgraph_create", "workgraph_ready"],
+                },
+            }),
+            180,
+        )
+        .await?;
+    assert!(
+        turn["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(label)),
+        "live provider did not confirm the WorkGraph label: {turn}"
+    );
+
+    let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+        state_root,
+        realm_id,
+        Some(meerkat_store::RealmBackend::Sqlite),
+        Some(meerkat_store::RealmOrigin::Explicit),
+    )
+    .await?;
+    let graph = meerkat::WorkGraphService::with_scope(
+        persistence.workgraph_store(),
+        realm_id,
+        meerkat::WorkNamespace::default(),
+    );
+    let snapshot = graph
+        .snapshot(meerkat::WorkGraphSnapshotFilter {
+            labels: vec![label.to_string()],
+            include_terminal: true,
+            ..meerkat::WorkGraphSnapshotFilter::default()
+        })
+        .await?;
+    let mut matching = snapshot.items.into_iter();
+    let item = matching
+        .next()
+        .ok_or_else(|| format!("provider created no WorkGraph item with label {label}"))?;
+    assert!(
+        matching.next().is_none(),
+        "provider created more than one WorkGraph item with label {label}"
+    );
+    Ok((session_id, persistence, graph, item))
+}
+
+async fn wait_for_job_snapshot(
+    jobs: &meerkat::DetachedJobService,
+    job_id: &meerkat::JobId,
+    timeout_secs: u64,
+    ready: impl Fn(&meerkat::JobSnapshot) -> bool,
+) -> Result<meerkat::JobSnapshot, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let snapshot = jobs
+            .get(job_id)
+            .await?
+            .ok_or_else(|| format!("durable job {job_id} disappeared"))?;
+        if ready(&snapshot) {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for durable job {job_id}; last snapshot: {snapshot:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_session_context(
+    persistence: &meerkat::PersistenceBundle,
+    session_id: &str,
+    expected_fragments: &[&str],
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let session_id = meerkat::SessionId::parse(session_id)?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let session = persistence
+            .session_store()
+            .load(&session_id)
+            .await?
+            .ok_or_else(|| format!("session {session_id} disappeared"))?;
+        let context = serde_json::to_value(session.system_context_state())?;
+        let pending = context["pending"].as_array().cloned().unwrap_or_default();
+        if expected_fragments.iter().all(|fragment| {
+            pending
+                .iter()
+                .filter(|append| append.to_string().contains(fragment))
+                .count()
+                == 1
+        }) {
+            return Ok(context);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for exact durable session context fragments \
+                 {expected_fragments:?}; context={context}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn workgraph_link_for_job(
+    realm_id: &str,
+    job_id: &meerkat::JobId,
+    item: &meerkat::WorkItem,
+) -> Result<meerkat::JobWorkGraphLink, Box<dyn std::error::Error>> {
+    Ok(meerkat::JobWorkGraphLink::new(
+        meerkat::JobReference::new(realm_id, job_id.clone())?,
+        meerkat::WorkItemRef {
+            realm_id: item.realm_id.clone(),
+            namespace: item.namespace.clone(),
+            item_id: item.id.clone(),
+        },
+    )?)
+}
+
+async fn project_job_terminal_evidence(
+    jobs: &meerkat::DetachedJobService,
+    graph: &meerkat::WorkGraphService,
+    link: &meerkat::JobWorkGraphLink,
+    expected_kind: meerkat::JobTerminalEvidenceKind,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = jobs
+        .get(link.job().job_id())
+        .await?
+        .ok_or_else(|| format!("durable job {} disappeared", link.job().job_id()))?;
+    let terminal = snapshot
+        .terminal_result
+        .as_ref()
+        .ok_or_else(|| format!("durable job {} is not terminal", link.job().job_id()))?;
+    let projector = meerkat::JobTerminalEvidenceProjector::new(jobs.clone(), graph.clone());
+    assert_eq!(
+        projector.project_terminal(link, terminal).await?,
+        meerkat::JobTerminalEvidenceProjection::Added(expected_kind)
+    );
+    assert_eq!(
+        projector.project_terminal(link, terminal).await?,
+        meerkat::JobTerminalEvidenceProjection::AlreadyPresent(expected_kind)
+    );
+    Ok(())
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+async fn crash_stdio_process(mut process: RpcProcess) -> Result<(), Box<dyn std::error::Error>> {
+    let pid = process.child.id().ok_or("stdio process has no pid")?;
+    let status = Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(format!("failed to SIGKILL stdio process {pid}: {status}").into());
+    }
+    timeout(Duration::from_secs(10), process.child.wait())
+        .await
+        .map_err(|_| format!("stdio process {pid} did not exit after SIGKILL"))??;
+    process.stderr_task.abort();
+    Ok(())
+}
+
+async fn wait_for_process_exit(pid: u32, timeout_secs: u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let status = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("background process {pid} survived host crash"));
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_durable_jobs_workgraph_feed() -> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config_with_workgraph(&project_dir).await?;
+    let realm_id = "durable-jobs-workgraph-feed";
+    write_realm_workgraph_config(&state_root, realm_id).await?;
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let mut pump = RpcEventPump::default();
+    let (session_id, persistence, graph, item) = create_live_workgraph_item(
+        &mut pump,
+        &mut rpc,
+        &state_root,
+        realm_id,
+        "durable-feed",
+        "Continuously ingest deployment artifacts",
+    )
+    .await?;
+    let command = r#"i=1
+while true; do
+  printf '{"type":"progress","cursor":%s,"message":"feed step %s"}\n' "$i" "$i"
+  case "$i" in
+    1) chunk=chunk-one ;;
+    2) chunk=chunk-two ;;
+    3) chunk=chunk-three ;;
+    *) chunk="chunk-$i" ;;
+  esac
+  printf '{"type":"notify","key":"feed:%s","title":"WorkGraph feed %s","message":"artifact %s"}\n' "$i" "$i" "$chunk"
+  sleep 2
+  i=$((i + 1))
+done"#;
+    let started = pump
+        .call(
+            &mut rpc,
+            "monitors/start",
+            json!({
+                "session_id": session_id,
+                "submission_key": "workgraph-feed-v1",
+                "command": command,
+                "working_dir": project_dir,
+                "timeout_secs": 600,
+                "protocol": "framed_jsonl",
+                "restart_class": "non_resumable",
+                "delivery": {"kind": "notification"},
+            }),
+            30,
+        )
+        .await?;
+    let job_id = meerkat::JobId::new(
+        started["job"]["job_id"]
+            .as_str()
+            .ok_or_else(|| format!("monitors/start omitted job id: {started}"))?,
+    )?;
+    let jobs = meerkat::DetachedJobService::new(persistence.job_store());
+    let link = workgraph_link_for_job(realm_id, &job_id, &item)?;
+
+    let streaming = wait_for_job_snapshot(&jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Running
+            && snapshot.outbox.len() >= 3
+            && snapshot.outbox.iter().all(|entry| entry.applied)
+            && snapshot
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.cursor >= 3)
+    })
+    .await?;
+    assert!(
+        streaming.terminal_result.is_none(),
+        "three durable deliveries must not terminalize the job"
+    );
+    wait_for_session_context(
+        &persistence,
+        &session_id,
+        &["chunk-one", "chunk-two", "chunk-three"],
+        30,
+    )
+    .await?;
+    let before_terminal = graph
+        .get(
+            Some(item.realm_id.clone()),
+            Some(item.namespace.clone()),
+            item.id.clone(),
+        )
+        .await?;
+    assert!(
+        before_terminal.evidence_refs.is_empty(),
+        "non-terminal notifications must not masquerade as terminal WorkGraph evidence"
+    );
+
+    let readout = pump
+        .call(
+            &mut rpc,
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "prompt": "Reply with the three artifact chunk codewords from the detached-job \
+                           notifications, in order, and nothing else.",
+            }),
+            180,
+        )
+        .await?;
+    let readout_text = readout["text"].as_str().unwrap_or_default().to_lowercase();
+    for expected in ["chunk-one", "chunk-two", "chunk-three"] {
+        assert!(
+            readout_text.contains(expected),
+            "live provider did not receive durable notification {expected}: {readout}"
+        );
+    }
+    assert_eq!(
+        jobs.get(&job_id).await?.expect("job").phase,
+        meerkat::JobPhase::Running,
+        "provider readout must happen while the background feed is still alive"
+    );
+
+    wait_for_job_snapshot(&jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Running
+            && snapshot.outbox.len() >= 5
+            && snapshot.outbox.iter().all(|entry| entry.applied)
+    })
+    .await?;
+    pump.call(
+        &mut rpc,
+        "jobs/cancel",
+        json!({"job_id": job_id.to_string()}),
+        30,
+    )
+    .await?;
+    wait_for_job_snapshot(&jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Cancelled
+    })
+    .await?;
+    project_job_terminal_evidence(
+        &jobs,
+        &graph,
+        &link,
+        meerkat::JobTerminalEvidenceKind::Cancelled,
+    )
+    .await?;
+    let completed_item = graph
+        .get(
+            Some(item.realm_id.clone()),
+            Some(item.namespace.clone()),
+            item.id.clone(),
+        )
+        .await?;
+    assert_eq!(completed_item.evidence_refs.len(), 1);
+    assert_eq!(
+        completed_item.evidence_refs[0].id,
+        format!("detached_job:{job_id}:terminal")
+    );
+    shutdown_stdio_process(rpc).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_durable_jobs_workgraph_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config_with_workgraph(&project_dir).await?;
+    let realm_id = "durable-jobs-workgraph-recovery";
+    write_realm_workgraph_config(&state_root, realm_id).await?;
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let host_pid = rpc.child.id().ok_or("rkat-rpc has no pid")?;
+    let mut pump = RpcEventPump::default();
+    let (session_id, persistence, graph, item) = create_live_workgraph_item(
+        &mut pump,
+        &mut rpc,
+        &state_root,
+        realm_id,
+        "durable-recovery",
+        "Recover a checkpointed background analysis",
+    )
+    .await?;
+    let attempts_path = project_dir.join("recovery-attempts");
+    let worker_pid_path = project_dir.join("recovery-worker-pid");
+    let command = format!(
+        r#"attempt=0
+if [ -f '{attempts}' ]; then attempt=$(cat '{attempts}'); fi
+attempt=$((attempt + 1))
+printf '%s' "$attempt" > '{attempts}'
+printf '%s' "$$" > '{worker_pid}'
+if [ -z "${{MEERKAT_MONITOR_CHECKPOINT:-}}" ]; then
+  printf '{{"type":"progress","cursor":1,"message":"checkpointing first attempt"}}\n'
+  printf '{{"type":"checkpoint","value":"phase-one"}}\n'
+  printf '{{"type":"notify","key":"recovery:first","title":"Recovery checkpoint","message":"checkpoint-alpha"}}\n'
+  while kill -0 '{host_pid}' 2>/dev/null; do sleep 1; done
+  exit 23
+fi
+printf '{{"type":"progress","cursor":3,"message":"resumed from checkpoint"}}\n'
+printf '{{"type":"notify","key":"recovery:resumed","title":"Recovery resumed","message":"recovered-beta"}}\n'
+while true; do sleep 1; done"#,
+        attempts = attempts_path.display(),
+        worker_pid = worker_pid_path.display(),
+    );
+    let monitor_params = json!({
+        "session_id": session_id,
+        "submission_key": "workgraph-recovery-v1",
+        "command": command,
+        "working_dir": project_dir,
+        "timeout_secs": 15,
+        "protocol": "framed_jsonl",
+        "restart_class": "checkpoint_resumable",
+        "delivery": {"kind": "notification"},
+    });
+    let started = pump
+        .call(&mut rpc, "monitors/start", monitor_params.clone(), 30)
+        .await?;
+    let job_id = meerkat::JobId::new(
+        started["job"]["job_id"]
+            .as_str()
+            .ok_or_else(|| format!("monitors/start omitted job id: {started}"))?,
+    )?;
+    let jobs = meerkat::DetachedJobService::new(persistence.job_store());
+    let before_crash = wait_for_job_snapshot(&jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Running
+            && snapshot.checkpoint_ref.is_some()
+            && !snapshot.outbox.is_empty()
+    })
+    .await?;
+    wait_for_session_context(&persistence, &session_id, &["checkpoint-alpha"], 30).await?;
+    let original_attempt = before_crash
+        .current_attempt_id
+        .clone()
+        .ok_or("running job omitted attempt id")?;
+    let original_fence = before_crash.current_fence;
+    let original_lease = before_crash
+        .lease_expires_at_ms
+        .ok_or("running job omitted lease")?;
+    let original_checkpoint = before_crash
+        .checkpoint_ref
+        .clone()
+        .ok_or("running job omitted checkpoint")?;
+    let original_runner_handle = before_crash
+        .runner_handle
+        .clone()
+        .ok_or("running job omitted runner handle")?;
+    let worker_pid: u32 = tokio::fs::read_to_string(&worker_pid_path).await?.parse()?;
+    drop(jobs);
+    drop(graph);
+    drop(persistence);
+    crash_stdio_process(rpc).await?;
+    wait_for_process_exit(worker_pid, 15).await?;
+
+    let mut reopened_rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let mut reopened_pump = RpcEventPump::default();
+    reopened_pump
+        .call(&mut reopened_rpc, "initialize", json!({}), 20)
+        .await?;
+    let (_manifest, reopened_persistence) = meerkat::open_realm_persistence_in(
+        &state_root,
+        realm_id,
+        Some(meerkat_store::RealmBackend::Sqlite),
+        Some(meerkat_store::RealmOrigin::Explicit),
+    )
+    .await?;
+    let reopened_jobs = meerkat::DetachedJobService::new(reopened_persistence.job_store());
+    let reopened_graph = meerkat::WorkGraphService::with_scope(
+        reopened_persistence.workgraph_store(),
+        realm_id,
+        meerkat::WorkNamespace::default(),
+    );
+    let reopened = reopened_jobs.get(&job_id).await?.ok_or("job missing")?;
+    assert_eq!(reopened.attempt_count, before_crash.attempt_count);
+    assert_eq!(reopened.current_attempt_id, Some(original_attempt.clone()));
+    assert_eq!(reopened.current_fence, original_fence);
+    assert_eq!(reopened.lease_expires_at_ms, Some(original_lease));
+    assert_eq!(
+        reopened.checkpoint_ref,
+        Some(original_checkpoint.clone()),
+        "reopen must rehydrate the latest committed checkpoint"
+    );
+    assert_eq!(
+        reopened.runner_handle,
+        Some(original_runner_handle.clone()),
+        "reopen must rehydrate the latest committed runner handle"
+    );
+
+    let old_authority = json!({
+        "job_id": job_id.to_string(),
+        "attempt_id": original_attempt.as_str(),
+        "fence": original_fence.get(),
+    });
+    reopened_pump
+        .call(
+            &mut reopened_rpc,
+            "mobkit/jobs/progress",
+            json!({
+                "authority": old_authority,
+                "cursor": 2,
+                "detail": "old writer remains valid after reopen",
+                "observed_at_ms": unix_time_ms(),
+            }),
+            20,
+        )
+        .await?;
+    let after_old_write = reopened_jobs.get(&job_id).await?.ok_or("job missing")?;
+    assert_eq!(
+        after_old_write.current_attempt_id,
+        Some(original_attempt.clone())
+    );
+    assert_eq!(after_old_write.current_fence, original_fence);
+    assert_eq!(after_old_write.lease_expires_at_ms, Some(original_lease));
+    assert_eq!(
+        after_old_write.checkpoint_ref,
+        Some(original_checkpoint.clone())
+    );
+    assert_eq!(after_old_write.runner_handle, Some(original_runner_handle));
+
+    while unix_time_ms() <= original_lease.saturating_add(1_000) {
+        sleep(Duration::from_secs(10)).await;
+    }
+    let restarted = reopened_pump
+        .call(&mut reopened_rpc, "monitors/start", monitor_params, 30)
+        .await?;
+    assert_eq!(restarted["job"]["job_id"].as_str(), Some(job_id.as_str()));
+    let reclaimed = wait_for_job_snapshot(&reopened_jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Running
+            && snapshot.attempt_count == before_crash.attempt_count + 1
+            && snapshot.current_fence > original_fence
+            && snapshot
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.cursor == 3)
+    })
+    .await?;
+    assert_ne!(
+        reclaimed.current_attempt_id.as_ref(),
+        Some(&original_attempt),
+        "explicit recovered claim must mint a new attempt"
+    );
+    assert_eq!(
+        reclaimed.checkpoint_ref,
+        Some(original_checkpoint),
+        "the explicit recovered claim must resume from the committed checkpoint"
+    );
+    wait_for_session_context(
+        &reopened_persistence,
+        &session_id,
+        &["checkpoint-alpha", "recovered-beta"],
+        30,
+    )
+    .await?;
+
+    let (_code, stale_message) = reopened_pump
+        .call_expect_error(
+            &mut reopened_rpc,
+            "mobkit/jobs/progress",
+            json!({
+                "authority": old_authority,
+                "cursor": 4,
+                "detail": "old writer must now be stale",
+                "observed_at_ms": unix_time_ms(),
+            }),
+            20,
+        )
+        .await?;
+    assert!(
+        stale_message.to_lowercase().contains("stale"),
+        "old writer should become stale only after the later committed claim: {stale_message}"
+    );
+    let recovery_readout = reopened_pump
+        .call(
+            &mut reopened_rpc,
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "prompt": "Reply with the two recovery codewords delivered by the background \
+                           job, in order, and nothing else.",
+            }),
+            180,
+        )
+        .await?;
+    let recovery_text = recovery_readout["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        recovery_text.contains("checkpoint-alpha") && recovery_text.contains("recovered-beta"),
+        "live provider did not receive pre-crash and post-recovery deliveries: {recovery_readout}"
+    );
+    assert_eq!(
+        reopened_jobs.get(&job_id).await?.expect("job").phase,
+        meerkat::JobPhase::Running
+    );
+
+    reopened_pump
+        .call(
+            &mut reopened_rpc,
+            "jobs/cancel",
+            json!({"job_id": job_id.to_string()}),
+            30,
+        )
+        .await?;
+    wait_for_job_snapshot(&reopened_jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Cancelled
+    })
+    .await?;
+    assert_eq!(
+        tokio::fs::read_to_string(&attempts_path).await?,
+        "2",
+        "recovery must execute exactly one later attempt"
+    );
+    let link = workgraph_link_for_job(realm_id, &job_id, &item)?;
+    project_job_terminal_evidence(
+        &reopened_jobs,
+        &reopened_graph,
+        &link,
+        meerkat::JobTerminalEvidenceKind::Cancelled,
+    )
+    .await?;
+    let recovered_item = reopened_graph
+        .get(
+            Some(item.realm_id.clone()),
+            Some(item.namespace.clone()),
+            item.id.clone(),
+        )
+        .await?;
+    assert_eq!(recovered_item.evidence_refs.len(), 1);
+    shutdown_stdio_process(reopened_rpc).await?;
+    Ok(())
+}
+
 // ===========================================================================
 // Scenario 56: RPC explicit mob persists and REST rebuilds member status
 // ===========================================================================

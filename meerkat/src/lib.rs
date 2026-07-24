@@ -147,10 +147,11 @@ mod agent_builder;
 pub use agent_builder::AgentBuilder;
 mod job_delivery;
 pub use job_delivery::{
-    AppliedRuntimeJobDelivery, JobDeliveryApplication, JobDeliveryContent, JobDeliverySink,
-    JobNotificationDeliveryPayload, JobOutboxProjectionError, JobOutboxProjector,
-    JobRuntimeDeliveryApplier, JobTerminalDeliveryPayload, PreparedJobDelivery,
-    ProjectedJobDelivery,
+    AppliedRuntimeJobDelivery, BlockedRuntimeJobDelivery, JobDeliveryApplication,
+    JobDeliveryContent, JobDeliverySink, JobNotificationDeliveryPayload, JobOutboxProjectionError,
+    JobOutboxProjectionPass, JobOutboxProjector, JobRuntimeDeliveryApplier,
+    JobTerminalDeliveryPayload, PreparedJobDelivery, ProjectedJobDelivery, RuntimeJobDeliveryDrain,
+    SkippedJobOutboxEntry,
 };
 mod job_composition;
 pub use job_composition::{

@@ -764,3 +764,82 @@ async fn await_activity_is_projected_only_while_the_binding_is_running() {
         "terminal waits are not current execution activity"
     );
 }
+
+/// Regression: an owner session that unregisters (runtime shutdown/retire)
+/// terminalizes its wait bindings as `Terminated` — a legitimate lifecycle
+/// closure, not corruption. A later terminal delivery for the awaited job
+/// must apply cleanly and reach the downstream sink; treating it as corrupt
+/// re-errors on every ~1s delivery retry and head-of-line blocks the entire
+/// durable delivery queue.
+#[tokio::test]
+async fn terminal_delivery_after_wait_owner_termination_applies_cleanly() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(store);
+    let session_id = SessionId::new();
+    let receipt = jobs
+        .submit(job_spec("await-unregistered", session_id.clone()))
+        .await
+        .expect("submit");
+    let claim = jobs
+        .claim_attempt(
+            &receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("worker-await-unregistered").expect("worker"),
+                1,
+                1_000,
+                RunnerHandleRef::new("runner:await-unregistered").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    let reference = JobReference::new("realm-a", receipt.job_id.clone()).expect("reference");
+    let operations = Arc::new(RuntimeOpsLifecycleRegistry::new());
+    let coordinator = JobAwaitCoordinator::new("realm-a", jobs.clone(), operations.clone());
+    let waiting = coordinator
+        .await_job(&session_id, &reference)
+        .await
+        .expect("await");
+
+    // The owner session goes away before the job finishes: unregister
+    // persists the running wait as Terminated (the same transition
+    // `retire_owner_for_unregister` applies).
+    operations
+        .terminate_owner("runtime session unregistered".into())
+        .expect("terminate owner");
+    let terminated = operations
+        .snapshot(&waiting.operation_id)
+        .expect("snapshot")
+        .expect("wait");
+    assert!(terminated.terminal);
+    assert_eq!(terminated.status, OperationStatus::Terminated);
+
+    let terminal = jobs
+        .complete_attempt(
+            &receipt.job_id,
+            AttemptWriteAuthority::from(&claim),
+            2,
+            None,
+        )
+        .await
+        .expect("complete")
+        .terminal_result
+        .expect("terminal result");
+    let downstream = Arc::new(CountingDeliverySink::default());
+    let sink = JobAwaitDeliverySink::new(coordinator, downstream.clone());
+    let application = JobDeliveryApplication::Notification {
+        job_id: receipt.job_id,
+        delivery_sequence: 1,
+        subscription: JobSubscription::new(
+            JobSubscriptionId::new("origin-await-unregistered").expect("subscription"),
+            session_id,
+            JobDeliveryKind::Notification,
+        ),
+        content: JobDeliveryContent::Terminal(terminal),
+    };
+
+    sink.apply(application).await.expect(
+        "a wait closed by runtime lifecycle must not corrupt the terminal delivery; \
+         Terminated-from-unregister is a legitimate terminal state",
+    );
+    assert_eq!(*downstream.applications.lock().await, 1);
+}

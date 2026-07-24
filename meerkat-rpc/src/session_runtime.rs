@@ -1801,6 +1801,21 @@ struct SessionRuntimeJobDeliverySink {
     runtime: Arc<SessionRuntime>,
 }
 
+/// Result of one durable job delivery drain pass across the realm.
+///
+/// `failures` are rows or sessions that stayed pending this pass (nothing is
+/// discarded; each retries on a later pass). The delivery driver uses the
+/// progress/failure split to decide between base cadence and backoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobDeliveryDrainSummary {
+    /// Outbox entries handed to runtime inboxes and acknowledged.
+    pub projected: usize,
+    /// Runtime inbox deliveries applied to their sinks and acknowledged.
+    pub applied: usize,
+    /// Human-readable descriptions of rows/sessions left pending this pass.
+    pub failures: Vec<String>,
+}
+
 struct ExternalEventRuntimeContext {
     handling_mode: meerkat_core::types::HandlingMode,
     idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
@@ -4534,21 +4549,47 @@ impl SessionRuntime {
         }
         let runtime = Arc::downgrade(self);
         tokio::spawn(async move {
+            // A drain that keeps failing without progress must not retry at
+            // full cadence forever: back off exponentially (capped) and
+            // reset as soon as a pass is clean or moves deliveries. This
+            // bounds the idle burn of a persistently poisoned delivery row
+            // while keeping healthy delivery latency at the base cadence.
+            const BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+            const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+            let mut delay = BASE_DELAY;
             loop {
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
-                if let Err(error) = runtime.drain_job_deliveries().await {
-                    tracing::warn!(%error, "durable job delivery drain failed");
-                }
+                let make_progress_or_clean = match runtime.drain_job_deliveries().await {
+                    Ok(summary) => {
+                        if !summary.failures.is_empty() {
+                            tracing::warn!(
+                                failures = ?summary.failures,
+                                "durable job delivery drain left rows pending"
+                            );
+                        }
+                        summary.failures.is_empty() || summary.projected > 0 || summary.applied > 0
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "durable job delivery drain failed");
+                        false
+                    }
+                };
                 drop(runtime);
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                delay = if make_progress_or_clean {
+                    BASE_DELAY
+                } else {
+                    MAX_DELAY.min(delay.saturating_mul(2))
+                };
+                tokio::time::sleep(delay).await;
             }
         });
     }
 
-    pub async fn drain_job_deliveries(self: &Arc<Self>) -> Result<(), String> {
+    pub async fn drain_job_deliveries(self: &Arc<Self>) -> Result<JobDeliveryDrainSummary, String> {
         let _guard = self.job_delivery_drain_lock.lock().await;
+        let mut summary = JobDeliveryDrainSummary::default();
         let realm_id = self
             .realm_id()
             .ok_or_else(|| "durable job delivery requires an active realm".to_string())?;
@@ -4557,10 +4598,17 @@ impl SessionRuntime {
             self.runtime_delivery_inbox.clone(),
             realm_id.to_string(),
         );
-        projector
+        let projection = projector
             .project_pending(256)
             .await
             .map_err(|error| error.to_string())?;
+        summary.projected = projection.projected.len();
+        for skipped in projection.skipped {
+            summary.failures.push(format!(
+                "projection of job {} delivery {} failed: {}",
+                skipped.job_id, skipped.delivery_sequence, skipped.error
+            ));
+        }
 
         let jobs = self
             .job_store
@@ -4601,15 +4649,32 @@ impl SessionRuntime {
             };
             let applier =
                 meerkat::JobRuntimeDeliveryApplier::new(self.runtime_delivery_inbox.clone(), sink);
-            applier
+            // Fail SAFE per session: one session's poisoned or unreadable
+            // inbox must not head-of-line block every other session's
+            // delivery drain. Nothing is discarded — failed rows stay
+            // pending and retry on the next pass.
+            match applier
                 .apply_pending(
                     &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
                     256,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                Ok(drain) => {
+                    summary.applied += drain.applied.len();
+                    if let Some(blocked) = drain.blocked {
+                        summary.failures.push(format!(
+                            "delivery {} (sequence {}) for session {session_id} is blocked: {}",
+                            blocked.delivery_id, blocked.runtime_sequence, blocked.error
+                        ));
+                    }
+                }
+                Err(error) => summary.failures.push(format!(
+                    "delivery drain for session {session_id} failed: {error}"
+                )),
+            }
         }
-        Ok(())
+        Ok(summary)
     }
 
     pub async fn runtime_job_delivery_backlog(&self) -> Result<u64, String> {

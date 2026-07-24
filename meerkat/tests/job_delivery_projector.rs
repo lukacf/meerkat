@@ -30,6 +30,40 @@ impl JobDeliverySink for RecordingDeliverySink {
     }
 }
 
+/// Rejects every delivery for one designated job until healed; records the
+/// job ids of accepted deliveries in application order.
+#[derive(Default)]
+struct SelectivePoisonSink {
+    poisoned: std::sync::Mutex<Option<JobId>>,
+    applications: Mutex<Vec<JobId>>,
+}
+
+impl SelectivePoisonSink {
+    fn poison(&self, job_id: JobId) {
+        *self.poisoned.lock().expect("poison lock") = Some(job_id);
+    }
+
+    fn heal(&self) {
+        *self.poisoned.lock().expect("poison lock") = None;
+    }
+}
+
+#[async_trait::async_trait]
+impl JobDeliverySink for SelectivePoisonSink {
+    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+        let job_id = match &application {
+            JobDeliveryApplication::Record { job_id, .. }
+            | JobDeliveryApplication::Notification { job_id, .. }
+            | JobDeliveryApplication::Event { job_id, .. } => job_id.clone(),
+        };
+        if self.poisoned.lock().expect("poison lock").as_ref() == Some(&job_id) {
+            return Err(format!("sink rejects deliveries for job {job_id}"));
+        }
+        self.applications.lock().await.push(job_id);
+        Ok(())
+    }
+}
+
 fn spec(key: &str, session_id: SessionId) -> JobSpec {
     spec_for_realm("default", key, session_id)
 }
@@ -82,13 +116,14 @@ async fn realm_scoped_projection_leaves_other_realm_outbox_pending() {
 
     let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
     let projector = JobOutboxProjector::new_for_realm(job_store.clone(), inbox.clone(), "default");
-    let projected = projector
+    let pass = projector
         .project_pending(10)
         .await
         .expect("project local realm");
 
-    assert_eq!(projected.len(), 1);
-    assert_eq!(projected[0].job_id, local);
+    assert!(pass.is_fully_projected());
+    assert_eq!(pass.projected.len(), 1);
+    assert_eq!(pass.projected[0].job_id, local);
     assert!(
         jobs.get(&foreign_receipt.job_id)
             .await
@@ -189,10 +224,11 @@ async fn nonterminal_notification_is_durable_and_replays_after_runtime_insert_cr
         .await
         .expect("runtime commit");
 
-    let projected = projector.project_pending(10).await.expect("retry project");
-    assert_eq!(projected.len(), 1);
-    assert_eq!(projected[0].runtime_sequence, first.sequence);
-    assert!(projected[0].runtime_deduplicated);
+    let pass = projector.project_pending(10).await.expect("retry project");
+    assert!(pass.is_fully_projected());
+    assert_eq!(pass.projected.len(), 1);
+    assert_eq!(pass.projected[0].runtime_sequence, first.sequence);
+    assert!(pass.projected[0].runtime_deduplicated);
 
     let job = jobs.get(&job_id).await.expect("load").expect("job");
     assert!(job.terminal_result.is_none());
@@ -271,16 +307,16 @@ async fn subscription_application_keeps_notifications_turn_free_and_events_canon
     let sink = Arc::new(RecordingDeliverySink::default());
     let applier = JobRuntimeDeliveryApplier::new(inbox.clone(), sink.clone());
     let runtime_id = LogicalRuntimeId::for_session(&origin);
-    let applied = applier.apply_pending(&runtime_id, 10).await.expect("apply");
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].applications, 2);
-    assert!(
-        applier
-            .apply_pending(&runtime_id, 10)
-            .await
-            .expect("idempotent retry")
-            .is_empty()
-    );
+    let drain = applier.apply_pending(&runtime_id, 10).await.expect("apply");
+    assert!(drain.is_fully_drained());
+    assert_eq!(drain.applied.len(), 1);
+    assert_eq!(drain.applied[0].applications, 2);
+    let retry = applier
+        .apply_pending(&runtime_id, 10)
+        .await
+        .expect("idempotent retry");
+    assert!(retry.is_fully_drained());
+    assert!(retry.applied.is_empty());
 
     let applications = sink.applications.lock().await.clone();
     assert!(matches!(
@@ -317,8 +353,9 @@ async fn crash_before_runtime_insert_leaves_job_delivery_retryable() {
 
     let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
     let projector = JobOutboxProjector::new(job_store.clone(), inbox.clone());
-    let projected = projector.project_pending(10).await.expect("project");
-    assert_eq!(projected.len(), 1);
+    let pass = projector.project_pending(10).await.expect("project");
+    assert!(pass.is_fully_projected());
+    assert_eq!(pass.projected.len(), 1);
 
     let job = jobs.get(&job_id).await.expect("load").expect("job exists");
     assert!(job.outbox[0].applied);
@@ -374,10 +411,11 @@ async fn crash_after_runtime_insert_before_job_ack_reuses_the_same_delivery_and_
         1
     );
 
-    let projected = projector.project_pending(10).await.expect("retry project");
-    assert_eq!(projected.len(), 1);
-    assert_eq!(projected[0].runtime_sequence, first.sequence);
-    assert!(projected[0].runtime_deduplicated);
+    let pass = projector.project_pending(10).await.expect("retry project");
+    assert!(pass.is_fully_projected());
+    assert_eq!(pass.projected.len(), 1);
+    assert_eq!(pass.projected[0].runtime_sequence, first.sequence);
+    assert!(pass.projected[0].runtime_deduplicated);
     assert!(
         job_store
             .list_pending_outbox(10)
@@ -474,4 +512,185 @@ async fn shell_projection_targets_requested_job_beyond_a_global_batch_boundary()
         runtime_entries[0].submission.delivery_id(),
         &RuntimeDeliveryId::new(target.as_str()).expect("delivery id")
     );
+}
+
+/// Regression: a delivery the sink rejects must fail SAFE — rows ahead of it
+/// apply and acknowledge, the failure is reported as a blocked row instead
+/// of aborting the drain, the row itself is never discarded, and it applies
+/// once the cause heals. Before this contract, the first poisoned row turned
+/// every drain pass into an error and head-of-line blocked the delivery
+/// queue forever.
+#[tokio::test]
+async fn poisoned_delivery_blocks_only_its_row_and_applies_after_heal() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    completed_job(&jobs, session_id.clone(), "drain-a").await;
+    completed_job(&jobs, session_id.clone(), "drain-b").await;
+
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store, inbox.clone());
+    let pass = projector.project_pending(10).await.expect("project");
+    assert_eq!(pass.projected.len(), 2);
+
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let pending = inbox.list_pending(&runtime_id, 10).await.expect("pending");
+    assert_eq!(pending.len(), 2);
+    let first = JobId::new(pending[0].submission.delivery_id().as_str()).expect("first job id");
+    let second = JobId::new(pending[1].submission.delivery_id().as_str()).expect("second job id");
+
+    let sink = Arc::new(SelectivePoisonSink::default());
+    sink.poison(second.clone());
+    let applier = JobRuntimeDeliveryApplier::new(inbox.clone(), sink.clone());
+
+    let drain = applier
+        .apply_pending(&runtime_id, 10)
+        .await
+        .expect("a poisoned row is a blocked drain, not a drain error");
+    assert_eq!(
+        drain.applied.len(),
+        1,
+        "rows ahead of the poison must apply"
+    );
+    assert_eq!(drain.applied[0].delivery_id.as_str(), first.as_str());
+    let blocked = drain.blocked.expect("the poisoned row must be reported");
+    assert_eq!(blocked.delivery_id.as_str(), second.as_str());
+    assert!(blocked.error.contains("sink rejects deliveries"));
+
+    // The blocked row is retained, not discarded: still pending, still
+    // reported on the next pass.
+    let retry = applier.apply_pending(&runtime_id, 10).await.expect("retry");
+    assert!(retry.applied.is_empty());
+    assert!(retry.blocked.is_some());
+    assert_eq!(
+        inbox
+            .list_pending(&runtime_id, 10)
+            .await
+            .expect("still pending")
+            .len(),
+        1
+    );
+
+    // Once the cause heals, the same delivery applies with nothing lost.
+    sink.heal();
+    let healed = applier
+        .apply_pending(&runtime_id, 10)
+        .await
+        .expect("healed drain");
+    assert!(healed.is_fully_drained());
+    assert_eq!(healed.applied.len(), 1);
+    assert_eq!(healed.applied[0].delivery_id.as_str(), second.as_str());
+    assert_eq!(*sink.applications.lock().await, vec![first, second]);
+    assert!(
+        inbox
+            .list_pending(&runtime_id, 10)
+            .await
+            .expect("drained")
+            .is_empty()
+    );
+}
+
+/// Delegates to the inner store but hides one job from `get`, simulating an
+/// outbox row whose job can no longer be resolved (the unmappable-row class).
+#[derive(Debug)]
+struct HidingJobStore {
+    inner: Arc<MemoryDetachedJobStore>,
+    hidden: std::sync::Mutex<Option<JobId>>,
+}
+
+#[async_trait::async_trait]
+impl DetachedJobStore for HidingJobStore {
+    async fn insert_deduplicated(
+        &self,
+        job: meerkat_jobs::StoredJob,
+    ) -> Result<meerkat_jobs::InsertJobOutcome, meerkat::DetachedJobError> {
+        self.inner.insert_deduplicated(job).await
+    }
+
+    async fn get(
+        &self,
+        job_id: &JobId,
+    ) -> Result<Option<meerkat_jobs::StoredJob>, meerkat::DetachedJobError> {
+        if self.hidden.lock().expect("hidden lock").as_ref() == Some(job_id) {
+            return Ok(None);
+        }
+        self.inner.get(job_id).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        expected_revision: u64,
+        replacement: meerkat_jobs::StoredJob,
+    ) -> Result<meerkat_jobs::StoredJob, meerkat::DetachedJobError> {
+        self.inner
+            .compare_and_swap(expected_revision, replacement)
+            .await
+    }
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<meerkat::JobOutboxEntry>, meerkat::DetachedJobError> {
+        self.inner.list_pending_outbox(limit).await
+    }
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<meerkat_jobs::StoredJob>, meerkat::DetachedJobError> {
+        self.inner
+            .list_for_origin(realm_id, origin_session_id, limit)
+            .await
+    }
+
+    async fn list_all(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<meerkat_jobs::StoredJob>, meerkat::DetachedJobError> {
+        self.inner.list_all(limit).await
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+}
+
+/// Regression: an outbox row that cannot be mapped to its job must not abort
+/// the projection pass. Other jobs keep projecting, the poisoned row is
+/// reported and stays pending (never acknowledged), and it projects once the
+/// store heals.
+#[tokio::test]
+async fn unmappable_outbox_row_is_skipped_and_other_jobs_keep_projecting() {
+    let memory = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(memory.clone());
+    let session_id = SessionId::new();
+    let vanished = completed_job(&jobs, session_id.clone(), "vanished").await;
+    let healthy = completed_job(&jobs, session_id.clone(), "healthy").await;
+
+    let store = Arc::new(HidingJobStore {
+        inner: memory,
+        hidden: std::sync::Mutex::new(Some(vanished.clone())),
+    });
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new_for_realm(store.clone(), inbox, "default");
+
+    let pass = projector
+        .project_pending(10)
+        .await
+        .expect("a poisoned row must not abort the projection pass");
+    assert_eq!(pass.projected.len(), 1, "other jobs must keep projecting");
+    assert_eq!(pass.projected[0].job_id, healthy);
+    assert_eq!(pass.skipped.len(), 1);
+    assert_eq!(pass.skipped[0].job_id, vanished);
+    assert!(pass.skipped[0].error.contains("missing job"));
+
+    // The skipped row was never acknowledged; it projects once the store
+    // resolves the job again.
+    *store.hidden.lock().expect("hidden lock") = None;
+    let healed = projector.project_pending(10).await.expect("healed pass");
+    assert!(healed.is_fully_projected());
+    assert_eq!(healed.projected.len(), 1);
+    assert_eq!(healed.projected[0].job_id, vanished);
 }

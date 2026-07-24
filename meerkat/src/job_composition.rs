@@ -523,7 +523,11 @@ impl JobAwaitCoordinator {
         let encoded = serde_json::to_string(terminal)
             .map_err(|error| JobCompositionError::Encode(error.to_string()))?;
         if current.terminal {
-            if terminal_outcome_matches_job(current.terminal_outcome.as_ref(), terminal, &encoded) {
+            if wait_outcome_accepts_job_terminal(
+                current.terminal_outcome.as_ref(),
+                terminal,
+                &encoded,
+            ) {
                 return Ok(());
             }
             return Err(JobCompositionError::Corrupt(format!(
@@ -553,15 +557,16 @@ impl JobAwaitCoordinator {
         if let Err(error) = result {
             // Two delivery workers can observe Running before either commits
             // the terminal operation transition. The generated registry
-            // serializes them; the loser accepts only the exact terminal truth
-            // committed by the winner.
+            // serializes them; the loser accepts the committed terminal truth
+            // when it is the same job projection — or a runtime lifecycle
+            // closure (e.g. the owner session unregistered mid-delivery).
             let latest = self.operations.snapshot(operation_id)?.ok_or_else(|| {
                 JobCompositionError::Corrupt(format!(
                     "detached job wait operation {operation_id} disappeared"
                 ))
             })?;
             if latest.terminal
-                && terminal_outcome_matches_job(
+                && wait_outcome_accepts_job_terminal(
                     latest.terminal_outcome.as_ref(),
                     terminal,
                     &encoded,
@@ -592,26 +597,58 @@ fn validate_wait_operation(
     Ok(())
 }
 
-fn terminal_outcome_matches_job(
+/// Whether an already-terminal wait operation's recorded outcome is
+/// compatible with delivered job terminal truth, i.e. the delivery may be
+/// acknowledged without re-transitioning the operation.
+///
+/// The outcome match is exhaustive on purpose: a new
+/// [`OperationTerminalOutcome`] variant must be classified here before this
+/// compiles. An unclassified variant must never fall into an implicit
+/// "corrupt" bucket — that error re-fires on every delivery retry and
+/// head-of-line blocks the durable delivery queue forever.
+///
+/// Per-variant semantics:
+/// - `Completed` / `Failed` are only ever written on a `DetachedJobWait` as
+///   projections of job authority, so they must agree with the delivered
+///   terminal exactly (variant class and encoded payload). Disagreement is
+///   split-brain job truth and stays a conflict.
+/// - `Cancelled` is compatible with any delivered terminal: either it is the
+///   job-truth projection of a cancelled job (reason carries the encoded
+///   terminal), or the wait binding itself was cancelled independently of
+///   the job — a closed wait cannot conflict with job truth it never
+///   recorded.
+/// - `Terminated` (owner session unregistered), `Aborted` (provisioning
+///   aborted), and `Retired` are runtime lifecycle closures that never claim
+///   knowledge of the job outcome. The wait binding is legitimately gone;
+///   the delivery is moot for the operation and still flows to the
+///   downstream sink.
+fn wait_outcome_accepts_job_terminal(
     outcome: Option<&OperationTerminalOutcome>,
     terminal: &JobTerminalResult,
     encoded: &str,
 ) -> bool {
-    match (outcome, terminal) {
-        (
-            Some(OperationTerminalOutcome::Completed(result)),
-            JobTerminalResult::Succeeded { .. },
-        ) => !result.is_error && result.content == encoded,
-        (Some(OperationTerminalOutcome::Cancelled { reason }), JobTerminalResult::Cancelled) => {
-            reason.as_deref() == Some(encoded)
+    let Some(outcome) = outcome else {
+        // A terminal wait with no recorded outcome has lost its truth.
+        return false;
+    };
+    match outcome {
+        OperationTerminalOutcome::Completed(result) => {
+            matches!(terminal, JobTerminalResult::Succeeded { .. })
+                && !result.is_error
+                && result.content == encoded
         }
-        (
-            Some(OperationTerminalOutcome::Failed { error }),
-            JobTerminalResult::Failed { .. }
-            | JobTerminalResult::WorkerLost
-            | JobTerminalResult::NeedsAttention { .. },
-        ) => error == encoded,
-        _ => false,
+        OperationTerminalOutcome::Failed { error } => {
+            matches!(
+                terminal,
+                JobTerminalResult::Failed { .. }
+                    | JobTerminalResult::WorkerLost
+                    | JobTerminalResult::NeedsAttention { .. }
+            ) && error == encoded
+        }
+        OperationTerminalOutcome::Cancelled { .. }
+        | OperationTerminalOutcome::Terminated { .. }
+        | OperationTerminalOutcome::Aborted { .. }
+        | OperationTerminalOutcome::Retired => true,
     }
 }
 

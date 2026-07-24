@@ -9,7 +9,7 @@ use meerkat_jobs::{
 };
 use meerkat_runtime::{
     LogicalRuntimeId, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliverySubmission,
+    RuntimeDeliveryKind, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
 };
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +79,34 @@ pub struct AppliedRuntimeJobDelivery {
     pub applications: usize,
 }
 
+/// A pending delivery whose application failed during a drain pass.
+///
+/// The row is never discarded: it stays pending in the runtime inbox and is
+/// retried on the next pass. Because the inbox is an ordered cursor machine,
+/// later rows for the same runtime stay queued behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedRuntimeJobDelivery {
+    pub delivery_id: RuntimeDeliveryId,
+    pub runtime_sequence: u64,
+    pub error: String,
+}
+
+/// Outcome of one ordered drain pass over a runtime's pending deliveries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeJobDeliveryDrain {
+    /// Deliveries applied and acknowledged this pass, in inbox order.
+    pub applied: Vec<AppliedRuntimeJobDelivery>,
+    /// The first delivery whose application failed, if any. Progress made
+    /// before it is retained in `applied`.
+    pub blocked: Option<BlockedRuntimeJobDelivery>,
+}
+
+impl RuntimeJobDeliveryDrain {
+    pub fn is_fully_drained(&self) -> bool {
+        self.blocked.is_none()
+    }
+}
+
 #[derive(Clone)]
 pub struct JobRuntimeDeliveryApplier {
     runtime_inbox: RuntimeDeliveryInbox,
@@ -100,70 +128,106 @@ impl JobRuntimeDeliveryApplier {
         }
     }
 
+    /// Apply pending deliveries in inbox order, failing SAFE per runtime.
+    ///
+    /// `Err` means the inbox itself could not be read. Every failure after
+    /// that — a corrupt payload, an unsupported kind, a sink rejection, a
+    /// failed acknowledgement — is reported as `blocked` in an `Ok` drain
+    /// instead of aborting the caller, so one poisoned runtime cannot
+    /// head-of-line block every other runtime's delivery drain forever.
+    ///
+    /// Within one runtime the drain still stops at the blocked row: the
+    /// generated delivery authority enforces in-order acknowledgement, so
+    /// acknowledging past a failed row would silently discard a durable
+    /// delivery that may still be legitimately applied later. For a durable
+    /// delivery pipeline, a bounded per-runtime stall (observable, retried,
+    /// recoverable once the cause is fixed) is the lesser risk; silent loss
+    /// of a session-visible delivery is not recoverable at all.
     pub async fn apply_pending(
         &self,
         runtime_id: &LogicalRuntimeId,
         limit: usize,
-    ) -> Result<Vec<AppliedRuntimeJobDelivery>, JobOutboxProjectionError> {
+    ) -> Result<RuntimeJobDeliveryDrain, JobOutboxProjectionError> {
         let pending = self.runtime_inbox.list_pending(runtime_id, limit).await?;
-        let mut applied = Vec::with_capacity(pending.len());
+        let mut drain = RuntimeJobDeliveryDrain {
+            applied: Vec::with_capacity(pending.len()),
+            blocked: None,
+        };
         for record in pending {
-            let applications = match record.submission.kind() {
-                RuntimeDeliveryKind::JobNotification => {
-                    let payload: JobNotificationDeliveryPayload =
-                        serde_json::from_slice(record.submission.payload()).map_err(|error| {
-                            JobOutboxProjectionError::Corrupt(format!(
-                                "notification delivery {} payload is invalid: {error}",
-                                record.submission.delivery_id()
-                            ))
-                        })?;
-                    apply_subscriptions(
-                        &*self.sink,
-                        payload.job_id,
-                        payload.delivery_sequence,
-                        payload.origin_session_id,
-                        payload.interaction_lineage_id,
-                        payload.targets,
-                        JobDeliveryContent::Notification(payload.notification),
-                    )
-                    .await?
+            match self.apply_record(runtime_id, &record).await {
+                Ok(applications) => drain.applied.push(AppliedRuntimeJobDelivery {
+                    delivery_id: record.submission.delivery_id().clone(),
+                    runtime_sequence: record.sequence,
+                    applications,
+                }),
+                Err(error) => {
+                    drain.blocked = Some(BlockedRuntimeJobDelivery {
+                        delivery_id: record.submission.delivery_id().clone(),
+                        runtime_sequence: record.sequence,
+                        error: error.to_string(),
+                    });
+                    break;
                 }
-                RuntimeDeliveryKind::JobTerminal => {
-                    let payload: JobTerminalDeliveryPayload =
-                        serde_json::from_slice(record.submission.payload()).map_err(|error| {
-                            JobOutboxProjectionError::Corrupt(format!(
-                                "terminal delivery {} payload is invalid: {error}",
-                                record.submission.delivery_id()
-                            ))
-                        })?;
-                    apply_subscriptions(
-                        &*self.sink,
-                        payload.job_id,
-                        payload.delivery_sequence,
-                        payload.origin_session_id,
-                        payload.interaction_lineage_id,
-                        payload.targets,
-                        JobDeliveryContent::Terminal(payload.terminal_result),
-                    )
-                    .await?
-                }
-                _ => {
-                    return Err(JobOutboxProjectionError::Corrupt(format!(
-                        "delivery {} has an unsupported runtime kind",
-                        record.submission.delivery_id()
-                    )));
-                }
-            };
-            self.runtime_inbox
-                .mark_applied(runtime_id, record.submission.delivery_id(), record.sequence)
-                .await?;
-            applied.push(AppliedRuntimeJobDelivery {
-                delivery_id: record.submission.delivery_id().clone(),
-                runtime_sequence: record.sequence,
-                applications,
-            });
+            }
         }
-        Ok(applied)
+        Ok(drain)
+    }
+
+    async fn apply_record(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+    ) -> Result<usize, JobOutboxProjectionError> {
+        let applications = match record.submission.kind() {
+            RuntimeDeliveryKind::JobNotification => {
+                let payload: JobNotificationDeliveryPayload =
+                    serde_json::from_slice(record.submission.payload()).map_err(|error| {
+                        JobOutboxProjectionError::Corrupt(format!(
+                            "notification delivery {} payload is invalid: {error}",
+                            record.submission.delivery_id()
+                        ))
+                    })?;
+                apply_subscriptions(
+                    &*self.sink,
+                    payload.job_id,
+                    payload.delivery_sequence,
+                    payload.origin_session_id,
+                    payload.interaction_lineage_id,
+                    payload.targets,
+                    JobDeliveryContent::Notification(payload.notification),
+                )
+                .await?
+            }
+            RuntimeDeliveryKind::JobTerminal => {
+                let payload: JobTerminalDeliveryPayload =
+                    serde_json::from_slice(record.submission.payload()).map_err(|error| {
+                        JobOutboxProjectionError::Corrupt(format!(
+                            "terminal delivery {} payload is invalid: {error}",
+                            record.submission.delivery_id()
+                        ))
+                    })?;
+                apply_subscriptions(
+                    &*self.sink,
+                    payload.job_id,
+                    payload.delivery_sequence,
+                    payload.origin_session_id,
+                    payload.interaction_lineage_id,
+                    payload.targets,
+                    JobDeliveryContent::Terminal(payload.terminal_result),
+                )
+                .await?
+            }
+            _ => {
+                return Err(JobOutboxProjectionError::Corrupt(format!(
+                    "delivery {} has an unsupported runtime kind",
+                    record.submission.delivery_id()
+                )));
+            }
+        };
+        self.runtime_inbox
+            .mark_applied(runtime_id, record.submission.delivery_id(), record.sequence)
+            .await?;
+        Ok(applications)
     }
 }
 
@@ -228,6 +292,34 @@ pub struct ProjectedJobDelivery {
     pub delivery_sequence: u64,
     pub runtime_sequence: u64,
     pub runtime_deduplicated: bool,
+}
+
+/// A pending outbox entry whose projection failed during a pass.
+///
+/// The entry is never acknowledged on failure: it stays pending in the job
+/// outbox and is retried on the next pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedJobOutboxEntry {
+    pub job_id: JobId,
+    pub delivery_sequence: u64,
+    pub error: String,
+}
+
+/// Outcome of one projection pass over the pending job outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobOutboxProjectionPass {
+    /// Entries handed to the runtime inbox and acknowledged, in outbox order.
+    pub projected: Vec<ProjectedJobDelivery>,
+    /// First failing entry per poisoned job. Later pending entries of the
+    /// same job are held back for the pass to preserve per-job delivery
+    /// order; entries of other jobs keep projecting.
+    pub skipped: Vec<SkippedJobOutboxEntry>,
+}
+
+impl JobOutboxProjectionPass {
+    pub fn is_fully_projected(&self) -> bool {
+        self.skipped.is_empty()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -372,40 +464,76 @@ impl JobOutboxProjector {
         })
     }
 
+    /// Project pending outbox entries, failing SAFE per job.
+    ///
+    /// `Err` means the pending outbox itself could not be listed. Any
+    /// failure on an individual entry is reported in `skipped` instead of
+    /// aborting the pass, so one poisoned outbox row cannot head-of-line
+    /// block every other job's delivery projection forever. A failed entry
+    /// is never acknowledged — it stays pending and retries next pass — and
+    /// the rest of that job's entries are held back for the pass so per-job
+    /// delivery order is preserved.
     pub async fn project_pending(
         &self,
         limit: usize,
-    ) -> Result<Vec<ProjectedJobDelivery>, JobOutboxProjectionError> {
+    ) -> Result<JobOutboxProjectionPass, JobOutboxProjectionError> {
         let entries = self.job_store.list_pending_outbox(limit).await?;
-        let mut projected = Vec::with_capacity(entries.len());
+        let mut pass = JobOutboxProjectionPass {
+            projected: Vec::with_capacity(entries.len()),
+            skipped: Vec::new(),
+        };
+        let mut poisoned_jobs = std::collections::BTreeSet::new();
         for entry in entries {
-            if self.realm_id.is_some() {
-                let Some(job) = self.job_store.get(&entry.job_id).await? else {
-                    return Err(JobOutboxProjectionError::Corrupt(format!(
-                        "outbox entry points to missing job {}",
-                        entry.job_id
-                    )));
-                };
-                if !self.owns_job(&job) {
-                    continue;
+            if poisoned_jobs.contains(&entry.job_id) {
+                continue;
+            }
+            match self.project_entry(&entry).await {
+                Ok(Some(delivery)) => pass.projected.push(delivery),
+                Ok(None) => {}
+                Err(error) => {
+                    pass.skipped.push(SkippedJobOutboxEntry {
+                        job_id: entry.job_id.clone(),
+                        delivery_sequence: entry.delivery_sequence,
+                        error: error.to_string(),
+                    });
+                    poisoned_jobs.insert(entry.job_id);
                 }
             }
-            let prepared = self.prepare(&entry).await?;
-            let runtime = self
-                .runtime_inbox
-                .submit(&prepared.runtime_id, prepared.submission)
-                .await?;
-            self.job_service
-                .mark_delivery_applied(&entry.job_id, entry.delivery_sequence)
-                .await?;
-            projected.push(ProjectedJobDelivery {
-                job_id: entry.job_id,
-                delivery_sequence: entry.delivery_sequence,
-                runtime_sequence: runtime.sequence,
-                runtime_deduplicated: runtime.deduplicated,
-            });
         }
-        Ok(projected)
+        Ok(pass)
+    }
+
+    /// Project one pending entry; `Ok(None)` means the entry belongs to a
+    /// realm outside this projector's authority.
+    async fn project_entry(
+        &self,
+        entry: &JobOutboxEntry,
+    ) -> Result<Option<ProjectedJobDelivery>, JobOutboxProjectionError> {
+        if self.realm_id.is_some() {
+            let Some(job) = self.job_store.get(&entry.job_id).await? else {
+                return Err(JobOutboxProjectionError::Corrupt(format!(
+                    "outbox entry points to missing job {}",
+                    entry.job_id
+                )));
+            };
+            if !self.owns_job(&job) {
+                return Ok(None);
+            }
+        }
+        let prepared = self.prepare(entry).await?;
+        let runtime = self
+            .runtime_inbox
+            .submit(&prepared.runtime_id, prepared.submission)
+            .await?;
+        self.job_service
+            .mark_delivery_applied(&entry.job_id, entry.delivery_sequence)
+            .await?;
+        Ok(Some(ProjectedJobDelivery {
+            job_id: entry.job_id.clone(),
+            delivery_sequence: entry.delivery_sequence,
+            runtime_sequence: runtime.sequence,
+            runtime_deduplicated: runtime.deduplicated,
+        }))
     }
 }
 

@@ -62,7 +62,9 @@ fn documented_composition_names(mdx: &str) -> std::collections::BTreeSet<String>
         if let Some(inner) = first_cell
             .strip_prefix('`')
             .and_then(|s| s.strip_suffix('`'))
-            && (inner.ends_with("_bundle") || inner.ends_with("_seam"))
+            && (inner.ends_with("_bundle")
+                || inner.ends_with("_seam")
+                || inner.ends_with("_delivery"))
         {
             names.insert(inner.to_string());
         }

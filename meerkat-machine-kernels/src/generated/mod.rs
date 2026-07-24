@@ -5,6 +5,7 @@ pub mod detached_job;
 pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;
+pub mod runtime_delivery;
 pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_turn_admission;

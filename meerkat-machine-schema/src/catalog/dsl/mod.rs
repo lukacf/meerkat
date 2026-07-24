@@ -39,6 +39,7 @@ pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
+pub mod runtime_delivery;
 pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_persistence_version_authority;
@@ -106,6 +107,8 @@ pub const DETACHED_JOB_PRODUCTION_RUST_CRATE: &str = "meerkat-jobs";
 pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
+pub const RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const RUNTIME_DELIVERY_PRODUCTION_RUST_MODULE: &str = "delivery_inbox::dsl";
 pub const MOB_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_MACHINE_PRODUCTION_RUST_MODULE: &str = "machines::mob_machine";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
@@ -541,6 +544,18 @@ pub fn dsl_detached_job_machine_production_schema() -> MachineSchema {
         dsl_detached_job_machine(),
         DETACHED_JOB_PRODUCTION_RUST_CRATE,
         DETACHED_JOB_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn dsl_runtime_delivery_machine() -> MachineSchema {
+    runtime_delivery::RuntimeDeliveryMachineState::schema()
+}
+
+pub fn dsl_runtime_delivery_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_runtime_delivery_machine(),
+        RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE,
+        RUNTIME_DELIVERY_PRODUCTION_RUST_MODULE,
     )
 }
 

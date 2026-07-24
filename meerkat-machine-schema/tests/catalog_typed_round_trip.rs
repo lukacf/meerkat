@@ -78,6 +78,7 @@ fn canonical_machine_slug_snapshot() {
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),
+            "RuntimeDeliveryMachine".to_string(),
             "ScheduleLifecycleMachine".to_string(),
             "SessionDocumentMachine".to_string(),
             "SessionTurnAdmissionMachine".to_string(),
@@ -101,6 +102,7 @@ fn canonical_composition_slug_snapshot() {
         vec![
             "adaptive_mob_bundle".to_string(),
             "auth_lease_bundle".to_string(),
+            "job_runtime_delivery".to_string(),
             "meerkat_mob_seam".to_string(),
             "schedule_bundle".to_string(),
             "schedule_mob_bundle".to_string(),

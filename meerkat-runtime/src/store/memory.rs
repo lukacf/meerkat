@@ -3,7 +3,7 @@
 //! Uses `tokio::sync::Mutex` per the in-memory concurrency rule.
 //! All mutations complete inside one lock acquisition (no lock held across .await).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 #[cfg(test)]
@@ -20,6 +20,7 @@ use super::{
     AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
     InputStateBatchCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
     MachineLifecycleExpectedVersion, MachineLifecycleObservation, MachineLifecycleStoreRecord,
+    RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
     RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
     SessionDelta, classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
     decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
@@ -78,6 +79,10 @@ struct Inner {
     /// Runtime id -> transcript-rewrite-keyed compaction projection outbox.
     compaction_projection_outbox:
         HashMap<String, HashMap<meerkat_core::CompactionProjectionId, CompactionOutboxEntry>>,
+    /// Exact generated runtime-delivery authority by logical runtime.
+    runtime_delivery_authority: HashMap<String, RuntimeDeliveryAuthorityRecord>,
+    /// Durable runtime-delivery rows ordered by generated sequence.
+    runtime_delivery_records: HashMap<String, BTreeMap<u64, RuntimeDeliveryStoreRecord>>,
 }
 
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
@@ -222,6 +227,126 @@ fn ensure_compaction_intents_already_outboxed(
 impl RuntimeStore for InMemoryRuntimeStore {
     fn supports_compaction_projection_outbox(&self) -> bool {
         true
+    }
+
+    async fn load_runtime_delivery_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeDeliveryAuthorityRecord>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .runtime_delivery_authority
+            .get(&runtime_id.0)
+            .cloned())
+    }
+
+    async fn load_runtime_delivery_record(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .runtime_delivery_records
+            .get(&runtime_id.0)
+            .and_then(|records| {
+                records
+                    .values()
+                    .find(|record| record.delivery_id() == delivery_id)
+            })
+            .cloned())
+    }
+
+    async fn compare_and_swap_runtime_delivery_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
+    ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let current = inner.runtime_delivery_authority.get(&runtime_id.0).cloned();
+        if current
+            .as_ref()
+            .map(RuntimeDeliveryAuthorityRecord::revision)
+            != expected_revision
+        {
+            return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+        }
+        let required_revision = expected_revision
+            .map_or(Some(1), |revision| revision.checked_add(1))
+            .ok_or_else(|| {
+                RuntimeStoreError::WriteFailed(
+                    "runtime delivery authority revision exhausted u64".into(),
+                )
+            })?;
+        if replacement.revision() != required_revision {
+            return Err(RuntimeStoreError::WriteFailed(format!(
+                "runtime delivery replacement revision {} is not required successor {required_revision}",
+                replacement.revision()
+            )));
+        }
+        if let Some(record) = inserted_delivery.as_ref() {
+            let records = inner
+                .runtime_delivery_records
+                .entry(runtime_id.0.clone())
+                .or_default();
+            if records.contains_key(&record.sequence())
+                || records
+                    .values()
+                    .any(|existing| existing.delivery_id() == record.delivery_id())
+            {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "runtime delivery row {} / sequence {} already exists",
+                    record.delivery_id(),
+                    record.sequence()
+                )));
+            }
+        }
+
+        inner
+            .runtime_delivery_authority
+            .insert(runtime_id.0.clone(), replacement.clone());
+        if let Some(record) = inserted_delivery {
+            inner
+                .runtime_delivery_records
+                .entry(runtime_id.0.clone())
+                .or_default()
+                .insert(record.sequence(), record);
+        }
+        Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
+    }
+
+    async fn list_runtime_delivery_records(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .runtime_delivery_records
+            .get(&runtime_id.0)
+            .into_iter()
+            .flat_map(|records| {
+                records
+                    .range((
+                        std::ops::Bound::Excluded(after_sequence),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .take(limit)
+                    .map(|(_, record)| record.clone())
+            })
+            .collect())
     }
 
     fn persist_auth_oauth_flow_snapshot(

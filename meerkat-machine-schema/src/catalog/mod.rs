@@ -7,9 +7,10 @@ use crate::{RustBinding, identity::MachineId};
 
 // Canonical exposures for the two-kernel cutover
 pub use compositions::{
-    adaptive_mob_bundle_composition, auth_lease_bundle_composition, meerkat_mob_seam_composition,
-    schedule_bundle_composition, schedule_mob_bundle_composition,
-    schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
+    adaptive_mob_bundle_composition, auth_lease_bundle_composition,
+    job_runtime_delivery_composition, meerkat_mob_seam_composition, schedule_bundle_composition,
+    schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
+    workgraph_attention_bundle_composition,
 };
 pub use coverage::{
     CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
@@ -46,6 +47,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_auth_machine(),
         dsl::dsl_approval_lifecycle_machine(),
         dsl::dsl_detached_job_machine(),
+        dsl::dsl_runtime_delivery_machine(),
         dsl::dsl_session_document_machine(),
         dsl::dsl_session_turn_admission_machine(),
         dsl::dsl_workgraph_lifecycle_machine(),
@@ -56,6 +58,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
 pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
     vec![
         meerkat_mob_seam_composition(),
+        job_runtime_delivery_composition(),
         schedule_bundle_composition(),
         schedule_runtime_bundle_composition(),
         schedule_mob_bundle_composition(),
@@ -86,6 +89,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "DetachedJobMachine",
             dsl::DETACHED_JOB_PRODUCTION_RUST_CRATE,
             dsl::DETACHED_JOB_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "RuntimeDeliveryMachine",
+            dsl::RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE,
+            dsl::RUNTIME_DELIVERY_PRODUCTION_RUST_MODULE,
         ),
         MachineProductionOwnerRelation::new(
             "SessionDocumentMachine",

@@ -6,6 +6,10 @@ not be absorbed into current work without re-triage.
 
 ## Open
 
+- Phase 3A: publish applied job-terminal inbox rows through the existing
+  runtime-owned quiescence, continuation, wake, typed-notice, and
+  `AgentApplied` boundary. The operation completion feed remains a read-only,
+  operation-specific projection and must not become job lifecycle authority.
 - Phase 3A/3B: runner-owned progress/artifact reporting must add typed artifact
   references without turning the store or worker shell into lifecycle
   authority.
@@ -49,3 +53,15 @@ not be absorbed into current work without re-triage.
   bypassed the shared TEXT/BLOB JSON codec. Revisions now use an eight-byte
   big-endian CAS token, SQLite errors stay typed, both JSON storage classes are
   accepted, and memory/SQLite share pending-outbox acknowledgement conformance.
+- Phase 2C: job terminal delivery now crosses an explicit generated
+  `job_runtime_delivery` composition. `RuntimeDeliveryMachine` alone
+  mints/reuses the runtime sequence and advances the ordered application
+  cursor; memory and SQLite stores only CAS opaque authority and inbox rows.
+- Phase 2C: crash before the runtime insert leaves the job outbox pending, and
+  crash after the runtime insert but before job acknowledgement reuses the
+  original runtime sequence. Focused tests also pin concurrent replay, ordered
+  one-time application, SQLite reopen, and unchanged job attempt/fence facts.
+- Phase 2C: recovery validation no longer expands the numeric range implied by
+  a corrupted delivery high-water mark. Persisted submissions re-run
+  constructor invariants, and recovered inbox rows must match the generated
+  source-sequence authority before application.

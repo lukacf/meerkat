@@ -145,6 +145,11 @@ pub use meerkat_core::{
 
 mod agent_builder;
 pub use agent_builder::AgentBuilder;
+mod job_delivery;
+pub use job_delivery::{
+    JobOutboxProjectionError, JobOutboxProjector, JobTerminalDeliveryPayload, PreparedJobDelivery,
+    ProjectedJobDelivery,
+};
 
 // Config store types (filesystem-dependent — not available on wasm32)
 #[cfg(not(target_arch = "wasm32"))]
@@ -309,7 +314,12 @@ pub use meerkat_core::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_jobs::SqliteDetachedJobStore;
 pub use meerkat_jobs::{
-    DetachedJobError, DetachedJobService, DetachedJobStore, MemoryDetachedJobStore,
+    AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
+    CheckpointRef, DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId,
+    FenceToken, InteractionLineageId, JobFailureCode, JobId, JobOutboxEntry, JobPhase, JobProgress,
+    JobReceipt, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobTerminalKind,
+    JobTerminalResult, MemoryDetachedJobStore, OriginMemberId, RestartClass, RunnerHandleRef,
+    RunnerIdentity, ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

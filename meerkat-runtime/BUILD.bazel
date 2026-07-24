@@ -879,6 +879,74 @@ rust_test(
 )
 
 rust_test(
+    name = "durable_delivery_inbox_test",
+    aliases = aliases(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "durable_delivery_inbox",
+    crate_root = "tests/durable_delivery_inbox.rs",
+    crate_features = [
+        "live",
+        "sqlite-store",
+        "test-support",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/comms_drain.rs",
+        "src/handles/peer_comms.rs",
+        "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
+        "tests/fixtures/v0_6_34_completed_idle/schema.sql",
+    ],
+    srcs = [
+        "tests/durable_delivery_inbox.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_BIN_NAME": "durable_delivery_inbox",
+        "CARGO_MANIFEST_DIR": "./meerkat-runtime",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "live",
+    ],
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-derive:meerkat_machine_derive",
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-live:meerkat_live",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "handles_dispatch_through_dispatcher_test",
     aliases = aliases(
         package_name = "meerkat-runtime",

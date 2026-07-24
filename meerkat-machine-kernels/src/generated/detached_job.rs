@@ -377,6 +377,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TerminalCommitted {
+        pub job_id: String,
         pub terminal_kind: DetachedJobTerminalKind,
         pub delivery_sequence: u64,
     }

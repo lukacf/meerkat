@@ -30,7 +30,7 @@ meerkat-core              (pure types, traits, agent loop, session-store contrac
   ├── meerkat-tools           (tool registry, builtins, shell, session-scoped task store)
   ├── meerkat-session         (session service: Ephemeral, Persistent)
   ├── meerkat-runtime         (runtime control plane, policy engine, completion-feed wake,
-                                DSL handle impls)
+                                generated durable-delivery inbox/cursor authority, DSL handle impls)
   ├── meerkat-jobs            (generated DetachedJobMachine authority, fenced attempts,
                                 typed terminal results, atomic outbox, memory/disk stores)
   ├── meerkat-workgraph       (realm-scoped durable WorkGraph service, stores, tools, read surface)
@@ -132,7 +132,14 @@ profiles; the in-repo stores run the same suite in
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `DetachedJobStore` | Atomic durable job insertion, realm-scoped submission deduplication, revision CAS, and terminal outbox persistence; lifecycle meaning remains generated-machine-owned | `MemoryDetachedJobStore` (SQLite implementation follows in Phase 2B) |
+| `DetachedJobStore` | Atomic durable job insertion, realm-scoped submission deduplication, revision CAS, and terminal outbox persistence; lifecycle meaning remains generated-machine-owned | `MemoryDetachedJobStore`, `SqliteDetachedJobStore` |
+
+### Runtime delivery traits (defined in meerkat-runtime)
+
+| Trait/type | Purpose | Implementors |
+|-------|---------|-------------|
+| `RuntimeStore` delivery primitives | Persist opaque generated `RuntimeDeliveryMachine` authority with CAS and atomically insert ordered inbox rows; stores do not assign sequence or application semantics | `InMemoryRuntimeStore`, `SqliteRuntimeStore` |
+| `RuntimeDeliveryInbox` | Apply generated identity/sequence/cursor transitions over a runtime store and expose pending durable delivery records | Runtime-owned service |
 
 ### Session traits (defined in meerkat-session)
 

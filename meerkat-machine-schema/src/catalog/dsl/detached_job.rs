@@ -185,6 +185,7 @@ machine! {
                 retry_due_at_ms: u64,
             },
             TerminalCommitted {
+                job_id: String,
                 terminal_kind: Enum<DetachedJobTerminalKind>,
                 delivery_sequence: u64,
             },
@@ -267,7 +268,7 @@ machine! {
         disposition CancelRequested => local seam SurfaceResultAlignment,
         disposition LeaseExpiryRecorded => local seam SurfaceResultAlignment,
         disposition RetryScheduled => local seam SurfaceResultAlignment,
-        disposition TerminalCommitted => local seam SurfaceResultAlignment,
+        disposition TerminalCommitted => routed [RuntimeDeliveryMachine] seam NoOwnerRealization,
         disposition DeliveryApplied => local seam SurfaceResultAlignment,
 
         transition SubmitQueued {
@@ -605,6 +606,7 @@ machine! {
             }
             to Cancelled
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Cancelled,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -622,6 +624,7 @@ machine! {
             }
             to Cancelled
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Cancelled,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -639,6 +642,7 @@ machine! {
             }
             to Cancelled
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Cancelled,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -713,6 +717,7 @@ machine! {
             }
             to WorkerLost
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::WorkerLost,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -734,6 +739,7 @@ machine! {
             }
             to Succeeded
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Succeeded,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -755,6 +761,7 @@ machine! {
             }
             to Succeeded
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Succeeded,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -776,6 +783,7 @@ machine! {
             }
             to Failed
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Failed,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -797,6 +805,7 @@ machine! {
             }
             to Failed
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Failed,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -819,6 +828,7 @@ machine! {
             }
             to Cancelled
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Cancelled,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -841,6 +851,7 @@ machine! {
             }
             to Cancelled
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::Cancelled,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -858,6 +869,7 @@ machine! {
             }
             to NeedsAttention
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::NeedsAttention,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -875,6 +887,7 @@ machine! {
             }
             to NeedsAttention
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::NeedsAttention,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -892,6 +905,7 @@ machine! {
             }
             to NeedsAttention
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::NeedsAttention,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -909,6 +923,7 @@ machine! {
             }
             to NeedsAttention
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::NeedsAttention,
                 delivery_sequence: self.terminal_delivery_sequence
             }
@@ -926,6 +941,7 @@ machine! {
             }
             to NeedsAttention
             emit TerminalCommitted {
+                job_id: self.job_id,
                 terminal_kind: DetachedJobTerminalKind::NeedsAttention,
                 delivery_sequence: self.terminal_delivery_sequence
             }

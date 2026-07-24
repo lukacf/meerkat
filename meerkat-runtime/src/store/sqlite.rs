@@ -24,8 +24,9 @@ mod inner {
         AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome,
         FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome, MachineLifecycleCasOutcome,
         MachineLifecycleCommit, MachineLifecycleExpectedVersion, MachineLifecycleObservation,
-        MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
-        RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
+        MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeDeliveryAuthorityCasOutcome,
+        RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeStore,
+        RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
         classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
         decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
         prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
@@ -95,15 +96,45 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
         tx.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
     }
 
+    const CREATE_RUNTIME_DELIVERY_SCHEMA_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS runtime_delivery_authority (
+    runtime_id TEXT PRIMARY KEY,
+    revision BLOB NOT NULL CHECK (length(revision) = 8),
+    state_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_delivery_inbox (
+    runtime_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    sequence BLOB NOT NULL CHECK (length(sequence) = 8),
+    submission_json BLOB NOT NULL,
+    PRIMARY KEY (runtime_id, delivery_id),
+    UNIQUE (runtime_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
+    ON runtime_delivery_inbox (runtime_id, sequence)";
+
+    fn migration_0002_runtime_delivery_inbox(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_DELIVERY_SCHEMA_SQL)
+    }
+
     /// The runtime store's schema domain in the per-file migration ledger.
     /// (Co-tenants the sessions file in the sqlite realm backend.)
     pub const RUNTIME_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
         name: "runtime-store",
-        migrations: &[meerkat_sqlite::Migration {
-            version: 1,
-            name: "base-schema",
-            apply: migration_0001_runtime_schema,
-        }],
+        migrations: &[
+            meerkat_sqlite::Migration {
+                version: 1,
+                name: "base-schema",
+                apply: migration_0001_runtime_schema,
+            },
+            meerkat_sqlite::Migration {
+                version: 2,
+                name: "runtime-delivery-inbox",
+                apply: migration_0002_runtime_delivery_inbox,
+            },
+        ],
     };
 
     fn map_shared_sqlite_error(err: meerkat_sqlite::SqliteStoreError) -> RuntimeStoreError {
@@ -178,6 +209,20 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
 
     fn runtime_id_text(runtime_id: &LogicalRuntimeId) -> &str {
         &runtime_id.0
+    }
+
+    fn encode_u64(value: u64) -> [u8; 8] {
+        value.to_be_bytes()
+    }
+
+    fn decode_u64(bytes: Vec<u8>, label: &str) -> Result<u64, RuntimeStoreError> {
+        let encoded: [u8; 8] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+            RuntimeStoreError::ReadFailed(format!(
+                "{label} must be an 8-byte unsigned integer, found {} bytes",
+                bytes.len()
+            ))
+        })?;
+        Ok(u64::from_be_bytes(encoded))
     }
 
     /// Deserialize a persisted session-snapshot row through typed serde.
@@ -1331,6 +1376,194 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
     impl RuntimeStore for SqliteRuntimeStore {
         fn supports_compaction_projection_outbox(&self) -> bool {
             true
+        }
+
+        async fn load_runtime_delivery_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeDeliveryAuthorityRecord>, RuntimeStoreError> {
+            let conn = open_runtime_connection(&self.path)?;
+            conn.query_row(
+                r"
+                SELECT revision, state_json
+                  FROM runtime_delivery_authority
+                 WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .map(|(revision, state_json)| {
+                Ok(RuntimeDeliveryAuthorityRecord::from_parts(
+                    decode_u64(revision, "runtime delivery authority revision")?,
+                    state_json,
+                ))
+            })
+            .transpose()
+        }
+
+        async fn load_runtime_delivery_record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            delivery_id: &str,
+        ) -> Result<Option<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+            let conn = open_runtime_connection(&self.path)?;
+            conn.query_row(
+                r"
+                SELECT sequence, submission_json
+                  FROM runtime_delivery_inbox
+                 WHERE runtime_id = ?1 AND delivery_id = ?2
+                ",
+                params![runtime_id_text(runtime_id), delivery_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .map(|(sequence, submission_json)| {
+                Ok(RuntimeDeliveryStoreRecord::from_parts(
+                    delivery_id,
+                    decode_u64(sequence, "runtime delivery sequence")?,
+                    submission_json,
+                ))
+            })
+            .transpose()
+        }
+
+        async fn compare_and_swap_runtime_delivery_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: Option<u64>,
+            replacement: RuntimeDeliveryAuthorityRecord,
+            inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
+        ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
+            let mut conn = open_runtime_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT revision, state_json
+                      FROM runtime_delivery_authority
+                     WHERE runtime_id = ?1
+                    ",
+                    params![runtime_id_text(runtime_id)],
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .map(|(revision, state_json)| {
+                    Ok(RuntimeDeliveryAuthorityRecord::from_parts(
+                        decode_u64(revision, "runtime delivery authority revision")?,
+                        state_json,
+                    ))
+                })
+                .transpose()?;
+            if current
+                .as_ref()
+                .map(RuntimeDeliveryAuthorityRecord::revision)
+                != expected_revision
+            {
+                return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+            }
+            let required_revision = expected_revision
+                .map_or(Some(1), |revision| revision.checked_add(1))
+                .ok_or_else(|| {
+                    RuntimeStoreError::WriteFailed(
+                        "runtime delivery authority revision exhausted u64".into(),
+                    )
+                })?;
+            if replacement.revision() != required_revision {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "runtime delivery replacement revision {} is not required successor {required_revision}",
+                    replacement.revision()
+                )));
+            }
+
+            if let Some(record) = inserted_delivery.as_ref() {
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_delivery_inbox
+                        (runtime_id, delivery_id, sequence, submission_json)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        record.delivery_id(),
+                        encode_u64(record.sequence()).as_slice(),
+                        record.submission_json(),
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            }
+
+            tx.execute(
+                r"
+                INSERT INTO runtime_delivery_authority (runtime_id, revision, state_json)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(runtime_id) DO UPDATE SET
+                    revision = excluded.revision,
+                    state_json = excluded.state_json
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    encode_u64(replacement.revision()).as_slice(),
+                    replacement.state_json(),
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
+        }
+
+        async fn list_runtime_delivery_records(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            after_sequence: u64,
+            limit: usize,
+        ) -> Result<Vec<RuntimeDeliveryStoreRecord>, RuntimeStoreError> {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let conn = open_runtime_connection(&self.path)?;
+            let mut statement = conn
+                .prepare(
+                    r"
+                    SELECT delivery_id, sequence, submission_json
+                      FROM runtime_delivery_inbox
+                     WHERE runtime_id = ?1 AND sequence > ?2
+                     ORDER BY sequence ASC
+                     LIMIT ?3
+                    ",
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        runtime_id_text(runtime_id),
+                        encode_u64(after_sequence).as_slice(),
+                        i64::try_from(limit).unwrap_or(i64::MAX),
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (delivery_id, sequence, submission_json) =
+                    row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                records.push(RuntimeDeliveryStoreRecord::from_parts(
+                    delivery_id,
+                    decode_u64(sequence, "runtime delivery sequence")?,
+                    submission_json,
+                ));
+            }
+            Ok(records)
         }
 
         fn auth_authority_key(&self) -> Option<String> {

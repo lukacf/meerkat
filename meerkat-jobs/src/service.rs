@@ -499,12 +499,13 @@ fn project_optional_terminal(
 ) -> Result<bool, DetachedJobError> {
     let mut committed = effects.iter().filter_map(|effect| match effect {
         dsl::DetachedJobEffect::TerminalCommitted {
+            job_id,
             terminal_kind,
             delivery_sequence,
-        } => Some((*terminal_kind, *delivery_sequence)),
+        } => Some((job_id.as_str(), *terminal_kind, *delivery_sequence)),
         _ => None,
     });
-    let Some((terminal_kind, delivery_sequence)) = committed.next() else {
+    let Some((emitted_job_id, terminal_kind, delivery_sequence)) = committed.next() else {
         return Ok(false);
     };
     if committed.next().is_some() {
@@ -516,6 +517,12 @@ fn project_optional_terminal(
         return Err(DetachedJobError::Store(format!(
             "machine terminal kind {terminal_kind:?} disagrees with typed result {:?}",
             result.kind()
+        )));
+    }
+    if emitted_job_id != job.job_id.as_str() {
+        return Err(DetachedJobError::Store(format!(
+            "machine terminal job id {emitted_job_id} disagrees with stored job {}",
+            job.job_id
         )));
     }
     if job.terminal_result.is_some() || !job.outbox.is_empty() {

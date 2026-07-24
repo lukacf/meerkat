@@ -543,6 +543,14 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
                 "meerkat-workgraph/src/store.rs",
             ]
         }
+        ("DetachedJobMachine", "RuntimeDeliveryMachine")
+        | ("RuntimeDeliveryMachine", "DetachedJobMachine") => {
+            // The facade projector realizes both halves of the two-store
+            // protocol: submit terminal outbox payload into runtime delivery
+            // authority, then acknowledge the job only after durable commit
+            // or exact generated reuse.
+            vec!["meerkat/src/job_delivery.rs"]
+        }
         _ => vec![],
     }
 }

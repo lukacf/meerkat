@@ -56,7 +56,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelRequested`
 - `LeaseExpiryRecorded`
 - `RetryScheduled`(retry_due_at_ms: u64)
-- `TerminalCommitted`(terminal_kind: DetachedJobTerminalKind, delivery_sequence: u64)
+- `TerminalCommitted`(job_id: String, terminal_kind: DetachedJobTerminalKind, delivery_sequence: u64)
 - `DeliveryApplied`(delivery_sequence: u64)
 
 ## Invariants

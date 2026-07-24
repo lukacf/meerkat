@@ -263,8 +263,8 @@ mod tests {
             "help skill must teach the actual MCP CLI config surface"
         );
         assert!(
-            MEERKAT_PLATFORM_SKILL_BODY.contains("meerkat = \"0.7\""),
-            "facade examples must track the current 0.7 release family"
+            MEERKAT_PLATFORM_SKILL_BODY.contains("meerkat = \"0.8\""),
+            "facade examples must track the current 0.8 release family"
         );
         assert!(
             MEERKAT_PLATFORM_SKILL_BODY.contains("Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`, `workgraph`, `live`."),

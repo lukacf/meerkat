@@ -369,7 +369,22 @@ pub struct TranscriptHistoryState {
     pub commits: Vec<TranscriptRewriteCommit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<TranscriptRevisionBody>,
+    /// Digest-format generation of the revision strings. Documents stamped
+    /// `>= 2` were written by the content-addressed digest format, so decode
+    /// skips the per-decode legacy-heal probe (a full-transcript hash);
+    /// absent/0 means unknown provenance and the probe runs once — the next
+    /// save persists the marker. A compatibility convenience, not an
+    /// integrity boundary (checkpoint stamps own integrity).
+    #[serde(default, skip_serializing_if = "digest_format_is_unknown")]
+    pub digest_format: u32,
 }
+
+fn digest_format_is_unknown(format: &u32) -> bool {
+    *format == 0
+}
+
+/// The digest-format generation minted by [`transcript_messages_digest`].
+pub(crate) const TRANSCRIPT_DIGEST_FORMAT_CURRENT: u32 = 2;
 
 impl<'de> Deserialize<'de> for TranscriptHistoryState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -384,12 +399,15 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
             commits: Vec<TranscriptRewriteCommit>,
             #[serde(default)]
             revisions: Vec<TranscriptRevisionBody>,
+            #[serde(default)]
+            digest_format: u32,
         }
         let wire = Wire::deserialize(deserializer)?;
         let mut state = TranscriptHistoryState {
             head: wire.head,
             commits: wire.commits,
             revisions: wire.revisions,
+            digest_format: wire.digest_format,
         };
         // Pre-parent-pointer v1 snapshots serialized each body as
         // {created_at,messages,revision}. When every non-root body lacks a
@@ -408,23 +426,30 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
                 state.revisions[index].parent_revision = Some(parent);
             }
         }
-        // Fast path: a graph written by the current digest format has a head
-        // body whose content digest equals the head string; skip the heal.
-        let head_is_current = match state
-            .revisions
-            .iter()
-            .find(|body| body.revision == state.head)
-        {
-            Some(head_body) => {
-                transcript_messages_digest(&head_body.messages).map_err(serde::de::Error::custom)?
-                    == state.head
-            }
-            None => true,
-        };
+        // Fast path: a graph stamped with the current digest format skips the
+        // heal probe outright — the probe hashes the full head transcript,
+        // which is decode-hot (every session load). Unstamped graphs (legacy
+        // or pre-marker writers) pay the probe once; their next save
+        // persists the marker.
+        let head_is_current = state.digest_format >= TRANSCRIPT_DIGEST_FORMAT_CURRENT
+            || match state
+                .revisions
+                .iter()
+                .find(|body| body.revision == state.head)
+            {
+                Some(head_body) => {
+                    transcript_messages_digest(&head_body.messages)
+                        .map_err(serde::de::Error::custom)?
+                        == state.head
+                }
+                None => true,
+            };
+        state.digest_format = TRANSCRIPT_DIGEST_FORMAT_CURRENT;
         if !head_is_current {
             let TranscriptHistoryState {
                 head,
                 commits,
+                digest_format: _,
                 revisions,
             } = &mut state;
             heal_legacy_revision_strings(revisions, commits, Some(head))
@@ -658,6 +683,7 @@ impl TranscriptHistoryState {
                 head: record.commit.parent_revision.clone(),
                 commits: Vec::new(),
                 revisions: Vec::new(),
+                digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
             });
             if record.commit.parent_revision != state.head {
                 if revision_body_extends_head(&record.parent_body, &state.revisions, &state.head)? {
@@ -1278,6 +1304,7 @@ fn revision_body_extends_head(
 }
 
 fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
+    crate::checkpoint::record_content_digest_computation();
     let bytes = serde_json::to_vec(value)?;
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
@@ -5988,6 +6015,52 @@ impl Session {
                 actual,
             });
         }
+        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
+        Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
+    }
+
+    /// [`Session::try_checkpoint_state`] for steady-state READS of durable
+    /// documents, skipping the canonical-content digest recomputation when
+    /// this process already fully verified this exact document shape and
+    /// stamp digest.
+    ///
+    /// Admission into the memo requires one complete verification (here, in
+    /// `try_checkpoint_state`, or at stamp install time), so the first read
+    /// after boot still hashes once. Content changes re-key the memo and
+    /// re-verify: the key carries the stamp digest plus the document's cheap
+    /// shape (message count, metadata entry count, content timestamps), and
+    /// every content mutation seam advances at least one of those. Write,
+    /// adoption, and convergence seams must keep calling
+    /// [`Session::try_checkpoint_state`]: a cached hit is memoized trust,
+    /// not a fresh proof of current bytes.
+    pub fn try_checkpoint_state_cached(
+        &self,
+    ) -> Result<crate::checkpoint::SessionCheckpointState, crate::checkpoint::SessionCheckpointError>
+    {
+        let stamp =
+            match crate::checkpoint::session_checkpoint_metadata_state(&self.id, &self.metadata)? {
+                crate::checkpoint::SessionCheckpointMetadataState::Stamped(stamp) => stamp,
+                crate::checkpoint::SessionCheckpointMetadataState::LegacyUnverified {
+                    legacy_runtime_checkpoint,
+                } => {
+                    return Ok(
+                        crate::checkpoint::SessionCheckpointState::LegacyUnverified {
+                            legacy_runtime_checkpoint,
+                        },
+                    );
+                }
+            };
+        if crate::checkpoint::checkpoint_stamp_verification_is_cached(self, stamp.digest()) {
+            return Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp));
+        }
+        let actual = crate::checkpoint::session_checkpoint_digest(self)?;
+        if stamp.digest() != &actual {
+            return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
+                expected: stamp.digest().clone(),
+                actual,
+            });
+        }
+        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
         Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
     }
 
@@ -6015,6 +6088,9 @@ impl Session {
             .remove(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
         self.metadata
             .insert(SESSION_CHECKPOINT_STAMP_KEY.to_string(), value);
+        // Recorded after the stamp insertion so the memoized document shape
+        // matches the persisted (and later reloaded) document exactly.
+        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
         Ok(())
     }
 
@@ -6251,6 +6327,7 @@ impl Session {
                 head: commit.parent_revision.clone(),
                 commits: Vec::new(),
                 revisions: Vec::new(),
+                digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
             });
         if !state
             .revisions
@@ -7930,6 +8007,7 @@ mod tests {
         let (commit, parent_messages, revision_messages) = legacy_rewrite_fixture();
         let state = TranscriptHistoryState {
             head: commit.revision.clone(),
+            digest_format: 0,
             commits: vec![commit.clone()],
             revisions: vec![
                 TranscriptRevisionBody {
@@ -8021,6 +8099,7 @@ mod tests {
         let (commit, parent_messages, _revision_messages) = legacy_rewrite_fixture();
         let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let state = TranscriptHistoryState {
+            digest_format: 0,
             head: bogus.to_string(),
             commits: Vec::new(),
             revisions: vec![TranscriptRevisionBody {

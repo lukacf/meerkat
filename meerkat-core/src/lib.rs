@@ -132,8 +132,9 @@ pub use checkpoint::{
     SessionLineageId, adopt_legacy_session, legacy_session_source_blob_digest,
     legacy_session_transcript_relation, legacy_snapshot_vs_typed_projection_transcript_relation,
     session_checkpoint_digest, session_checkpoint_metadata_state, session_checkpoint_relation,
-    session_checkpoints_are_exact, session_transcript_history_checkpoint_digest,
-    transcript_history_checkpoint_digest,
+    session_checkpoints_are_exact, session_content_digest_computations,
+    session_transcript_history_checkpoint_digest, transcript_history_checkpoint_digest,
+    verified_checkpoint_stamp_relation,
 };
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,

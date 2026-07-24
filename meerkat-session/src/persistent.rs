@@ -2524,6 +2524,33 @@ fn verified_checkpoint_stamp_for_recovery(
     }
 }
 
+/// Read-side twin of [`verified_checkpoint_stamp_for_recovery`] for
+/// steady-state read arbitration over freshly deserialized durable copies.
+///
+/// It trusts the process-lifetime verification memo
+/// ([`Session::try_checkpoint_state_cached`]) so an unchanged document is
+/// not re-hashed on every load; first sight of a digest in this process
+/// still verifies fully. Recovery and rollback WRITE guards must keep the
+/// fully re-verifying form above.
+fn verified_checkpoint_stamp_for_read(
+    session: &Session,
+    expected_session_id: &SessionId,
+    _role: &str,
+) -> Result<meerkat_core::SessionCheckpointStamp, meerkat_core::SessionCheckpointError> {
+    if session.id() != expected_session_id {
+        return Err(meerkat_core::SessionCheckpointError::SessionIdMismatch {
+            expected: expected_session_id.clone(),
+            actual: session.id().clone(),
+        });
+    }
+    match session.try_checkpoint_state_cached()? {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => Ok(stamp),
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+            Err(meerkat_core::SessionCheckpointError::LegacyCheckpointUnverified)
+        }
+    }
+}
+
 fn checkpoint_stamp_names_exact_authority(
     checkpoint: &meerkat_core::SessionCheckpointStamp,
     authority: &meerkat_core::SessionCheckpointStamp,
@@ -3345,7 +3372,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     // copies now carry the typed stamp.
                     let snapshot = if matches!(
                         snapshot
-                            .try_checkpoint_state()
+                            .try_checkpoint_state_cached()
                             .map_err(session_checkpoint_read_error)?,
                         meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
                     ) {
@@ -3385,7 +3412,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     let store_head = match store_head {
                         Some(head)
                             if matches!(
-                                head.try_checkpoint_state()
+                                head.try_checkpoint_state_cached()
                                     .map_err(session_checkpoint_read_error)?,
                                 meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
                             ) =>
@@ -3422,7 +3449,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     let store_projection = match store_projection {
                         Some(row)
                             if matches!(
-                                row.try_checkpoint_state()
+                                row.try_checkpoint_state_cached()
                                     .map_err(session_checkpoint_read_error)?,
                                 meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
                             ) =>
@@ -4053,6 +4080,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// stale-strict-prefix snapshot loading unreconciled on a COLD resume is
     /// the permanent-save-rejection wedge: the frozen copy can never satisfy
     /// the append-only guard against the longer persisted head.
+    ///
+    /// Stamp verification here trusts the process-lifetime verification memo
+    /// (first sight per process still hashes), and the two-sided relation is
+    /// classified from the already-verified stamps without re-hashing either
+    /// document. Both documents are still fully deserialized because
+    /// `RuntimeStore`/`SessionStore` expose no stamp-only probe; adding one
+    /// is a store-API extension, not a read-path change.
     fn resolve_runtime_snapshot_read_source(
         &self,
         id: &SessionId,
@@ -4061,7 +4095,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session_is_live: bool,
     ) -> Result<Session, SessionError> {
         let snapshot_stamp =
-            verified_checkpoint_stamp_for_recovery(&snapshot, id, "runtime session snapshot")
+            verified_checkpoint_stamp_for_read(&snapshot, id, "runtime session snapshot")
                 .map_err(session_checkpoint_read_error)?;
         if snapshot_stamp.provenance()
             == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
@@ -4077,13 +4111,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         {
             None => (false, false),
             Some(head) => {
-                let head_stamp =
-                    verified_checkpoint_stamp_for_recovery(head, id, "session store head")
-                        .map_err(session_checkpoint_read_error)?;
+                let head_stamp = verified_checkpoint_stamp_for_read(head, id, "session store head")
+                    .map_err(session_checkpoint_read_error)?;
                 let head_is_runtime_checkpoint = head_stamp.provenance()
                     == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint;
-                let relation = meerkat_core::session_checkpoint_relation(&snapshot, head)
-                    .map_err(session_checkpoint_read_error)?;
+                // Both stamps were verified against their documents just
+                // above; the relation needs stamp identity fields only, so
+                // classifying from the stamps avoids re-verifying (and
+                // re-hashing) both full documents.
+                let relation =
+                    meerkat_core::verified_checkpoint_stamp_relation(&snapshot_stamp, &head_stamp);
                 match relation {
                     meerkat_core::SessionCheckpointRelation::RevisionConflict
                         if head_is_runtime_checkpoint
@@ -13990,6 +14027,46 @@ mod tests {
         assert_eq!(
             verified_checkpoint_stamp(&selected),
             verified_checkpoint_stamp(&runtime),
+        );
+    }
+
+    #[test]
+    fn steady_state_read_arbitration_recomputes_zero_digests_for_unchanged_documents() {
+        let id = SessionId::new();
+        let mut base = Session::with_id(id.clone());
+        base.push(Message::User(UserMessage::text(
+            "committed base".to_string(),
+        )));
+        // `install_checkpoint_stamp` performs the one full content
+        // verification for this digest key (write time); the durable head row
+        // is the same committed document, i.e. the idle steady-state shape.
+        let (snapshot, _stamp) = with_checkpoint_root(base);
+        let store_head = snapshot.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+
+        let digests_before = meerkat_core::session_content_digest_computations();
+        for _ in 0..5 {
+            let selected = service
+                .resolve_runtime_snapshot_read_source(
+                    &id,
+                    snapshot.clone(),
+                    Some(store_head.clone()),
+                    false,
+                )
+                .expect("steady-state arbitration must keep resolving");
+            assert_eq!(selected.messages(), snapshot.messages());
+        }
+        assert_eq!(
+            meerkat_core::session_content_digest_computations(),
+            digests_before,
+            "read arbitration over already-verified unchanged documents must perform \
+             zero content-digest computations"
         );
     }
 
@@ -26462,6 +26539,57 @@ mod tests {
                 .await
                 .expect("status should succeed after resume"),
             "resume from the store head must materialize a live session"
+        );
+    }
+
+    #[tokio::test]
+    async fn steady_state_full_load_path_recomputes_zero_digests() {
+        // Covers the FULL production read path (load_authoritative_session ->
+        // load_authoritative_session_base -> legacy probes -> read-source
+        // arbitration), not just the arbitration helper: a regression
+        // reverting any probe to the uncached checkpoint decode trips this.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store,
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("evict the live session so loads use durable state");
+
+        // First durable load pays the one per-process verification.
+        service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("first durable load succeeds")
+            .expect("runtime authority exists");
+
+        let digests_before = meerkat_core::session_content_digest_computations();
+        for _ in 0..5 {
+            service
+                .load_authoritative_session(&result.session_id)
+                .await
+                .expect("steady-state durable load succeeds")
+                .expect("runtime authority exists");
+        }
+        assert_eq!(
+            meerkat_core::session_content_digest_computations(),
+            digests_before,
+            "steady-state durable loads of an unchanged session must perform \
+             zero content-digest computations end to end"
         );
     }
 

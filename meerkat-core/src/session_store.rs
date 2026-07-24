@@ -125,6 +125,38 @@ pub fn session_projection_cas_token(session: &Session) -> Result<String, Session
 /// matches the persisted transcript. A plain save may append or update
 /// metadata; same-session replacement must go through
 /// [`transcript_rewrite_save_guard`].
+/// Process-lifetime bounded memo of slim-materialization verifications:
+/// (session id, head revision digest, message count) triples whose full
+/// transcript hash was already proven this process. FIFO-bounded; eviction
+/// only costs a re-verification.
+fn slim_verification_memo()
+-> &'static std::sync::Mutex<std::collections::VecDeque<(String, String, u64)>> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(String, String, u64)>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+const SLIM_VERIFICATION_MEMO_BOUND: usize = 4096;
+
+fn slim_materialization_verified(id: &SessionId, revision: &str, count: u64) -> bool {
+    slim_verification_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(mid, mrev, mcount)| mid == &id.to_string() && mrev == revision && *mcount == count)
+}
+
+fn record_slim_materialization_verified(id: &SessionId, revision: &str, count: u64) {
+    let mut memo = slim_verification_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if memo.len() >= SLIM_VERIFICATION_MEMO_BOUND {
+        memo.pop_front();
+    }
+    memo.push_back((id.to_string(), revision.to_string(), count));
+}
+
 pub fn append_only_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
@@ -1707,9 +1739,17 @@ impl SessionHead {
         if messages.len() as u64 != self.message_count {
             return Err(SessionStoreError::Corrupted(self.id));
         }
-        let digest = transcript_messages_digest(&messages).map_err(SessionStoreError::from)?;
-        if digest != self.head_revision {
-            return Err(SessionStoreError::Corrupted(self.id));
+        // The head revision IS the transcript content digest, so one full
+        // verification per (session, revision, count) per process proves the
+        // pair; re-hashing on every slim materialization made every store
+        // read O(transcript) (the idle-burn / slow-boot class). A mutated
+        // transcript changes the revision -> new key -> full re-verify.
+        if !slim_materialization_verified(&self.id, &self.head_revision, self.message_count) {
+            let digest = transcript_messages_digest(&messages).map_err(SessionStoreError::from)?;
+            if digest != self.head_revision {
+                return Err(SessionStoreError::Corrupted(self.id));
+            }
+            record_slim_materialization_verified(&self.id, &self.head_revision, self.message_count);
         }
         let SessionHead {
             id,
@@ -2826,6 +2866,7 @@ mod tests {
         incoming.set_system_prompt("forged replacement system".to_string());
         let incoming_revision = incoming.transcript_revision()?;
         let history = TranscriptHistoryState {
+            digest_format: 0,
             head: incoming_revision.clone(),
             commits: Vec::new(),
             revisions: vec![
@@ -2875,6 +2916,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: poisoned_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![crate::TranscriptRevisionBody {
@@ -2955,6 +2997,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: vec![commit],
                 revisions: vec![
@@ -3091,6 +3134,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![crate::TranscriptRevisionBody {
@@ -3224,6 +3268,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![
@@ -3272,6 +3317,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![
@@ -3341,6 +3387,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![crate::TranscriptRevisionBody {
@@ -3378,6 +3425,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: Vec::new(),
                 revisions: vec![
@@ -3428,6 +3476,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: vec![TranscriptRewriteCommit {
                     parent_revision: previous.transcript_revision()?,
@@ -3482,6 +3531,7 @@ mod tests {
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
+                digest_format: 0,
                 head: incoming_revision.clone(),
                 commits: vec![TranscriptRewriteCommit {
                     parent_revision: previous.transcript_revision()?,
@@ -3833,6 +3883,7 @@ mod tests {
         let parent_revision = transcript_messages_digest(&parent_messages)?;
         let mut parent = previous.clone();
         parent.apply_transcript_history_state(TranscriptHistoryState {
+            digest_format: 0,
             head: parent_revision.clone(),
             commits: Vec::new(),
             revisions: vec![crate::TranscriptRevisionBody {
@@ -3894,6 +3945,7 @@ mod tests {
         let forged_parent_revision = transcript_messages_digest(&forged_parent_messages)?;
         let mut forged_parent = previous.clone();
         forged_parent.apply_transcript_history_state(TranscriptHistoryState {
+            digest_format: 0,
             head: forged_parent_revision.clone(),
             commits: Vec::new(),
             revisions: vec![

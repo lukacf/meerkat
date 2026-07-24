@@ -92,6 +92,16 @@ const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(1
 const IDENTITY_RECONCILE_LEASE_TTL_MS: u64 = crate::identity::IDENTITY_LEASE_MAX_TTL_MS;
 const IDENTITY_RECONCILE_TICK_INTERVAL: Duration = Duration::from_millis(25);
 const IDENTITY_RECONCILE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+/// Upper bound on how long a converged identity may substitute its cached,
+/// already-verified session observation for a fresh document read. Session
+/// documents can be large (the HomeCore fixture is 82 MB); re-verifying an
+/// unchanged document at scan cadence costs a full deserialize + canonical
+/// sha256 per identity per second. Drift that is visible in the cheap
+/// per-pass observations (intent revision/digest, lease, runtime lifecycle,
+/// member row, wiring) invalidates the witness immediately; drift visible
+/// only inside the session document itself stays level-triggered with at
+/// most this detection latency.
+const IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS: u64 = 300_000;
 
 /// Admission boundary for the deliberately narrow 0.8.2 recovery slice.
 ///
@@ -202,6 +212,38 @@ fn identity_recovery_slice_unsupported_obligation(
             | IdentityReconcileDecision::ReleaseSessionAuthority
             | IdentityReconcileDecision::Tombstoned
     )
+}
+
+/// Volatile, actor-run-scoped witness that one identity's persisted session
+/// document was fully verified while the pass classified `Converged` under
+/// the exact sealed intent authority recorded here. While that authority is
+/// unchanged and the reverify deadline has not elapsed, steady-state passes
+/// substitute the cached observation for the session-document read. This is
+/// never restart authority: a cold actor starts with an empty map and fully
+/// re-observes every identity.
+#[derive(Debug, Clone)]
+pub(super) struct IdentityConvergedSessionWitness {
+    intent_revision: u64,
+    intent_digest: String,
+    authority_digest: String,
+    observation: crate::identity::IdentitySessionObservation,
+    verified_at_ms: u64,
+}
+
+/// Map threaded through the actor run loop; see
+/// [`IdentityConvergedSessionWitness`].
+pub(super) type IdentityConvergedSessionWitnesses =
+    BTreeMap<AgentIdentity, IdentityConvergedSessionWitness>;
+
+/// Disposition of one reconcile pass attempt.
+enum IdentityReconcilePassDisposition {
+    /// The pass settled; `true` requeues the identity for the next tick.
+    Outcome(bool),
+    /// The pass classified something other than `Converged` over a cached
+    /// session witness. The witness was discarded; the caller must re-run
+    /// the pass with a fresh session-document observation before any status
+    /// projection or actuation.
+    ReverifySession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1765,6 +1807,15 @@ pub(super) static IDENTITY_RECONCILE_COMPLETION_REQUEUES: std::sync::atomic::Ato
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 pub(super) static IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(super) static IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Test-only override (milliseconds; 0 = use the production constant) for the
+/// converged-session reverify deadline, so expiry-driven re-verification is
+/// testable without a five-minute wall-clock wait.
+#[cfg(test)]
+pub(super) static IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_SESSION_INGRESS_DETACH_FOR_SESSION: std::sync::Mutex<Option<SessionId>> =
@@ -16578,6 +16629,9 @@ impl MobActor {
         &self,
         desired: &crate::identity::DesiredSessionTarget,
     ) -> crate::identity::IdentitySessionObservation {
+        #[cfg(test)]
+        IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let loaded = self
             .session_service
             .load_persisted_session(&desired.session_id)
@@ -17142,12 +17196,18 @@ impl MobActor {
         }
     }
 
-    async fn reconcile_next_identity(&mut self) {
+    async fn reconcile_next_identity(
+        &mut self,
+        session_witnesses: &mut IdentityConvergedSessionWitnesses,
+    ) {
         let Some(identity) = self.identity_reconcile_queue.pop_front() else {
             return;
         };
         self.identity_reconcile_enqueued.remove(&identity);
-        match self.reconcile_identity_once(&identity).await {
+        match self
+            .reconcile_identity_once(&identity, session_witnesses)
+            .await
+        {
             Ok(true) => self.enqueue_identity_reconcile(identity),
             Ok(false) => {}
             Err(error) => {
@@ -17161,10 +17221,69 @@ impl MobActor {
         }
     }
 
+    /// Return the cached converged session observation when it still proves
+    /// the exact sealed intent authority and the reverify deadline has not
+    /// elapsed; otherwise discard it.
+    fn identity_converged_session_observation(
+        session_witnesses: &mut IdentityConvergedSessionWitnesses,
+        identity: &AgentIdentity,
+        intent: &crate::identity::IdentityIntentRecord,
+        now_ms: u64,
+    ) -> Option<crate::identity::IdentitySessionObservation> {
+        let witness = session_witnesses.get(identity)?;
+        #[cfg(test)]
+        let reverify_interval_ms = match IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS,
+            override_ms => override_ms,
+        };
+        #[cfg(not(test))]
+        let reverify_interval_ms = IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS;
+        let current = witness.intent_revision == intent.intent_revision
+            && witness.intent_digest == intent.intent_digest
+            && witness.authority_digest == intent.authority_digest
+            && now_ms.saturating_sub(witness.verified_at_ms) < reverify_interval_ms;
+        if !current {
+            session_witnesses.remove(identity);
+            return None;
+        }
+        Some(witness.observation.clone())
+    }
+
     async fn reconcile_identity_once(
         &mut self,
         identity: &AgentIdentity,
+        session_witnesses: &mut IdentityConvergedSessionWitnesses,
     ) -> Result<bool, MobError> {
+        match self
+            .reconcile_identity_pass(identity, session_witnesses, true)
+            .await?
+        {
+            IdentityReconcilePassDisposition::Outcome(requeue) => Ok(requeue),
+            IdentityReconcilePassDisposition::ReverifySession => {
+                match self
+                    .reconcile_identity_pass(identity, session_witnesses, false)
+                    .await?
+                {
+                    IdentityReconcilePassDisposition::Outcome(requeue) => Ok(requeue),
+                    IdentityReconcilePassDisposition::ReverifySession => {
+                        Err(MobError::Internal(
+                            "identity reconcile requested session reverification from a fresh document observation"
+                                .to_string(),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reconcile_identity_pass(
+        &mut self,
+        identity: &AgentIdentity,
+        session_witnesses: &mut IdentityConvergedSessionWitnesses,
+        allow_session_witness: bool,
+    ) -> Result<IdentityReconcilePassDisposition, MobError> {
         use crate::identity::{
             IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuatorTarget,
             IdentityAuthorityCondition, IdentityExternalCeremonyCondition,
@@ -17197,7 +17316,7 @@ impl MobActor {
                     Some(error.to_string()),
                 )
                 .await;
-                return Ok(false);
+                return Ok(IdentityReconcilePassDisposition::Outcome(false));
             }
         };
         let intent_condition = Self::identity_authority_condition(&intent_observation);
@@ -17218,7 +17337,7 @@ impl MobActor {
                 Some(reason),
             )
             .await;
-            return Ok(false);
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
         }
         let now_ms = Self::identity_reconcile_now_ms()?;
         let lease_observation = match self
@@ -17242,7 +17361,7 @@ impl MobActor {
                     Some(error.to_string()),
                 )
                 .await;
-                return Ok(false);
+                return Ok(IdentityReconcilePassDisposition::Outcome(false));
             }
         };
         let lease_condition = self.identity_lease_condition(&lease_observation, now_ms);
@@ -17275,10 +17394,10 @@ impl MobActor {
                     super::IdentityRecoveryFailStopPoint::LeaseAcquired,
                 );
             }
-            return Ok(matches!(
+            return Ok(IdentityReconcilePassDisposition::Outcome(matches!(
                 outcome,
                 IdentityLeaseClaimOutcome::Acquired(_) | IdentityLeaseClaimOutcome::Renewed(_)
-            ));
+            )));
         }
         if lease_condition != IdentityLeaseCondition::HeldByCurrentIncarnation {
             self.replace_identity_reconcile_status(
@@ -17289,12 +17408,12 @@ impl MobActor {
                 None,
             )
             .await;
-            return Ok(false);
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
         }
         let Some(intent_record) = intent_record else {
             self.replace_identity_reconcile_status(identity, None, None, preliminary, None)
                 .await;
-            return Ok(false);
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
         };
         let active_lease = match lease_observation {
             IdentityStoredObservation::Valid(record) => record.active.ok_or_else(|| {
@@ -17329,7 +17448,27 @@ impl MobActor {
             }
         };
 
-        let session_observation = self.observe_identity_session(session).await;
+        // Converged steady state must not reload the session document: the
+        // cached witness substitutes the expensive read while the sealed
+        // intent authority is unchanged. Every other per-pass observation
+        // below stays fresh, so realization drift that those observations can
+        // see keeps its scan-cadence repair latency.
+        let witness_session_observation = if allow_session_witness {
+            Self::identity_converged_session_observation(
+                session_witnesses,
+                identity,
+                &intent_record,
+                now_ms,
+            )
+        } else {
+            session_witnesses.remove(identity);
+            None
+        };
+        let session_observed_from_witness = witness_session_observation.is_some();
+        let session_observation = match witness_session_observation {
+            Some(observation) => observation,
+            None => self.observe_identity_session(session).await,
+        };
         #[cfg(feature = "runtime-adapter")]
         let (runtime_observation, runtime_target_observation) =
             self.observe_identity_runtime_target(session).await;
@@ -17423,6 +17562,30 @@ impl MobActor {
             facts.external_ceremony = IdentityExternalCeremonyCondition::TemporarilyUnavailable;
         }
         let decision = crate::identity::classify_identity_reconciliation(facts);
+        if session_observed_from_witness && decision != IdentityReconcileDecision::Converged {
+            // The fresh cheap observations stopped corroborating the cached
+            // session witness. Discard it and re-run this pass over a fresh
+            // document read before any status projection or actuation, so a
+            // permit is never minted from a cached session witness.
+            session_witnesses.remove(identity);
+            return Ok(IdentityReconcilePassDisposition::ReverifySession);
+        }
+        if !session_observed_from_witness {
+            if decision == IdentityReconcileDecision::Converged {
+                session_witnesses.insert(
+                    identity.clone(),
+                    IdentityConvergedSessionWitness {
+                        intent_revision: intent_record.intent_revision,
+                        intent_digest: intent_record.intent_digest.clone(),
+                        authority_digest: intent_record.authority_digest.clone(),
+                        observation: session_observation.clone(),
+                        verified_at_ms: now_ms,
+                    },
+                );
+            } else {
+                session_witnesses.remove(identity);
+            }
+        }
         let unsupported_obligation_detail =
             identity_recovery_slice_unsupported_obligation(decision).then(|| {
                 format!(
@@ -17463,7 +17626,7 @@ impl MobActor {
         )
         .await;
         if unsupported_obligation_detail.is_some() {
-            return Ok(false);
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
         }
 
         let action: Result<bool, MobError> = async {
@@ -17786,7 +17949,7 @@ impl MobActor {
         }
         .await;
         match action {
-            Ok(requeue) => Ok(requeue),
+            Ok(requeue) => Ok(IdentityReconcilePassDisposition::Outcome(requeue)),
             Err(error) => {
                 self.replace_identity_reconcile_status(
                     identity,
@@ -17796,7 +17959,7 @@ impl MobActor {
                     Some(error.to_string()),
                 )
                 .await;
-                Ok(false)
+                Ok(IdentityReconcilePassDisposition::Outcome(false))
             }
         }
     }
@@ -20490,6 +20653,9 @@ impl MobActor {
         self.enqueue_all_identity_intents().await;
         let mut deferred_commands: VecDeque<RoutedMobCommand> = VecDeque::new();
         let mut host_status_polls_in_flight = BTreeSet::new();
+        // Run-scoped converged session witnesses: volatile by construction, so
+        // a cold incarnation always re-verifies every session document.
+        let mut identity_session_witnesses = IdentityConvergedSessionWitnesses::new();
         let mut host_status_poll = tokio::time::interval(super::handle::HOST_STATUS_POLL_INTERVAL);
         let mut identity_reconcile_tick = tokio::time::interval(IDENTITY_RECONCILE_TICK_INTERVAL);
         let mut identity_reconcile_scan = tokio::time::interval(IDENTITY_RECONCILE_SCAN_INTERVAL);
@@ -20523,7 +20689,7 @@ impl MobActor {
                         continue;
                     }
                     _tick = identity_reconcile_tick.tick() => {
-                        self.reconcile_next_identity().await;
+                        self.reconcile_next_identity(&mut identity_session_witnesses).await;
                         continue;
                     }
                     _tick = identity_reconcile_scan.tick() => {

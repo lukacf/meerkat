@@ -1463,6 +1463,7 @@ struct MockSessionService {
     create_session_delay_ms: AtomicU64,
     load_persisted_session_delay_ms: AtomicU64,
     load_persisted_session_started: tokio::sync::Notify,
+    load_persisted_session_calls: AtomicU64,
     load_persisted_session_in_flight: AtomicU64,
     load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -1550,6 +1551,7 @@ impl MockSessionService {
             create_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_started: tokio::sync::Notify::new(),
+            load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_in_flight: AtomicU64::new(0),
             load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -3292,6 +3294,8 @@ impl MobSessionService for MockSessionService {
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         self.load_persisted_session_started.notify_one();
+        self.load_persisted_session_calls
+            .fetch_add(1, Ordering::Relaxed);
         let in_flight = self
             .load_persisted_session_in_flight
             .fetch_add(1, Ordering::Relaxed)
@@ -7873,6 +7877,251 @@ async fn identity_reconcile_loop_rematerializes_existing_history_and_ignores_sta
         .shutdown()
         .await
         .expect("shutdown reconcile test mob");
+}
+
+/// Resets the converged-session reverify override on drop so one test cannot
+/// leak a shortened deadline into another.
+struct IdentityReconcileReverifyOverrideGuard;
+
+impl IdentityReconcileReverifyOverrideGuard {
+    fn set(ms: u64) -> Self {
+        super::actor::IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS.store(ms, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for IdentityReconcileReverifyOverrideGuard {
+    fn drop(&mut self) {
+        super::actor::IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Shared setup for the converged-cadence tests: seed one verified legacy
+/// session, seal its RequireExisting identity intent, and wait for the
+/// reconcile loop to report Converged with the member materialized.
+async fn converge_identity_reconcile_fixture(
+    label: &str,
+) -> (
+    super::MobHandle,
+    Arc<MockSessionService>,
+    AgentIdentity,
+    SessionId,
+) {
+    let definition = with_unique_mob_id(sample_definition(), label);
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store,
+    ));
+    service.set_runtime_adapter(runtime_adapter.clone());
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create converged-cadence identity mob");
+
+    let identity = AgentIdentity::from("steady-1");
+    let mut manifest = test_identity_declaration_manifest(
+        "idle-cadence",
+        meerkat_core::ops::OperationId::new(),
+        identity.clone(),
+    );
+    let fixed_session_id = SessionId::new();
+    let fixed_lineage_id = meerkat_core::SessionLineageId::for_session(&fixed_session_id);
+    let mut original = factory_policy_session(
+        Session::with_id(fixed_session_id.clone()),
+        "claude-sonnet-4-5".to_string(),
+        4096,
+    );
+    let mut metadata = original.session_metadata().expect("seed session metadata");
+    metadata.comms_name = Some(test_comms_name_for(&mob_id, "worker", identity.as_str()));
+    metadata.peer_meta = Some(
+        meerkat_core::PeerMeta::default()
+            .with_label("mob_id", mob_id.as_str())
+            .with_label("role", "worker")
+            .with_label("member_id", identity.as_str()),
+    );
+    metadata.realm_id =
+        Some(meerkat_core::RealmId::parse(format!("mob.{mob_id}")).expect("valid mob realm id"));
+    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+        mob_id: mob_id.as_str().to_string(),
+        role: "worker".to_string(),
+        member: identity.as_str().to_string(),
+    });
+    original
+        .set_session_metadata(metadata)
+        .expect("install durable member metadata");
+    original.push_batch(
+        (0..12)
+            .map(|index| {
+                meerkat_core::Message::User(meerkat_core::types::UserMessage::text(format!(
+                    "steady-state transcript message {index:02}"
+                )))
+            })
+            .collect(),
+    );
+    let legacy_bytes = serde_json::to_vec(&original).expect("serialize legacy session");
+    let stamp = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
+        &original,
+        &legacy_bytes,
+        meerkat_core::SessionGeneration::INITIAL,
+        meerkat_core::SessionCheckpointRevision::new(3),
+    )
+    .expect("mint exact recovery-migration checkpoint");
+    original
+        .install_checkpoint_stamp(stamp.clone())
+        .expect("install exact recovery-migration checkpoint");
+    service
+        .persisted_sessions
+        .write()
+        .await
+        .insert(fixed_session_id.clone(), original);
+
+    let declaration = manifest
+        .members
+        .get_mut(&identity)
+        .expect("steady-state declaration");
+    declaration.session_authority_policy =
+        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
+    declaration.initial_message = None;
+    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
+        session: crate::identity::DesiredSessionTarget {
+            session_id: fixed_session_id.clone(),
+            lineage_id: fixed_lineage_id,
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        checkpoint: stamp,
+        continuity_epoch_highwater: 11,
+        snapshot_fence_audit: 7,
+    });
+    handle
+        .apply_identity_declaration_manifest(manifest)
+        .await
+        .expect("seal verified existing-session intent");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let converged = matches!(
+                handle
+                    .identity_convergence_status(&identity)
+                    .await
+                    .expect("read identity convergence status"),
+                crate::identity::IdentityStoredObservation::Valid(status)
+                    if status.decision
+                        == Some(crate::identity::IdentityReconcileDecision::Converged)
+            );
+            let materialized = handle
+                .get_member(&identity)
+                .await
+                .expect("read rematerialized member")
+                .is_some();
+            if converged && materialized {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("existing identity should converge");
+
+    (handle, service, identity, fixed_session_id)
+}
+
+/// The customer-facing idle contract: once an identity is Converged and
+/// nothing changes, steady-state reconcile passes must not reload the
+/// persisted session document (the 82 MB HomeCore document was reloaded and
+/// digest-verified once per scan interval per member).
+#[tokio::test]
+async fn identity_reconcile_converged_steady_state_stops_session_document_loads() {
+    let (handle, service, identity, _session_id) =
+        converge_identity_reconcile_fixture("identity-converged-idle").await;
+
+    // Drain any pass already in flight at the moment convergence was observed.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    let service_loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
+    let observe_loads_before =
+        super::actor::IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS.load(Ordering::Relaxed);
+
+    // Idle window spanning multiple scan intervals (scan = 1s).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let service_loads_after = service.load_persisted_session_calls.load(Ordering::Relaxed);
+    let observe_loads_after =
+        super::actor::IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS.load(Ordering::Relaxed);
+    assert_eq!(
+        observe_loads_after, observe_loads_before,
+        "converged steady-state reconcile passes must not re-observe the session document"
+    );
+    assert_eq!(
+        service_loads_after, service_loads_before,
+        "converged steady-state reconcile passes must not call session-service loads"
+    );
+    assert!(
+        matches!(
+            handle
+                .identity_convergence_status(&identity)
+                .await
+                .expect("read post-idle identity convergence status"),
+            crate::identity::IdentityStoredObservation::Valid(status)
+                if status.decision
+                    == Some(crate::identity::IdentityReconcileDecision::Converged)
+        ),
+        "identity must remain Converged across the idle window"
+    );
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown converged-idle mob");
+}
+
+/// The witness is a bounded cache, not new authority: after the reverify
+/// deadline the next pass re-reads the document, so session-document-only
+/// drift (here: the persisted document disappearing out-of-band) stays
+/// level-triggered and demotes the identity from Converged.
+#[tokio::test]
+async fn identity_reconcile_converged_witness_expiry_detects_session_document_drift() {
+    let _override_guard = IdentityReconcileReverifyOverrideGuard::set(1_000);
+    let (handle, service, identity, session_id) =
+        converge_identity_reconcile_fixture("identity-converged-reverify").await;
+
+    // Session-document-only drift: invisible to every cheap per-pass
+    // observation, discoverable only by re-reading the document.
+    service
+        .archived_session_ids
+        .write()
+        .await
+        .insert(session_id);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let demoted = matches!(
+                handle
+                    .identity_convergence_status(&identity)
+                    .await
+                    .expect("read post-drift identity convergence status"),
+                crate::identity::IdentityStoredObservation::Valid(status)
+                    if status.decision.is_some()
+                        && status.decision
+                            != Some(crate::identity::IdentityReconcileDecision::Converged)
+            );
+            if demoted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("witness expiry must re-verify the document and demote Converged");
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown converged-reverify mob");
 }
 
 #[test]

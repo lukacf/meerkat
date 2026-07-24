@@ -14,7 +14,10 @@ use crate::types::SessionId;
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::sync::{Mutex, OnceLock};
 
 /// Current durable schema for [`SessionCheckpointStamp`].
 pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION: u32 = 1;
@@ -868,6 +871,139 @@ pub fn session_checkpoint_metadata_state(
     Ok(SessionCheckpointMetadataState::Stamped(stamp))
 }
 
+thread_local! {
+    /// Per-thread count of full content-digest computations
+    /// (canonical-JSON serialization + SHA-256 over session content).
+    /// Structural regression tests assert a zero delta across steady-state
+    /// reads; a thread-local counter keeps that assertion immune to
+    /// unrelated tests on other threads. One `Cell` bump per multi-KB hash
+    /// pass is noise in release builds.
+    static CONTENT_DIGEST_COMPUTATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Per-thread count of session content-digest computations. Observability
+/// seam for structural no-rehash regression tests only; not a public API.
+#[doc(hidden)]
+#[must_use]
+pub fn session_content_digest_computations() -> u64 {
+    CONTENT_DIGEST_COMPUTATIONS.with(Cell::get)
+}
+
+pub(crate) fn record_content_digest_computation() {
+    CONTENT_DIGEST_COMPUTATIONS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+/// Identity under which one full stamp verification is memoized.
+///
+/// The digest string alone cannot see an in-process content mutation that
+/// leaves a stale stamp in place, so the key also carries the document's
+/// cheap O(1) shape: every `Session` content mutation seam changes the
+/// message count, the metadata entry count, or `updated_at`, which re-keys
+/// the memo and forces a full re-verification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VerifiedStampKey {
+    session_id: String,
+    digest: String,
+    message_count: usize,
+    metadata_entries: usize,
+    created_at: std::time::SystemTime,
+    updated_at: std::time::SystemTime,
+}
+
+fn verified_stamp_key(session: &Session, digest: &SessionCheckpointDigest) -> VerifiedStampKey {
+    VerifiedStampKey {
+        session_id: session.id().to_string(),
+        digest: digest.as_str().to_string(),
+        message_count: session.messages().len(),
+        metadata_entries: session.metadata().len(),
+        created_at: session.created_at(),
+        updated_at: session.updated_at(),
+    }
+}
+
+/// Process-lifetime memo of checkpoint stamps whose digest was fully
+/// verified against session content.
+///
+/// The memo only ever ADDS the fact "a document of this exact shape and
+/// content digest was proved for this session in this process": entry
+/// admission requires one complete canonical-content verification, so the
+/// first read after boot always hashes, and changed content re-keys (via
+/// digest or document shape) and re-verifies. Bounded FIFO eviction only
+/// forces a redundant re-verification, never a stale trust decision for a
+/// key that was never proved.
+struct BoundedStampVerificationCache {
+    capacity: usize,
+    entries: HashSet<VerifiedStampKey>,
+    order: VecDeque<VerifiedStampKey>,
+}
+
+impl BoundedStampVerificationCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashSet::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn contains(&self, key: &VerifiedStampKey) -> bool {
+        self.entries.contains(key)
+    }
+
+    fn record(&mut self, key: VerifiedStampKey) {
+        if self.entries.contains(&key) {
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key);
+    }
+}
+
+const VERIFIED_STAMP_CACHE_CAPACITY: usize = 4096;
+
+static VERIFIED_STAMP_CACHE: OnceLock<Mutex<BoundedStampVerificationCache>> = OnceLock::new();
+
+fn verified_stamp_cache() -> &'static Mutex<BoundedStampVerificationCache> {
+    VERIFIED_STAMP_CACHE.get_or_init(|| {
+        Mutex::new(BoundedStampVerificationCache::new(
+            VERIFIED_STAMP_CACHE_CAPACITY,
+        ))
+    })
+}
+
+/// Whether this exact document shape and digest were already fully verified
+/// in this process. A poisoned lock degrades to "not cached": the caller
+/// re-verifies.
+pub(crate) fn checkpoint_stamp_verification_is_cached(
+    session: &Session,
+    digest: &SessionCheckpointDigest,
+) -> bool {
+    let key = verified_stamp_key(session, digest);
+    verified_stamp_cache()
+        .lock()
+        .map(|cache| cache.contains(&key))
+        .unwrap_or(false)
+}
+
+/// Record one completed full verification of this exact document shape and
+/// digest. Callers must have just proved the digest against canonical
+/// content of `session` in its current shape.
+pub(crate) fn record_checkpoint_stamp_verification(
+    session: &Session,
+    digest: &SessionCheckpointDigest,
+) {
+    let key = verified_stamp_key(session, digest);
+    if let Ok(mut cache) = verified_stamp_cache().lock() {
+        cache.record(key);
+    }
+}
+
 /// Compute the pinned canonical checkpoint digest.
 ///
 /// Canonicalization uses recursive lexicographic object-key ordering, stable
@@ -877,6 +1013,7 @@ pub fn session_checkpoint_metadata_state(
 pub fn session_checkpoint_digest(
     session: &Session,
 ) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    record_content_digest_computation();
     let history_digest = session_transcript_history_checkpoint_digest(session)?;
     let mut document = session.checkpoint_digest_document()?;
     if let Some(metadata) = document
@@ -1033,28 +1170,44 @@ pub fn session_checkpoint_relation(
             return Ok(SessionCheckpointRelation::RightLegacyUnverified);
         }
     };
+    Ok(verified_checkpoint_stamp_relation(&left, &right))
+}
+
+/// Classify two ALREADY-VERIFIED checkpoint stamps without touching either
+/// document's content.
+///
+/// Each stamp must have been proved against its enclosing document first
+/// ([`Session::try_checkpoint_state`] or its cached form); this function
+/// compares stamp identity fields only and never re-hashes. Legacy
+/// (unstamped) documents cannot reach this seam, so the legacy relation
+/// variants are never returned.
+#[must_use]
+pub fn verified_checkpoint_stamp_relation(
+    left: &SessionCheckpointStamp,
+    right: &SessionCheckpointStamp,
+) -> SessionCheckpointRelation {
     if left.session_id != right.session_id {
-        return Ok(SessionCheckpointRelation::DifferentSessionIdentity);
+        return SessionCheckpointRelation::DifferentSessionIdentity;
     }
     if left.lineage_id != right.lineage_id {
-        return Ok(SessionCheckpointRelation::DifferentLineage);
+        return SessionCheckpointRelation::DifferentLineage;
     }
     if left.generation < right.generation {
-        return Ok(SessionCheckpointRelation::LeftGenerationOlder);
+        return SessionCheckpointRelation::LeftGenerationOlder;
     }
     if left.generation > right.generation {
-        return Ok(SessionCheckpointRelation::LeftGenerationNewer);
+        return SessionCheckpointRelation::LeftGenerationNewer;
     }
     if left.checkpoint_revision < right.checkpoint_revision {
-        return Ok(SessionCheckpointRelation::LeftRevisionOlder);
+        return SessionCheckpointRelation::LeftRevisionOlder;
     }
     if left.checkpoint_revision > right.checkpoint_revision {
-        return Ok(SessionCheckpointRelation::LeftRevisionNewer);
+        return SessionCheckpointRelation::LeftRevisionNewer;
     }
     if left == right {
-        Ok(SessionCheckpointRelation::Exact)
+        SessionCheckpointRelation::Exact
     } else {
-        Ok(SessionCheckpointRelation::RevisionConflict)
+        SessionCheckpointRelation::RevisionConflict
     }
 }
 
@@ -1428,6 +1581,117 @@ mod tests {
         mutated.push(Message::User(UserMessage::text("after".to_string())));
         assert!(matches!(
             mutated.try_checkpoint_state(),
+            Err(SessionCheckpointError::DigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn cached_checkpoint_state_verifies_first_sight_then_skips_recomputation() {
+        // `stamped_root` installs the stamp via document JSON, never through
+        // a verifying seam, so this digest key starts unseen by the memo.
+        let session = stamped_root(&session_with_text("cached read"));
+        let before = session_content_digest_computations();
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("first read"),
+            SessionCheckpointState::Verified(_)
+        ));
+        let after_first = session_content_digest_computations();
+        assert!(
+            after_first > before,
+            "first sight of a digest key in this process must fully verify"
+        );
+        for _ in 0..4 {
+            assert!(matches!(
+                session
+                    .try_checkpoint_state_cached()
+                    .expect("memoized read"),
+                SessionCheckpointState::Verified(_)
+            ));
+        }
+        assert_eq!(
+            session_content_digest_computations(),
+            after_first,
+            "steady-state cached reads of an unchanged document must not recompute digests"
+        );
+
+        // The exact seam never consults the memo: write/adopt/convergence
+        // verification stays full.
+        assert!(matches!(
+            session.try_checkpoint_state().expect("exact read"),
+            SessionCheckpointState::Verified(_)
+        ));
+        assert!(
+            session_content_digest_computations() > after_first,
+            "try_checkpoint_state must keep re-verifying content"
+        );
+    }
+
+    #[test]
+    fn cached_checkpoint_state_fails_closed_on_unproved_digest_key() {
+        let session = session_with_text("verify me");
+        let mut other = session.clone();
+        other.push(Message::User(UserMessage::text("diverged".to_string())));
+        // Syntactically valid stamp naming a digest this document does not
+        // have and this process never proved: the memo cannot admit it, so
+        // the cached seam re-verifies and rejects.
+        let wrong = SessionCheckpointStamp::new(
+            session.id().clone(),
+            SessionLineageId::for_session(session.id()),
+            SessionGeneration::INITIAL,
+            SessionCheckpointRevision::INITIAL,
+            SessionCheckpointAuthorityBase::Absent,
+            session_checkpoint_digest(&other).expect("digest"),
+            SessionCheckpointProvenance::SessionCreated,
+        );
+        let mismatched = install_stamp(&session, &wrong);
+        assert!(matches!(
+            mismatched.try_checkpoint_state_cached(),
+            Err(SessionCheckpointError::DigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn stamp_verification_memo_is_bounded_with_fifo_eviction() {
+        let mut cache = BoundedStampVerificationCache::new(2);
+        let session = session_with_text("bounded memo");
+        let key = |fill: char| {
+            verified_stamp_key(
+                &session,
+                &SessionCheckpointDigest::parse(format!("sha256:{}", fill.to_string().repeat(64)))
+                    .expect("digest"),
+            )
+        };
+        let (k1, k2, k3) = (key('1'), key('2'), key('3'));
+        cache.record(k1.clone());
+        cache.record(k2.clone());
+        assert!(cache.contains(&k1));
+        assert!(cache.contains(&k2));
+        // Re-recording a present key must not evict.
+        cache.record(k2.clone());
+        assert!(cache.contains(&k1));
+        cache.record(k3.clone());
+        assert!(
+            !cache.contains(&k1),
+            "capacity overflow must evict the oldest entry, forcing re-verification"
+        );
+        assert!(cache.contains(&k2));
+        assert!(cache.contains(&k3));
+    }
+
+    #[test]
+    fn cached_checkpoint_state_reverifies_after_in_process_content_mutation() {
+        let session = stamped_root(&session_with_text("shape keyed"));
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("seed memo"),
+            SessionCheckpointState::Verified(_)
+        ));
+        // Metadata mutation with the stale stamp left in place: the document
+        // shape (entry count, updated_at) re-keys the memo, so the cached
+        // seam re-verifies and fails closed within the same process.
+        let mut mutated = session;
+        mutated.set_metadata("caller_fact", serde_json::json!("drift"));
+        assert!(matches!(
+            mutated.try_checkpoint_state_cached(),
             Err(SessionCheckpointError::DigestMismatch { .. })
         ));
     }

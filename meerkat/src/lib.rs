@@ -152,6 +152,8 @@ pub use job_delivery::{
     JobRuntimeDeliveryApplier, JobTerminalDeliveryPayload, PreparedJobDelivery,
     ProjectedJobDelivery,
 };
+mod job_surface;
+pub use job_surface::{project_job_description, project_job_receipt};
 #[cfg(feature = "schedule")]
 mod predicate_schedule;
 #[cfg(feature = "schedule")]
@@ -326,11 +328,12 @@ pub use meerkat_jobs::SqliteDetachedJobStore;
 pub use meerkat_jobs::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
     CheckpointRef, DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId,
-    FenceToken, InteractionLineageId, JobDeliveryKind, JobFailureCode, JobHealthCondition, JobId,
-    JobNotification, JobOutboxEntry, JobPhase, JobProgress, JobProgressKind, JobReceipt,
-    JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
-    JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore, OriginMemberId, RestartClass,
-    RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
+    FenceToken, InteractionLineageId, JobDeliveryKind, JobDescription, JobFailureCode,
+    JobHealthCondition, JobId, JobNotification, JobOutboxEntry, JobPhase, JobProgress,
+    JobProgressKind, JobReceipt, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey,
+    JobSubscription, JobSubscriptionId, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore,
+    OriginMemberId, RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef,
+    ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

@@ -425,6 +425,8 @@ pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAf
 pub struct ToolDispatchContext {
     current_turn: Option<CurrentTurnContent>,
     turn_metadata: BTreeMap<String, serde_json::Value>,
+    origin_session_id: Option<crate::types::SessionId>,
+    interaction_lineage_id: Option<crate::interaction::InteractionId>,
 }
 
 /// Dispatch-context key carrying the current durable objective id.
@@ -439,6 +441,8 @@ impl ToolDispatchContext {
         Self {
             current_turn: blocks.map(CurrentTurnContent::new),
             turn_metadata: BTreeMap::new(),
+            origin_session_id: None,
+            interaction_lineage_id: None,
         }
     }
 
@@ -464,6 +468,29 @@ impl ToolDispatchContext {
 
     pub fn current_turn(&self) -> Option<&CurrentTurnContent> {
         self.current_turn.as_ref()
+    }
+
+    /// Bind the runtime-owned durable identity of the turn being dispatched.
+    ///
+    /// Standalone callers may leave this absent. Durable execution owners must
+    /// fail closed rather than minting replacement identity at dispatch time.
+    #[must_use]
+    pub fn with_runtime_identity(
+        mut self,
+        origin_session_id: crate::types::SessionId,
+        interaction_lineage_id: Option<crate::interaction::InteractionId>,
+    ) -> Self {
+        self.origin_session_id = Some(origin_session_id);
+        self.interaction_lineage_id = interaction_lineage_id;
+        self
+    }
+
+    pub fn origin_session_id(&self) -> Option<&crate::types::SessionId> {
+        self.origin_session_id.as_ref()
+    }
+
+    pub const fn interaction_lineage_id(&self) -> Option<crate::interaction::InteractionId> {
+        self.interaction_lineage_id
     }
 
     pub fn current_turn_image(

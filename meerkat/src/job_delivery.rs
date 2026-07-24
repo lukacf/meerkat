@@ -250,6 +250,7 @@ pub struct JobOutboxProjector {
     job_store: Arc<dyn DetachedJobStore>,
     job_service: DetachedJobService,
     runtime_inbox: RuntimeDeliveryInbox,
+    realm_id: Option<String>,
 }
 
 impl std::fmt::Debug for JobOutboxProjector {
@@ -264,7 +265,29 @@ impl JobOutboxProjector {
             job_service: DetachedJobService::new(job_store.clone()),
             job_store,
             runtime_inbox,
+            realm_id: None,
         }
+    }
+
+    /// Bind projection authority to one realm.
+    ///
+    /// Stores are normally realm-scoped already, but this explicit filter
+    /// keeps shared/test providers from projecting or acknowledging another
+    /// realm's outbox through the current runtime.
+    pub fn new_for_realm(
+        job_store: Arc<dyn DetachedJobStore>,
+        runtime_inbox: RuntimeDeliveryInbox,
+        realm_id: impl Into<String>,
+    ) -> Self {
+        let mut projector = Self::new(job_store, runtime_inbox);
+        projector.realm_id = Some(realm_id.into());
+        projector
+    }
+
+    fn owns_job(&self, job: &meerkat_jobs::StoredJob) -> bool {
+        self.realm_id
+            .as_deref()
+            .is_none_or(|realm_id| job.spec.realm_id == realm_id)
     }
 
     pub async fn prepare(
@@ -277,6 +300,14 @@ impl JobOutboxProjector {
                 entry.job_id
             ))
         })?;
+        if !self.owns_job(&job) {
+            return Err(JobOutboxProjectionError::Corrupt(format!(
+                "job {} belongs to realm {}, outside projector realm {}",
+                entry.job_id,
+                job.spec.realm_id,
+                self.realm_id.as_deref().unwrap_or("<unscoped>")
+            )));
+        }
         let persisted = job
             .outbox
             .iter()
@@ -348,6 +379,17 @@ impl JobOutboxProjector {
         let entries = self.job_store.list_pending_outbox(limit).await?;
         let mut projected = Vec::with_capacity(entries.len());
         for entry in entries {
+            if self.realm_id.is_some() {
+                let Some(job) = self.job_store.get(&entry.job_id).await? else {
+                    return Err(JobOutboxProjectionError::Corrupt(format!(
+                        "outbox entry points to missing job {}",
+                        entry.job_id
+                    )));
+                };
+                if !self.owns_job(&job) {
+                    continue;
+                }
+            }
             let prepared = self.prepare(&entry).await?;
             let runtime = self
                 .runtime_inbox
@@ -367,6 +409,7 @@ impl JobOutboxProjector {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProjector {
     async fn project_job(&self, job_id: &str) -> Result<(), String> {
@@ -424,6 +467,12 @@ impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProje
         else {
             return Err(format!("cannot acknowledge missing job {job_id}"));
         };
+        if !self.owns_job(&job) {
+            return Err(format!(
+                "cannot acknowledge job {job_id} outside projector realm {}",
+                self.realm_id.as_deref().unwrap_or("<unscoped>")
+            ));
+        }
         let runtime_id = LogicalRuntimeId::for_session(&job.spec.origin_session_id);
         let pending = self
             .runtime_inbox

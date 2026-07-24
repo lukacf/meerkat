@@ -1,3 +1,9 @@
+---
+title: "Durable Tool Execution v1 Deferred Findings"
+description: "Deferred findings discovered while delivering the durable tool execution and background jobs plan."
+icon: "list-check"
+---
+
 # Durable Tool Execution v1 — Deferred Findings
 
 This ledger records review findings that are adjacent to, but outside, the
@@ -6,19 +12,28 @@ not be absorbed into current work without re-triage.
 
 ## Open
 
-- Phase 3A: publish applied job-terminal inbox rows through the existing
-  runtime-owned quiescence, continuation, wake, typed-notice, and
-  `AgentApplied` boundary. The operation completion feed remains a read-only,
-  operation-specific projection and must not become job lifecycle authority.
-- Phase 3A/3B: runner-owned progress/artifact reporting must add typed artifact
-  references without turning the store or worker shell into lifecycle
-  authority.
 - Storage-provider follow-up: the shared doctor inventories higher-owned
   schema domains such as `jobs`, `runtime-store`, and `workgraph`, but cannot
   certify their supported versions without inverting crate ownership. Normal
   store open and `storage migrate --apply` still refuse future versions typed;
   a future provider-aware certification registry should close the read-only
   doctor gap for all higher-owned domains together.
+- Test-isolation follow-up: running every `meerkat-rpc::router::tests` case in
+  one parallel test process can make seven unrelated live-session tests contend
+  for the process-wide realtime projection budget. Phase 4's job and runtime
+  projection tests pass in that run; the live tests should receive explicit
+  serial/resource-budget isolation without coupling that work to durable jobs.
+- SDK live-provider follow-up: the Python and TypeScript SDK suites' image
+  scenarios fail when the local RPC subprocess has no image-generation
+  executor configured (`no image generation executor configured for provider
+  gemini`). Phase 4's deterministic SDK builds, wrapper parity, and non-live
+  tests pass; provider-backed image smoke remains an environment/release-lane
+  concern outside the durable-jobs protocol slice.
+- Machine-poster follow-up: `DetachedJobMachine` and
+  `RuntimeDeliveryMachine` are explicitly listed in the poster generator's
+  shrink-only coverage-gap roster. Their canonical TLA, contracts, mappings,
+  kernels, TLC verification, and authority docs are present; bespoke
+  large-format SVG layouts are a separate documentation slice.
 
 ## Resolved in scope
 
@@ -65,3 +80,13 @@ not be absorbed into current work without re-triage.
   a corrupted delivery high-water mark. Persisted submissions re-run
   constructor invariants, and recovered inbox rows must match the generated
   source-sequence authority before application.
+- Phase 3A: applied job-terminal inbox rows publish through the runtime-owned
+  delivery boundary while operation completion remains only a read projection;
+  the durable shell worker and store do not own lifecycle semantics.
+- Phase 3A/3B: runner progress, typed artifacts, monitor notifications, and
+  checkpoints are durable job facts without turning the worker shell or store
+  into lifecycle authority.
+- Phase 4 gate containment: the foreground-shell cancellation canary now waits
+  for parseable parent/child PID files rather than mere file creation, and the
+  two process-heavy durable-monitor stress tests have load-tolerant completion
+  deadlines. Their focused tests remain sub-100-ms when the machine is idle.

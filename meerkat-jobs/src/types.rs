@@ -407,6 +407,7 @@ impl JobProgress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobReceipt {
     pub job_id: JobId,
+    pub phase: JobPhase,
     pub deduplicated: bool,
     pub restart_class: RestartClass,
 }
@@ -588,4 +589,40 @@ pub struct JobSnapshot {
     pub terminal_result: Option<JobTerminalResult>,
     pub subscriptions: Vec<JobSubscription>,
     pub outbox: Vec<JobOutboxEntry>,
+}
+
+/// Safe application-facing projection of one detached job.
+///
+/// Attempt ids, fences, worker ids, runner handles, checkpoint authority, and
+/// credential references are deliberately absent. Host write authority uses
+/// [`AttemptWriteAuthority`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobDescription {
+    pub job_id: JobId,
+    pub runner: RunnerIdentity,
+    pub phase: JobPhase,
+    pub restart_class: RestartClass,
+    pub attempt_count: u64,
+    pub progress: Option<JobProgress>,
+    pub cancel_requested: bool,
+    pub terminal_result: Option<JobTerminalResult>,
+    pub subscription_count: u64,
+    pub delivery_backlog: u64,
+}
+
+/// Derived operational census over generated job authority.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobHealthSnapshot {
+    pub queued: u64,
+    pub running: u64,
+    pub awaiting_members: u64,
+    pub stale_leases: u64,
+    pub needs_attention: u64,
+    pub delivery_backlog: u64,
+}
+
+impl JobHealthSnapshot {
+    pub const fn is_degraded(&self) -> bool {
+        self.stale_leases > 0 || self.needs_attention > 0 || self.delivery_backlog > 0
+    }
 }

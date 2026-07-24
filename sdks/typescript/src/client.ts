@@ -57,6 +57,25 @@ import {
   type CommsPeersResult,
   type CommsSendResult,
   type InterruptResult,
+  type JobsArtifactsParams,
+  type JobsArtifactsResult,
+  type JobsCancelParams,
+  type JobsCancelResult,
+  type JobsGetParams,
+  type JobsGetResult,
+  type JobsHealthResult,
+  type JobsListParams,
+  type JobsListResult,
+  type JobsProgressParams,
+  type JobsProgressResult,
+  type JobsResultParams,
+  type JobsResultResult,
+  type JobsRetryParams,
+  type JobsRetryResult,
+  type JobsSubscribeParams,
+  type JobsSubscribeResult,
+  type JobsUnsubscribeParams,
+  type JobsUnsubscribeResult,
   type ServerCapabilities,
   type SkillEntry,
   type WorkEventsResult,
@@ -78,12 +97,21 @@ import {
   type MobRunResultParams,
   type MobMemberParams,
   type MobMemberStatusResult,
+  type MobkitJobCancelAckParams,
+  type MobkitJobCheckpointParams,
+  type MobkitJobCompleteParams,
+  type MobkitJobFailParams,
+  type MobkitJobHeartbeatParams,
+  type MobkitJobMutationResult,
+  type MobkitJobProgressParams,
   type MobSpawnManyParams,
   type MobSpawnManyResult,
   type WireLiveAdapterObservation,
   type WireAuthBindingRef,
   type MobSpawnSpecParams,
   type MobTurnStartParams,
+  type MonitorsStartParams,
+  type MonitorsStartResult,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRotateSupervisorResult,
   type MobConcludeObjectiveParams,
@@ -1406,6 +1434,86 @@ export class MeerkatClient {
   async getRuntimeHostHealth(): Promise<Record<string, unknown>> {
     type _RpcSignature = [RpcRuntimeHostHealth];
     return this.request("runtime/health", {});
+  }
+
+  async jobsGet(params: JobsGetParams): Promise<JobsGetResult> {
+    return this.request("jobs/get", { ...params }) as Promise<JobsGetResult>;
+  }
+
+  async jobsList(params: JobsListParams): Promise<JobsListResult> {
+    return this.request("jobs/list", { ...params }) as Promise<JobsListResult>;
+  }
+
+  async jobsCancel(params: JobsCancelParams): Promise<JobsCancelResult> {
+    return this.request("jobs/cancel", { ...params }) as Promise<JobsCancelResult>;
+  }
+
+  async jobsProgress(params: JobsProgressParams): Promise<JobsProgressResult> {
+    return this.request("jobs/progress", { ...params }) as Promise<JobsProgressResult>;
+  }
+
+  async jobsResult(params: JobsResultParams): Promise<JobsResultResult> {
+    return this.request("jobs/result", { ...params }) as Promise<JobsResultResult>;
+  }
+
+  async jobsArtifacts(params: JobsArtifactsParams): Promise<JobsArtifactsResult> {
+    return this.request("jobs/artifacts", { ...params }) as Promise<JobsArtifactsResult>;
+  }
+
+  async jobsRetry(params: JobsRetryParams): Promise<JobsRetryResult> {
+    return this.request("jobs/retry", { ...params }) as Promise<JobsRetryResult>;
+  }
+
+  async jobsHealth(): Promise<JobsHealthResult> {
+    return this.request("jobs/health", {}) as Promise<JobsHealthResult>;
+  }
+
+  async jobsSubscribe(params: JobsSubscribeParams): Promise<JobsSubscribeResult> {
+    return this.request("jobs/subscribe", { ...params }) as Promise<JobsSubscribeResult>;
+  }
+
+  async jobsUnsubscribe(params: JobsUnsubscribeParams): Promise<JobsUnsubscribeResult> {
+    return this.request("jobs/unsubscribe", { ...params }) as Promise<JobsUnsubscribeResult>;
+  }
+
+  async monitorsStart(params: MonitorsStartParams): Promise<MonitorsStartResult> {
+    return this.request("monitors/start", { ...params }) as Promise<MonitorsStartResult>;
+  }
+
+  async mobkitJobHeartbeat(
+    params: MobkitJobHeartbeatParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/heartbeat", { ...params }) as Promise<MobkitJobMutationResult>;
+  }
+
+  async mobkitJobProgress(
+    params: MobkitJobProgressParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/progress", { ...params }) as Promise<MobkitJobMutationResult>;
+  }
+
+  async mobkitJobCheckpoint(
+    params: MobkitJobCheckpointParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/checkpoint", { ...params }) as Promise<MobkitJobMutationResult>;
+  }
+
+  async mobkitJobComplete(
+    params: MobkitJobCompleteParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/complete", { ...params }) as Promise<MobkitJobMutationResult>;
+  }
+
+  async mobkitJobFail(
+    params: MobkitJobFailParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/fail", { ...params }) as Promise<MobkitJobMutationResult>;
+  }
+
+  async mobkitJobCancelAck(
+    params: MobkitJobCancelAckParams,
+  ): Promise<MobkitJobMutationResult> {
+    return this.request("mobkit/jobs/cancel_ack", { ...params }) as Promise<MobkitJobMutationResult>;
   }
 
   async requestApproval(

@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3190,6 +3190,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "uuid",
 ]
 
@@ -3599,6 +3600,7 @@ dependencies = [
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-tools",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

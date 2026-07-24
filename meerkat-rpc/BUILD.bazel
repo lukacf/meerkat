@@ -68,6 +68,7 @@ rust_library(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,
@@ -117,6 +118,7 @@ rust_library(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -184,6 +186,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,
@@ -235,6 +238,7 @@ rust_binary(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,
@@ -306,6 +310,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -384,6 +389,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -462,6 +468,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -540,6 +547,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -614,6 +622,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -688,6 +697,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -762,6 +772,7 @@ rust_test(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -806,6 +817,7 @@ rust_library(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,
@@ -852,6 +864,7 @@ rust_binary(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_rpc_surface_min",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
@@ -899,6 +912,7 @@ rust_library(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,
@@ -949,6 +963,7 @@ rust_binary(
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_rpc_surface_comms_mcp",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",

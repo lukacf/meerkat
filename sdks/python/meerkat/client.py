@@ -63,6 +63,31 @@ from .generated.types import (
     WorkItemsResult,
     GoalStatusRequest,
     GoalStatusResult,
+    JobArtifactRef,
+    JobHealthSummary,
+    JobProgress,
+    JobRunner,
+    JobSummary,
+    JobTerminalResult,
+    JobsArtifactsParams,
+    JobsArtifactsResult,
+    JobsCancelParams,
+    JobsCancelResult,
+    JobsGetParams,
+    JobsGetResult,
+    JobsHealthResult,
+    JobsListParams,
+    JobsListResult,
+    JobsProgressParams,
+    JobsProgressResult,
+    JobsResultParams,
+    JobsResultResult,
+    JobsRetryParams,
+    JobsRetryResult,
+    JobsSubscribeParams,
+    JobsSubscribeResult,
+    JobsUnsubscribeParams,
+    JobsUnsubscribeResult,
     LiveCloseResult,
     LiveCloseStatus,
     LiveOpenResult,
@@ -90,6 +115,13 @@ from .generated.types import (
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberStatusResult,
+    MobkitJobCancelAckParams,
+    MobkitJobCheckpointParams,
+    MobkitJobCompleteParams,
+    MobkitJobFailParams,
+    MobkitJobHeartbeatParams,
+    MobkitJobMutationResult,
+    MobkitJobProgressParams,
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
@@ -110,6 +142,8 @@ from .generated.types import (
     MobTurnStartParams,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
+    MonitorsStartParams,
+    MonitorsStartResult,
     PublicTurnToolOverlay,
     RealtimeTurningMode,
     WireAuthBindingRef,
@@ -1553,6 +1587,286 @@ class MeerkatClient:
     async def get_runtime_host_health(self) -> dict[str, Any]:
         _rpc_signature: RpcRuntimeHostHealth
         return await self._request("runtime/health", {})
+
+    @staticmethod
+    def _parse_job_summary(raw: Any, context: str) -> JobSummary:
+        value = MeerkatClient._require_dict(raw, "job", context)
+        runner_raw = MeerkatClient._require_dict(value.get("runner"), "runner", context)
+        progress_raw = value.get("progress")
+        progress = (
+            None
+            if progress_raw is None
+            else JobProgress(
+                cursor=MeerkatClient._require_non_negative_integer_field(
+                    MeerkatClient._require_dict(progress_raw, "progress", context),
+                    "cursor",
+                    context,
+                ),
+                detail=MeerkatClient._require_present_string_field(
+                    MeerkatClient._require_dict(progress_raw, "progress", context),
+                    "detail",
+                    context,
+                ),
+            )
+        )
+        terminal_raw = value.get("terminal_result")
+        if terminal_raw is not None:
+            terminal = MeerkatClient._require_dict(
+                terminal_raw, "terminal_result", context
+            )
+            terminal_kind = MeerkatClient._require_string_field(
+                terminal, "kind", context
+            )
+            if terminal_kind not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+                "worker_lost",
+                "needs_attention",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported terminal_result.kind {terminal_kind!r}",
+                )
+        return JobSummary(
+            attempt_count=MeerkatClient._require_non_negative_integer_field(
+                value, "attempt_count", context
+            ),
+            cancel_requested=MeerkatClient._require_bool_field(
+                value, "cancel_requested", context
+            ),
+            delivery_backlog=MeerkatClient._require_non_negative_integer_field(
+                value, "delivery_backlog", context
+            ),
+            job_id=MeerkatClient._require_string_field(value, "job_id", context),
+            phase=cast(
+                Any,
+                MeerkatClient._require_string_field(value, "phase", context),
+            ),
+            restart_class=cast(
+                Any,
+                MeerkatClient._require_string_field(value, "restart_class", context),
+            ),
+            runner=JobRunner(
+                name=MeerkatClient._require_string_field(runner_raw, "name", context),
+                version=MeerkatClient._require_string_field(
+                    runner_raw, "version", context
+                ),
+            ),
+            subscription_count=MeerkatClient._require_non_negative_integer_field(
+                value, "subscription_count", context
+            ),
+            progress=progress,
+            terminal_result=cast(JobTerminalResult | None, terminal_raw),
+        )
+
+    @staticmethod
+    def _parse_job_get_result(raw: Any, context: str) -> JobsGetResult:
+        result = MeerkatClient._require_dict(raw, "result", context)
+        return JobsGetResult(
+            job=MeerkatClient._parse_job_summary(result.get("job"), context)
+        )
+
+    async def jobs_get(self, params: JobsGetParams) -> JobsGetResult:
+        return self._parse_job_get_result(
+            await self._request("jobs/get", _wire_params(params)),
+            "Invalid jobs/get response",
+        )
+
+    async def jobs_list(self, params: JobsListParams) -> JobsListResult:
+        raw = await self._request("jobs/list", _wire_params(params))
+        jobs = self._require_present_list_field(raw, "jobs", "Invalid jobs/list response")
+        return JobsListResult(
+            jobs=[
+                self._parse_job_summary(job, f"Invalid jobs/list response jobs[{index}]")
+                for index, job in enumerate(jobs)
+            ]
+        )
+
+    async def jobs_cancel(self, params: JobsCancelParams) -> JobsCancelResult:
+        result = self._parse_job_get_result(
+            await self._request("jobs/cancel", _wire_params(params)),
+            "Invalid jobs/cancel response",
+        )
+        return JobsCancelResult(job=result.job)
+
+    async def jobs_progress(self, params: JobsProgressParams) -> JobsProgressResult:
+        raw = await self._request("jobs/progress", _wire_params(params))
+        progress_raw = raw.get("progress")
+        progress = (
+            None
+            if progress_raw is None
+            else JobProgress(
+                cursor=self._require_non_negative_integer_field(
+                    self._require_dict(progress_raw, "progress", "Invalid jobs/progress response"),
+                    "cursor",
+                    "Invalid jobs/progress response",
+                ),
+                detail=self._require_present_string_field(
+                    self._require_dict(progress_raw, "progress", "Invalid jobs/progress response"),
+                    "detail",
+                    "Invalid jobs/progress response",
+                ),
+            )
+        )
+        return JobsProgressResult(
+            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/progress response"),
+            phase=cast(Any, self._require_string_field(raw, "phase", "Invalid jobs/progress response")),
+            progress=progress,
+        )
+
+    async def jobs_result(self, params: JobsResultParams) -> JobsResultResult:
+        raw = await self._request("jobs/result", _wire_params(params))
+        return JobsResultResult(
+            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/result response"),
+            phase=cast(Any, self._require_string_field(raw, "phase", "Invalid jobs/result response")),
+            result=cast(JobTerminalResult | None, raw.get("result")),
+        )
+
+    async def jobs_artifacts(self, params: JobsArtifactsParams) -> JobsArtifactsResult:
+        raw = await self._request("jobs/artifacts", _wire_params(params))
+        artifacts = self._require_present_list_field(
+            raw, "artifacts", "Invalid jobs/artifacts response"
+        )
+        return JobsArtifactsResult(
+            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/artifacts response"),
+            artifacts=[
+                JobArtifactRef(
+                    reference=self._require_string_field(
+                        self._require_dict(item, "artifact", "Invalid jobs/artifacts response"),
+                        "reference",
+                        "Invalid jobs/artifacts response",
+                    )
+                )
+                for item in artifacts
+            ],
+        )
+
+    async def jobs_retry(self, params: JobsRetryParams) -> JobsRetryResult:
+        result = self._parse_job_get_result(
+            await self._request("jobs/retry", _wire_params(params)),
+            "Invalid jobs/retry response",
+        )
+        return JobsRetryResult(job=result.job)
+
+    async def jobs_health(self) -> JobsHealthResult:
+        raw = await self._request("jobs/health", {})
+        health = self._require_dict(
+            raw.get("detached_jobs"), "detached_jobs", "Invalid jobs/health response"
+        )
+        return JobsHealthResult(
+            detached_jobs=JobHealthSummary(
+                awaiting_members=self._require_non_negative_integer_field(
+                    health, "awaiting_members", "Invalid jobs/health response"
+                ),
+                delivery_backlog=self._require_non_negative_integer_field(
+                    health, "delivery_backlog", "Invalid jobs/health response"
+                ),
+                needs_attention=self._require_non_negative_integer_field(
+                    health, "needs_attention", "Invalid jobs/health response"
+                ),
+                queued=self._require_non_negative_integer_field(
+                    health, "queued", "Invalid jobs/health response"
+                ),
+                running=self._require_non_negative_integer_field(
+                    health, "running", "Invalid jobs/health response"
+                ),
+                stale_leases=self._require_non_negative_integer_field(
+                    health, "stale_leases", "Invalid jobs/health response"
+                ),
+                status=cast(
+                    Any,
+                    self._require_string_field(
+                        health, "status", "Invalid jobs/health response"
+                    ),
+                ),
+            )
+        )
+
+    async def jobs_subscribe(
+        self, params: JobsSubscribeParams
+    ) -> JobsSubscribeResult:
+        result = self._parse_job_get_result(
+            await self._request("jobs/subscribe", _wire_params(params)),
+            "Invalid jobs/subscribe response",
+        )
+        return JobsSubscribeResult(job=result.job)
+
+    async def jobs_unsubscribe(
+        self, params: JobsUnsubscribeParams
+    ) -> JobsUnsubscribeResult:
+        result = self._parse_job_get_result(
+            await self._request("jobs/unsubscribe", _wire_params(params)),
+            "Invalid jobs/unsubscribe response",
+        )
+        return JobsUnsubscribeResult(job=result.job)
+
+    async def monitors_start(self, params: MonitorsStartParams) -> MonitorsStartResult:
+        result = self._parse_job_get_result(
+            await self._request("monitors/start", _wire_params(params)),
+            "Invalid monitors/start response",
+        )
+        return MonitorsStartResult(job=result.job)
+
+    async def mobkit_job_heartbeat(
+        self, params: MobkitJobHeartbeatParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/heartbeat", _wire_params(params)),
+                "Invalid mobkit/jobs/heartbeat response",
+            ).job
+        )
+
+    async def mobkit_job_progress(
+        self, params: MobkitJobProgressParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/progress", _wire_params(params)),
+                "Invalid mobkit/jobs/progress response",
+            ).job
+        )
+
+    async def mobkit_job_checkpoint(
+        self, params: MobkitJobCheckpointParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/checkpoint", _wire_params(params)),
+                "Invalid mobkit/jobs/checkpoint response",
+            ).job
+        )
+
+    async def mobkit_job_complete(
+        self, params: MobkitJobCompleteParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/complete", _wire_params(params)),
+                "Invalid mobkit/jobs/complete response",
+            ).job
+        )
+
+    async def mobkit_job_fail(
+        self, params: MobkitJobFailParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/fail", _wire_params(params)),
+                "Invalid mobkit/jobs/fail response",
+            ).job
+        )
+
+    async def mobkit_job_cancel_ack(
+        self, params: MobkitJobCancelAckParams
+    ) -> MobkitJobMutationResult:
+        return MobkitJobMutationResult(
+            job=self._parse_job_get_result(
+                await self._request("mobkit/jobs/cancel_ack", _wire_params(params)),
+                "Invalid mobkit/jobs/cancel_ack response",
+            ).job
+        )
 
     async def request_approval(self, params: dict[str, Any]) -> dict[str, Any]:
         _rpc_signature: RpcApprovalRecord | RpcApprovalRequestParams

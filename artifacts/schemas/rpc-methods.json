@@ -12,6 +12,107 @@
       "result_type": "ToolsRegisterResult"
     },
     {
+      "description": "Get a safe detached-job projection",
+      "name": "jobs/get",
+      "params_type": "JobsGetParams",
+      "result_type": "JobsGetResult"
+    },
+    {
+      "description": "List detached jobs for an origin session",
+      "name": "jobs/list",
+      "params_type": "JobsListParams",
+      "result_type": "JobsListResult"
+    },
+    {
+      "description": "Request machine-authorized detached-job cancellation",
+      "name": "jobs/cancel",
+      "params_type": "JobsCancelParams",
+      "result_type": "JobsCancelResult"
+    },
+    {
+      "description": "Read a safe detached-job progress projection",
+      "name": "jobs/progress",
+      "params_type": "JobsProgressParams",
+      "result_type": "JobsProgressResult"
+    },
+    {
+      "description": "Read a safe detached-job terminal result projection",
+      "name": "jobs/result",
+      "params_type": "JobsResultParams",
+      "result_type": "JobsResultResult"
+    },
+    {
+      "description": "List safe artifact references produced by a detached job",
+      "name": "jobs/artifacts",
+      "params_type": "JobsArtifactsParams",
+      "result_type": "JobsArtifactsResult"
+    },
+    {
+      "description": "Schedule a machine-authorized retry after observed worker loss",
+      "name": "jobs/retry",
+      "params_type": "JobsRetryParams",
+      "result_type": "JobsRetryResult"
+    },
+    {
+      "description": "Read detached-job operational health",
+      "name": "jobs/health",
+      "result_type": "JobsHealthResult"
+    },
+    {
+      "description": "Start a high-trust durable script monitor",
+      "name": "monitors/start",
+      "params_type": "MonitorsStartParams",
+      "result_type": "MonitorsStartResult"
+    },
+    {
+      "description": "Add a durable detached-job delivery subscription",
+      "name": "jobs/subscribe",
+      "params_type": "JobsSubscribeParams",
+      "result_type": "JobsSubscribeResult"
+    },
+    {
+      "description": "Remove a durable detached-job delivery subscription",
+      "name": "jobs/unsubscribe",
+      "params_type": "JobsUnsubscribeParams",
+      "result_type": "JobsUnsubscribeResult"
+    },
+    {
+      "description": "Renew a detached callback attempt lease under its current fence",
+      "name": "mobkit/jobs/heartbeat",
+      "params_type": "MobkitJobHeartbeatParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
+      "description": "Commit detached callback progress under its current fence",
+      "name": "mobkit/jobs/progress",
+      "params_type": "MobkitJobProgressParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
+      "description": "Commit a detached callback checkpoint under its current fence",
+      "name": "mobkit/jobs/checkpoint",
+      "params_type": "MobkitJobCheckpointParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
+      "description": "Complete a detached callback attempt under its current fence",
+      "name": "mobkit/jobs/complete",
+      "params_type": "MobkitJobCompleteParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
+      "description": "Fail a detached callback attempt under its current fence",
+      "name": "mobkit/jobs/fail",
+      "params_type": "MobkitJobFailParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
+      "description": "Acknowledge detached callback cancellation under its current fence",
+      "name": "mobkit/jobs/cancel_ack",
+      "params_type": "MobkitJobCancelAckParams",
+      "result_type": "MobkitJobMutationResult"
+    },
+    {
       "description": "Create session + run first turn",
       "name": "session/create",
       "params_type": "CreateSessionParams",

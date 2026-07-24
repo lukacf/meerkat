@@ -56,6 +56,19 @@ filter = 'test(~test_wire_members_batch_materializes_300_by_150_dense_topology_i
 threads-required = "num-cpus"
 
 [[profile.fast.overrides]]
+# This process-backed monitor test verifies that a committed completion line
+# wins over subsequent stdout. It is normally sub-second, but a concurrently
+# saturating topology/codegen case can starve its Tokio/process readers until
+# the contract timeout. Reserve the lane; the command still exercises its own
+# stdout concurrency internally.
+filter = 'test(~explicit_completion_cannot_deadlock_behind_post_complete_stdout_flood)'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+filter = 'test(~explicit_completion_cannot_deadlock_behind_post_complete_stdout_flood)'
+threads-required = "num-cpus"
+
+[[profile.fast.overrides]]
 # Branch-winner mob flow tests drive full in-memory runtimes and wait on
 # scheduler progress, so running them beside codegen canaries or parity audits
 # can consume their terminal-state wait budget without surfacing a product

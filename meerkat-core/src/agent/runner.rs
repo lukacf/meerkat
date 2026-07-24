@@ -1882,7 +1882,13 @@ where
             );
         }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&run_prompt_input)
-            .with_turn_metadata(dispatch_metadata);
+            .with_turn_metadata(dispatch_metadata)
+            .with_runtime_identity(
+                self.session.id().clone(),
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.interaction_id),
+            );
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2040,7 +2046,13 @@ where
             );
         }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&prompt)
-            .with_turn_metadata(dispatch_metadata);
+            .with_turn_metadata(dispatch_metadata)
+            .with_runtime_identity(
+                self.session.id().clone(),
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.interaction_id),
+            );
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 

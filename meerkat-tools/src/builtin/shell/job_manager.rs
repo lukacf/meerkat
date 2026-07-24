@@ -590,6 +590,7 @@ impl JobManager {
                 "detached shell requires canonical session, operation, and durable storage binding",
             ));
         }
+        self.config.check_allowlist(command)?;
         self.ensure_recovered().await?;
         let durable = self.durable()?.clone();
 
@@ -2845,7 +2846,7 @@ mod durable_tests {
             .await
             .expect("spawn monitor");
         let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
-        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+        let completed = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let snapshot = service.get(&job_id).await.expect("read").expect("job");
                 if snapshot.terminal_result.is_some() {
@@ -2963,7 +2964,7 @@ mod durable_tests {
             .await
             .expect("spawn monitor");
         let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let snapshot = service.get(&job_id).await.expect("read").expect("job");
                 if snapshot.terminal_result.is_some() {

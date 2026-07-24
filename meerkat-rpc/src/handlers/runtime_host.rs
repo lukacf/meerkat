@@ -46,12 +46,13 @@ fn host_surface_options(
     options.schedules = cfg!(feature = "schedule");
     options.skills = skills_enabled;
     options.approvals = approvals_available;
+    options.durable_jobs = true;
     options.rpc_transport = Some("json_rpc".to_string());
     options.rpc_methods = meerkat_contracts::rpc_method_names(catalog_options);
     options
 }
 
-pub fn handle_info(
+pub async fn handle_info(
     id: Option<RpcId>,
     runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
@@ -73,7 +74,9 @@ pub fn handle_info(
     let metadata = metadata
         .as_ref()
         .map(meerkat::surface::RuntimeHostMetadataProjection::from);
-    let info = meerkat::surface::build_runtime_host_info(&options, metadata.as_ref(), context_root);
+    let mut info =
+        meerkat::surface::build_runtime_host_info(&options, metadata.as_ref(), context_root);
+    info.health = runtime_health(runtime).await;
     RpcResponse::success(id, &info)
 }
 
@@ -97,7 +100,38 @@ pub fn handle_capabilities(
     RpcResponse::success(id, &capabilities)
 }
 
-pub fn handle_health(id: Option<RpcId>) -> RpcResponse {
-    let health = meerkat::surface::build_runtime_host_health();
+pub async fn handle_health(id: Option<RpcId>, runtime: &Arc<SessionRuntime>) -> RpcResponse {
+    let health = runtime_health(runtime).await;
     RpcResponse::success(id, &health)
+}
+
+async fn runtime_health(runtime: &SessionRuntime) -> meerkat_contracts::RuntimeHostHealth {
+    let mut health = meerkat::surface::build_runtime_host_health();
+    let observed_at_ms = meerkat_core::time_compat::SystemTime::now()
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(u64::MAX);
+    let service = runtime.detached_job_service();
+    let job_snapshot = match runtime.realm_id() {
+        Some(realm_id) => {
+            service
+                .health_snapshot_for_realm(realm_id.as_str(), observed_at_ms, 10_000)
+                .await
+        }
+        None => service.health_snapshot(observed_at_ms, 10_000).await,
+    };
+    let jobs = match job_snapshot {
+        Ok(snapshot)
+            if !snapshot.is_degraded() && runtime.runtime_job_delivery_backlog().await == Ok(0) =>
+        {
+            meerkat_contracts::RuntimeHostHealthStatus::Ok
+        }
+        Ok(_) | Err(_) => meerkat_contracts::RuntimeHostHealthStatus::Degraded,
+    };
+    health.checks.insert("jobs".to_string(), jobs);
+    if jobs != meerkat_contracts::RuntimeHostHealthStatus::Ok {
+        health.status = meerkat_contracts::RuntimeHostHealthStatus::Degraded;
+    }
+    health
 }

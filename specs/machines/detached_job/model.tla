@@ -112,7 +112,7 @@ ClaimRetryScheduled(attempt_id, worker_id, claimed_at_ms, arg_lease_expires_at_m
 
 RenewRunningLease(attempt_id, fence, arg_heartbeat_at_ms, arg_lease_expires_at_ms) ==
     /\ phase = "Running"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (heartbeat_at_ms # None) /\ (arg_heartbeat_at_ms > (IF "value" \in DOMAIN heartbeat_at_ms THEN heartbeat_at_ms["value"] ELSE None)) /\ (arg_heartbeat_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)) /\ (arg_lease_expires_at_ms > (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (heartbeat_at_ms # None) /\ (arg_heartbeat_at_ms > (IF "value" \in DOMAIN heartbeat_at_ms THEN heartbeat_at_ms["value"] ELSE None)) /\ (arg_lease_expires_at_ms > arg_heartbeat_at_ms) /\ (arg_lease_expires_at_ms > (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ lease_expires_at_ms' = Some(arg_lease_expires_at_ms)
@@ -122,7 +122,7 @@ RenewRunningLease(attempt_id, fence, arg_heartbeat_at_ms, arg_lease_expires_at_m
 
 RenewExternalWaitLease(attempt_id, fence, arg_heartbeat_at_ms, arg_lease_expires_at_ms) ==
     /\ phase = "WaitingExternal"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (heartbeat_at_ms # None) /\ (arg_heartbeat_at_ms > (IF "value" \in DOMAIN heartbeat_at_ms THEN heartbeat_at_ms["value"] ELSE None)) /\ (arg_heartbeat_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)) /\ (arg_lease_expires_at_ms > (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (heartbeat_at_ms # None) /\ (arg_heartbeat_at_ms > (IF "value" \in DOMAIN heartbeat_at_ms THEN heartbeat_at_ms["value"] ELSE None)) /\ (arg_lease_expires_at_ms > arg_heartbeat_at_ms) /\ (arg_lease_expires_at_ms > (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "WaitingExternal"
     /\ model_step_count' = model_step_count + 1
     /\ lease_expires_at_ms' = Some(arg_lease_expires_at_ms)
@@ -771,7 +771,7 @@ no_attempt_has_no_attempt_authority == (IF (attempt_count # 0) THEN TRUE ELSE ((
 checkpoint_requires_attempt == (IF (checkpoint_ref = None) THEN TRUE ELSE (attempt_count > 0))
 active_execution_requires_attempt_authority == (IF ((phase # "Running") /\ (phase # "WaitingExternal") /\ (phase # "LossObserved") /\ (phase # "RetryScheduled")) THEN TRUE ELSE ((current_attempt_id # None) /\ (current_worker_id # None) /\ (lease_expires_at_ms # None) /\ (runner_handle # None) /\ (current_fence > 0)))
 terminal_requires_delivery == (IF ((phase # "Succeeded") /\ (phase # "Failed") /\ (phase # "Cancelled") /\ (phase # "WorkerLost") /\ (phase # "NeedsAttention")) THEN TRUE ELSE ((terminal_kind # None) /\ (terminal_delivery_sequence > 0) /\ (terminal_delivery_sequence <= delivery_sequence)))
-notification_identity_and_sequence_cardinality_match == ((Cardinality(notification_ids) = Cardinality(notification_idempotency_keys)) /\ (Cardinality(notification_ids) = Len(notification_id_by_key)) /\ (Cardinality(notification_ids) = Len(notification_delivery_ids)) /\ (Cardinality(notification_ids) = Len(notification_sequences)))
+notification_identity_and_sequence_cardinality_match == ((Cardinality(notification_ids) = Cardinality(notification_idempotency_keys)) /\ (DOMAIN notification_id_by_key = notification_idempotency_keys) /\ (DOMAIN notification_delivery_ids = notification_ids) /\ (DOMAIN notification_sequences = notification_ids))
 applied_notifications_are_committed == (Cardinality(notification_applied) <= Cardinality(notification_ids))
 nonterminal_has_no_terminal_delivery == (IF (phase = "Succeeded") THEN TRUE ELSE (IF (phase = "Failed") THEN TRUE ELSE (IF (phase = "Cancelled") THEN TRUE ELSE (IF (phase = "WorkerLost") THEN TRUE ELSE (IF (phase = "NeedsAttention") THEN TRUE ELSE ((terminal_kind = None) /\ (terminal_delivery_sequence = 0) /\ (terminal_delivery_applied = FALSE)))))))
 

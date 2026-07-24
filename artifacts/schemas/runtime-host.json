@@ -42,6 +42,11 @@
           "comms": {
             "type": "boolean"
           },
+          "durable_jobs": {
+            "default": false,
+            "description": "Durable detached-job protocol and storage are available.",
+            "type": "boolean"
+          },
           "event_replay": {
             "type": "boolean"
           },
@@ -160,6 +165,11 @@
         "type": "boolean"
       },
       "comms": {
+        "type": "boolean"
+      },
+      "durable_jobs": {
+        "default": false,
+        "description": "Durable detached-job protocol and storage are available.",
         "type": "boolean"
       },
       "event_replay": {
@@ -393,6 +403,11 @@
             "type": "boolean"
           },
           "comms": {
+            "type": "boolean"
+          },
+          "durable_jobs": {
+            "default": false,
+            "description": "Durable detached-job protocol and storage are available.",
             "type": "boolean"
           },
           "event_replay": {

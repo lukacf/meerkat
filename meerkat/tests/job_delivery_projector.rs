@@ -31,8 +31,12 @@ impl JobDeliverySink for RecordingDeliverySink {
 }
 
 fn spec(key: &str, session_id: SessionId) -> JobSpec {
+    spec_for_realm("default", key, session_id)
+}
+
+fn spec_for_realm(realm_id: &str, key: &str, session_id: SessionId) -> JobSpec {
     JobSpec::new(
-        "default",
+        realm_id,
         session_id,
         meerkat::ExecutionIntentId::new(),
         InteractionLineageId::new(),
@@ -42,6 +46,58 @@ fn spec(key: &str, session_id: SessionId) -> JobSpec {
         CanonicalArgumentsHash::new(format!("hash-{key}")).expect("hash"),
         JobSubmissionKey::new(key).expect("submission key"),
     )
+}
+
+#[tokio::test]
+async fn realm_scoped_projection_leaves_other_realm_outbox_pending() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let local = completed_job(&jobs, session_id.clone(), "local").await;
+
+    let foreign_receipt = jobs
+        .submit(spec_for_realm("other", "foreign", session_id.clone()))
+        .await
+        .expect("submit foreign job");
+    let foreign_claim = jobs
+        .claim_attempt(
+            &foreign_receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("worker-other").expect("worker"),
+                1,
+                100,
+                RunnerHandleRef::new("runner-other").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim foreign job");
+    jobs.complete_attempt(
+        &foreign_receipt.job_id,
+        (&foreign_claim).into(),
+        2,
+        Some(JobResultRef::new("foreign-result").expect("result")),
+    )
+    .await
+    .expect("complete foreign job");
+
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new_for_realm(job_store.clone(), inbox.clone(), "default");
+    let projected = projector
+        .project_pending(10)
+        .await
+        .expect("project local realm");
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].job_id, local);
+    assert!(
+        jobs.get(&foreign_receipt.job_id)
+            .await
+            .expect("load foreign")
+            .expect("foreign job")
+            .outbox
+            .iter()
+            .any(|entry| !entry.applied)
+    );
 }
 
 async fn completed_job(jobs: &DetachedJobService, session_id: SessionId, key: &str) -> JobId {

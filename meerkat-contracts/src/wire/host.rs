@@ -52,6 +52,9 @@ pub struct RuntimeHostFeatureFlags {
     /// Defaulted so pre-field payloads keep decoding (SD-8).
     #[serde(default)]
     pub multi_host_mobs: bool,
+    /// Durable detached-job protocol and storage are available.
+    #[serde(default)]
+    pub durable_jobs: bool,
 }
 
 /// Realm/config metadata projected from the owning config store.
@@ -143,6 +146,7 @@ mod tests {
             external_members: false,
             secure_remote_rpc: false,
             multi_host_mobs: false,
+            durable_jobs: true,
         }
     }
 
@@ -159,6 +163,18 @@ mod tests {
             !decoded.multi_host_mobs,
             "absent multi_host_mobs must decode to false (SD-8)"
         );
+    }
+
+    #[test]
+    fn feature_flags_durable_jobs_defaults_false_for_pre_field_payloads() {
+        let mut value = serde_json::to_value(sample_flags()).expect("serialize flags");
+        value
+            .as_object_mut()
+            .expect("flags object")
+            .remove("durable_jobs");
+        let decoded: RuntimeHostFeatureFlags =
+            serde_json::from_value(value).expect("pre-field flags payload decodes");
+        assert!(!decoded.durable_jobs);
     }
 
     #[test]

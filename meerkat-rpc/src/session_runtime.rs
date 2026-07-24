@@ -1681,6 +1681,11 @@ fn gate_runtime_completion_outcome(
 pub struct SessionRuntime {
     factory: AgentFactory,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    job_store: Arc<dyn meerkat::DetachedJobStore>,
+    runtime_delivery_inbox: meerkat_runtime::RuntimeDeliveryInbox,
+    job_delivery_driver_armed: std::sync::atomic::AtomicBool,
+    job_delivery_drain_lock: Mutex<()>,
+    monitor_job_managers: Mutex<HashMap<SessionId, Arc<meerkat_tools::builtin::shell::JobManager>>>,
     schedule_service: ScheduleService,
     workgraph_store: Arc<dyn meerkat::WorkGraphStore>,
     artifact_store: Arc<dyn meerkat_core::ArtifactStore>,
@@ -1790,6 +1795,114 @@ pub struct SessionRuntime {
     /// surface-agnostic accessors land on `MeerkatSessionRuntime` and
     /// flow through `inner()`. Phase 4 R1 will collapse the duplication.
     inner: Arc<meerkat::session_runtime::MeerkatSessionRuntime>,
+}
+
+struct SessionRuntimeJobDeliverySink {
+    runtime: Arc<SessionRuntime>,
+}
+
+struct ExternalEventRuntimeContext {
+    handling_mode: meerkat_core::types::HandlingMode,
+    idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
+    correlation_id: Option<meerkat_runtime::CorrelationId>,
+}
+
+#[async_trait::async_trait]
+impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
+    async fn apply(&self, application: meerkat::JobDeliveryApplication) -> Result<(), String> {
+        use meerkat::JobDeliveryApplication;
+
+        match application {
+            JobDeliveryApplication::Record { .. } => Ok(()),
+            JobDeliveryApplication::Notification {
+                job_id,
+                delivery_sequence,
+                subscription,
+                content,
+            } => {
+                let mut request = AppendSystemContextRequest::from_text(render_job_delivery_text(
+                    &job_id, &content,
+                ));
+                request.source = Some(format!("detached_job:{job_id}"));
+                request.idempotency_key = Some(format!(
+                    "job:{job_id}:{delivery_sequence}:{}",
+                    subscription.subscription_id()
+                ));
+                self.runtime
+                    .append_system_context(subscription.session_id(), request)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.message)
+            }
+            JobDeliveryApplication::Event {
+                job_id,
+                delivery_sequence,
+                subscription,
+                interaction_lineage_id,
+                handling_mode,
+                content,
+            } => {
+                let event_type = match &content {
+                    meerkat::JobDeliveryContent::Notification(_) => "job.notification",
+                    meerkat::JobDeliveryContent::Terminal(_) => "job.terminal",
+                };
+                let content_value = match &content {
+                    meerkat::JobDeliveryContent::Notification(notification) => {
+                        serde_json::json!({
+                            "kind": "notification",
+                            "notification": notification,
+                        })
+                    }
+                    meerkat::JobDeliveryContent::Terminal(result) => serde_json::json!({
+                        "kind": "terminal",
+                        "result": result,
+                    }),
+                };
+                let payload = serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "delivery_sequence": delivery_sequence,
+                    "content": content_value,
+                });
+                let correlation_id = uuid::Uuid::parse_str(interaction_lineage_id.as_str())
+                    .ok()
+                    .map(meerkat_runtime::CorrelationId::from_uuid);
+                self.runtime
+                    .accept_external_event_via_runtime_with_context(
+                        subscription.session_id(),
+                        event_type.to_string(),
+                        payload,
+                        None,
+                        ExternalEventRuntimeContext {
+                            handling_mode,
+                            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(format!(
+                                "job:{job_id}:{delivery_sequence}:{}",
+                                subscription.subscription_id()
+                            ))),
+                            correlation_id,
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.message)
+            }
+        }
+    }
+}
+
+fn render_job_delivery_text(
+    job_id: &meerkat::JobId,
+    content: &meerkat::JobDeliveryContent,
+) -> String {
+    match content {
+        meerkat::JobDeliveryContent::Notification(notification) => format!(
+            "Detached job {job_id}: {}\n\n{}",
+            notification.title(),
+            notification.body()
+        ),
+        meerkat::JobDeliveryContent::Terminal(result) => {
+            format!("Detached job {job_id} reached terminal state: {result:?}")
+        }
+    }
 }
 
 fn session_metadata_marks_mob_member(session: &Session) -> bool {
@@ -2186,6 +2299,9 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let job_store = persistence.job_store();
+        let runtime_delivery_inbox =
+            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -2265,6 +2381,11 @@ impl SessionRuntime {
         Self {
             factory: factory_clone,
             service,
+            job_store,
+            runtime_delivery_inbox,
+            job_delivery_driver_armed: std::sync::atomic::AtomicBool::new(false),
+            job_delivery_drain_lock: Mutex::new(()),
+            monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
             workgraph_store,
             artifact_store,
@@ -2328,6 +2449,9 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let job_store = persistence.job_store();
+        let runtime_delivery_inbox =
+            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -2408,6 +2532,11 @@ impl SessionRuntime {
         Self {
             factory: factory_clone,
             service,
+            job_store,
+            runtime_delivery_inbox,
+            job_delivery_driver_armed: std::sync::atomic::AtomicBool::new(false),
+            job_delivery_drain_lock: Mutex::new(()),
+            monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
             workgraph_store,
             artifact_store,
@@ -4068,15 +4197,8 @@ impl SessionRuntime {
     }
 
     fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        let tx = self.callback_request_tx()?;
-        Some(Arc::new(
-            crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
-                self.callback_tool_registry(),
-                tx,
-                self.callback_id_counter(),
-                vec![],
-            ),
-        ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
+        self.callback_tool_dispatcher(vec![])
+            .map(|dispatcher| Arc::new(dispatcher) as Arc<dyn meerkat_core::AgentToolDispatcher>)
     }
 
     /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
@@ -4183,6 +4305,237 @@ impl SessionRuntime {
 
     pub fn schedule_service(&self) -> ScheduleService {
         self.schedule_service.clone()
+    }
+
+    pub fn detached_job_service(&self) -> meerkat::DetachedJobService {
+        meerkat::DetachedJobService::new(self.job_store.clone())
+    }
+
+    pub(crate) async fn monitor_job_manager_for_session(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<Arc<meerkat_tools::builtin::shell::JobManager>, RpcError> {
+        if let Some(manager) = self.monitor_job_managers.lock().await.get(session_id) {
+            return Ok(Arc::clone(manager));
+        }
+        if !self.factory.enable_shell {
+            return Err(RpcError {
+                code: error::INVALID_REQUEST,
+                message: "monitors/start requires shell capability".to_string(),
+                data: None,
+            });
+        }
+        let realm_id = self.realm_id().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "monitors/start requires an active realm".to_string(),
+            data: None,
+        })?;
+        let project_root = self
+            .factory
+            .project_root
+            .clone()
+            .or_else(|| self.factory.context_root.clone())
+            .ok_or_else(|| RpcError {
+                code: error::INVALID_REQUEST,
+                message: "monitors/start requires an explicit project or context root".to_string(),
+                data: None,
+            })?;
+        self.ensure_runtime_executor(session_id).await?;
+        let ops_registry = self
+            .runtime_adapter
+            .ops_lifecycle_registry(session_id)
+            .await
+            .ok_or_else(|| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "monitors/start could not resolve runtime operation authority for {session_id}"
+                ),
+                data: None,
+            })?;
+        let projector: Arc<dyn meerkat_tools::builtin::shell::ShellJobDeliveryProjector> =
+            Arc::new(meerkat::JobOutboxProjector::new_for_realm(
+                self.job_store.clone(),
+                self.runtime_delivery_inbox.clone(),
+                realm_id.to_string(),
+            ));
+        let durable = meerkat_tools::builtin::shell::DurableShellJobRuntime::new(
+            realm_id.to_string(),
+            session_id.clone(),
+            self.job_store.clone(),
+            self.blob_store(),
+            projector,
+        )
+        .map_err(|error| RpcError {
+            code: error::INVALID_REQUEST,
+            message: error.to_string(),
+            data: None,
+        })?;
+        let manager = Arc::new(
+            meerkat_tools::builtin::shell::JobManager::new(
+                meerkat_tools::builtin::shell::ShellConfig::with_project_root(project_root),
+            )
+            .bind_canonical_async_ops(session_id.clone(), ops_registry)
+            .with_durable_job_runtime(durable),
+        );
+        let mut managers = self.monitor_job_managers.lock().await;
+        Ok(Arc::clone(
+            managers
+                .entry(session_id.clone())
+                .or_insert_with(|| manager),
+        ))
+    }
+
+    /// Cancel a built-in durable shell/monitor runner with process containment.
+    /// Returns `false` for non-built-in runners so their owning host protocol
+    /// can handle cancellation.
+    pub(crate) async fn cancel_local_durable_runner(
+        self: &Arc<Self>,
+        job_id: &meerkat::JobId,
+    ) -> Result<bool, RpcError> {
+        let Some(job) = self.job_store.get(job_id).await.map_err(|error| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?
+        else {
+            return Ok(false);
+        };
+        let Some(realm_id) = self.realm_id() else {
+            return Ok(false);
+        };
+        if job.spec.realm_id != realm_id.as_str()
+            || !matches!(
+                job.spec.runner.name(),
+                "meerkat.shell" | "meerkat.monitor_script"
+            )
+        {
+            return Ok(false);
+        }
+        let manager = self
+            .monitor_job_manager_for_session(&job.spec.origin_session_id)
+            .await?;
+        manager
+            .cancel_job(&meerkat_tools::builtin::shell::JobId::from_string(
+                job_id.to_string(),
+            ))
+            .await
+            .map_err(|error| RpcError {
+                code: error::INVALID_REQUEST,
+                message: error.to_string(),
+                data: None,
+            })?;
+        Ok(true)
+    }
+
+    /// Start the mechanical job-outbox/runtime-inbox delivery driver once.
+    ///
+    /// The driver never claims work or changes job lifecycle. It only performs
+    /// the durable handoff and applies already-committed subscription effects.
+    pub fn arm_job_delivery_driver(self: &Arc<Self>) {
+        if self
+            .job_delivery_driver_armed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let runtime = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let Some(runtime) = runtime.upgrade() else {
+                    return;
+                };
+                if let Err(error) = runtime.drain_job_deliveries().await {
+                    tracing::warn!(%error, "durable job delivery drain failed");
+                }
+                drop(runtime);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    pub async fn drain_job_deliveries(self: &Arc<Self>) -> Result<(), String> {
+        let _guard = self.job_delivery_drain_lock.lock().await;
+        let realm_id = self
+            .realm_id()
+            .ok_or_else(|| "durable job delivery requires an active realm".to_string())?;
+        let projector = meerkat::JobOutboxProjector::new_for_realm(
+            self.job_store.clone(),
+            self.runtime_delivery_inbox.clone(),
+            realm_id.to_string(),
+        );
+        projector
+            .project_pending(256)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let jobs = self
+            .job_store
+            .list_all(10_000)
+            .await
+            .map_err(|error| error.to_string())?;
+        let sessions = jobs
+            .into_iter()
+            .filter(|job| job.spec.realm_id == realm_id.as_str())
+            .map(|job| {
+                let session_id = job.spec.origin_session_id;
+                (session_id.to_string(), session_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let sink: Arc<dyn meerkat::JobDeliverySink> = Arc::new(SessionRuntimeJobDeliverySink {
+            runtime: Arc::clone(self),
+        });
+        let applier =
+            meerkat::JobRuntimeDeliveryApplier::new(self.runtime_delivery_inbox.clone(), sink);
+        for session_id in sessions.into_values() {
+            applier
+                .apply_pending(
+                    &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                    256,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn runtime_job_delivery_backlog(&self) -> Result<u64, String> {
+        let realm_id = self.realm_id().map(|realm_id| realm_id.to_string());
+        let jobs = self
+            .job_store
+            .list_all(10_000)
+            .await
+            .map_err(|error| error.to_string())?;
+        let sessions = jobs
+            .into_iter()
+            .filter(|job| {
+                realm_id
+                    .as_deref()
+                    .is_none_or(|realm_id| job.spec.realm_id == realm_id)
+            })
+            .map(|job| {
+                let session_id = job.spec.origin_session_id;
+                (session_id.to_string(), session_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut total = 0_u64;
+        for session_id in sessions.into_values() {
+            let pending = self
+                .runtime_delivery_inbox
+                .list_pending(
+                    &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                    10_000,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            total = total.saturating_add(u64::try_from(pending.len()).unwrap_or(u64::MAX));
+        }
+        Ok(total)
     }
 
     /// Build the realm-scoped WorkGraph service.
@@ -5052,6 +5405,34 @@ impl SessionRuntime {
             .unwrap_or_else(
                 || Arc::new(crate::callback_dispatcher::CallbackToolRegistry::default()),
             )
+    }
+
+    pub fn callback_tool_dispatcher(
+        &self,
+        inline_tools: Vec<meerkat_core::ToolDef>,
+    ) -> Option<crate::callback_dispatcher::CallbackToolDispatcher> {
+        let callback_tx = self.callback_request_tx()?;
+        let registry = self.callback_tool_registry();
+        let id_counter = self.callback_id_counter();
+        Some(match self.realm_id() {
+            Some(realm_id) => {
+                crate::callback_dispatcher::CallbackToolDispatcher::from_registry_with_job_runtime(
+                    registry,
+                    callback_tx,
+                    id_counter,
+                    inline_tools,
+                    realm_id.to_string(),
+                    self.job_store.clone(),
+                    self.blob_store(),
+                )
+            }
+            None => crate::callback_dispatcher::CallbackToolDispatcher::from_registry(
+                registry,
+                callback_tx,
+                id_counter,
+                inline_tools,
+            ),
+        })
     }
 
     /// P1#5: attach the live adapter host so the runtime can fan out
@@ -5983,6 +6364,28 @@ impl SessionRuntime {
         payload: serde_json::Value,
         blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        self.accept_external_event_via_runtime_with_context(
+            session_id,
+            event_type,
+            payload,
+            blocks,
+            ExternalEventRuntimeContext {
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                idempotency_key: None,
+                correlation_id: None,
+            },
+        )
+        .await
+    }
+
+    async fn accept_external_event_via_runtime_with_context(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        event_type: String,
+        payload: serde_json::Value,
+        blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
+        context: ExternalEventRuntimeContext,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
         use meerkat_runtime::input::{
             ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
@@ -6010,14 +6413,14 @@ impl SessionRuntime {
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
-                idempotency_key: None,
+                idempotency_key: context.idempotency_key,
                 supersession_key: None,
-                correlation_id: None,
+                correlation_id: context.correlation_id,
             },
             event_type,
             payload,
             blocks,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            handling_mode: context.handling_mode,
             render_metadata: None,
         });
         let input_id = input.id().clone();

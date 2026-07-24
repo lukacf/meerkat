@@ -318,10 +318,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -1153,6 +1157,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -2276,6 +2287,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PromptText": {
         "properties": {
@@ -17528,10 +17557,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -18363,6 +18396,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -19565,6 +19605,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PromptText": {
         "properties": {
@@ -25719,10 +25777,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -26554,6 +26616,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -29313,6 +29382,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
@@ -34471,8 +34558,395 @@
     "title": "BridgeTurnOutcomeRecord",
     "type": "object"
   },
+  "CallbackJobCancelParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      }
+    },
+    "required": [
+      "authority"
+    ],
+    "title": "CallbackJobCancelParams",
+    "type": "object"
+  },
+  "CallbackJobCancelResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "accepted": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "accepted"
+    ],
+    "title": "CallbackJobCancelResult",
+    "type": "object"
+  },
+  "CallbackJobReconcileParams": {
+    "$defs": {
+      "CallbackJobReconcileAttempt": {
+        "properties": {
+          "authority": {
+            "$ref": "#/$defs/JobAttemptAuthority"
+          },
+          "checkpoint_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lease_expires_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "runner_handle": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authority",
+          "runner",
+          "restart_class",
+          "runner_handle",
+          "lease_expires_at_ms"
+        ],
+        "type": "object"
+      },
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attempts": {
+        "items": {
+          "$ref": "#/$defs/CallbackJobReconcileAttempt"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "attempts"
+    ],
+    "title": "CallbackJobReconcileParams",
+    "type": "object"
+  },
+  "CallbackJobReconcileResult": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "live_attempts": {
+        "items": {
+          "$ref": "#/$defs/JobAttemptAuthority"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "live_attempts"
+    ],
+    "title": "CallbackJobReconcileResult",
+    "type": "object"
+  },
+  "CallbackJobStartParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "arguments": {
+        "description": "Non-secret runner arguments loaded from the committed specification\nreference for this short control-plane callback."
+      },
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "credential_scopes": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "restart_class": {
+        "$ref": "#/$defs/JobRestartClass"
+      },
+      "resume_checkpoint": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "runner": {
+        "$ref": "#/$defs/JobRunner"
+      },
+      "runner_handle": {
+        "description": "Stable non-secret handle already committed with the claim. The host\nmust echo this handle when accepting the attempt.",
+        "type": "string"
+      },
+      "runner_specification_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "authority",
+      "runner",
+      "restart_class",
+      "runner_handle",
+      "arguments"
+    ],
+    "title": "CallbackJobStartParams",
+    "type": "object"
+  },
+  "CallbackJobStartResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "accepted": {
+        "type": "boolean"
+      },
+      "runner_handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "accepted",
+      "runner_handle"
+    ],
+    "title": "CallbackJobStartResult",
+    "type": "object"
+  },
   "CallbackToolDefinition": {
     "$defs": {
+      "CallbackToolExecution": {
+        "description": "Private host/gateway execution declaration for a callback tool.",
+        "oneOf": [
+          {
+            "properties": {
+              "mode": {
+                "const": "fast",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "credential_scopes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "idempotency_scope": {
+                "$ref": "#/$defs/JobIdempotencyScope"
+              },
+              "mode": {
+                "const": "detached",
+                "type": "string"
+              },
+              "restart_class": {
+                "$ref": "#/$defs/JobRestartClass"
+              },
+              "runner": {
+                "$ref": "#/$defs/JobRunner"
+              },
+              "submission_timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mode",
+              "runner",
+              "restart_class",
+              "idempotency_scope",
+              "submission_timeout_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "JobIdempotencyScope": {
+        "enum": [
+          "tool_call",
+          "interaction_and_arguments",
+          "host_semantic_key"
+        ],
+        "type": "string"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
@@ -34483,6 +34957,17 @@
     "properties": {
       "description": {
         "type": "string"
+      },
+      "execution": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/CallbackToolExecution"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Private host/gateway execution metadata. It is never copied into the\nprovider-facing `ToolDef`."
       },
       "input_schema": true,
       "name": {
@@ -34872,10 +35357,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -35707,6 +36196,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -41452,6 +41948,24 @@
             "type": "string"
           }
         ]
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PortableDefinitionExtract": {
         "additionalProperties": false,
@@ -50698,10 +51212,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -51533,6 +52051,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -55004,6 +55529,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
@@ -59014,6 +59557,36 @@
     "title": "DeferredCreateResult",
     "type": "object"
   },
+  "DetachedJobsActivitySummary": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Detached-job census attached to member status without changing member\nlifecycle semantics.",
+    "properties": {
+      "active": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "needs_attention": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "oldest_active_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "active",
+      "needs_attention"
+    ],
+    "title": "DetachedJobsActivitySummary",
+    "type": "object"
+  },
   "EventsLatestCursorResult": {
     "$defs": {
       "ContractVersion": {
@@ -59423,10 +59996,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -60258,6 +60835,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -61445,6 +62029,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PromptText": {
         "properties": {
@@ -66983,6 +67585,2213 @@
       "result"
     ],
     "title": "InterruptResult",
+    "type": "object"
+  },
+  "JobExecutionActivity": {
+    "$defs": {
+      "JobExecutionActivityKind": {
+        "enum": [
+          "idle",
+          "calling_provider",
+          "executing_fast_tool",
+          "streaming_tool",
+          "awaiting_detached",
+          "draining"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_ids": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "kind": {
+        "$ref": "#/$defs/JobExecutionActivityKind"
+      },
+      "since_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "kind",
+      "since_ms"
+    ],
+    "title": "JobExecutionActivity",
+    "type": "object"
+  },
+  "JobHealthSummary": {
+    "$defs": {
+      "JobHealthStatus": {
+        "enum": [
+          "ok",
+          "degraded"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "awaiting_members": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "delivery_backlog": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "needs_attention": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "queued": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "running": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "stale_leases": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "status": {
+        "$ref": "#/$defs/JobHealthStatus"
+      }
+    },
+    "required": [
+      "status",
+      "queued",
+      "running",
+      "awaiting_members",
+      "stale_leases",
+      "needs_attention",
+      "delivery_backlog"
+    ],
+    "title": "JobHealthSummary",
+    "type": "object"
+  },
+  "JobReceipt": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "awaitable": {
+        "type": "boolean"
+      },
+      "deduplicated": {
+        "type": "boolean"
+      },
+      "job_id": {
+        "type": "string"
+      },
+      "restart_class": {
+        "$ref": "#/$defs/JobRestartClass"
+      },
+      "status": {
+        "$ref": "#/$defs/JobPhase"
+      }
+    },
+    "required": [
+      "job_id",
+      "status",
+      "deduplicated",
+      "restart_class",
+      "awaitable"
+    ],
+    "title": "JobReceipt",
+    "type": "object"
+  },
+  "JobSummary": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Safe application-facing job projection.",
+    "properties": {
+      "attempt_count": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "cancel_requested": {
+        "type": "boolean"
+      },
+      "delivery_backlog": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "job_id": {
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/JobPhase"
+      },
+      "progress": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobProgress"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "restart_class": {
+        "$ref": "#/$defs/JobRestartClass"
+      },
+      "runner": {
+        "$ref": "#/$defs/JobRunner"
+      },
+      "subscription_count": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "terminal_result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobTerminalResult"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "job_id",
+      "runner",
+      "phase",
+      "restart_class",
+      "attempt_count",
+      "cancel_requested",
+      "subscription_count",
+      "delivery_backlog"
+    ],
+    "title": "JobSummary",
+    "type": "object"
+  },
+  "JobsArtifactsParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobsGetParams",
+    "type": "object"
+  },
+  "JobsArtifactsResult": {
+    "$defs": {
+      "JobArtifactRef": {
+        "properties": {
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "artifacts": {
+        "items": {
+          "$ref": "#/$defs/JobArtifactRef"
+        },
+        "type": "array"
+      },
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id",
+      "artifacts"
+    ],
+    "title": "JobsArtifactsResult",
+    "type": "object"
+  },
+  "JobsCancelParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobsGetParams",
+    "type": "object"
+  },
+  "JobsCancelResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
+    "type": "object"
+  },
+  "JobsGetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobsGetParams",
+    "type": "object"
+  },
+  "JobsGetResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
+    "type": "object"
+  },
+  "JobsHealthParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "JobsHealthParams",
+    "type": "object"
+  },
+  "JobsHealthResult": {
+    "$defs": {
+      "JobHealthStatus": {
+        "enum": [
+          "ok",
+          "degraded"
+        ],
+        "type": "string"
+      },
+      "JobHealthSummary": {
+        "properties": {
+          "awaiting_members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "needs_attention": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queued": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "running": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stale_leases": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/JobHealthStatus"
+          }
+        },
+        "required": [
+          "status",
+          "queued",
+          "running",
+          "awaiting_members",
+          "stale_leases",
+          "needs_attention",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "detached_jobs": {
+        "$ref": "#/$defs/JobHealthSummary"
+      }
+    },
+    "required": [
+      "detached_jobs"
+    ],
+    "title": "JobsHealthResult",
+    "type": "object"
+  },
+  "JobsListParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "limit": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "JobsListParams",
+    "type": "object"
+  },
+  "JobsListResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "jobs": {
+        "items": {
+          "$ref": "#/$defs/JobSummary"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "jobs"
+    ],
+    "title": "JobsListResult",
+    "type": "object"
+  },
+  "JobsProgressParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobsGetParams",
+    "type": "object"
+  },
+  "JobsProgressResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/JobPhase"
+      },
+      "progress": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobProgress"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "job_id",
+      "phase"
+    ],
+    "title": "JobsProgressResult",
+    "type": "object"
+  },
+  "JobsResultParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobsGetParams",
+    "type": "object"
+  },
+  "JobsResultResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/JobPhase"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobTerminalResult"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "job_id",
+      "phase"
+    ],
+    "title": "JobsResultResult",
+    "type": "object"
+  },
+  "JobsRetryParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      },
+      "retry_due_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "job_id",
+      "retry_due_at_ms"
+    ],
+    "title": "JobsRetryParams",
+    "type": "object"
+  },
+  "JobsRetryResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
+    "type": "object"
+  },
+  "JobsSubscribeParams": {
+    "$defs": {
+      "JobDeliveryKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "record",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "notification",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handling_mode": {
+                "$ref": "#/$defs/WireHandlingMode"
+              },
+              "kind": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handling_mode"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "delivery": {
+        "$ref": "#/$defs/JobDeliveryKind"
+      },
+      "job_id": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "subscription_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id",
+      "subscription_id",
+      "session_id",
+      "delivery"
+    ],
+    "title": "JobsSubscribeParams",
+    "type": "object"
+  },
+  "JobsSubscribeResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
+    "type": "object"
+  },
+  "JobsUnsubscribeParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job_id": {
+        "type": "string"
+      },
+      "subscription_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id",
+      "subscription_id"
+    ],
+    "title": "JobsUnsubscribeParams",
+    "type": "object"
+  },
+  "JobsUnsubscribeResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
     "type": "object"
   },
   "ListSessionsResult": {
@@ -77752,6 +80561,68 @@
   },
   "MobMemberStatusResult": {
     "$defs": {
+      "DetachedJobsActivitySummary": {
+        "description": "Detached-job census attached to member status without changing member\nlifecycle semantics.",
+        "properties": {
+          "active": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "needs_attention": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "oldest_active_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "active",
+          "needs_attention"
+        ],
+        "type": "object"
+      },
+      "JobExecutionActivity": {
+        "properties": {
+          "job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/$defs/JobExecutionActivityKind"
+          },
+          "since_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "since_ms"
+        ],
+        "type": "object"
+      },
+      "JobExecutionActivityKind": {
+        "enum": [
+          "idle",
+          "calling_provider",
+          "executing_fast_tool",
+          "streaming_tool",
+          "awaiting_detached",
+          "draining"
+        ],
+        "type": "string"
+      },
       "WireHostRef": {
         "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
         "type": "string"
@@ -78007,6 +80878,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/member_status`.",
     "properties": {
+      "activity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobExecutionActivity"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Execution activity is separate from member lifecycle status."
+      },
       "comms_reachability": {
         "anyOf": [
           {
@@ -78034,6 +80916,17 @@
           "string",
           "null"
         ]
+      },
+      "detached_jobs": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DetachedJobsActivitySummary"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Durable detached work owned by this member's current session."
       },
       "error": {
         "type": [
@@ -81285,6 +84178,894 @@
       "wired"
     ],
     "title": "MobWireResult",
+    "type": "object"
+  },
+  "MobkitJobCancelAckParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "acknowledged_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      }
+    },
+    "required": [
+      "authority",
+      "acknowledged_at_ms"
+    ],
+    "title": "MobkitJobCancelAckParams",
+    "type": "object"
+  },
+  "MobkitJobCheckpointParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "checkpoint_ref": {
+        "type": "string"
+      },
+      "observed_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "authority",
+      "checkpoint_ref",
+      "observed_at_ms"
+    ],
+    "title": "MobkitJobCheckpointParams",
+    "type": "object"
+  },
+  "MobkitJobCompleteParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "completed_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "result_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "authority",
+      "completed_at_ms"
+    ],
+    "title": "MobkitJobCompleteParams",
+    "type": "object"
+  },
+  "MobkitJobFailParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "code": {
+        "type": "string"
+      },
+      "detail_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "failed_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "authority",
+      "failed_at_ms",
+      "code"
+    ],
+    "title": "MobkitJobFailParams",
+    "type": "object"
+  },
+  "MobkitJobHeartbeatParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "heartbeat_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "lease_expires_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "authority",
+      "heartbeat_at_ms",
+      "lease_expires_at_ms"
+    ],
+    "title": "MobkitJobHeartbeatParams",
+    "type": "object"
+  },
+  "MobkitJobMutationResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
+    "type": "object"
+  },
+  "MobkitJobProgressParams": {
+    "$defs": {
+      "JobAttemptAuthority": {
+        "description": "Host-only write authority. This type must never be embedded in app job\nsummaries or ordinary status responses.",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "fence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "fence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/JobAttemptAuthority"
+      },
+      "cursor": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "detail": {
+        "type": "string"
+      },
+      "observed_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "authority",
+      "cursor",
+      "detail",
+      "observed_at_ms"
+    ],
+    "title": "MobkitJobProgressParams",
+    "type": "object"
+  },
+  "MonitorsStartParams": {
+    "$defs": {
+      "JobDeliveryKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "record",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "notification",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handling_mode": {
+                "$ref": "#/$defs/WireHandlingMode"
+              },
+              "kind": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handling_mode"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "MonitorOutputProtocol": {
+        "enum": [
+          "framed_jsonl",
+          "lines"
+        ],
+        "type": "string"
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "command": {
+        "type": "string"
+      },
+      "delivery": {
+        "$ref": "#/$defs/JobDeliveryKind"
+      },
+      "max_line_bytes": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "max_notifications_per_window": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "max_retained_diagnostic_bytes": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "notification_window_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "protocol": {
+        "$ref": "#/$defs/MonitorOutputProtocol",
+        "default": "framed_jsonl"
+      },
+      "restart_class": {
+        "$ref": "#/$defs/JobRestartClass"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "submission_key": {
+        "description": "Caller-stable idempotency identity for this monitor submission.",
+        "type": "string"
+      },
+      "timeout_secs": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "working_dir": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "session_id",
+      "submission_key",
+      "command",
+      "timeout_secs",
+      "restart_class",
+      "delivery"
+    ],
+    "title": "MonitorsStartParams",
+    "type": "object"
+  },
+  "MonitorsStartResult": {
+    "$defs": {
+      "JobPhase": {
+        "enum": [
+          "unsubmitted",
+          "queued",
+          "claimed",
+          "running",
+          "waiting_external",
+          "loss_observed",
+          "retry_scheduled",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "worker_lost",
+          "needs_attention"
+        ],
+        "type": "string"
+      },
+      "JobProgress": {
+        "properties": {
+          "cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "JobRestartClass": {
+        "enum": [
+          "adoptable",
+          "checkpoint_resumable",
+          "replayable",
+          "non_resumable"
+        ],
+        "type": "string"
+      },
+      "JobRunner": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "JobSummary": {
+        "description": "Safe application-facing job projection.",
+        "properties": {
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_backlog": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/JobPhase"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restart_class": {
+            "$ref": "#/$defs/JobRestartClass"
+          },
+          "runner": {
+            "$ref": "#/$defs/JobRunner"
+          },
+          "subscription_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JobTerminalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "runner",
+          "phase",
+          "restart_class",
+          "attempt_count",
+          "cancel_requested",
+          "subscription_count",
+          "delivery_backlog"
+        ],
+        "type": "object"
+      },
+      "JobTerminalResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "succeeded",
+                "type": "string"
+              },
+              "result_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "needs_attention",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "job": {
+        "$ref": "#/$defs/JobSummary"
+      }
+    },
+    "required": [
+      "job"
+    ],
+    "title": "JobsGetResult",
     "type": "object"
   },
   "PeerAddress": {
@@ -99126,9 +102907,14 @@
           "tool_name": {
             "description": "Name of the external tool the agent is waiting on.",
             "type": "string"
+          },
+          "tool_use_id": {
+            "description": "Provider-issued tool-use identifier that the callback result must\nreference. This is a required top-level protocol field; it is never\ninferred from or injected into `args`.",
+            "type": "string"
           }
         },
         "required": [
+          "tool_use_id",
           "tool_name",
           "args"
         ],
@@ -100043,10 +103829,14 @@
               },
               "tool_name": {
                 "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
               }
             },
             "required": [
               "reason_type",
+              "tool_use_id",
               "tool_name",
               "args"
             ],
@@ -100878,6 +104668,13 @@
               "args": true,
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "pending_tool_calls": {
+                "description": "Complete pending callback set. Empty on legacy/single-call event\nproducers; canonical runtime producers always populate it.",
+                "items": {
+                  "$ref": "#/$defs/PendingCallbackToolCall"
+                },
+                "type": "array"
               },
               "tool_name": {
                 "type": "string"
@@ -102039,6 +105836,24 @@
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
+      },
+      "PendingCallbackToolCall": {
+        "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
+        "properties": {
+          "args": true,
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
       },
       "PromptText": {
         "properties": {
@@ -114344,9 +118159,14 @@
       "tool_name": {
         "description": "Name of the external tool the agent is waiting on.",
         "type": "string"
+      },
+      "tool_use_id": {
+        "description": "Provider-issued tool-use identifier that the callback result must\nreference. This is a required top-level protocol field; it is never\ninferred from or injected into `args`.",
+        "type": "string"
       }
     },
     "required": [
+      "tool_use_id",
       "tool_name",
       "args"
     ],

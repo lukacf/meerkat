@@ -84,6 +84,23 @@ subset.
 | `runtime/host_info` | Runtime | — | `RuntimeHostInfo` | Read host identity, endpoints, capabilities, health, and realm projection |
 | `runtime/capabilities` | Runtime | — | `RuntimeHostCapabilities` | Read runtime host capability flags |
 | `runtime/health` | Runtime | — | `RuntimeHostHealth` | Read runtime host health |
+| `jobs/get` | Jobs | `JobsGetParams` | `JobsGetResult` | Read a realm-scoped detached-job projection without worker write authority |
+| `jobs/list` | Jobs | `JobsListParams` | `JobsListResult` | List detached jobs for one origin session in the active realm |
+| `jobs/cancel` | Jobs | `JobsCancelParams` | `JobsCancelResult` | Commit a cancellation request and notify the owning runner |
+| `jobs/progress` | Jobs | `JobsProgressParams` | `JobsProgressResult` | Read committed detached-job progress |
+| `jobs/result` | Jobs | `JobsResultParams` | `JobsResultResult` | Read a safe terminal-result summary |
+| `jobs/artifacts` | Jobs | `JobsArtifactsParams` | `JobsArtifactsResult` | List safe artifact references produced by a job |
+| `jobs/retry` | Jobs | `JobsRetryParams` | `JobsRetryResult` | Schedule a generated-machine-authorized retry |
+| `jobs/health` | Jobs | — | `JobsHealthResult` | Read realm-scoped detached-job health and delivery backlog |
+| `jobs/subscribe` | Jobs | `JobsSubscribeParams` | `JobsSubscribeResult` | Add a durable record, notification, or event delivery subscription |
+| `jobs/unsubscribe` | Jobs | `JobsUnsubscribeParams` | `JobsUnsubscribeResult` | Remove a durable delivery subscription |
+| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a high-trust durable script monitor with explicit restart and output contracts |
+| `mobkit/jobs/heartbeat` | Host jobs | `MobkitJobHeartbeatParams` | `MobkitJobMutationResult` | Renew the exact committed attempt lease |
+| `mobkit/jobs/progress` | Host jobs | `MobkitJobProgressParams` | `MobkitJobMutationResult` | Commit progress under exact attempt/fence authority |
+| `mobkit/jobs/checkpoint` | Host jobs | `MobkitJobCheckpointParams` | `MobkitJobMutationResult` | Commit a restart checkpoint under exact attempt/fence authority |
+| `mobkit/jobs/complete` | Host jobs | `MobkitJobCompleteParams` | `MobkitJobMutationResult` | Commit successful terminality under exact attempt/fence authority |
+| `mobkit/jobs/fail` | Host jobs | `MobkitJobFailParams` | `MobkitJobMutationResult` | Commit failed terminality under exact attempt/fence authority |
+| `mobkit/jobs/cancel_ack` | Host jobs | `MobkitJobCancelAckParams` | `MobkitJobMutationResult` | Acknowledge cancellation under exact attempt/fence authority |
 | `session/create` | Session | `CreateSessionParams` | `WireRunResult \| DeferredCreateResult` | Create session and run first turn |
 | `session/list` | Session | `ListSessionsParams` | `ListSessionsResult` | List active sessions |
 | `session/read` | Session | `ReadSessionParams` | `WireSessionInfo` | Get session state |

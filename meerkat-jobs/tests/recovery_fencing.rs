@@ -183,6 +183,46 @@ async fn older_writer_is_fenced_only_after_a_later_claim_commits() {
 }
 
 #[tokio::test]
+async fn reopened_writer_can_renew_same_fence_until_expiry_is_committed() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let service = DetachedJobService::new(store.clone());
+    let receipt = service
+        .submit(spec("reopen-renew-same-fence", RestartClass::Adoptable))
+        .await
+        .expect("submit");
+    let claim = service
+        .claim_attempt(
+            &receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("worker-a").expect("worker"),
+                100,
+                1_000,
+                RunnerHandleRef::new("external:scan-42").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    let reopened = DetachedJobService::new(Arc::new(
+        MemoryDetachedJobStore::from_snapshot(store.snapshot().await).expect("reopen"),
+    ));
+
+    let renewed = reopened
+        .renew_lease(
+            &receipt.job_id,
+            AttemptWriteAuthority::from(&claim),
+            1_500,
+            2_500,
+        )
+        .await
+        .expect("reconstruction must not make the exact committed writer unrenewable");
+
+    assert_eq!(renewed.attempt_count, claim.attempt_count);
+    assert_eq!(renewed.current_attempt_id, Some(claim.attempt_id));
+    assert_eq!(renewed.current_fence, claim.fence);
+    assert_eq!(renewed.lease_expires_at_ms, Some(2_500));
+}
+
+#[tokio::test]
 async fn checkpoint_survives_retry_scheduling_and_is_available_to_the_new_attempt() {
     let store = Arc::new(MemoryDetachedJobStore::new());
     let service = DetachedJobService::new(store);

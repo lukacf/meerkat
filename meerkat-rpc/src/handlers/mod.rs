@@ -12,6 +12,7 @@ pub mod config;
 pub mod event;
 pub mod help;
 pub mod initialize;
+pub mod jobs;
 pub mod live;
 pub mod mcp;
 #[cfg(feature = "mob")]

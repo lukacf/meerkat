@@ -1309,6 +1309,15 @@ impl ResolvedToolExecutionPlan {
         &self.owner_witnesses
     }
 
+    /// Canonical argument digest bound into this plan at the fenced root
+    /// resolution seam. Detached execution uses this exact digest for durable
+    /// submission identity instead of re-canonicalizing arguments later.
+    pub fn canonical_arguments_sha256(&self) -> Option<[u8; 32]> {
+        self.resolved_call
+            .as_ref()
+            .map(|resolved| resolved.canonical_arguments_sha256)
+    }
+
     pub fn with_owner_witness(
         mut self,
         witness: ToolExecutionOwnerWitness,

@@ -875,6 +875,8 @@ impl MobMemberSnapshot {
                     },
                 }
             }),
+            activity: None,
+            detached_jobs: None,
             // Placement (phase 7, ADJ-P7-2): the `member_placement` machine
             // fact, attached to the snapshot by the status projection.
             placement: self

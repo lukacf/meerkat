@@ -883,22 +883,29 @@ mod tests {
             .await
         });
 
-        for _ in 0..100 {
-            if leader_pid_file.exists() && child_pid_file.exists() {
-                break;
+        async fn wait_for_pid(path: &Path) -> Option<i32> {
+            for _ in 0..500 {
+                if let Ok(contents) = std::fs::read_to_string(path)
+                    && let Ok(pid) = contents.trim().parse()
+                {
+                    return Some(pid);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            None
         }
-        let leader_pid: i32 = std::fs::read_to_string(&leader_pid_file)
-            .expect("shell must publish its process-group leader before cancellation")
-            .trim()
-            .parse()
-            .unwrap();
-        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
-            .expect("shell must publish its child pid before cancellation")
-            .trim()
-            .parse()
-            .unwrap();
+        let leader_pid = wait_for_pid(&leader_pid_file).await;
+        assert!(
+            leader_pid.is_some(),
+            "shell must publish a parseable process-group leader before cancellation"
+        );
+        let leader_pid = leader_pid.unwrap_or_default();
+        let child_pid = wait_for_pid(&child_pid_file).await;
+        assert!(
+            child_pid.is_some(),
+            "shell must publish a parseable child pid before cancellation"
+        );
+        let child_pid = child_pid.unwrap_or_default();
 
         task.abort();
         let _ = task.await;

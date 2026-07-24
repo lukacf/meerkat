@@ -20,12 +20,15 @@ meerkat-machine-schema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
 uuid = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 meerkat-sqlite = { workspace = true }
 rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

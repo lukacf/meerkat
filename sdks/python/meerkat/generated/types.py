@@ -388,6 +388,7 @@ model-facing definition."""
     description: str
     input_schema: Any
     name: ToolName
+    execution: Optional[CallbackToolExecution] = None
 
 
 @dataclass
@@ -1008,6 +1009,7 @@ class RuntimeHostFeatureFlags:
     session_events: bool
     session_streams: bool
     skills: bool
+    durable_jobs: Optional[bool] = None
     multi_host_mobs: Optional[bool] = None
 
 
@@ -1147,6 +1149,332 @@ class WireSessionTranscriptRevisionList:
 format."""
     entries: list[dict[str, Any]]
     head_revision: str
+
+
+# Private host/gateway execution declaration for a callback tool.
+class CallbackToolExecutionFast(TypedDict, total=False):
+    mode: Required[Literal['fast']]
+
+class CallbackToolExecutionDetached(TypedDict, total=False):
+    credential_scopes: NotRequired[list[str]]
+    idempotency_scope: Required[JobIdempotencyScope]
+    mode: Required[Literal['detached']]
+    restart_class: Required[JobRestartClass]
+    runner: Required[JobRunner]
+    submission_timeout_ms: Required[int]
+
+CallbackToolExecution = CallbackToolExecutionFast | CallbackToolExecutionDetached
+
+# Durable job wire type for JobDeliveryKind.
+class JobDeliveryKindRecord(TypedDict, total=False):
+    kind: Required[Literal['record']]
+
+class JobDeliveryKindNotification(TypedDict, total=False):
+    kind: Required[Literal['notification']]
+
+class JobDeliveryKindEvent(TypedDict, total=False):
+    handling_mode: Required[WireHandlingMode]
+    kind: Required[Literal['event']]
+
+JobDeliveryKind = JobDeliveryKindRecord | JobDeliveryKindNotification | JobDeliveryKindEvent
+
+# Durable job wire type for JobHealthStatus.
+JobHealthStatus = Literal['ok', 'degraded']
+
+# Durable job wire type for JobIdempotencyScope.
+JobIdempotencyScope = Literal['tool_call', 'interaction_and_arguments', 'host_semantic_key']
+
+# Durable job wire type for JobPhase.
+JobPhase = Literal['unsubmitted', 'queued', 'claimed', 'running', 'waiting_external', 'loss_observed', 'retry_scheduled', 'succeeded', 'failed', 'cancelled', 'worker_lost', 'needs_attention']
+
+# Durable job wire type for JobRestartClass.
+JobRestartClass = Literal['adoptable', 'checkpoint_resumable', 'replayable', 'non_resumable']
+
+# Durable job wire type for JobTerminalResult.
+class JobTerminalResultSucceeded(TypedDict, total=False):
+    kind: Required[Literal['succeeded']]
+    result_ref: NotRequired[Optional[str]]
+
+class JobTerminalResultFailed(TypedDict, total=False):
+    code: Required[str]
+    detail_ref: NotRequired[Optional[str]]
+    kind: Required[Literal['failed']]
+
+class JobTerminalResultCancelled(TypedDict, total=False):
+    kind: Required[Literal['cancelled']]
+
+class JobTerminalResultWorkerLost(TypedDict, total=False):
+    kind: Required[Literal['worker_lost']]
+
+class JobTerminalResultNeedsAttention(TypedDict, total=False):
+    kind: Required[Literal['needs_attention']]
+    reason: Required[str]
+
+JobTerminalResult = JobTerminalResultSucceeded | JobTerminalResultFailed | JobTerminalResultCancelled | JobTerminalResultWorkerLost | JobTerminalResultNeedsAttention
+
+# Durable job wire type for MonitorOutputProtocol.
+MonitorOutputProtocol = Literal['framed_jsonl', 'lines']
+
+# Public handling mode for mob member delivery.
+WireHandlingMode = Literal['queue', 'steer']
+
+@dataclass
+class JobArtifactRef:
+    """Wire payload for JobArtifactRef."""
+    reference: str
+
+
+@dataclass
+class JobAttemptAuthority:
+    """Host-only write authority. This type must never be embedded in app job
+summaries or ordinary status responses."""
+    attempt_id: str
+    fence: int
+    job_id: str
+
+
+@dataclass
+class JobHealthSummary:
+    """Wire payload for JobHealthSummary."""
+    awaiting_members: int
+    delivery_backlog: int
+    needs_attention: int
+    queued: int
+    running: int
+    stale_leases: int
+    status: JobHealthStatus
+
+
+@dataclass
+class JobProgress:
+    """Wire payload for JobProgress."""
+    cursor: int
+    detail: str
+
+
+@dataclass
+class JobRunner:
+    """Request payload for JobRunner."""
+    name: str
+    version: str
+
+
+@dataclass
+class JobSummary:
+    """Safe application-facing job projection."""
+    attempt_count: int
+    cancel_requested: bool
+    delivery_backlog: int
+    job_id: str
+    phase: JobPhase
+    restart_class: JobRestartClass
+    runner: JobRunner
+    subscription_count: int
+    progress: Optional[JobProgress] = None
+    terminal_result: Optional[JobTerminalResult] = None
+
+
+@dataclass
+class JobsArtifactsParams:
+    """Wire payload for JobsArtifactsParams."""
+    job_id: str
+
+
+@dataclass
+class JobsArtifactsResult:
+    """Wire payload for JobsArtifactsResult."""
+    artifacts: list[JobArtifactRef]
+    job_id: str
+
+
+@dataclass
+class JobsCancelParams:
+    """Wire payload for JobsCancelParams."""
+    job_id: str
+
+
+@dataclass
+class JobsCancelResult:
+    """Wire payload for JobsCancelResult."""
+    job: JobSummary
+
+
+@dataclass
+class JobsGetParams:
+    """Wire payload for JobsGetParams."""
+    job_id: str
+
+
+@dataclass
+class JobsGetResult:
+    """Wire payload for JobsGetResult."""
+    job: JobSummary
+
+
+@dataclass
+class JobsHealthResult:
+    """Wire payload for JobsHealthResult."""
+    detached_jobs: JobHealthSummary
+
+
+@dataclass
+class JobsListParams:
+    """Wire payload for JobsListParams."""
+    limit: Optional[int] = None
+    session_id: Optional[str] = None
+
+
+@dataclass
+class JobsListResult:
+    """Wire payload for JobsListResult."""
+    jobs: list[JobSummary]
+
+
+@dataclass
+class JobsProgressParams:
+    """Wire payload for JobsProgressParams."""
+    job_id: str
+
+
+@dataclass
+class JobsProgressResult:
+    """Wire payload for JobsProgressResult."""
+    job_id: str
+    phase: JobPhase
+    progress: Optional[JobProgress] = None
+
+
+@dataclass
+class JobsResultParams:
+    """Wire payload for JobsResultParams."""
+    job_id: str
+
+
+@dataclass
+class JobsResultResult:
+    """Wire payload for JobsResultResult."""
+    job_id: str
+    phase: JobPhase
+    result: Optional[JobTerminalResult] = None
+
+
+@dataclass
+class JobsRetryParams:
+    """Wire payload for JobsRetryParams."""
+    job_id: str
+    retry_due_at_ms: int
+
+
+@dataclass
+class JobsRetryResult:
+    """Wire payload for JobsRetryResult."""
+    job: JobSummary
+
+
+@dataclass
+class JobsSubscribeParams:
+    """Wire payload for JobsSubscribeParams."""
+    delivery: JobDeliveryKind
+    job_id: str
+    session_id: str
+    subscription_id: str
+
+
+@dataclass
+class JobsSubscribeResult:
+    """Wire payload for JobsSubscribeResult."""
+    job: JobSummary
+
+
+@dataclass
+class JobsUnsubscribeParams:
+    """Wire payload for JobsUnsubscribeParams."""
+    job_id: str
+    subscription_id: str
+
+
+@dataclass
+class JobsUnsubscribeResult:
+    """Wire payload for JobsUnsubscribeResult."""
+    job: JobSummary
+
+
+@dataclass
+class MobkitJobCancelAckParams:
+    """Wire payload for MobkitJobCancelAckParams."""
+    acknowledged_at_ms: int
+    authority: JobAttemptAuthority
+
+
+@dataclass
+class MobkitJobCheckpointParams:
+    """Wire payload for MobkitJobCheckpointParams."""
+    authority: JobAttemptAuthority
+    checkpoint_ref: str
+    observed_at_ms: int
+
+
+@dataclass
+class MobkitJobCompleteParams:
+    """Wire payload for MobkitJobCompleteParams."""
+    authority: JobAttemptAuthority
+    completed_at_ms: int
+    result_ref: Optional[str] = None
+
+
+@dataclass
+class MobkitJobFailParams:
+    """Wire payload for MobkitJobFailParams."""
+    authority: JobAttemptAuthority
+    code: str
+    failed_at_ms: int
+    detail_ref: Optional[str] = None
+
+
+@dataclass
+class MobkitJobHeartbeatParams:
+    """Wire payload for MobkitJobHeartbeatParams."""
+    authority: JobAttemptAuthority
+    heartbeat_at_ms: int
+    lease_expires_at_ms: int
+
+
+@dataclass
+class MobkitJobMutationResult:
+    """Wire payload for MobkitJobMutationResult."""
+    job: JobSummary
+
+
+@dataclass
+class MobkitJobProgressParams:
+    """Wire payload for MobkitJobProgressParams."""
+    authority: JobAttemptAuthority
+    cursor: int
+    detail: str
+    observed_at_ms: int
+
+
+@dataclass
+class MonitorsStartParams:
+    """Wire payload for MonitorsStartParams."""
+    command: str
+    delivery: JobDeliveryKind
+    restart_class: JobRestartClass
+    session_id: str
+    submission_key: str
+    timeout_secs: int
+    max_line_bytes: Optional[int] = None
+    max_notifications_per_window: Optional[int] = None
+    max_retained_diagnostic_bytes: Optional[int] = None
+    notification_window_ms: Optional[int] = None
+    protocol: Optional[MonitorOutputProtocol] = None
+    working_dir: Optional[str] = None
+
+
+@dataclass
+class MonitorsStartResult:
+    """Wire payload for MonitorsStartResult."""
+    job: JobSummary
 
 
 @dataclass
@@ -1546,7 +1874,7 @@ class MobMemberSendParams:
     agent_identity: str
     content: WireContentInput
     mob_id: str
-    handling_mode: Optional[Literal['queue', 'steer']] = None
+    handling_mode: Optional[WireHandlingMode] = None
     render_metadata: Optional[dict[str, Any]] = None
 
 
@@ -1554,7 +1882,7 @@ class MobMemberSendParams:
 class MobMemberSendResult:
     """Response payload for host-side mob member delivery."""
     agent_identity: str
-    handling_mode: Literal['queue', 'steer']
+    handling_mode: WireHandlingMode
     member_ref: WireMemberRef
     mob_id: str
 
@@ -1569,7 +1897,7 @@ semantics without introducing a separate thread/project runtime."""
     content: WireContentInput
     mob_id: str
     spec: MobMemberSpecWire
-    handling_mode: Optional[Literal['queue', 'steer']] = None
+    handling_mode: Optional[WireHandlingMode] = None
     render_metadata: Optional[dict[str, Any]] = None
 
 
@@ -1757,9 +2085,11 @@ class MobMemberStatusResult:
     member_ref: WireMemberRef
     status: WireMobMemberStatus
     tokens_used: int
+    activity: Optional[dict[str, Any]] = None
     comms_reachability: Optional[WireReachability] = None
     control_reachability: Optional[WireReachability] = None
     current_session_id: Optional[str] = None
+    detached_jobs: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     external_member: Optional[Any] = None
     freshness_reason: Optional[str] = None
@@ -5291,9 +5621,6 @@ McpHttpTransport = Literal['streamable-http', 'sse']
 
 # Target for a mob wire/unwire call.
 MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]
-
-# Public handling mode for mob member delivery.
-WireHandlingMode = Literal['queue', 'steer']
 
 # Public render class contract for mob member delivery.
 WireRenderClass = Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']

@@ -420,6 +420,30 @@ impl DetachedJobStore for SqliteDetachedJobStore {
         })
     }
 
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|conn| {
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            let mut statement = conn
+                .prepare(
+                    "SELECT job_id, realm_id, submission_key, revision,
+                            has_pending_outbox, job_json
+                       FROM detached_jobs
+                      ORDER BY job_id
+                      LIMIT ?1",
+                )
+                .map_err(raw_sqlite_error)?;
+            let mut rows = statement.query([limit]).map_err(raw_sqlite_error)?;
+            let mut jobs = Vec::new();
+            while let Some(row) = rows.next().map_err(raw_sqlite_error)? {
+                jobs.push(decode_job_row(row)?);
+            }
+            Ok(jobs)
+        })
+    }
+
     fn is_persistent(&self) -> bool {
         true
     }

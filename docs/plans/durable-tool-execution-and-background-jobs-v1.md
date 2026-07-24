@@ -1,3 +1,9 @@
+---
+title: "Durable Tool Execution and Background Jobs v1"
+description: "Architecture and delivery plan for durable detached tools, generated job lifecycle authority, recovery, delivery, and host protocols."
+icon: "clock-rotate-left"
+---
+
 # Proposal: Durable Tool Execution and Background Jobs v1
 
 Status: Proposed
@@ -34,9 +40,9 @@ Meerkat already has useful pieces:
 
 The missing piece is durable ownership of unfinished execution:
 
-- [`JobManager`](/Users/luka/.codex/worktrees/8935/meerkat/meerkat-tools/src/builtin/shell/job_manager.rs:148) is in-memory.
-- Runtime recovery explicitly discards non-terminal operations in [`from_recovered`](/Users/luka/.codex/worktrees/8935/meerkat/meerkat-runtime/src/ops_lifecycle.rs:2178).
-- [`WorkItem`](/Users/luka/.codex/worktrees/8935/meerkat/meerkat-workgraph/src/types.rs:660) has no executable specification, attempts, fencing, checkpoint, result, or delivery state.
+- [`JobManager`](https://github.com/lukacf/meerkat/blob/dda5f2b2e2da4165b85f2591611e5d46d2b5d380/meerkat-tools/src/builtin/shell/job_manager.rs#L148) is in-memory.
+- Runtime recovery explicitly discards non-terminal operations in [`from_recovered`](https://github.com/lukacf/meerkat/blob/dda5f2b2e2da4165b85f2591611e5d46d2b5d380/meerkat-runtime/src/ops_lifecycle.rs#L2178).
+- [`WorkItem`](https://github.com/lukacf/meerkat/blob/dda5f2b2e2da4165b85f2591611e5d46d2b5d380/meerkat-workgraph/src/types.rs#L660) has no executable specification, attempts, fencing, checkpoint, result, or delivery state.
 - Schedule runnables are awaited in-process and do not own restart-safe execution.
 - MobKit callback tools currently synchronously await `callback/call_tool`.
 
@@ -75,10 +81,10 @@ There is no single platform-wide tool timeout. The effective deadline is the nar
 |---|---:|---|
 | Built-in foreground shell | 30 seconds by default | Tool-internal deadline |
 | SDK/builder `ToolDispatcher` | 30 seconds by default from `ToolTimeoutPolicy`; contributed as `ToolDeadlineOwner::Dispatcher` and enforced around router dispatch | Dispatcher-layer deadline when this wrapper is composed |
-| Meerkat normal tool batch | 600 seconds by default in [`ToolsConfig`](/Users/luka/.codex/worktrees/8935/meerkat/meerkat-core/src/config.rs:2185) | Agent-loop outer deadline |
+| Meerkat normal tool batch | 600 seconds by default in [`ToolsConfig`](https://github.com/lukacf/meerkat/blob/dda5f2b2e2da4165b85f2591611e5d46d2b5d380/meerkat-core/src/config.rs#L2185) | Agent-loop outer deadline |
 | MobKit provider operation | 120 seconds public contract | Host callback’s supported work window |
-| Python SDK callback wait | 125 seconds in [`_transport.py`](/Users/luka/src/meerkat-mobkit/sdk/python/meerkat_mobkit/_transport.py:18) | Cancels the host coroutine |
-| TypeScript SDK callback wait | 125 seconds in [`transport.ts`](/Users/luka/src/meerkat-mobkit/sdk/typescript/src/transport.ts:74) | Aborts the host callback |
+| Python SDK callback wait | 125 seconds in [`_transport.py`](https://github.com/lukacf/meerkat-mobkit/blob/c2920a8afb4fd2c598bb657e8234d18bcb911a50/sdk/python/meerkat_mobkit/_transport.py#L18) | Cancels the host coroutine |
+| TypeScript SDK callback wait | 125 seconds in [`transport.ts`](https://github.com/lukacf/meerkat-mobkit/blob/c2920a8afb4fd2c598bb657e8234d18bcb911a50/sdk/typescript/src/transport.ts#L74) | Aborts the host callback |
 | Rust gateway callback wire | 130 seconds | Final gateway wire deadline |
 | LLM stream inactivity | 300 seconds by default | Provider-stream watchdog, unrelated to tool callbacks |
 | Schedule occurrence lease | 60 seconds | Scheduling/redelivery lease, not a long-job execution lease |
@@ -260,7 +266,7 @@ Retry authority belongs only to `DetachedJobMachine`. Schedule, workers, callbac
 
 The storage-unification work changes the correct integration point.
 
-Meerkat’s [`RealmStoreSet`](/Users/luka/.codex/worktrees/8935/meerkat/meerkat/src/storage_provider.rs:51) should gain:
+Meerkat’s [`RealmStoreSet`](https://github.com/lukacf/meerkat/blob/dda5f2b2e2da4165b85f2591611e5d46d2b5d380/meerkat/src/storage_provider.rs#L51) should gain:
 
 ```rust
 job_store: Arc<dyn DetachedJobStore>

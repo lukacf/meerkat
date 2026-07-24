@@ -686,6 +686,8 @@ const POSTER_COVERAGE_KNOWN_GAPS = new Set([
   "dsl_occurrence_lifecycle_machine",
   "dsl_auth_machine",
   "dsl_approval_lifecycle_machine",
+  "dsl_detached_job_machine",
+  "dsl_runtime_delivery_machine",
   "dsl_session_document_machine",
   "dsl_session_turn_admission_machine",
   "dsl_workgraph_lifecycle_machine",

@@ -282,9 +282,9 @@ machine! {
 
         invariant notification_identity_and_sequence_cardinality_match {
             self.notification_ids.len() == self.notification_idempotency_keys.len()
-                && self.notification_ids.len() == self.notification_id_by_key.len()
-                && self.notification_ids.len() == self.notification_delivery_ids.len()
-                && self.notification_ids.len() == self.notification_sequences.len()
+                && self.notification_id_by_key.keys() == self.notification_idempotency_keys
+                && self.notification_delivery_ids.keys() == self.notification_ids
+                && self.notification_sequences.keys() == self.notification_ids
         }
 
         invariant applied_notifications_are_committed {
@@ -427,7 +427,7 @@ machine! {
                 && self.lease_expires_at_ms != None
                 && self.heartbeat_at_ms != None
                 && heartbeat_at_ms > self.heartbeat_at_ms.get("value")
-                && heartbeat_at_ms <= self.lease_expires_at_ms.get("value")
+                && lease_expires_at_ms > heartbeat_at_ms
                 && lease_expires_at_ms > self.lease_expires_at_ms.get("value")
             }
             update {
@@ -453,7 +453,7 @@ machine! {
                 && self.lease_expires_at_ms != None
                 && self.heartbeat_at_ms != None
                 && heartbeat_at_ms > self.heartbeat_at_ms.get("value")
-                && heartbeat_at_ms <= self.lease_expires_at_ms.get("value")
+                && lease_expires_at_ms > heartbeat_at_ms
                 && lease_expires_at_ms > self.lease_expires_at_ms.get("value")
             }
             update {

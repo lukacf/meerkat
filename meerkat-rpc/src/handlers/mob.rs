@@ -1998,6 +1998,7 @@ pub async fn handle_member_status(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let params: MobMemberParams = match parse_params(params) {
         Ok(p) => p,
@@ -2013,7 +2014,67 @@ pub async fn handle_member_status(
             let member_ref =
                 meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), agent_identity.as_str());
             match snapshot.to_member_status_result(member_ref) {
-                Ok(result) => RpcResponse::success(id, result),
+                Ok(mut result) => {
+                    if let (Some(raw_session_id), Some(realm_id)) =
+                        (result.current_session_id.as_deref(), runtime.realm_id())
+                    {
+                        let session_id = match meerkat_core::SessionId::parse(raw_session_id) {
+                            Ok(session_id) => session_id,
+                            Err(error) => {
+                                return RpcResponse::error(
+                                    id,
+                                    error::INTERNAL_ERROR,
+                                    format!(
+                                        "member status exposed an invalid current session id: {error}"
+                                    ),
+                                );
+                            }
+                        };
+                        let jobs = match runtime
+                            .detached_job_service()
+                            .list_descriptions_for_origin(realm_id.as_str(), &session_id, 10_000)
+                            .await
+                        {
+                            Ok(jobs) => jobs,
+                            Err(error) => {
+                                return RpcResponse::error(
+                                    id,
+                                    error::INTERNAL_ERROR,
+                                    format!(
+                                        "failed to project detached jobs for member status: {error}"
+                                    ),
+                                );
+                            }
+                        };
+                        let active = jobs
+                            .iter()
+                            .filter(|job| {
+                                matches!(
+                                    job.phase,
+                                    meerkat::JobPhase::Queued
+                                        | meerkat::JobPhase::Running
+                                        | meerkat::JobPhase::WaitingExternal
+                                        | meerkat::JobPhase::LossObserved
+                                        | meerkat::JobPhase::RetryScheduled
+                                )
+                            })
+                            .count();
+                        let needs_attention = jobs
+                            .iter()
+                            .filter(|job| job.phase == meerkat::JobPhase::NeedsAttention)
+                            .count();
+                        result.detached_jobs =
+                            Some(meerkat_contracts::DetachedJobsActivitySummary {
+                                active: u64::try_from(active).unwrap_or(u64::MAX),
+                                needs_attention: u64::try_from(needs_attention).unwrap_or(u64::MAX),
+                                // Do not synthesize activity-start authority
+                                // from leases or progress. The generated
+                                // runtime wait composition owns this fact.
+                                oldest_active_ms: None,
+                            });
+                    }
+                    RpcResponse::success(id, result)
+                }
                 Err(projection_error) => RpcResponse::error(
                     id,
                     error::INTERNAL_ERROR,

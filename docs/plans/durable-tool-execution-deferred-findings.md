@@ -1,3 +1,9 @@
+---
+title: "Durable Tool Execution Deferred Findings"
+description: "Earlier deferred findings from the durable shell and job execution delivery slices."
+icon: "list-check"
+---
+
 # Durable Tool Execution Deferred Findings
 
 This ledger records review findings that do not violate the active slice

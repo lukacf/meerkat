@@ -4,11 +4,11 @@ use crate::machines::detached_job as dsl;
 use crate::store::{InsertJobOutcome, StoredJob};
 use crate::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CheckpointRef,
-    DetachedJobError, DetachedJobStore, FenceToken, JobFailureCode, JobHealthCondition, JobId,
-    JobNotification, JobNotificationReceipt, JobOutboxEntry, JobOutboxPayload, JobProgress,
-    JobReceipt, JobResultRef, JobSnapshot, JobSubscription, JobSubscriptionId, JobTerminalResult,
-    NotificationId, PredicateEvaluation, PredicateEvaluationReceipt, PredicateObservation,
-    PredicateWatch,
+    DetachedJobError, DetachedJobStore, FenceToken, JobDescription, JobFailureCode,
+    JobHealthCondition, JobHealthSnapshot, JobId, JobNotification, JobNotificationReceipt,
+    JobOutboxEntry, JobOutboxPayload, JobProgress, JobReceipt, JobResultRef, JobSnapshot,
+    JobSubscription, JobSubscriptionId, JobTerminalResult, NotificationId, PredicateEvaluation,
+    PredicateEvaluationReceipt, PredicateObservation, PredicateWatch,
 };
 
 #[derive(Clone)]
@@ -62,11 +62,13 @@ impl DetachedJobService {
         match self.store.insert_deduplicated(stored).await? {
             InsertJobOutcome::Inserted(inserted) => Ok(JobReceipt {
                 job_id: inserted.job_id,
+                phase: inserted.machine_state.lifecycle_phase,
                 deduplicated: false,
                 restart_class: inserted.spec.restart_class,
             }),
             InsertJobOutcome::Existing(existing) => Ok(JobReceipt {
                 job_id: existing.job_id,
+                phase: existing.machine_state.lifecycle_phase,
                 deduplicated: true,
                 restart_class: existing.spec.restart_class,
             }),
@@ -75,6 +77,112 @@ impl DetachedJobService {
 
     pub async fn get(&self, job_id: &JobId) -> Result<Option<JobSnapshot>, DetachedJobError> {
         self.store.get(job_id).await?.map(job_snapshot).transpose()
+    }
+
+    pub async fn describe(
+        &self,
+        job_id: &JobId,
+    ) -> Result<Option<JobDescription>, DetachedJobError> {
+        self.store
+            .get(job_id)
+            .await?
+            .map(job_description)
+            .transpose()
+    }
+
+    pub async fn describe_for_realm(
+        &self,
+        realm_id: &str,
+        job_id: &JobId,
+    ) -> Result<Option<JobDescription>, DetachedJobError> {
+        self.store
+            .get(job_id)
+            .await?
+            .filter(|job| job.spec.realm_id == realm_id)
+            .map(job_description)
+            .transpose()
+    }
+
+    pub async fn list_descriptions_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &meerkat_core::SessionId,
+        limit: usize,
+    ) -> Result<Vec<JobDescription>, DetachedJobError> {
+        self.store
+            .list_for_origin(realm_id, origin_session_id, limit)
+            .await?
+            .into_iter()
+            .map(job_description)
+            .collect()
+    }
+
+    /// Derive operational health from committed generated-machine state.
+    ///
+    /// This is deliberately a projection: it neither expires a lease nor
+    /// claims/retries work. Those decisions remain explicit machine inputs.
+    pub async fn health_snapshot(
+        &self,
+        observed_at_ms: u64,
+        limit: usize,
+    ) -> Result<JobHealthSnapshot, DetachedJobError> {
+        self.health_snapshot_for_realm_filter(None, observed_at_ms, limit)
+            .await
+    }
+
+    pub async fn health_snapshot_for_realm(
+        &self,
+        realm_id: &str,
+        observed_at_ms: u64,
+        limit: usize,
+    ) -> Result<JobHealthSnapshot, DetachedJobError> {
+        self.health_snapshot_for_realm_filter(Some(realm_id), observed_at_ms, limit)
+            .await
+    }
+
+    async fn health_snapshot_for_realm_filter(
+        &self,
+        realm_id: Option<&str>,
+        observed_at_ms: u64,
+        limit: usize,
+    ) -> Result<JobHealthSnapshot, DetachedJobError> {
+        let jobs = self.store.list_all(limit).await?;
+        let mut health = JobHealthSnapshot::default();
+        for job in jobs
+            .into_iter()
+            .filter(|job| realm_id.is_none_or(|realm_id| job.spec.realm_id == realm_id))
+        {
+            let state = &job.machine_state;
+            match state.lifecycle_phase {
+                dsl::DetachedJobPhase::Queued | dsl::DetachedJobPhase::RetryScheduled => {
+                    health.queued = health.queued.saturating_add(1);
+                }
+                dsl::DetachedJobPhase::Running | dsl::DetachedJobPhase::WaitingExternal => {
+                    health.running = health.running.saturating_add(1);
+                    if state
+                        .lease_expires_at_ms
+                        .is_some_and(|expires_at_ms| expires_at_ms < observed_at_ms)
+                    {
+                        health.stale_leases = health.stale_leases.saturating_add(1);
+                    }
+                }
+                dsl::DetachedJobPhase::NeedsAttention => {
+                    health.needs_attention = health.needs_attention.saturating_add(1);
+                }
+                dsl::DetachedJobPhase::Unsubmitted
+                | dsl::DetachedJobPhase::Claimed
+                | dsl::DetachedJobPhase::LossObserved
+                | dsl::DetachedJobPhase::Succeeded
+                | dsl::DetachedJobPhase::Failed
+                | dsl::DetachedJobPhase::Cancelled
+                | dsl::DetachedJobPhase::WorkerLost => {}
+            }
+            health.delivery_backlog = health.delivery_backlog.saturating_add(
+                u64::try_from(job.outbox.iter().filter(|entry| !entry.applied).count())
+                    .unwrap_or(u64::MAX),
+            );
+        }
+        Ok(health)
     }
 
     pub async fn subscribe(
@@ -700,6 +808,29 @@ fn ensure_current_writer(
         });
     }
     Ok(())
+}
+
+fn job_description(job: StoredJob) -> Result<JobDescription, DetachedJobError> {
+    let snapshot = job_snapshot(job.clone())?;
+    Ok(JobDescription {
+        job_id: snapshot.job_id,
+        runner: job.spec.runner,
+        phase: snapshot.phase,
+        restart_class: job.spec.restart_class,
+        attempt_count: snapshot.attempt_count,
+        progress: snapshot.progress,
+        cancel_requested: snapshot.cancel_requested,
+        terminal_result: snapshot.terminal_result,
+        subscription_count: u64::try_from(snapshot.subscriptions.len()).unwrap_or(u64::MAX),
+        delivery_backlog: u64::try_from(
+            snapshot
+                .outbox
+                .iter()
+                .filter(|entry| !entry.applied)
+                .count(),
+        )
+        .unwrap_or(u64::MAX),
+    })
 }
 
 fn decode_predicate_checkpoint(

@@ -34,6 +34,58 @@ K20_CATALOG_CONTRACT_TYPES = [
     "WorkItemsResult",
 ]
 
+JOBS_RPC_CONTRACT_TYPES = [
+    "JobsArtifactsParams",
+    "JobsArtifactsResult",
+    "JobsCancelParams",
+    "JobsCancelResult",
+    "JobsGetParams",
+    "JobsGetResult",
+    "JobsHealthResult",
+    "JobsListParams",
+    "JobsListResult",
+    "JobsProgressParams",
+    "JobsProgressResult",
+    "JobsResultParams",
+    "JobsResultResult",
+    "JobsRetryParams",
+    "JobsRetryResult",
+    "JobsSubscribeParams",
+    "JobsSubscribeResult",
+    "JobsUnsubscribeParams",
+    "JobsUnsubscribeResult",
+    "MobkitJobCancelAckParams",
+    "MobkitJobCheckpointParams",
+    "MobkitJobCompleteParams",
+    "MobkitJobFailParams",
+    "MobkitJobHeartbeatParams",
+    "MobkitJobMutationResult",
+    "MobkitJobProgressParams",
+    "MonitorsStartParams",
+    "MonitorsStartResult",
+]
+
+JOBS_RPC_CONTRACT_HELPER_TYPES = [
+    "JobArtifactRef",
+    "JobAttemptAuthority",
+    "JobHealthSummary",
+    "JobProgress",
+    "JobRunner",
+    "JobSummary",
+]
+
+JOBS_RPC_CONTRACT_ALIAS_TYPES = [
+    "CallbackToolExecution",
+    "JobDeliveryKind",
+    "JobHealthStatus",
+    "JobIdempotencyScope",
+    "JobPhase",
+    "JobRestartClass",
+    "JobTerminalResult",
+    "MonitorOutputProtocol",
+    "WireHandlingMode",
+]
+
 MOB_RPC_CONTRACT_TYPES = [
     "MobIdParams",
     "MobMemberParams",
@@ -723,6 +775,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
+        *JOBS_RPC_CONTRACT_TYPES,
+        *JOBS_RPC_CONTRACT_HELPER_TYPES,
+        *JOBS_RPC_CONTRACT_ALIAS_TYPES,
     }
 
 
@@ -1355,6 +1410,9 @@ def _sdk_contract_type_roster() -> list[str]:
         WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
         COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
+        JOBS_RPC_CONTRACT_TYPES,
+        JOBS_RPC_CONTRACT_HELPER_TYPES,
+        JOBS_RPC_CONTRACT_ALIAS_TYPES,
         PUBLIC_RPC_CATALOG_OBJECT_TYPES,
         PUBLIC_RPC_CATALOG_ALIAS_TYPES,
     ):
@@ -3409,6 +3467,12 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_alias(name, wire_schema, f"Wire payload for {name}.")
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
         append_python_contract_dataclass(name)
+    for name in JOBS_RPC_CONTRACT_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Durable job wire type for {name}.")
+    for name in JOBS_RPC_CONTRACT_HELPER_TYPES:
+        append_python_contract_dataclass(name)
+    for name in JOBS_RPC_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
     for name in MOB_RPC_CONTRACT_TYPES:
@@ -4115,6 +4179,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         append_typescript_alias(name, wire_schema)
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in JOBS_RPC_CONTRACT_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in JOBS_RPC_CONTRACT_HELPER_TYPES:
+        append_typescript_contract_interface(name)
+    for name in JOBS_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_interface("MobWireParams", params_schema)
     append_typescript_interface("MobUnwireParams", params_schema)
@@ -5909,6 +5979,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     emitted.add("MobListResult")
     append_interface("MobRespawnResult")
     append_interface("MobEventsResult")
+    append_alias("WireHandlingMode")
     append_interface("MobMemberSendResult")
     append_interface("MobFlowStatusResult")
     append_interface("MobRunResult")

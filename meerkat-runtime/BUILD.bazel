@@ -908,7 +908,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.4",
+        "CARGO_PKG_VERSION": "0.8.5",
         "CARGO_BIN_NAME": "durable_delivery_inbox",
         "CARGO_MANIFEST_DIR": "./meerkat-runtime",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",

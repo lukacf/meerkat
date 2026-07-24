@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
+use ::tokio::sync::RwLock;
 use async_trait::async_trait;
 use meerkat_core::SessionId;
-use tokio::sync::RwLock;
 
 use crate::machines::detached_job::{DetachedJobMachineAuthority, DetachedJobMachineState};
 use crate::{
@@ -56,6 +59,10 @@ pub trait DetachedJobStore: Send + Sync {
         origin_session_id: &SessionId,
         limit: usize,
     ) -> Result<Vec<StoredJob>, DetachedJobError>;
+
+    /// Mechanical recovery census. Callers must use generated lifecycle state
+    /// to decide whether a row is runnable, reconcilable, or terminal.
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError>;
 
     fn is_persistent(&self) -> bool;
 }
@@ -253,6 +260,21 @@ impl DetachedJobStore for MemoryDetachedJobStore {
             .filter(|job| {
                 job.spec.realm_id == realm_id && &job.spec.origin_session_id == origin_session_id
             })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .inner
+            .read()
+            .await
+            .jobs
+            .values()
             .take(limit)
             .cloned()
             .collect())

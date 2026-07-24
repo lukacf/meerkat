@@ -57,6 +57,7 @@ export type AgentErrorReason = {
   args: unknown;
   reason_type: "callback_pending";
   tool_name: string;
+  tool_use_id: string;
 } | {
   cause_kind: TurnTerminalCauseKind;
   outcome: TurnTerminalOutcome;
@@ -239,6 +240,12 @@ export type OpenAiImageMetadata = {
 };
 
 export type PeerId = string;
+
+export interface PendingCallbackToolCall {
+  args: unknown;
+  tool_name: string;
+  tool_use_id: string;
+}
 
 export interface PromptText {
   content: string;
@@ -671,6 +678,7 @@ export interface InteractionCompleteEvent {
 export interface InteractionCallbackPendingEvent {
   args: unknown;
   interaction_id: InteractionId;
+  pending_tool_calls?: PendingCallbackToolCall[];
   tool_name: string;
   type: "interaction_callback_pending";
 }

@@ -906,8 +906,8 @@ struct VerifiedStampKey {
     digest: String,
     message_count: usize,
     metadata_entries: usize,
-    created_at: std::time::SystemTime,
-    updated_at: std::time::SystemTime,
+    created_at: crate::time_compat::SystemTime,
+    updated_at: crate::time_compat::SystemTime,
 }
 
 fn verified_stamp_key(session: &Session, digest: &SessionCheckpointDigest) -> VerifiedStampKey {

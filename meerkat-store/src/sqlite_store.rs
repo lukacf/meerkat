@@ -2258,6 +2258,11 @@ mod tests {
                 raw = raw.replace(current, legacy);
             }
             *state = serde_json::from_str(&raw).unwrap();
+            // A pre-0.7.14 writer predates the digest-format marker; the
+            // fixture blob was produced by the CURRENT writer (which stamps
+            // it), so strip the marker or the forged legacy strings ride a
+            // stamp that legitimately skips the decode-time heal probe.
+            state.as_object_mut().unwrap().remove("digest_format");
         }
         {
             let conn = open_connection(store.path()).unwrap();

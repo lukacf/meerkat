@@ -538,7 +538,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.5",
+        "CARGO_PKG_VERSION": "0.8.7",
         "CARGO_BIN_NAME": "monitor_protocol",
         "CARGO_MANIFEST_DIR": "./meerkat-tools",
     },

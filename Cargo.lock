@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "async-trait",
  "chrono",

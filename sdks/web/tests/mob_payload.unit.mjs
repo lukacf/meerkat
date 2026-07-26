@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
-import { Session, serializePromptContentInput } from '../dist/session.js';
+import { MeerkatError, Session, serializePromptContentInput } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
 const WEB_PACKAGE_JSON_URL = new URL('../package.json', import.meta.url);
@@ -292,6 +292,40 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
   await assert.rejects(
     () => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]),
     /Mob spawn failed \(profile_not_found\): profile missing/,
+  );
+});
+
+test('Mob.spawn preserves provider-auth data on typed failed rows', async () => {
+  const structuredData = {
+    cause: 'provider_auth',
+    kind: 'interactive_login_required',
+    provider: 'openai',
+    realm_id: 'project',
+    binding_id: 'openai',
+  };
+  const mob = new Mob('mob-web-unit', {
+    async mob_spawn() {
+      return JSON.stringify([
+        {
+          status: 'failed',
+          result: {
+            cause: 'session_error',
+            message: 'provider authentication failed',
+            structured_data: structuredData,
+          },
+        },
+      ]);
+    },
+  });
+
+  await assert.rejects(
+    () => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]),
+    (error) => {
+      assert.ok(error instanceof MeerkatError);
+      assert.equal(error.code, 'mob_spawn_failed');
+      assert.deepEqual(error.data, structuredData);
+      return true;
+    },
   );
 });
 
@@ -729,6 +763,30 @@ test('Mob decoders reject missing typed status instead of fabricating defaults',
   await assert.rejects(
     () => missingRespawnStatus.respawn('worker-1'),
     /Invalid mob respawn response: missing status/,
+  );
+
+  const structuredData = {
+    cause: 'provider_auth',
+    kind: 'interactive_login_required',
+    provider: 'openai',
+  };
+  const rejectedRespawn = new Mob('mob-web-unit', {
+    async mob_respawn() {
+      throw JSON.stringify({
+        code: 'mob_respawn_error',
+        message: 'provider authentication failed',
+        data: structuredData,
+      });
+    },
+  });
+  await assert.rejects(
+    () => rejectedRespawn.respawn('worker-1'),
+    (error) => {
+      assert.ok(error instanceof MeerkatError);
+      assert.equal(error.code, 'mob_respawn_error');
+      assert.deepEqual(error.data, structuredData);
+      return true;
+    },
   );
 
   const missingAppendStatus = new Mob('mob-web-unit', {

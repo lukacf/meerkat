@@ -2678,7 +2678,7 @@ class MeerkatClient:
                 )
                 continue
 
-            if set(payload.keys()) - {"cause", "message"}:
+            if set(payload.keys()) - {"cause", "message", "structured_data"}:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: failed result has unknown fields",
@@ -2698,10 +2698,15 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: failed result missing message",
                 )
+            structured_data = payload.get("structured_data")
             normalized.append(
                 MobSpawnManyResultEntry(
                     status="failed",
-                    result=MobSpawnManyFailedResult(cause=cause, message=message),
+                    result=MobSpawnManyFailedResult(
+                        cause=cause,
+                        message=message,
+                        structured_data=structured_data,
+                    ),
                 )
             )
         return MobSpawnManyResult(results=normalized)

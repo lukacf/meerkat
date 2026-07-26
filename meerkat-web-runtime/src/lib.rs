@@ -694,8 +694,16 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
     err_js(code, &msg.to_string())
 }
 
+fn mob_error_value(error: &meerkat_mob::MobError) -> serde_json::Value {
+    let mut value = err_value("mob_error", error);
+    if let Some(data) = error.structured_data() {
+        value["data"] = data;
+    }
+    value
+}
+
 fn err_mob(e: meerkat_mob::MobError) -> JsValue {
-    err_str("mob_error", e)
+    js_from_value(mob_error_value(&e))
 }
 
 fn mob_destroy_error_value(e: MobMcpDestroyError) -> serde_json::Value {
@@ -706,9 +714,7 @@ fn mob_destroy_error_value(e: MobMcpDestroyError) -> serde_json::Value {
             "destroy_report": report,
             "retryable": true,
         }),
-        MobMcpDestroyError::Mob(error) => {
-            serde_json::json!({ "code": "mob_error", "message": error.to_string() })
-        }
+        MobMcpDestroyError::Mob(error) => mob_error_value(&error),
     }
 }
 
@@ -2114,7 +2120,11 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.cause(), e.to_string()),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed_with_structured_data(
+                e.cause(),
+                e.to_string(),
+                e.error().structured_data(),
+            ),
         })
         .collect();
 
@@ -2562,7 +2572,13 @@ pub async fn mob_respawn(
                 .map(std::string::ToString::to_string)
                 .collect(),
         },
-        Err(e) => return Err(JsValue::from_str(&e.to_string())),
+        Err(e) => {
+            let mut value = err_value("mob_respawn_error", &e);
+            if let Some(data) = e.structured_data() {
+                value["data"] = data;
+            }
+            return Err(js_from_value(value));
+        }
     };
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
@@ -3011,7 +3027,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{
         build_service_infrastructure, destroy_session_with_services, mob_destroy_error_value,
-        populate_realm_from_api_keys,
+        mob_error_value, populate_realm_from_api_keys,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload};
@@ -3617,6 +3633,30 @@ capabilities = [{capability_values}]
             serde_json::from_value(payload)
                 .expect("typed failed spawn_many entry must deserialize");
         assert_eq!(round_trip, entry);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn mob_error_value_preserves_provider_auth_data() {
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("project").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+        let error = meerkat_mob::MobError::SessionError(
+            meerkat_core::SessionError::provider_auth_failure(failure),
+        );
+
+        let value = mob_error_value(&error);
+
+        assert_eq!(value["code"], "mob_error");
+        assert_eq!(value["data"]["cause"], "provider_auth");
+        assert_eq!(value["data"]["kind"], "interactive_login_required");
+        assert_eq!(value["data"]["provider"], "openai");
+        assert_eq!(value["data"]["realm_id"], "project");
+        assert_eq!(value["data"]["binding_id"], "openai");
     }
 
     #[test]

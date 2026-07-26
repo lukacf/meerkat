@@ -1258,6 +1258,7 @@ export interface MobSpawnManySpawnedResult {
 export interface MobSpawnManyFailedResult {
   cause: MobSpawnManyFailureCause;
   message: string;
+  structured_data?: unknown;
 }
 
 export interface MobSpawnReceiptWire {
@@ -2592,7 +2593,10 @@ export interface MemberBuildRejectionBindingUnresolvable {
 }
 
 export interface MemberBuildRejectionProviderAuthPayload {
+  binding_id?: string | null;
   kind: AuthErrorKind;
+  provider?: Provider | null;
+  realm_id?: string | null;
 }
 
 export interface MemberBuildRejectionProviderAuth {

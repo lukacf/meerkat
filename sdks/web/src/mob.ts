@@ -1,5 +1,5 @@
 import { EventSubscription } from './events.js';
-import { serializePromptContentInput } from './session.js';
+import { MeerkatError, serializePromptContentInput } from './session.js';
 import { isKnownEvent } from './types.js';
 import { MOB_SPAWN_MANY_FAILURE_CAUSES } from './generated/mob.js';
 import type {
@@ -491,7 +491,7 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
   if (status === 'failed') {
     requireOnlyKeys(
       raw.result,
-      ['cause', 'message'],
+      ['cause', 'message', 'structured_data'],
       'Invalid mob spawn response: malformed failed result payload',
     );
     const cause = raw.result.cause;
@@ -502,7 +502,11 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
     if (typeof message !== 'string' || message.length === 0) {
       throw new Error('Invalid mob spawn response: failed result missing message');
     }
-    throw new Error(`Mob spawn failed (${cause}): ${message}`);
+    throw new MeerkatError(
+      'mob_spawn_failed',
+      `Mob spawn failed (${cause}): ${message}`,
+      raw.result.structured_data,
+    );
   }
 
   requireOnlyKeys(
@@ -1158,10 +1162,15 @@ export class Mob {
 
   /** Spawn one or more agents into the mob. */
   async spawn(specs: SpawnSpec[]): Promise<SpawnResult[]> {
-    const json = await this.bindings.mob_spawn(
-      this.mobId,
-      JSON.stringify(specs.map(spawnSpecPayload)),
-    );
+    let json: string;
+    try {
+      json = await this.bindings.mob_spawn(
+        this.mobId,
+        JSON.stringify(specs.map(spawnSpecPayload)),
+      );
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     const parsed = parseJsonPayload(json, 'Invalid mob spawn response');
     if (!Array.isArray(parsed)) {
       throw new Error('Invalid mob spawn response: results must be a list');
@@ -1310,7 +1319,12 @@ export class Mob {
       initialMessage != null
         ? serializePromptContentInput(initialMessage)
         : undefined;
-    const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
+    let json: string;
+    try {
+      json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     return parseMobRespawnResult(parseJsonPayload(json, 'Invalid mob respawn response'));
   }
 
@@ -1344,8 +1358,10 @@ export class Mob {
       backend?: string;
     },
   ): Promise<MobHelperResult> {
-    const json = await this.bindings.mob_spawn_helper(
-      this.mobId,
+    let json: string;
+    try {
+      json = await this.bindings.mob_spawn_helper(
+        this.mobId,
         JSON.stringify({
           prompt,
           agent_identity: options.agentIdentity,
@@ -1359,7 +1375,10 @@ export class Mob {
           runtime_mode: options.runtimeMode,
           backend: options.backend,
         }),
-    );
+      );
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     return parseMobHelperResult(
       parseJsonPayload(json, 'Invalid mob spawn_helper response'),
       'Invalid mob spawn_helper response',
@@ -1385,8 +1404,10 @@ export class Mob {
       backend?: string;
     },
   ): Promise<MobHelperResult> {
-    const json = await this.bindings.mob_fork_helper(
-      this.mobId,
+    let json: string;
+    try {
+      json = await this.bindings.mob_fork_helper(
+        this.mobId,
         JSON.stringify({
           source_member_id: sourceMemberId,
           prompt,
@@ -1402,7 +1423,10 @@ export class Mob {
           runtime_mode: options.runtimeMode,
           backend: options.backend,
         }),
-    );
+      );
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     return parseMobHelperResult(
       parseJsonPayload(json, 'Invalid mob fork_helper response'),
       'Invalid mob fork_helper response',

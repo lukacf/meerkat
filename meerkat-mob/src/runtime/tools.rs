@@ -15,6 +15,24 @@ use std::collections::HashSet;
 
 use meerkat_core::DynamicToolComposite;
 
+pub(crate) fn mob_error_to_tool_error(tool_name: &str, error: MobError) -> ToolError {
+    let message = format!("tool '{tool_name}' failed: {error}");
+    match error.structured_data() {
+        Some(data) => ToolError::execution_failed_with_data(message, data),
+        None => ToolError::execution_failed(message),
+    }
+}
+
+pub(crate) fn mob_spawn_many_failure_entry(
+    error: &MobSpawnManyFailure,
+) -> meerkat_contracts::MobSpawnManyResultEntry {
+    meerkat_contracts::MobSpawnManyResultEntry::failed_with_structured_data(
+        error.cause(),
+        error.to_string(),
+        error.error().structured_data(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // NameFilteredDispatcher
 // ---------------------------------------------------------------------------
@@ -841,7 +859,7 @@ impl MobOperatorToolDispatcher {
     }
 
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
-        ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
+        mob_error_to_tool_error(call.name, error)
     }
 
     fn encode_result(
@@ -1215,12 +1233,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                     results.push(json!(entry));
                                 }
                                 Err(error) => {
-                                    results.push(json!(
-                                        meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                            error.cause(),
-                                            error.to_string()
-                                        )
-                                    ));
+                                    results.push(json!(mob_spawn_many_failure_entry(&error)));
                                 }
                             }
                         }
@@ -1243,12 +1256,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                         ),
                                     ))
                                 }
-                                Err(error) => {
-                                    json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                        error.cause(),
-                                        error.to_string()
-                                    ))
-                                }
+                                Err(error) => json!(mob_spawn_many_failure_entry(&error)),
                             })
                             .collect::<Vec<_>>();
                         (results, Vec::new())
@@ -1410,3 +1418,31 @@ const TOOL_MOB_LIST_FLOWS: &str = "mob_list_flows";
 const TOOL_MOB_RUN_FLOW: &str = "mob_run_flow";
 const TOOL_MOB_FLOW_STATUS: &str = "mob_flow_status";
 const TOOL_MOB_CANCEL_FLOW: &str = "mob_cancel_flow";
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::*;
+
+    #[test]
+    fn operator_tool_mapper_preserves_provider_auth_data() {
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("project").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+        let error = mob_error_to_tool_error(
+            TOOL_SPAWN_MEMBER,
+            MobError::SessionError(meerkat_core::SessionError::provider_auth_failure(failure)),
+        );
+        let data = error
+            .structured_data()
+            .expect("operator tool errors should preserve provider-auth data");
+
+        assert_eq!(data["cause"], "provider_auth");
+        assert_eq!(data["kind"], "interactive_login_required");
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["realm_id"], "project");
+        assert_eq!(data["binding_id"], "openai");
+    }
+}

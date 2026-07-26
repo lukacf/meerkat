@@ -50,6 +50,7 @@ pub use meerkat_core::{
     AssistantBlock,
     // Phase 3 provider-auth redesign — realm-scoped connection identity.
     AuthBindingRef,
+    BindingId,
     BlockAssistantMessage,
     // Budget
     Budget,
@@ -92,6 +93,7 @@ pub use meerkat_core::{
     MeerkatSchema,
     // Types
     Message,
+    OAuthProviderIdentity,
     OpEvent,
     OperationId,
     OperationPolicy,
@@ -100,6 +102,7 @@ pub use meerkat_core::{
     OutputSchema,
     // Provider
     Provider,
+    RealmId,
     ResponseStatus,
     ResultShape,
     RetryConfig,
@@ -263,6 +266,8 @@ pub use meerkat_workgraph::{
 
 // AgentFactory and build_agent types
 mod factory;
+#[cfg(not(target_arch = "wasm32"))]
+mod host_auth;
 mod model_fallback;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, CreateSessionModelResolution,
@@ -271,6 +276,13 @@ pub use factory::{
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
     resolve_create_session_model, resolve_provider_catalog_default_model,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use host_auth::{
+    HostAuthError, HostAuthLoginComplete, HostAuthLoginStart, HostAuthService, HostAuthStatus,
+    HostAuthTarget,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
 
 pub mod help;
 

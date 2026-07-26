@@ -3870,6 +3870,10 @@ impl SessionRuntime {
         self.runtime_adapter.oauth_flow_authority()
     }
 
+    pub fn provider_auth_runtime_authority(&self) -> meerkat_runtime::ProviderAuthRuntimeAuthority {
+        self.runtime_adapter.provider_auth_runtime_authority()
+    }
+
     /// Override the shared default LLM client used by this runtime.
     pub fn set_default_llm_client(&self, client: Option<Arc<dyn LlmClient>>) {
         *self

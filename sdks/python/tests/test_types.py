@@ -783,6 +783,7 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     assert get_origin(failure_hints["cause"]) is Literal
     assert "profile_not_found" in get_args(failure_hints["cause"])
     assert "missing_member_capability" in get_args(failure_hints["cause"])
+    assert "structured_data" in failure_hints
     assert GeneratedMobSpawnManyFailureCause == failure_hints["cause"]
 
     spec = GeneratedMobSpawnSpecParams(
@@ -884,6 +885,11 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
                     "result": {
                         "cause": "missing_member_capability",
                         "message": "host lacks tracked input cancellation",
+                        "structured_data": {
+                            "cause": "provider_auth",
+                            "kind": "interactive_login_required",
+                            "provider": "openai",
+                        },
                     },
                 },
             ]
@@ -908,6 +914,11 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
     assert result.results[1].result.cause == "missing_member_capability"
     assert result.results[1].result.message == "host lacks tracked input cancellation"
+    assert result.results[1].result.structured_data == {
+        "cause": "provider_auth",
+        "kind": "interactive_login_required",
+        "provider": "openai",
+    }
 
 
 @pytest.mark.asyncio

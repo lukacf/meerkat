@@ -2862,6 +2862,7 @@ async fn mob_force_cancel(
 #[cfg(feature = "mob")]
 trait MobRestWireErrorSource: std::fmt::Display {
     fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
+    fn structured_data(&self) -> Option<Value>;
 }
 
 #[cfg(feature = "mob")]
@@ -2869,12 +2870,20 @@ impl MobRestWireErrorSource for meerkat_mob::MobError {
     fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
         self.wire_detail()
     }
+
+    fn structured_data(&self) -> Option<Value> {
+        meerkat_mob::MobError::structured_data(self)
+    }
 }
 
 #[cfg(feature = "mob")]
 impl MobRestWireErrorSource for meerkat_mob::MobRespawnError {
     fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
         self.wire_detail()
+    }
+
+    fn structured_data(&self) -> Option<Value> {
+        meerkat_mob::MobRespawnError::structured_data(self)
     }
 }
 
@@ -2895,7 +2904,24 @@ where
                 format!("failed to serialize mob error detail: {serialize_error}"),
             ),
         },
-        None => fallback(err.to_string()).into_response(),
+        None => {
+            let fallback_error = fallback(err.to_string());
+            match (fallback_error, err.structured_data()) {
+                (ApiError::BadRequest(message), Some(details)) => ApiError::BadRequestWithData {
+                    message,
+                    code: "BAD_REQUEST".to_string(),
+                    details,
+                }
+                .into_response(),
+                (ApiError::Internal(message), Some(details)) => ApiError::InternalWithData {
+                    message,
+                    code: "INTERNAL_ERROR".to_string(),
+                    details,
+                }
+                .into_response(),
+                (fallback_error, _) => fallback_error.into_response(),
+            }
+        }
     }
 }
 
@@ -11373,6 +11399,32 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["code"], json!("NOT_FOUND"));
+
+        let auth_failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("project").unwrap()),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").unwrap()),
+        };
+        let auth_respawn = meerkat_mob::MobRespawnError::SpawnAfterRetireWithCause {
+            identity: meerkat_mob::AgentIdentity::from("worker"),
+            cause: meerkat_mob::MobError::SessionError(
+                meerkat_core::SessionError::provider_auth_failure(auth_failure),
+            ),
+        };
+        let response = mob_rest_error(&auth_respawn, ApiError::BadRequest);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], json!("BAD_REQUEST"));
+        assert_eq!(payload["details"]["cause"], json!("provider_auth"));
+        assert_eq!(
+            payload["details"]["kind"],
+            json!("interactive_login_required")
+        );
+        assert_eq!(payload["details"]["provider"], json!("openai"));
+        assert_eq!(payload["details"]["realm_id"], json!("project"));
+        assert_eq!(payload["details"]["binding_id"], json!("openai"));
 
         let respawn =
             meerkat_mob::MobRespawnError::Mob(meerkat_mob::MobError::BridgeRequestTimedOut {

@@ -1115,6 +1115,11 @@ const generatedMobSpawnManyFailureCause: MobSpawnManyFailureCause = "missing_mem
 const generatedMobSpawnManyFailure: MobSpawnManyFailedResult = {
   cause: generatedMobSpawnManyFailureCause,
   message: "profile missing",
+  structured_data: {
+    cause: "provider_auth",
+    kind: "interactive_login_required",
+    provider: "openai",
+  },
 };
 const generatedMobSpawnManyPayload: MobSpawnManyResultPayload = generatedMobSpawnManyFailure;
 const generatedMobSpawnManySpawned: MobSpawnManySpawnedResult = {

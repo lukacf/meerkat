@@ -625,6 +625,27 @@ impl From<BridgeRejectionReply> for MobError {
 }
 
 impl MobError {
+    /// Structured data carried by an underlying domain error.
+    ///
+    /// Session materialization failures use this to preserve typed
+    /// provider-auth causes through MobKit and RPC without teaching the mob
+    /// layer to reclassify authentication itself.
+    pub fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::SessionError(error) => error.structured_data(),
+            Self::BridgeCommandRejected {
+                cause:
+                    BridgeRejectionCause::MaterializeBuildRejected {
+                        cause: build_rejection,
+                    },
+                ..
+            } => build_rejection
+                .provider_auth_failure()
+                .map(|failure| failure.structured_data()),
+            _ => None,
+        }
+    }
+
     pub fn bridge_rejection_cause(&self) -> Option<BridgeRejectionCause> {
         match self {
             // Cloned: `BridgeRejectionCause` carries payload variants since V4.
@@ -790,6 +811,17 @@ impl crate::runtime::MobRespawnError {
     pub fn wire_detail(&self) -> Option<WireMobErrorDetail> {
         match self {
             Self::Mob(inner) => inner.wire_detail(),
+            _ => None,
+        }
+    }
+
+    /// Structured data carried by the mob cause, including failures that
+    /// happened after the previous member was retired.
+    pub fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Mob(inner) | Self::SpawnAfterRetireWithCause { cause: inner, .. } => {
+                inner.structured_data()
+            }
             _ => None,
         }
     }
@@ -1324,5 +1356,45 @@ mod tests {
             respawn_only.wire_detail().is_none(),
             "respawn-specific variants have no console wire code"
         );
+    }
+
+    #[test]
+    fn placed_provider_auth_rejection_projects_canonical_structured_data() {
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("global").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+        let error = MobError::BridgeCommandRejected {
+            cause: BridgeRejectionCause::MaterializeBuildRejected {
+                cause: meerkat_contracts::wire::supervisor_bridge::MemberBuildRejection::from_provider_auth_failure(
+                    &failure,
+                ),
+            },
+            reason: failure.public_message(),
+        };
+
+        assert_eq!(error.structured_data(), Some(failure.structured_data()));
+    }
+
+    #[test]
+    fn respawn_after_retire_preserves_structured_mob_cause() {
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::Expired,
+            provider: meerkat_core::Provider::Anthropic,
+            realm_id: None,
+            binding_id: None,
+        };
+        let expected = failure.structured_data();
+        let error = crate::runtime::MobRespawnError::SpawnAfterRetireWithCause {
+            identity: AgentIdentity::from("worker"),
+            cause: MobError::SessionError(meerkat_core::SessionError::provider_auth_failure(
+                failure,
+            )),
+        };
+
+        assert_eq!(error.structured_data(), Some(expected));
+        assert!(error.wire_detail().is_none());
     }
 }

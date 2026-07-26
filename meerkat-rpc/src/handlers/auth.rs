@@ -41,6 +41,71 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+fn host_auth_service(
+    runtime: &SessionRuntime,
+) -> Result<meerkat::HostAuthService, meerkat::HostAuthError> {
+    let persistence = runtime
+        .provider_auth_persistence()
+        .map_err(meerkat::HostAuthError::Factory)?
+        .ok_or(meerkat::HostAuthError::PersistenceUnavailable)?;
+    Ok(meerkat::HostAuthService::new(
+        persistence,
+        runtime.provider_auth_runtime_authority(),
+    ))
+}
+
+fn host_auth_target(
+    provider: &str,
+    realm_id: &str,
+    binding_id: &str,
+    profile_id: Option<&str>,
+) -> Result<meerkat::HostAuthTarget, String> {
+    let provider = OAuthProviderIdentity::from_alias(provider)
+        .ok_or_else(|| format!("unknown OAuth provider '{provider}'"))?;
+    Ok(meerkat::HostAuthTarget {
+        provider,
+        realm_id: meerkat_core::RealmId::parse(realm_id).map_err(|error| error.to_string())?,
+        binding_id: meerkat_core::BindingId::parse(binding_id)
+            .map_err(|error| error.to_string())?,
+        profile_id: profile_id
+            .map(meerkat_core::ProfileId::parse)
+            .transpose()
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthError) -> RpcResponse {
+    let code = match &error_value {
+        meerkat::HostAuthError::Target(_)
+        | meerkat::HostAuthError::WriteOwner(_)
+        | meerkat::HostAuthError::OAuthTarget(_) => error::INVALID_PARAMS,
+        meerkat::HostAuthError::OAuthFlow(
+            OAuthFlowError::Missing
+            | OAuthFlowError::ProviderMismatch { .. }
+            | OAuthFlowError::RedirectUriMismatch
+            | OAuthFlowError::TargetMismatch { .. }
+            | OAuthFlowError::DevicePollInProgress
+            | OAuthFlowError::DeviceCodeAlreadyAdmitted
+            | OAuthFlowError::DeviceExpiryOutOfRange,
+        ) => error::INVALID_PARAMS,
+        meerkat::HostAuthError::OAuthFlow(
+            OAuthFlowError::RegistryProjectionMissing { .. }
+            | OAuthFlowError::StateGenerationFailed
+            | OAuthFlowError::LifecycleRejected { .. }
+            | OAuthFlowError::PersistenceFailed { .. },
+        )
+        | meerkat::HostAuthError::OAuthExchange(_)
+        | meerkat::HostAuthError::CredentialMutation(_)
+        | meerkat::HostAuthError::TokenStore(_)
+        | meerkat::HostAuthError::Factory(_)
+        | meerkat::HostAuthError::PersistenceUnavailable
+        | meerkat::HostAuthError::Lifecycle(_)
+        | meerkat::HostAuthError::StatusRehydrate(_)
+        | meerkat::HostAuthError::InvalidExpiry(_) => error::INTERNAL_ERROR,
+    };
+    RpcResponse::error(id, code, error_value.to_string())
+}
+
 /// Effective config the auth-resolution read path consumes.
 ///
 /// When a per-realm config-document source is attached (decision 2/3), compose
@@ -1295,71 +1360,38 @@ pub async fn handle_auth_login_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-        }
-    };
-    let target = match resolve_oauth_target(
-        runtime,
-        resolved.provider,
-        Some(parsed.realm_id.as_str()),
-        Some(parsed.binding_id.as_str()),
+    let target = match host_auth_target(
+        &parsed.provider,
+        &parsed.realm_id,
+        &parsed.binding_id,
         parsed.profile_id.as_deref(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(r) => return r.with_id(id),
-    };
-    // Strict-owner write guard (decision 5): reject an OAuth login that targets
-    // a realm which only INHERITS this binding from an ancestor (e.g. `global`),
-    // naming the owning realm. Reads inherit; writes are strict-owner.
-    if let Err(r) = guard_strict_owner_write(
-        runtime,
-        &id,
-        parsed.realm_id.as_str(),
-        parsed.binding_id.as_str(),
-    )
-    .await
-    {
-        return r;
-    }
-    if let Err(e) =
-        validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
-    {
-        return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-    }
-    let auth_binding = target.auth_binding;
-    let pkce = PkcePair::generate_s256();
-    let verifier = pkce.verifier.secret().clone();
-    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let state_token = match runtime.oauth_flow_authority().start(
-        auth_binding,
-        resolved.identity,
-        parsed.redirect_uri.clone(),
-        verifier,
     ) {
-        Ok(state) => state,
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("oauth state initialization failed: {e}"),
-            );
+        Ok(target) => target,
+        Err(error_value) => {
+            return RpcResponse::error(id, error::INVALID_PARAMS, error_value);
         }
     };
-    let authorize_url = resolved
-        .endpoints
-        .authorize_url_with_pkce(&pkce.challenge, &state_token);
+    let config = match load_config(runtime).await {
+        Ok(config) => config,
+        Err(response) => return response.with_id(id),
+    };
+    let service = match host_auth_service(runtime) {
+        Ok(service) => service,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    let started = match service
+        .login_start(&config, &target, parsed.redirect_uri.clone())
+        .await
+    {
+        Ok(started) => started,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
     RpcResponse::success(
         id,
         meerkat_contracts::WireLoginStart {
-            authorize_url,
-            state: state_token,
-            redirect_uri: parsed.redirect_uri,
+            authorize_url: started.authorize_url,
+            state: started.state,
+            redirect_uri: started.redirect_uri,
             provider: parsed.provider,
         },
     )
@@ -1374,178 +1406,56 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-        }
-    };
-    let provider = resolved.provider;
-    let target = match resolve_oauth_target(
-        runtime,
-        provider,
-        Some(parsed.realm_id.as_str()),
-        Some(parsed.binding_id.as_str()),
+    let target = match host_auth_target(
+        &parsed.provider,
+        &parsed.realm_id,
+        &parsed.binding_id,
         parsed.profile_id.as_deref(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(r) => return r.with_id(id),
-    };
-    // Strict-owner write guard (decision 5): reject persisting an OAuth login
-    // against a realm that only INHERITS this binding, naming the owner.
-    if let Err(r) = guard_strict_owner_write(
-        runtime,
-        &id,
-        parsed.realm_id.as_str(),
-        parsed.binding_id.as_str(),
-    )
-    .await
-    {
-        return r;
-    }
-    let auth_binding = target.auth_binding;
-    let binding = target.binding;
-    let backend_profile = target.backend;
-    let auth_profile = target.auth_profile;
-    if provider != auth_profile.provider {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!(
-                "binding {} resolves provider '{}' not '{}'",
-                binding.id,
-                auth_profile.provider.as_str(),
-                parsed.provider,
-            ),
-        );
-    }
-    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
-    {
-        return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-    }
-
-    if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
-        return response;
-    }
-    let flow = match runtime.oauth_flow_authority().verify(
-        &parsed.state,
-        &auth_binding,
-        resolved.identity,
-        &parsed.redirect_uri,
     ) {
-        Ok(flow) => flow,
-        Err(OAuthFlowError::Missing) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                "oauth state is missing or expired",
-            );
-        }
-        Err(e @ OAuthFlowError::RegistryProjectionMissing { .. }) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("oauth registry projection failed: {e}"),
-            );
-        }
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("oauth state verification failed: {e}"),
-            );
+        Ok(target) => target,
+        Err(error_value) => {
+            return RpcResponse::error(id, error::INVALID_PARAMS, error_value);
         }
     };
-
-    let http = reqwest::Client::new();
-    let result = match exchange_authorization_code_with_state(
-        &http,
-        &resolved.endpoints,
-        &parsed.code,
-        &flow.pkce_verifier,
-        resolved.client_secret,
-        Some(&parsed.state),
-    )
-    .await
+    let config = match load_config(runtime).await {
+        Ok(config) => config,
+        Err(response) => return response.with_id(id),
+    };
+    let service = match host_auth_service(runtime) {
+        Ok(service) => service,
+        Err(error_value) => return host_auth_error_response(id, error_value),
+    };
+    let completed = match service
+        .login_complete(
+            &config,
+            &target,
+            parsed.redirect_uri,
+            parsed.state,
+            &parsed.code,
+        )
+        .await
     {
-        Ok(r) => r,
-        Err(OAuthError::TokenEndpoint { status, body }) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("token endpoint returned {status}: {body}"),
-            );
-        }
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("Token exchange failed: {e}"),
-            );
-        }
+        Ok(completed) => completed,
+        Err(error_value) => return host_auth_error_response(id, error_value),
     };
-    let expires_at = match result.expires_at_from(chrono::Utc::now()) {
-        Ok(expires_at) => expires_at,
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("token expiry is invalid: {e}"),
-            );
-        }
-    };
-    let tokens = PersistedTokens {
-        auth_mode: resolved.auth_mode,
-        primary_secret: Some(result.access_token),
-        refresh_token: result.refresh_token,
-        id_token: result.id_token,
-        expires_at,
-        last_refresh: Some(chrono::Utc::now()),
-        scopes: result
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default(),
-        account_id: None,
-        metadata: serde_json::Value::Null,
-    };
-    let authority = runtime.oauth_flow_authority();
-    if let Err(resp) = save_tokens_and_consume_browser_flow(
-        id.clone(),
-        runtime,
-        &auth_binding,
-        &tokens,
-        OwnedBrowserFlowConsume {
-            authority,
-            state: parsed.state.clone(),
-            provider: resolved.identity,
-            redirect_uri: parsed.redirect_uri.clone(),
-        },
-    )
-    .await
-    {
-        return resp;
-    }
     tracing::info!(
         target: "meerkat::auth::audit",
-        binding_key = ?auth_binding,
+        binding_key = ?completed.auth_binding,
         action = "login_oauth_complete",
         provider = %parsed.provider,
-        has_refresh_token = %tokens.refresh_token.is_some(),
+        has_refresh_token = %completed.has_refresh_token,
         "OAuth login completed via RPC"
     );
     RpcResponse::success(
         id,
         meerkat_contracts::WireLoginReady {
             state: None,
-            identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
-            profile_id: auth_profile.id.clone(),
+            identity: meerkat_contracts::WireBindingIdentity::from(&completed.auth_binding),
+            profile_id: completed.profile_id,
             provider: parsed.provider,
-            expires_at: expires_at.map(|e| e.to_rfc3339()),
-            has_refresh_token: tokens.refresh_token.is_some(),
-            scopes: tokens.scopes,
+            expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
+            has_refresh_token: completed.has_refresh_token,
+            scopes: completed.scopes,
         },
     )
 }
@@ -2193,6 +2103,42 @@ mod tests {
 
     fn raw_params(value: serde_json::Value) -> Box<RawValue> {
         serde_json::value::to_raw_value(&value).unwrap()
+    }
+
+    #[test]
+    fn host_auth_flow_mismatch_is_invalid_params() {
+        let response = host_auth_error_response(
+            Some(RpcId::Num(1)),
+            meerkat::HostAuthError::OAuthFlow(OAuthFlowError::RedirectUriMismatch),
+        );
+        assert_eq!(response.error.unwrap().code, error::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn host_auth_authority_fault_is_internal_error() {
+        let response = host_auth_error_response(
+            Some(RpcId::Num(2)),
+            meerkat::HostAuthError::OAuthFlow(OAuthFlowError::LifecycleRejected {
+                operation: "consume_oauth_browser_flow",
+                detail: "injected authority fault".to_string(),
+            }),
+        );
+        assert_eq!(response.error.unwrap().code, error::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn host_auth_oauth_exchange_diagnostics_are_redacted() {
+        let response = host_auth_error_response(
+            Some(RpcId::Num(3)),
+            meerkat::HostAuthError::OAuthExchange(OAuthError::TokenEndpoint {
+                status: 400,
+                body: "sensitive-code-and-token".to_string(),
+            }),
+        );
+        let error = response.error.expect("OAuth exchange should fail");
+        assert_eq!(error.code, error::INTERNAL_ERROR);
+        assert_eq!(error.message, "OAuth token exchange failed");
+        assert!(!error.message.contains("sensitive-code-and-token"));
     }
 
     fn test_runtime() -> SessionRuntime {

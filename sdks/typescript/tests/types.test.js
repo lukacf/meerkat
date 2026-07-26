@@ -3144,6 +3144,11 @@ describe("Parity wrappers", () => {
             result: {
               cause: "profile_not_found",
               message: "profile missing",
+              structured_data: {
+                cause: "provider_auth",
+                kind: "interactive_login_required",
+                provider: "openai",
+              },
             },
           }],
         };
@@ -3246,6 +3251,11 @@ describe("Parity wrappers", () => {
     assert.equal(spawned[1].status, "failed");
     assert.equal(spawned[1].result.cause, "profile_not_found");
     assert.equal(spawned[1].result.message, "profile missing");
+    assert.deepEqual(spawned[1].result.structured_data, {
+      cause: "provider_auth",
+      kind: "interactive_login_required",
+      provider: "openai",
+    });
     assert.equal(append.agent_identity, "worker-1");
     assert.equal(events.events.length, 1);
     assert.equal(created.notFound, false);

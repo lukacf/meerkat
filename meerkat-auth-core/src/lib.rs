@@ -20,6 +20,8 @@ pub mod auth_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
+mod browser_login;
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
 pub mod mcp_oauth;
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,6 +50,8 @@ pub use auth_store::{
     AutoTokenStore, CommandCredentialRunner, CommandCredentialSpec, EphemeralTokenStore,
     FileTokenStore,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use browser_login::{BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow};
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
 pub use mcp_oauth::{

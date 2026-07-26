@@ -50,7 +50,11 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-meerkat-providers = { workspace = true, default-features = false, features = ["refresh-file-lock"] }
+meerkat-providers = { workspace = true, default-features = false, features = [
+    "oauth",
+    "refresh-file-lock",
+] }
+reqwest = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -94,6 +98,7 @@ openai = [
 openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
 gemini = ["meerkat-client/gemini", "dep:meerkat-gemini", "meerkat-providers/gemini"]
 all-providers = ["anthropic", "openai", "gemini"]
+native-keyring = ["meerkat-providers/native-keyring"]
 
 # Storage backends
 jsonl-store = ["meerkat-store/jsonl"]

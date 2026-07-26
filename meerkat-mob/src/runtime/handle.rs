@@ -1929,6 +1929,15 @@ pub enum MobRespawnError {
         reason: String,
     },
 
+    /// Spawn failed after retire with a typed mob cause. This preserves
+    /// structured provider-auth data through respawn transports.
+    #[error("spawn failed after retire for member {identity}: {cause}")]
+    SpawnAfterRetireWithCause {
+        identity: AgentIdentity,
+        #[source]
+        cause: MobError,
+    },
+
     /// Topology restore failed after replacement spawn.
     /// The replacement receipt is carried so callers can still use the new session.
     #[error("topology restore failed for member {}: {} peer(s) failed", receipt.identity, failed_peer_ids.len())]

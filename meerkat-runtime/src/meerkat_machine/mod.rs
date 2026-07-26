@@ -902,6 +902,31 @@ fn generated_runtime_auth_lease_handle(
         .expect("runtime AuthLeaseHandle must be certified by generated AuthMachine authority")
 }
 
+/// Runtime-certified provider-auth authority bundle.
+///
+/// The fields are private so native auth surfaces cannot accidentally pair an
+/// OAuth flow authority from one MeerkatMachine with credential lifecycle
+/// authority from another.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct ProviderAuthRuntimeAuthority {
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    oauth_flows: Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ProviderAuthRuntimeAuthority {
+    pub fn generated_auth_lease_handle(&self) -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+        self.auth_lease.clone()
+    }
+
+    pub fn oauth_flow_authority(
+        &self,
+    ) -> Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority> {
+        Arc::clone(&self.oauth_flows)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn persistent_auth_authorities(
     store: &Arc<dyn RuntimeStore>,
@@ -6618,6 +6643,23 @@ impl MeerkatMachine {
             .clone()
     }
 
+    /// Return the atomically snapshotted provider-auth authority pair.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn provider_auth_runtime_authority(&self) -> ProviderAuthRuntimeAuthority {
+        let auth_lease = self
+            .auth_lease
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let oauth_flows = self
+            .oauth_flows
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ProviderAuthRuntimeAuthority {
+            auth_lease: auth_lease.clone(),
+            oauth_flows: Arc::clone(&oauth_flows),
+        }
+    }
+
     /// Install the auth lifecycle authority that public surfaces also read.
     ///
     /// Surfaces construct the adapter before all state fields are available, so
@@ -6632,7 +6674,7 @@ impl MeerkatMachine {
     ///
     /// The credential side still has to be a generated AuthMachine authority;
     /// the explicit OAuth authority only controls login-flow test seams.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     pub fn set_auth_lease_handle_with_oauth_flow_authority(
         &self,
         handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
@@ -6657,20 +6699,29 @@ impl MeerkatMachine {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            *self
+            let mut auth_slot = self
+                .auth_lease
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut oauth_slot = self
                 .oauth_flows
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                    std::time::Duration::from_secs(10 * 60),
-                    Arc::clone(&handle),
-                ));
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *oauth_slot = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                std::time::Duration::from_secs(10 * 60),
+                Arc::clone(&handle),
+            ));
+            *auth_slot = generated_runtime_auth_lease_handle(handle);
         }
+        #[cfg(target_arch = "wasm32")]
         let handle = generated_runtime_auth_lease_handle(handle);
-        *self
-            .auth_lease
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+        #[cfg(target_arch = "wasm32")]
+        {
+            *self
+                .auth_lease
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+        }
     }
 
     /// Shared OAuth login-flow authority used by all auth surfaces that are

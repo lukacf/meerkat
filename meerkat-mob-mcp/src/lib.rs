@@ -4292,7 +4292,19 @@ fn encode(call: ToolCallView<'_>, payload: serde_json::Value) -> Result<ToolResu
 }
 
 fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
-    ToolError::execution_failed(format!("tool '{}' failed: {err}", call.name))
+    let message = format!("tool '{}' failed: {err}", call.name);
+    match err.structured_data() {
+        Some(data) => ToolError::execution_failed_with_data(message, data),
+        None => ToolError::execution_failed(message),
+    }
+}
+
+fn map_mob_respawn_err(call: ToolCallView<'_>, err: meerkat_mob::MobRespawnError) -> ToolError {
+    let message = format!("tool '{}' failed: {err}", call.name);
+    match err.structured_data() {
+        Some(data) => ToolError::execution_failed_with_data(message, data),
+        None => ToolError::execution_failed(message),
+    }
 }
 
 fn map_destroy_err(call: ToolCallView<'_>, err: MobMcpDestroyError) -> ToolError {
@@ -4721,10 +4733,13 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                         WireMemberRef::encode(mob_id.as_str(), &identity),
                                     ))
                                 }
-                                Err(error) => json!(MobSpawnManyResultEntry::failed(
-                                    error.cause(),
-                                    error.to_string(),
-                                )),
+                                Err(error) => {
+                                    json!(MobSpawnManyResultEntry::failed_with_structured_data(
+                                        error.cause(),
+                                        error.to_string(),
+                                        error.error().structured_data(),
+                                    ))
+                                }
                             }
                         },
                     )
@@ -4808,7 +4823,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                             "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
                         }),
                     ),
-                    Err(e) => return Err(map_mob_err(call, MobError::Internal(e.to_string()))),
+                    Err(e) => return Err(map_mob_respawn_err(call, e)),
                 }
             }
             "mob_force_cancel" => {
@@ -5012,7 +5027,11 @@ impl McpToolError {
     pub fn from_mob(err: &MobError) -> Self {
         match err.wire_detail() {
             Some(detail) => Self::from_wire_detail(detail, err.to_string()),
-            None => Self::invalid_params(err.to_string()),
+            None => Self {
+                code: -32602,
+                message: err.to_string(),
+                data: err.structured_data(),
+            },
         }
     }
 
@@ -5021,7 +5040,11 @@ impl McpToolError {
     pub fn from_mob_respawn(err: &meerkat_mob::MobRespawnError) -> Self {
         match err.wire_detail() {
             Some(detail) => Self::from_wire_detail(detail, err.to_string()),
-            None => Self::invalid_params(err.to_string()),
+            None => Self {
+                code: -32602,
+                message: err.to_string(),
+                data: err.structured_data(),
+            },
         }
     }
 

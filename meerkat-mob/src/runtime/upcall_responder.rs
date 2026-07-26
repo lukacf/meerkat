@@ -66,7 +66,9 @@ use super::member_upcall::{
     TOOL_SPAWN_MANY_MEMBERS, TOOL_SPAWN_MEMBER, TOOL_UNWIRE_MEMBERS, TOOL_WIRE_MEMBERS,
     UpcallToolOutcome,
 };
-use super::tools::MobOperatorToolDispatcher;
+use super::tools::{
+    MobOperatorToolDispatcher, mob_error_to_tool_error, mob_spawn_many_failure_entry,
+};
 use super::{
     MobHandle, SpawnMemberAdmission, SpawnMemberAdmissionObservations, SpawnMemberSpec,
     SpawnToolAdmission,
@@ -676,9 +678,11 @@ impl MobUpcallSeams {
         self.ensure_spawn_member_scope(context, tool_name, &spec)
             .await?;
         let domain_spec = self.domain_spawn_spec(tool_name, requester, spec)?;
-        let result = self.handle.spawn_spec(domain_spec).await.map_err(|error| {
-            ToolError::execution_failed(format!("tool '{tool_name}' failed: {error}"))
-        })?;
+        let result = self
+            .handle
+            .spawn_spec(domain_spec)
+            .await
+            .map_err(|error| mob_error_to_tool_error(tool_name, error))?;
         self.record_provenance(tool_name, context).await;
         Ok(self.spawn_result_payload(&result.agent_identity))
     }
@@ -703,9 +707,7 @@ impl MobUpcallSeams {
             .handle
             .spawn_many(domain_specs)
             .await
-            .map_err(|error| {
-                ToolError::execution_failed(format!("tool '{tool_name}' failed: {error}"))
-            })?
+            .map_err(|error| mob_error_to_tool_error(tool_name, error))?
             .into_iter()
             .map(|result| match result {
                 Ok(spawn_result) => {
@@ -715,10 +717,7 @@ impl MobUpcallSeams {
                         self.member_ref_payload(&spawn_result.agent_identity),
                     ))
                 }
-                Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                    error.cause(),
-                    error.to_string()
-                )),
+                Err(error) => json!(mob_spawn_many_failure_entry(&error)),
             })
             .collect::<Vec<_>>();
         self.record_provenance(tool_name, context).await;

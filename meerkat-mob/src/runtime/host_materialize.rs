@@ -31,7 +31,7 @@ use meerkat_contracts::wire::{
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::TrustedPeerDescriptor;
-use meerkat_core::service::SessionError;
+use meerkat_core::service::{SessionError, SessionProviderAuthFailure};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 
@@ -170,6 +170,8 @@ pub enum MaterializeServeError {
         binding: String,
         detail: String,
     },
+    #[error("{}", .0.public_message())]
+    ProviderAuth(SessionProviderAuthFailure),
     #[error("session service returned '{created}' for admitted member session '{expected}'")]
     IdentityMismatch { expected: String, created: String },
     #[error("runtime session bindings preparation failed: {detail}")]
@@ -224,6 +226,14 @@ impl MaterializeServeError {
                     "materialize rejected: auth binding '{realm}/{binding}' is unresolvable on this host"
                 ),
             ),
+            Self::ProviderAuth(failure) => (
+                Cause::MaterializeBuildRejected {
+                    cause: meerkat_contracts::wire::supervisor_bridge::MemberBuildRejection::from_provider_auth_failure(
+                        failure,
+                    ),
+                },
+                format!("materialize rejected: {}", failure.public_message()),
+            ),
             Self::Build(_)
             | Self::Comms { .. }
             | Self::SupervisorBind { .. }
@@ -242,6 +252,12 @@ fn classify_materialize_create_error(
     error: crate::error::MobError,
     spec: &PortableMemberSpec,
 ) -> MaterializeServeError {
+    if let crate::error::MobError::SessionError(session_error) = &error
+        && let Some(failure) = session_error.provider_auth_failure_data()
+    {
+        return MaterializeServeError::ProviderAuth(failure);
+    }
+
     let llm_identity_unresolvable = matches!(
         &error,
         crate::error::MobError::SessionError(session_error)
@@ -2788,6 +2804,40 @@ mod tests {
             !reason.contains(secret_stderr),
             "raw provider/command diagnostics must remain local"
         );
+    }
+
+    #[test]
+    fn post_preflight_provider_auth_failure_preserves_typed_wire_cause() {
+        let spec = sample_spec();
+        let failure = SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::Anthropic,
+            realm_id: Some(meerkat_core::RealmId::parse("global").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("anthropic").expect("binding")),
+        };
+        let error = classify_materialize_create_error(
+            crate::error::MobError::SessionError(SessionError::provider_auth_failure(
+                failure.clone(),
+            )),
+            &spec,
+        );
+
+        assert!(matches!(
+            &error,
+            MaterializeServeError::ProviderAuth(actual) if actual == &failure
+        ));
+        let (cause, reason) = error.wire_cause();
+        assert_eq!(
+            cause,
+            meerkat_contracts::wire::supervisor_bridge::BridgeRejectionCause::MaterializeBuildRejected {
+                cause: meerkat_contracts::wire::supervisor_bridge::MemberBuildRejection::from_provider_auth_failure(
+                    &failure,
+                ),
+            }
+        );
+        assert!(reason.contains("interactive_login_required"));
+        assert!(reason.contains("global/anthropic"));
+        assert!(!reason.contains("credential"));
     }
 
     // T21 — decompile totality over the contracts fixture: every carried

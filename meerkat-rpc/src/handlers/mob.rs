@@ -50,17 +50,28 @@ fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse 
 /// `invalid_params` string rendering byte-identical.
 trait MobWireErrorSource: std::fmt::Display {
     fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
+    fn structured_data(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 impl MobWireErrorSource for MobError {
     fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
         MobError::wire_detail(self)
     }
+
+    fn structured_data(&self) -> Option<serde_json::Value> {
+        MobError::structured_data(self)
+    }
 }
 
 impl MobWireErrorSource for MobRespawnError {
     fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
         MobRespawnError::wire_detail(self)
+    }
+
+    fn structured_data(&self) -> Option<serde_json::Value> {
+        MobRespawnError::structured_data(self)
     }
 }
 
@@ -92,7 +103,12 @@ fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcRespo
                 format!("failed to serialize mob error detail: {serialize_error}"),
             ),
         },
-        None => invalid_params(id, err.to_string()),
+        None => match err.structured_data() {
+            Some(data) => {
+                RpcResponse::error_with_data(id, error::INVALID_PARAMS, err.to_string(), data)
+            }
+            None => invalid_params(id, err.to_string()),
+        },
     }
 }
 
@@ -682,7 +698,11 @@ pub async fn handle_spawn_many(
                             WireMemberRef::encode(mob_id.as_str(), &identity_str),
                         )
                     }
-                    Err(err) => MobSpawnManyResultEntry::failed(err.cause(), err.to_string()),
+                    Err(err) => MobSpawnManyResultEntry::failed_with_structured_data(
+                        err.cause(),
+                        err.to_string(),
+                        err.error().structured_data(),
+                    ),
                 })
                 .collect();
             RpcResponse::success(id, MobSpawnManyResult { results: entries })
@@ -4424,5 +4444,28 @@ mod tests {
             error.data.is_none(),
             "unclassified errors carry no data payload"
         );
+    }
+
+    #[test]
+    fn mob_call_error_preserves_provider_auth_session_data() {
+        let session_error = meerkat_core::SessionError::provider_auth_failure(
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+                provider: meerkat_core::Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("openai").unwrap()),
+            },
+        );
+        let err = MobError::SessionError(session_error);
+
+        let response = mob_call_error(Some(RpcId::Num(5)), &err);
+        let error = response.error.expect("provider auth spawn error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        let data = error.data.expect("typed provider auth data");
+        assert_eq!(data["cause"], "provider_auth");
+        assert_eq!(data["kind"], "interactive_login_required");
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["realm_id"], "global");
+        assert_eq!(data["binding_id"], "openai");
     }
 }

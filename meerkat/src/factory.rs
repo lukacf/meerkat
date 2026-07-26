@@ -3442,6 +3442,24 @@ impl AgentFactory {
         identity: &SessionLlmIdentity,
         auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+        self.build_llm_client_for_identity_with_auth_lease_in_realm(
+            config,
+            identity,
+            auth_lease_handle,
+            None,
+        )
+        .await
+    }
+
+    /// Build a live-session LLM client using the same realm-head-aware
+    /// candidate policy as initial construction and preflight.
+    pub async fn build_llm_client_for_identity_with_auth_lease_in_realm(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+        preferred_realm: Option<&RealmId>,
+    ) -> Result<Arc<dyn LlmClient>, FactoryError> {
         let registry = config
             .model_registry(meerkat_models::canonical())
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
@@ -3452,7 +3470,7 @@ impl AgentFactory {
                     &registry,
                     identity,
                     auth_lease_handle,
-                    None,
+                    preferred_realm,
                 )
                 .await
                 .map(|resolved| resolved.client);
@@ -3466,24 +3484,14 @@ impl AgentFactory {
             )));
         }
 
-        let (realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
+        let explicit_auth_binding = identity.auth_binding.is_some();
+        let candidates = Self::resolve_realm_binding_candidates_for_provider(
             config,
             identity.provider,
             identity.auth_binding.as_ref(),
-            None,
+            preferred_realm,
         )
         .map_err(FactoryError::ConnectionTarget)?;
-        let lease_auth_binding = if auth_binding.is_env_default()
-            && identity
-                .auth_binding
-                .as_ref()
-                .map(AuthBindingRef::is_env_default)
-                .unwrap_or(true)
-        {
-            None
-        } else {
-            Some(auth_binding.clone())
-        };
 
         #[allow(unused_mut)]
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
@@ -3496,24 +3504,58 @@ impl AgentFactory {
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        if lease_auth_binding.is_some()
-            && let Some(handle) = auth_lease_handle.clone()
-        {
-            env = env.with_auth_lease_handle(handle);
-        }
         let provider_registry = Arc::clone(&self.provider_registry);
-        let connection = provider_registry
-            .resolve(&realm, &auth_binding, &env)
-            .await
-            .map_err(FactoryError::ProviderAuth)?;
-        if let (Some(handle), Some(lease_auth_binding)) =
-            (auth_lease_handle, lease_auth_binding.as_ref())
-        {
-            Self::publish_auth_lease(&handle, lease_auth_binding, &connection)?;
+        let mut first_resolution_error = None;
+        for target in candidates {
+            let lease_auth_binding = (!target.auth_binding.is_env_default()
+                || explicit_auth_binding)
+                .then_some(target.auth_binding.clone());
+            let mut candidate_env = env.clone();
+            if lease_auth_binding.is_some()
+                && let Some(handle) = auth_lease_handle.clone()
+            {
+                candidate_env = candidate_env.with_auth_lease_handle(handle);
+            }
+            match provider_registry
+                .resolve(&target.realm, &target.auth_binding, &candidate_env)
+                .await
+            {
+                Ok(connection) => {
+                    if connection.provider != identity.provider {
+                        return Err(FactoryError::ProviderAuth(
+                            meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
+                                expected: identity.provider,
+                                resolved: connection.provider,
+                            },
+                        ));
+                    }
+                    if let (Some(handle), Some(lease_auth_binding)) =
+                        (auth_lease_handle.as_ref(), lease_auth_binding.as_ref())
+                    {
+                        Self::publish_auth_lease(handle, lease_auth_binding, &connection)?;
+                    }
+                    return provider_registry
+                        .build_client(connection)
+                        .map_err(FactoryError::ClientBuild);
+                }
+                Err(error) => {
+                    first_resolution_error.get_or_insert(error);
+                    if explicit_auth_binding {
+                        break;
+                    }
+                }
+            }
         }
-        provider_registry
-            .build_client(connection)
-            .map_err(FactoryError::ClientBuild)
+        Err(FactoryError::ProviderAuth(
+            first_resolution_error.unwrap_or_else(|| {
+                meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                    format!(
+                        "no auth binding candidates resolved for provider '{}'",
+                        identity.provider.as_str()
+                    ),
+                )
+            }),
+        ))
     }
 
     /// Build the per-request LLM policy for a (re)configured identity.
@@ -4879,10 +4921,11 @@ impl AgentFactory {
                     }
                 };
                 let raw_client = match self
-                    .build_llm_client_for_identity_with_auth_lease(
+                    .build_llm_client_for_identity_with_auth_lease_in_realm(
                         config,
                         &identity,
                         auth_lease_handle.clone(),
+                        build_config.realm_id.as_ref(),
                     )
                     .await
                 {
@@ -9543,6 +9586,300 @@ mod tests {
             snapshot.phase, None,
             "synthetic env-default hot-swap identity must not be admitted to AuthMachine lease truth"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn hot_swap_falls_through_unavailable_configured_auth_to_env_default() {
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct FallbackRecordingRuntime {
+            calls: Arc<std::sync::Mutex<Vec<AuthBindingRef>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for FallbackRecordingRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                let auth_binding = binding.auth_binding_ref().clone();
+                self.calls.lock().unwrap().push(auth_binding.clone());
+                if !auth_binding.is_env_default() {
+                    assert!(
+                        env.auth_lease_handle.is_some(),
+                        "durable candidates receive lifecycle authority"
+                    );
+                    return Err(ProviderAuthError::Auth(
+                        meerkat_core::AuthError::InteractiveLoginRequired,
+                    ));
+                }
+                assert!(
+                    env.auth_lease_handle.is_none(),
+                    "synthetic environment fallback never receives lifecycle authority"
+                );
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "env-fallback-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(FallbackRecordingRuntime {
+                calls: Arc::clone(&calls),
+            }));
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "global".to_string(),
+            inline_realm_section(&[("openai", "configured-but-unavailable")]),
+        );
+        let mut project = inline_realm_section(&[("openai", "project-configured-but-unavailable")]);
+        project.parent = Some(RealmId::global());
+        let project_realm = RealmId::parse("project").unwrap();
+        config.realm.insert("project".to_string(), project);
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(SessionId::new())
+            .await
+            .expect("session runtime bindings");
+        let openai_binding = configured_auth_binding("project", "default_openai");
+        let current_openai = SessionLlmIdentity {
+            model: "gpt-5.4".into(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(openai_binding),
+        };
+        let current_anthropic = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".into(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(configured_auth_binding("project", "default_anthropic")),
+        };
+        let params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.2),
+            ..Default::default()
+        };
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("canonical registry");
+        let targets = [
+            (
+                "same-provider model change",
+                meerkat_core::resolve_session_llm_identity_override(
+                    &current_openai,
+                    &registry,
+                    meerkat_core::SessionLlmIdentityOverride {
+                        model: Some("gpt-5.5"),
+                        provider: None,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+                        ),
+                    },
+                )
+                .unwrap(),
+            ),
+            (
+                "provider change",
+                meerkat_core::resolve_session_llm_identity_override(
+                    &current_anthropic,
+                    &registry,
+                    meerkat_core::SessionLlmIdentityOverride {
+                        model: Some("gpt-5.5"),
+                        provider: None,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+                        ),
+                    },
+                )
+                .unwrap(),
+            ),
+            (
+                "provider-parameter-only change",
+                meerkat_core::resolve_session_llm_identity_override(
+                    &current_openai,
+                    &registry,
+                    meerkat_core::SessionLlmIdentityOverride {
+                        model: None,
+                        provider: None,
+                        self_hosted_server_id: None,
+                        provider_params: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                &params,
+                            ),
+                        ),
+                        auth_binding: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+                        ),
+                    },
+                )
+                .unwrap(),
+            ),
+        ];
+
+        for (case, identity) in targets {
+            factory
+                .build_llm_client_for_identity_with_auth_lease_in_realm(
+                    &config,
+                    &identity,
+                    Some(bindings.auth_lease().clone()),
+                    Some(&project_realm),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{case} should use environment fallback: {error}"));
+
+            let mut recorded = calls.lock().unwrap();
+            assert_eq!(recorded.len(), 3, "{case}");
+            assert_eq!(recorded[0].realm, project_realm, "{case}");
+            assert!(!recorded[0].is_env_default(), "{case}");
+            assert_eq!(recorded[1].realm, RealmId::global(), "{case}");
+            assert!(!recorded[1].is_env_default(), "{case}");
+            assert!(recorded[2].is_env_default(), "{case}");
+            recorded.clear();
+        }
+
+        let durable_lease = meerkat_core::handles::LeaseKey::from_auth_binding(
+            &configured_auth_binding("project", "default_openai"),
+        );
+        assert_eq!(
+            bindings.auth_lease().snapshot(&durable_lease).phase,
+            None,
+            "failed durable candidates must not publish a lease"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn hot_swap_explicit_durable_auth_binding_never_falls_through() {
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, ValidatedBinding,
+        };
+
+        struct RejectingRuntime {
+            calls: Arc<std::sync::Mutex<Vec<AuthBindingRef>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for RejectingRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                let auth_binding = binding.auth_binding_ref().clone();
+                self.calls.lock().unwrap().push(auth_binding.clone());
+                Err(ProviderAuthError::Auth(if auth_binding.is_env_default() {
+                    meerkat_core::AuthError::MissingSecret
+                } else {
+                    meerkat_core::AuthError::InteractiveLoginRequired
+                }))
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("resolution always fails")
+            }
+        }
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RejectingRuntime {
+                calls: Arc::clone(&calls),
+            }));
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+        let mut config = Config::default();
+        config.realm.insert(
+            "global".to_string(),
+            inline_realm_section(&[("openai", "configured-but-unavailable")]),
+        );
+        let explicit = configured_auth_binding("global", "default_openai");
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".into(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(explicit.clone()),
+        };
+
+        let error = match factory
+            .build_llm_client_for_identity_with_auth_lease(&config, &identity, None)
+            .await
+        {
+            Ok(_) => panic!("an explicit durable binding must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            FactoryError::ProviderAuth(ProviderAuthError::Auth(
+                meerkat_core::AuthError::InteractiveLoginRequired
+            ))
+        ));
+        assert_eq!(calls.lock().unwrap().as_slice(), &[explicit]);
+
+        calls.lock().unwrap().clear();
+        let unspecified = SessionLlmIdentity {
+            auth_binding: None,
+            ..identity
+        };
+        let error = match factory
+            .build_llm_client_for_identity_with_auth_lease(&config, &unspecified, None)
+            .await
+        {
+            Ok(_) => panic!("all auth candidates should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            FactoryError::ProviderAuth(ProviderAuthError::Auth(
+                meerkat_core::AuthError::InteractiveLoginRequired
+            ))
+        ));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(!calls[0].is_env_default());
+        assert!(calls[1].is_env_default());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

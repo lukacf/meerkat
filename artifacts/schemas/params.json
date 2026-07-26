@@ -6886,13 +6886,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [

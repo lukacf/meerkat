@@ -1627,6 +1627,7 @@ class MobSpawnManyFailedResult:
     """Failed per-member `mob/spawn_many` result payload."""
     cause: MobSpawnManyFailureCause
     message: str
+    structured_data: Optional[Any] = None
 
 
 @dataclass
@@ -3728,7 +3729,10 @@ class MemberBuildRejectionBindingUnresolvable(TypedDict, total=False):
     binding_unresolvable: Required[MemberBuildRejectionBindingUnresolvablePayload]
 
 class MemberBuildRejectionProviderAuthPayload(TypedDict, total=False):
+    binding_id: NotRequired[Optional[str]]
     kind: Required[AuthErrorKind]
+    provider: NotRequired[Optional[Provider]]
+    realm_id: NotRequired[Optional[str]]
 
 class MemberBuildRejectionProviderAuth(TypedDict, total=False):
     provider_auth: Required[MemberBuildRejectionProviderAuthPayload]

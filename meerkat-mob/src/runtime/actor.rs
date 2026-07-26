@@ -34361,9 +34361,9 @@ impl MobActor {
         let spawn_receipt = match spawn_reply_rx.await {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(error)) => {
-                return Some(Err(MobRespawnError::SpawnAfterRetire {
+                return Some(Err(MobRespawnError::SpawnAfterRetireWithCause {
                     identity: AgentIdentity::from(identity.as_str()),
-                    reason: error.to_string(),
+                    cause: error,
                 }));
             }
             Err(_) => {
@@ -34986,9 +34986,9 @@ impl MobActor {
                 Err(error) => {
                     respawn_trust_cleanup_uncertain =
                         error.external_member_cleanup_is_uncertain();
-                    return Err(MobRespawnError::SpawnAfterRetire {
+                    return Err(MobRespawnError::SpawnAfterRetireWithCause {
                         identity: AgentIdentity::from(agent_identity.as_str()),
-                        reason: error.to_string(),
+                        cause: error,
                     });
                 }
             };

@@ -112,6 +112,28 @@ pub enum AuthErrorKind {
     Other,
 }
 
+impl AuthErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingSecret => "missing_secret",
+            Self::UnsupportedCombination => "unsupported_combination",
+            Self::MissingRequiredMetadata => "missing_required_metadata",
+            Self::WorkspaceMismatch => "workspace_mismatch",
+            Self::StaleCredential => "stale_credential",
+            Self::RefreshRequired => "refresh_required",
+            Self::LeaseAbsent => "lease_absent",
+            Self::UserReauthRequired => "user_reauth_required",
+            Self::Expired => "expired",
+            Self::RefreshFailed => "refresh_failed",
+            Self::ResolveRequired => "resolve_required",
+            Self::InteractiveLoginRequired => "interactive_login_required",
+            Self::HostOwnedUnavailable => "host_owned_unavailable",
+            Self::Io => "io",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

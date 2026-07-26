@@ -2881,6 +2881,7 @@ dependencies = [
  "meerkat-workgraph",
  "nix 0.29.0",
  "parking_lot",
+ "reqwest 0.12.28",
  "schemars 1.2.1",
  "serde",
  "serde_json",

@@ -306,6 +306,84 @@ without cross-contamination. Public wire surfaces accept the structural
 form is a CLI input convenience and is converted before it crosses the
 wire boundary.
 
+## Native desktop hosts
+
+Native applications should use `HostAuthService` for the complete interactive
+transaction instead of recreating the CLI or RPC flow. The service owns strict
+binding-owner resolution, PKCE and one-time state, exchange, coordinated
+TokenStore persistence, AuthMachine lifecycle publication, rollback, status,
+and logout. The application owns only its loopback listener, browser launch,
+and UI.
+
+Open one persistence capability and share that exact capability between
+`AgentFactory` and `HostAuthService`:
+
+```rust
+use std::sync::Arc;
+
+use meerkat::{
+    AgentFactory, HostAuthService, TokenStoreBackend,
+};
+use meerkat_runtime::MeerkatMachine;
+
+fn desktop_auth(
+    sessions_root: std::path::PathBuf,
+) -> Result<
+    (AgentFactory, HostAuthService, Arc<MeerkatMachine>),
+    Box<dyn std::error::Error>,
+> {
+    // This is the CLI-compatible profile: the desktop and `rkat auth login`
+    // read and write the same file-owned credential for a binding.
+    let persistence = TokenStoreBackend::default_auto()?
+        .open_with_refresh_authority()?;
+    let runtime = Arc::new(MeerkatMachine::ephemeral());
+
+    let factory = AgentFactory::new(sessions_root)
+        .with_provider_auth_persistence(persistence.clone());
+    let auth = HostAuthService::new(
+        persistence,
+        runtime.provider_auth_runtime_authority(),
+    );
+    Ok((factory, auth, runtime))
+}
+```
+
+Keep the `MeerkatMachine` alive for as long as the factory and auth service;
+the snippet returns it in `Arc`, while a real host normally stores all three in
+one application state object. A TokenStore open
+failure is returned as a fault and is never collapsed into
+`interactive_login_required`.
+
+Managed-store resolution also requires per-session AuthMachine bindings. Do
+not use the factory's standalone build mode for a runtime-backed desktop
+session:
+
+```rust
+use meerkat::{AgentBuildConfig, RuntimeBuildMode, Session, SessionId};
+
+let session = Session::new();
+let bindings = runtime.prepare_bindings(session.id().clone()).await?;
+let mut build = AgentBuildConfig::new("gpt-5.4");
+build.resume_session = Some(session);
+build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+let agent = factory.build_agent(build, &config).await?;
+```
+
+For a keyring-preferred desktop, enable Meerkat's `native-keyring` feature and
+replace `default_auto()` with `default_keyring_auto()`. That profile preserves
+an existing CLI file credential as the per-key authority, but a brand-new key
+is written to the OS keyring. Use the same keyring-aware backend in every
+process that must see desktop-first credentials; the stock CLI intentionally
+uses the file profile to avoid surprise OS keychain prompts.
+
+The browser flow is split for native UI:
+
+1. Bind the loopback listener and choose its redirect URI.
+2. Call `login_start(config, target, redirect_uri)`, then open the returned
+   `authorize_url`.
+3. Pass the callback's `state` and `code` to `login_complete`.
+4. Use `status` and `logout` for secret-free UI projections and sign-out.
+
 ## Refresh coordination
 
 Refresh semantics are owned by the `AuthMachine` DSL (one instance

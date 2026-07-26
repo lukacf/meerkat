@@ -48,6 +48,12 @@ pub mod auth_store {
     pub use meerkat_auth_core::auth_store::*;
 }
 #[cfg(not(target_arch = "wasm32"))]
+pub mod browser_login {
+    pub use meerkat_auth_core::{
+        BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow,
+    };
+}
+#[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers {
     pub use meerkat_auth_core::authorizers::*;
 }

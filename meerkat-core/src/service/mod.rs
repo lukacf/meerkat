@@ -96,9 +96,62 @@ pub enum SessionError {
     Unsupported(String),
 }
 
+/// Stable structured cause carried when provider authentication prevents
+/// session materialization.
+///
+/// This projection intentionally excludes credential material and provider
+/// diagnostics. Hosts can route to the correct login UI from the typed auth
+/// class and owner-stamped binding identity without parsing `Display` text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+pub struct SessionProviderAuthFailure {
+    pub kind: crate::AuthErrorKind,
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<crate::RealmId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<crate::BindingId>,
+}
+
+impl SessionProviderAuthFailure {
+    /// Stable secret-free payload for session, MobKit, RPC, and MCP surfaces.
+    pub fn structured_data(&self) -> serde_json::Value {
+        let mut data = serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(data) = data.as_object_mut() {
+            data.insert(
+                SessionError::AGENT_BUILD_FAILURE_CAUSE_KEY.to_string(),
+                serde_json::Value::String(
+                    SessionError::LLM_IDENTITY_UNRESOLVABLE_CAUSE.to_string(),
+                ),
+            );
+            data.insert(
+                SessionError::PROVIDER_AUTH_CAUSE_KEY.to_string(),
+                serde_json::Value::String(SessionError::PROVIDER_AUTH_CAUSE.to_string()),
+            );
+        }
+        data
+    }
+
+    /// Stable public message containing typed routing facts only.
+    pub fn public_message(&self) -> String {
+        let binding = match (&self.realm_id, &self.binding_id) {
+            (Some(realm), Some(binding)) => format!(" binding={realm}/{binding}"),
+            _ => String::new(),
+        };
+        format!(
+            "provider authentication failed: provider={} kind={}{}",
+            self.provider.as_str(),
+            self.kind.as_str(),
+            binding
+        )
+    }
+}
+
 impl SessionError {
     const AGENT_BUILD_FAILURE_CAUSE_KEY: &'static str = "agent_build_failure_cause";
     const LLM_IDENTITY_UNRESOLVABLE_CAUSE: &'static str = "LlmIdentityUnresolvable";
+    const PROVIDER_AUTH_CAUSE_KEY: &'static str = "cause";
+    const PROVIDER_AUTH_CAUSE: &'static str = "provider_auth";
 
     /// Preserve the typed class of an LLM identity/client construction
     /// failure across the generic session-builder boundary. Remote member
@@ -122,6 +175,31 @@ impl SessionError {
                     .and_then(serde_json::Value::as_str)
                     == Some(Self::LLM_IDENTITY_UNRESOLVABLE_CAUSE)
         )
+    }
+
+    /// Preserve a typed provider-auth failure across the generic
+    /// session-builder and MobKit/RPC boundaries.
+    pub fn provider_auth_failure(failure: SessionProviderAuthFailure) -> Self {
+        Self::FailedWithData {
+            message: failure.public_message(),
+            data: failure.structured_data(),
+        }
+    }
+
+    /// Read the typed provider-auth projection, if this session error carries
+    /// one. Unknown or malformed structured data fails closed as `None`.
+    pub fn provider_auth_failure_data(&self) -> Option<SessionProviderAuthFailure> {
+        let Self::FailedWithData { data, .. } = self else {
+            return None;
+        };
+        if data
+            .get(Self::PROVIDER_AUTH_CAUSE_KEY)
+            .and_then(serde_json::Value::as_str)
+            != Some(Self::PROVIDER_AUTH_CAUSE)
+        {
+            return None;
+        }
+        serde_json::from_value(data.clone()).ok()
     }
 
     /// Fail-closed signal for a runtime executor whose live session mutated
@@ -2400,6 +2478,42 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_auth_failure_projects_every_kind_without_secret_fields() {
+        let kinds = [
+            crate::AuthErrorKind::MissingSecret,
+            crate::AuthErrorKind::UnsupportedCombination,
+            crate::AuthErrorKind::MissingRequiredMetadata,
+            crate::AuthErrorKind::WorkspaceMismatch,
+            crate::AuthErrorKind::StaleCredential,
+            crate::AuthErrorKind::RefreshRequired,
+            crate::AuthErrorKind::LeaseAbsent,
+            crate::AuthErrorKind::UserReauthRequired,
+            crate::AuthErrorKind::Expired,
+            crate::AuthErrorKind::RefreshFailed,
+            crate::AuthErrorKind::ResolveRequired,
+            crate::AuthErrorKind::InteractiveLoginRequired,
+            crate::AuthErrorKind::HostOwnedUnavailable,
+            crate::AuthErrorKind::Io,
+            crate::AuthErrorKind::Other,
+        ];
+        for kind in kinds {
+            let failure = SessionProviderAuthFailure {
+                kind,
+                provider: Provider::OpenAI,
+                realm_id: Some(crate::RealmId::parse("global").unwrap()),
+                binding_id: Some(crate::BindingId::parse("openai").unwrap()),
+            };
+            let error = SessionError::provider_auth_failure(failure.clone());
+            assert_eq!(error.provider_auth_failure_data(), Some(failure));
+            let data = error.structured_data().unwrap();
+            assert_eq!(data["kind"], kind.as_str());
+            assert!(data.get("primary_secret").is_none());
+            assert!(data.get("refresh_token").is_none());
+            assert!(data.get("id_token").is_none());
+        }
+    }
 
     /// Canonical overlay composition: allow-lists intersect, deny-lists
     /// union, and dispatch-context entries from distinct producers (e.g. the

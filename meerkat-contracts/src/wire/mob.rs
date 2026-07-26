@@ -847,6 +847,8 @@ pub enum MobSpawnManyFailureCause {
 pub struct MobSpawnManyFailedResult {
     pub cause: MobSpawnManyFailureCause,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_data: Option<Value>,
 }
 
 /// Typed payload for one `mob/spawn_many` row.
@@ -900,11 +902,20 @@ impl MobSpawnManyResultEntry {
     }
 
     pub fn failed(cause: MobSpawnManyFailureCause, message: impl Into<String>) -> Self {
+        Self::failed_with_structured_data(cause, message, None)
+    }
+
+    pub fn failed_with_structured_data(
+        cause: MobSpawnManyFailureCause,
+        message: impl Into<String>,
+        structured_data: Option<Value>,
+    ) -> Self {
         Self {
             status: MobSpawnManyResultStatus::Failed,
             result: MobSpawnManyResultPayload::Failed(MobSpawnManyFailedResult {
                 cause,
                 message: message.into(),
+                structured_data,
             }),
         }
     }
@@ -3394,12 +3405,39 @@ mod tests {
         assert_eq!(json["status"], "failed");
         assert_eq!(json["result"]["cause"], "profile_not_found");
         assert_eq!(json["result"]["message"], "profile missing");
+        assert!(json["result"].get("structured_data").is_none());
         assert!(json.get("ok").is_none());
         assert!(json.get("error").is_none());
 
         let round_trip: MobSpawnManyResultEntry =
             serde_json::from_value(json).expect("deserialize typed failed spawn_many row");
         assert_eq!(round_trip, failed);
+
+        let failed_with_data = MobSpawnManyResultEntry::failed_with_structured_data(
+            MobSpawnManyFailureCause::SessionError,
+            "provider authentication failed",
+            Some(serde_json::json!({
+                "cause": "provider_auth",
+                "kind": "interactive_login_required",
+                "provider": "openai"
+            })),
+        );
+        let json = serde_json::to_value(&failed_with_data).expect("serialize failed row with data");
+        assert_eq!(json["result"]["structured_data"]["cause"], "provider_auth");
+        let round_trip: MobSpawnManyResultEntry =
+            serde_json::from_value(json).expect("deserialize failed row with data");
+        assert_eq!(round_trip, failed_with_data);
+
+        let legacy_without_data = serde_json::json!({
+            "status": "failed",
+            "result": {
+                "cause": "profile_not_found",
+                "message": "profile missing"
+            }
+        });
+        let decoded: MobSpawnManyResultEntry =
+            serde_json::from_value(legacy_without_data).expect("read pre-data failed row");
+        assert_eq!(decoded, failed);
     }
 
     #[test]

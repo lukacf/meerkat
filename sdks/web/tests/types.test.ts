@@ -7,6 +7,7 @@
 
 import type {
   Mob,
+  MeerkatError,
   AuthProfile,
   AuthBindingIdentity,
   AuthCredentialsCleared,
@@ -44,12 +45,19 @@ import type {
   WireAuthStatusState,
   EventEnvelope,
 } from '../src/index.js';
+
 import { Auth } from '../src/index.js';
 import type {
   WirePeerConnectivityKnown,
   WirePeerConnectivitySnapshot,
   WireUnreachablePeer,
 } from '../src/generated/mob.js';
+
+declare const typedRuntimeError: MeerkatError;
+const typedRuntimeErrorCode: string = typedRuntimeError.code;
+const typedRuntimeErrorData: unknown = typedRuntimeError.data;
+void typedRuntimeErrorCode;
+void typedRuntimeErrorData;
 
 declare const generatedConnectivity: WirePeerConnectivityKnown;
 const generatedConnectivitySnapshot: WirePeerConnectivitySnapshot =

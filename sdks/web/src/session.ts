@@ -50,11 +50,13 @@ export function serializePromptContentInput(
  */
 export class MeerkatError extends Error {
   readonly code: string;
+  readonly data?: unknown;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, data?: unknown) {
     super(message);
     this.name = 'MeerkatError';
     this.code = code;
+    this.data = data;
   }
 
   /**
@@ -65,7 +67,7 @@ export class MeerkatError extends Error {
   static fromWasm(reason: unknown): MeerkatError {
     const envelope = parseErrorEnvelope(reason);
     if (envelope) {
-      return new MeerkatError(envelope.code, envelope.message);
+      return new MeerkatError(envelope.code, envelope.message, envelope.data);
     }
     const message =
       reason instanceof Error
@@ -79,7 +81,7 @@ export class MeerkatError extends Error {
 
 function parseErrorEnvelope(
   reason: unknown,
-): { code: string; message: string } | undefined {
+): { code: string; message: string; data?: unknown } | undefined {
   let record: unknown = reason;
   if (typeof reason === 'string') {
     try {
@@ -96,7 +98,7 @@ function parseErrorEnvelope(
     return undefined;
   }
   const message = typeof record.message === 'string' ? record.message : code;
-  return { code, message };
+  return { code, message, data: record.data };
 }
 
 function normalizeSessionEvent(raw: unknown): SessionEvent {

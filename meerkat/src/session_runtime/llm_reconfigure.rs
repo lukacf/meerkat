@@ -143,6 +143,16 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError>;
 
+    /// Return the exact realm that owned the live session's initial build.
+    ///
+    /// Hot-swap credential resolution must begin from this per-session realm,
+    /// not from the service-wide config head, because one runtime can host
+    /// sessions (notably mob members) from several child realms.
+    async fn live_realm_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::RealmId>, SessionError>;
+
     async fn live_tool_visibility_state(
         &self,
         session_id: &SessionId,
@@ -183,6 +193,18 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
     ) -> Result<(), SessionError>;
 }
 
+async fn preferred_hot_swap_realm(
+    service: &dyn SessionRuntimeLlmReconfigureService,
+    session_id: &SessionId,
+    fallback_realm: Option<meerkat_core::RealmId>,
+) -> Result<Option<meerkat_core::RealmId>, RuntimeDriverError> {
+    Ok(service
+        .live_realm_id(session_id)
+        .await
+        .map_err(session_error_to_runtime_driver)?
+        .or(fallback_realm))
+}
+
 #[async_trait::async_trait]
 impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAgentBuilder> {
     async fn acquire_runtime_turn_finalization_guard(
@@ -204,6 +226,17 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError> {
         self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_realm_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::RealmId>, SessionError> {
+        Ok(self
+            .export_live_session(session_id)
+            .await?
+            .session_metadata()
+            .and_then(|metadata| metadata.realm_id))
     }
 
     async fn live_tool_visibility_state(
@@ -305,6 +338,17 @@ impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgen
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError> {
         self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_realm_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::RealmId>, SessionError> {
+        Ok(self
+            .export_session(session_id)
+            .await?
+            .session_metadata()
+            .and_then(|metadata| metadata.realm_id))
     }
 
     async fn live_tool_visibility_state(
@@ -542,6 +586,39 @@ impl SessionRuntimeLlmReconfigureHost {
         &self,
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn AgentLlmClient>, RuntimeDriverError> {
+        let preferred_realm = self.inheritance_head_realm();
+        self.build_adapter_for_llm_identity_in_realm(identity, preferred_realm.as_ref())
+            .await
+    }
+
+    async fn build_adapter_for_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Arc<dyn AgentLlmClient>, RuntimeDriverError> {
+        let preferred_realm = preferred_hot_swap_realm(
+            self.service.as_ref(),
+            session_id,
+            self.inheritance_head_realm(),
+        )
+        .await?;
+        self.build_adapter_for_llm_identity_in_realm(identity, preferred_realm.as_ref())
+            .await
+    }
+
+    fn inheritance_head_realm(&self) -> Option<meerkat_core::RealmId> {
+        self.realm_inheritance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|inheritance| inheritance.head().clone())
+    }
+
+    async fn build_adapter_for_llm_identity_in_realm(
+        &self,
+        identity: &SessionLlmIdentity,
+        preferred_realm: Option<&meerkat_core::RealmId>,
+    ) -> Result<Arc<dyn AgentLlmClient>, RuntimeDriverError> {
         let default_llm_client = self
             .default_llm_client
             .read()
@@ -552,10 +629,11 @@ impl SessionRuntimeLlmReconfigureHost {
         } else {
             let config = self.load_config_for_hot_swap().await?;
             self.factory
-                .build_llm_client_for_identity_with_auth_lease(
+                .build_llm_client_for_identity_with_auth_lease_in_realm(
                     &config,
                     identity,
                     Some(self.auth_lease.clone()),
+                    preferred_realm,
                 )
                 .await
                 .map_err(|e| {
@@ -762,7 +840,9 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         session_id: &SessionId,
         identity: &SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
-        let adapter = self.build_adapter_for_llm_identity(identity).await?;
+        let adapter = self
+            .build_adapter_for_session_llm_identity(session_id, identity)
+            .await?;
         let request_policy = self
             .build_request_policy_for_llm_identity(session_id, identity)
             .await?;
@@ -813,6 +893,88 @@ mod tests {
         AuthBindingRef, BindingId, BindingOrigin, ConfigStore as _, Provider, RealmId,
     };
 
+    struct RealmOnlyService {
+        realm_id: Option<RealmId>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionRuntimeLlmReconfigureService for RealmOnlyService {
+        async fn acquire_runtime_turn_finalization_guard(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+        {
+            unreachable!("realm selection does not acquire the turn boundary")
+        }
+
+        async fn live_llm_identity(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<SessionLlmIdentity, SessionError> {
+            unreachable!("realm selection does not read the LLM identity")
+        }
+
+        async fn live_realm_id(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<RealmId>, SessionError> {
+            Ok(self.realm_id.clone())
+        }
+
+        async fn live_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<SessionToolVisibilityState>, SessionError> {
+            unreachable!("realm selection does not read tool visibility")
+        }
+
+        async fn live_web_search_override(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<meerkat_core::ToolCategoryOverride, SessionError> {
+            unreachable!("realm selection does not read web-search policy")
+        }
+
+        async fn live_tool_scope_snapshot(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+            unreachable!("realm selection does not read the tool scope")
+        }
+
+        async fn apply_live_llm_identity_under_runtime_turn_boundary(
+            &self,
+            _session_id: &SessionId,
+            _client: Arc<dyn AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), SessionError> {
+            unreachable!("realm selection does not mutate the LLM identity")
+        }
+
+        async fn apply_live_tool_visibility_state_under_runtime_turn_boundary(
+            &self,
+            _session_id: &SessionId,
+            _state: Option<SessionToolVisibilityState>,
+        ) -> Result<(), SessionError> {
+            unreachable!("realm selection does not mutate tool visibility")
+        }
+
+        async fn persist_live_under_runtime_turn_boundary(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            unreachable!("realm selection does not persist")
+        }
+
+        async fn discard_live_under_runtime_turn_boundary(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            unreachable!("realm selection does not discard")
+        }
+    }
+
     fn anthropic_binding() -> AuthBindingRef {
         AuthBindingRef {
             realm: RealmId::parse("tenant_a").unwrap(),
@@ -849,6 +1011,27 @@ mod tests {
             provider_params: None,
             auth_binding,
         }
+    }
+
+    #[tokio::test]
+    async fn live_session_realm_overrides_runtime_head_for_hot_swap() {
+        let session_realm = RealmId::parse("mob.project.member").unwrap();
+        let runtime_head = RealmId::parse("project").unwrap();
+        let service = RealmOnlyService {
+            realm_id: Some(session_realm.clone()),
+        };
+        let selected =
+            preferred_hot_swap_realm(&service, &SessionId::new(), Some(runtime_head.clone()))
+                .await
+                .expect("select preferred realm");
+        assert_eq!(selected, Some(session_realm));
+
+        let service = RealmOnlyService { realm_id: None };
+        let selected =
+            preferred_hot_swap_realm(&service, &SessionId::new(), Some(runtime_head.clone()))
+                .await
+                .expect("fall back to runtime head");
+        assert_eq!(selected, Some(runtime_head));
     }
 
     #[tokio::test]

@@ -2020,7 +2020,11 @@ export class MeerkatClient {
           },
         };
       }
-      if (Object.keys(resultRecord).some((key) => key !== "cause" && key !== "message")) {
+      if (
+        Object.keys(resultRecord).some(
+          (key) => key !== "cause" && key !== "message" && key !== "structured_data",
+        )
+      ) {
         throw new MeerkatError(
           "INVALID_RESPONSE",
           "Invalid mob/spawn_many response: failed result has unknown fields",
@@ -2045,6 +2049,7 @@ export class MeerkatClient {
         result: {
           cause,
           message,
+          structured_data: resultRecord.structured_data,
         },
       };
     });

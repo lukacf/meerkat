@@ -1953,9 +1953,59 @@ pub enum MemberBuildRejection {
     /// realm chain.
     BindingUnresolvable { kind: ConnectionTargetErrorKind },
     /// Credential material missing / needs login / expired / lease-gated.
-    ProviderAuth { kind: meerkat_core::AuthErrorKind },
+    ///
+    /// The routing fields are additive so V4 payloads that carried only
+    /// `kind` remain readable. New senders stamp the complete secret-free
+    /// provider/binding identity.
+    ProviderAuth {
+        kind: meerkat_core::AuthErrorKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<meerkat_core::Provider>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        realm_id: Option<meerkat_core::RealmId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding_id: Option<meerkat_core::BindingId>,
+    },
     /// Self-hosted alias not configured on the host.
     SelfHostedServerMissing { server_id: String },
+}
+
+impl MemberBuildRejection {
+    /// Project the canonical session auth failure onto the bridge wire type.
+    #[must_use]
+    pub fn from_provider_auth_failure(
+        failure: &meerkat_core::service::SessionProviderAuthFailure,
+    ) -> Self {
+        Self::ProviderAuth {
+            kind: failure.kind,
+            provider: Some(failure.provider),
+            realm_id: failure.realm_id.clone(),
+            binding_id: failure.binding_id.clone(),
+        }
+    }
+
+    /// Recover the canonical session auth failure when the sender supplied
+    /// the provider routing identity. Legacy kind-only payloads return `None`.
+    #[must_use]
+    pub fn provider_auth_failure(
+        &self,
+    ) -> Option<meerkat_core::service::SessionProviderAuthFailure> {
+        let Self::ProviderAuth {
+            kind,
+            provider,
+            realm_id,
+            binding_id,
+        } = self
+        else {
+            return None;
+        };
+        Some(meerkat_core::service::SessionProviderAuthFailure {
+            kind: *kind,
+            provider: (*provider)?,
+            realm_id: realm_id.clone(),
+            binding_id: binding_id.clone(),
+        })
+    }
 }
 
 /// Wire projection of `meerkat_core::connection::ConnectionTargetError`'s
@@ -4502,6 +4552,9 @@ mod tests {
             (
                 MemberBuildRejection::ProviderAuth {
                     kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+                    provider: None,
+                    realm_id: None,
+                    binding_id: None,
                 },
                 json!({"provider_auth": {"kind": "interactive_login_required"}}),
             ),
@@ -4519,6 +4572,29 @@ mod tests {
                 serde_json::from_value(value).expect("decode rejection");
             assert_eq!(decoded, rejection);
         }
+    }
+
+    #[test]
+    fn member_build_rejection_provider_auth_preserves_routing_identity() {
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("global").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+        let rejection = MemberBuildRejection::from_provider_auth_failure(&failure);
+        assert_eq!(
+            serde_json::to_value(&rejection).expect("serialize rejection"),
+            json!({
+                "provider_auth": {
+                    "kind": "interactive_login_required",
+                    "provider": "openai",
+                    "realm_id": "global",
+                    "binding_id": "openai"
+                }
+            })
+        );
+        assert_eq!(rejection.provider_auth_failure(), Some(failure));
     }
 
     // -----------------------------------------------------------------------

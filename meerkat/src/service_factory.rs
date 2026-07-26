@@ -41,12 +41,40 @@ pub struct FactoryAgent {
     session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
 }
 
-fn build_agent_error_to_session_error(error: BuildAgentError) -> SessionError {
+fn build_agent_error_to_session_error(
+    error: BuildAgentError,
+    provider: Option<meerkat_core::Provider>,
+    auth_binding: Option<&meerkat_core::AuthBindingRef>,
+) -> SessionError {
     match error {
         #[cfg(feature = "comms")]
         BuildAgentError::SessionIdentityInUse(session_id) => SessionError::Agent(
             meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
         ),
+        BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(auth_error),
+        )) => match provider {
+            Some(provider) => {
+                let kind = auth_error.kind();
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    auth_kind = %kind.as_str(),
+                    "provider authentication prevented session materialization"
+                );
+                SessionError::provider_auth_failure(
+                    meerkat_core::service::SessionProviderAuthFailure {
+                        kind,
+                        provider,
+                        realm_id: auth_binding.map(|binding| binding.realm.clone()),
+                        binding_id: auth_binding.map(|binding| binding.binding.clone()),
+                    },
+                )
+            }
+            None => SessionError::build_llm_identity_unresolvable(format!(
+                "provider authentication failed: {}",
+                auth_error.kind().as_str()
+            )),
+        },
         BuildAgentError::LlmClient(error) => {
             SessionError::build_llm_identity_unresolvable(error.to_string())
         }
@@ -625,6 +653,11 @@ impl RealmInheritance {
         Self { source, head }
     }
 
+    /// Head realm whose durable document this inheritance chain composes.
+    pub fn head(&self) -> &meerkat_core::connection::RealmId {
+        &self.head
+    }
+
     /// Compose the parent chain + `global` tail over `head_config` (the surface's
     /// authoritative head config), producing the effective config the agent
     /// build AND the model hot-swap / reconfigure path consume.
@@ -1062,11 +1095,41 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             _ => None,
         };
 
+        let provider_error_context = build_config.provider.or_else(|| {
+            config
+                .model_registry(meerkat_models::canonical())
+                .ok()
+                .and_then(|registry| {
+                    registry
+                        .entry(&build_config.model)
+                        .map(|entry| entry.provider)
+                })
+        });
+        let auth_binding_error_context = provider_error_context.and_then(|provider| {
+            meerkat_core::resolve_auth_binding_candidates_for_provider(
+                &config,
+                provider,
+                build_config.auth_binding.as_ref(),
+                build_config.realm_id.as_ref(),
+                true,
+            )
+            .ok()
+            .and_then(|candidates| candidates.into_iter().next())
+            .filter(|target| !target.auth_binding.is_env_default())
+            .map(|target| target.auth_binding)
+        });
+
         let agent = self
             .factory
             .build_agent(build_config, &config)
             .await
-            .map_err(build_agent_error_to_session_error)?;
+            .map_err(|error| {
+                build_agent_error_to_session_error(
+                    error,
+                    provider_error_context,
+                    auth_binding_error_context.as_ref(),
+                )
+            })?;
 
         Ok(FactoryAgent {
             agent,
@@ -1159,13 +1222,74 @@ mod tests {
 
     #[test]
     fn llm_client_build_failure_keeps_typed_session_cause() {
-        let error = build_agent_error_to_session_error(BuildAgentError::LlmClient(
-            meerkat_client::FactoryError::ClientCreationFailed(
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ClientCreationFailed(
                 "backend diagnostic that callers must not classify by text".to_string(),
-            ),
-        ));
+            )),
+            Some(Provider::OpenAI),
+            None,
+        );
 
         assert!(error.is_build_llm_identity_unresolvable());
+    }
+
+    #[test]
+    fn provider_auth_build_failure_keeps_typed_session_payload() {
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").unwrap(),
+            binding: meerkat_core::BindingId::parse("openai").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+                meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                    meerkat_core::AuthError::InteractiveLoginRequired,
+                ),
+            )),
+            Some(Provider::OpenAI),
+            Some(&binding),
+        );
+
+        assert!(error.is_build_llm_identity_unresolvable());
+        assert_eq!(
+            error.provider_auth_failure_data(),
+            Some(meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+                provider: Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("openai").unwrap()),
+            })
+        );
+        let data = error.structured_data().expect("structured auth failure");
+        assert_eq!(data["cause"], "provider_auth");
+        assert_eq!(data["kind"], "interactive_login_required");
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["realm_id"], "global");
+        assert_eq!(data["binding_id"], "openai");
+    }
+
+    #[test]
+    fn provider_auth_public_message_redacts_provider_diagnostics() {
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+                meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                    meerkat_core::AuthError::RefreshFailed(
+                        "sentinel-token-endpoint-body".to_string(),
+                    ),
+                ),
+            )),
+            Some(Provider::OpenAI),
+            None,
+        );
+
+        assert!(!error.to_string().contains("sentinel-token-endpoint-body"));
+        assert_eq!(
+            error
+                .provider_auth_failure_data()
+                .map(|failure| failure.kind),
+            Some(meerkat_core::AuthErrorKind::RefreshFailed)
+        );
     }
 
     struct MockLlmClient {

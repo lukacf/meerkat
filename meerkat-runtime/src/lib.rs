@@ -542,6 +542,8 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use meerkat_core::types::HandlingMode;
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_machine::ProviderAuthRuntimeAuthority;
 pub use meerkat_machine::{
     ArchivedSessionActorMaterializationAuthorization,
     CommittedRuntimeExecutorAttachmentPublicationLease, CommsDrainMode, CommsDrainPhase,

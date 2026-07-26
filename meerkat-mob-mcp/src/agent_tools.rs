@@ -454,7 +454,11 @@ impl AgentMobToolSurface {
     }
 
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
-        ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
+        let message = format!("tool '{}' failed: {error}", call.name);
+        match error.structured_data() {
+            Some(data) => ToolError::execution_failed_with_data(message, data),
+            None => ToolError::execution_failed(message),
+        }
     }
 
     fn map_destroy_error(call: ToolCallView<'_>, error: crate::MobMcpDestroyError) -> ToolError {
@@ -2723,6 +2727,36 @@ mod tests {
             Some(true)
         );
         assert!(data.get("destroy_report").is_some());
+    }
+
+    #[test]
+    fn test_agent_surface_mob_error_preserves_provider_auth_data() {
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "mob_spawn_member",
+            args: &raw,
+        };
+        let failure = meerkat_core::service::SessionProviderAuthFailure {
+            kind: meerkat_core::AuthErrorKind::InteractiveLoginRequired,
+            provider: meerkat_core::Provider::OpenAI,
+            realm_id: Some(meerkat_core::RealmId::parse("project").expect("realm")),
+            binding_id: Some(meerkat_core::BindingId::parse("openai").expect("binding")),
+        };
+
+        let error = AgentMobToolSurface::map_mob_error(
+            call,
+            MobError::SessionError(meerkat_core::SessionError::provider_auth_failure(failure)),
+        );
+        let data = error
+            .structured_data()
+            .expect("provider-auth failures should retain typed data");
+
+        assert_eq!(data["cause"], "provider_auth");
+        assert_eq!(data["kind"], "interactive_login_required");
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["realm_id"], "project");
+        assert_eq!(data["binding_id"], "openai");
     }
 
     fn canonical_agent_wire_peer_arg() -> WirePeerArg {

@@ -4502,7 +4502,7 @@ struct RuntimeScope {
     user_config_root: Option<PathBuf>,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    oauth_flow_authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+    provider_auth_authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
 }
 
 impl RuntimeScope {
@@ -4514,24 +4514,11 @@ impl RuntimeScope {
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn new_cli_auth_handles() -> (
     meerkat_core::handles::GeneratedAuthLeaseHandle,
-    Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+    meerkat_runtime::ProviderAuthRuntimeAuthority,
 ) {
-    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
-    let generated_auth_lease =
-        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
-            Arc::clone(&auth_lease),
-        )
-        .expect("CLI RuntimeAuthLeaseHandle must be certified by generated AuthMachine authority");
-    let oauth_flow_authority = Arc::new(
-        meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
-            Arc::clone(&auth_lease),
-        ),
-    );
-    (
-        generated_auth_lease,
-        oauth_flow_authority as Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
-    )
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let authority = runtime.provider_auth_runtime_authority();
+    (authority.generated_auth_lease_handle(), authority)
 }
 
 #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
@@ -4602,7 +4589,7 @@ fn resolve_runtime_scope_with_realm(
     }
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+    let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
     #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
@@ -4618,7 +4605,7 @@ fn resolve_runtime_scope_with_realm(
         user_config_root,
         auth_lease,
         #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-        oauth_flow_authority,
+        provider_auth_authority,
     })
 }
 
@@ -6373,7 +6360,7 @@ async fn prepare_credential_reads(scope: &RuntimeScope) {
     ensure_legacy_login_credentials_migrated_once(scope).await;
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 struct CliPreparedTokenCommitSnapshot {
     key: meerkat_providers::auth_store::TokenKey,
     lease_key: meerkat_core::handles::LeaseKey,
@@ -6390,7 +6377,7 @@ struct CliTokenCommitSnapshot {
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn prepare_cli_token_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -6497,7 +6484,7 @@ async fn save_marked_cli_token_commit_unlocked(
     Ok(())
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -6642,7 +6629,7 @@ async fn rollback_cli_token_commit(
     Ok(())
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 struct OwnedCliBrowserFlowConsume {
     authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     state: String,
@@ -6650,7 +6637,7 @@ struct OwnedCliBrowserFlowConsume {
     redirect_uri: String,
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_oauth_tokens_and_consume_browser_flow(
     persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -6852,10 +6839,8 @@ async fn interactive_login(
 ) -> anyhow::Result<()> {
     use std::time::Duration;
 
-    use meerkat_providers::auth_oauth::{
-        OAuthError, PkcePair, bind_loopback_callback_with_redirect,
-    };
-    use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStoreBackend};
+    use meerkat_providers::auth_oauth::{OAuthError, bind_loopback_callback_with_redirect};
+    use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;
@@ -6888,6 +6873,26 @@ async fn interactive_login(
     let auth_binding = target.auth_binding;
     let identity = provider.oauth_identity();
     let key = TokenKey::from_auth_binding(&auth_binding);
+    let host_target = meerkat::HostAuthTarget {
+        provider: identity,
+        realm_id: auth_binding.realm.clone(),
+        binding_id: auth_binding.binding.clone(),
+        profile_id: auth_binding.profile.clone(),
+    };
+    let persistence = TokenStoreBackend::default_auto()
+        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
+        .open_with_refresh_authority()
+        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+    // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
+    // forward so an existing sign-in keeps working under the new global realm.
+    if let Err(e) =
+        migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
+            .await
+    {
+        tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
+    }
+    let auth_service =
+        meerkat::HostAuthService::new(persistence, scope.provider_auth_authority.clone());
     let cli_cmd = current_cli_command_name();
 
     eprintln!();
@@ -6926,7 +6931,6 @@ async fn interactive_login(
         4,
         "Preparing a local callback to receive the authorization code",
     );
-    let pkce = PkcePair::generate_s256();
     let pending_callback = bind_loopback_callback_with_redirect(
         provider.callback_path(),
         provider.callback_redirect_host(),
@@ -6935,22 +6939,11 @@ async fn interactive_login(
     .await
     .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
     let redirect_url = pending_callback.redirect_url.clone();
-    // K18: resolve endpoints from the typed identity directly — no
-    // typed→alias→typed round trip through a CLI-local alias string.
-    let endpoints =
-        meerkat_providers::oauth_flow::oauth_provider_endpoints(identity, redirect_url.clone());
-    let client_secret = identity.client_secret();
-    let auth_mode = identity.auth_mode();
-    let state_token = scope
-        .oauth_flow_authority
-        .start(
-            auth_binding.clone(),
-            identity,
-            redirect_url.clone(),
-            pkce.verifier.secret().clone(),
-        )
+    let login_start = auth_service
+        .login_start(&config, &host_target, redirect_url.clone())
+        .await
         .map_err(|e| anyhow::anyhow!("OAuth flow admission failed: {e}"))?;
-    let handle = pending_callback.expect_state(state_token.clone());
+    let handle = pending_callback.expect_state(login_start.state.clone());
     print_ok(&format!(
         "Local callback ready at {}",
         auth_cyan(&redirect_url),
@@ -6958,8 +6951,7 @@ async fn interactive_login(
 
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
-    let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
-    let browser_ok = webbrowser::open(&authorize_url).is_ok();
+    let browser_ok = webbrowser::open(&login_start.authorize_url).is_ok();
     if browser_ok {
         print_ok("Browser launched. Complete the sign-in there.");
     } else {
@@ -6967,7 +6959,7 @@ async fn interactive_login(
         eprintln!();
         eprintln!("  Copy this URL into a browser manually:");
         eprintln!();
-        eprintln!("    {}", auth_cyan(&authorize_url));
+        eprintln!("    {}", auth_cyan(&login_start.authorize_url));
         eprintln!();
     }
     print_hint("If you want to cancel, press Ctrl-C — nothing is saved until step 4.");
@@ -7012,76 +7004,26 @@ async fn interactive_login(
         }
     };
     print_ok("Received authorization code from the provider.");
-    let flow = scope
-        .oauth_flow_authority
-        .verify(&outcome.state, &auth_binding, identity, &redirect_url)
-        .map_err(|e| anyhow::anyhow!("OAuth flow verification failed: {e}"))?;
 
     // --- Step 4: exchange + persist ------------------------------
     print_step(4, 4, "Exchanging the code for access + refresh tokens");
-    let http = reqwest::Client::new();
-    let result = meerkat_providers::auth_oauth::exchange_authorization_code_with_state(
-        &http,
-        &endpoints,
-        &outcome.code,
-        &flow.pkce_verifier,
-        client_secret,
-        Some(&outcome.state),
-    )
-    .await
-    .map_err(|e| {
-        eprintln!();
-        eprintln!("{} Token exchange failed: {e}", auth_yellow("⚠"));
-        print_hint("Check your network connection and try `rkat auth login` again.");
-        anyhow::anyhow!("Token exchange failed: {e}")
-    })?;
-
-    let now = chrono::Utc::now();
-    let expires_at = result
-        .expires_at_from(now)
-        .map_err(|e| anyhow::anyhow!("Token expiry conversion failed: {e}"))?;
-    let has_refresh = result.refresh_token.is_some();
-    let tokens = PersistedTokens {
-        auth_mode,
-        primary_secret: Some(result.access_token),
-        refresh_token: result.refresh_token,
-        id_token: result.id_token,
-        expires_at,
-        last_refresh: Some(now),
-        scopes: result
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default(),
-        account_id: None,
-        metadata: serde_json::Value::Null,
-    };
-
-    let persistence = TokenStoreBackend::default_auto()
-        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-        .open_with_refresh_authority()
-        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-    // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
-    // forward so an existing sign-in keeps working under the new global realm.
-    if let Err(e) =
-        migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
-            .await
-    {
-        tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
-    }
-    save_cli_oauth_tokens_and_consume_browser_flow(
-        persistence,
-        scope.auth_lease.clone(),
-        auth_binding.clone(),
-        tokens.clone(),
-        OwnedCliBrowserFlowConsume {
-            authority: Arc::clone(&scope.oauth_flow_authority),
-            state: outcome.state.clone(),
-            provider: identity,
-            redirect_uri: redirect_url.clone(),
-        },
-    )
-    .await?;
+    let completed = auth_service
+        .login_complete(
+            &config,
+            &host_target,
+            redirect_url,
+            outcome.state,
+            &outcome.code,
+        )
+        .await
+        .map_err(|e| {
+            eprintln!();
+            eprintln!("{} Token exchange failed: {e}", auth_yellow("⚠"));
+            print_hint("Check your network connection and try `rkat auth login` again.");
+            anyhow::anyhow!("Token exchange failed: {e}")
+        })?;
+    let expires_at = completed.expires_at;
+    let has_refresh = completed.has_refresh_token;
     print_ok("Tokens persisted to the local credentials file (0o600 on Unix).");
 
     // --- Success summary + next steps -----------------------------
@@ -17475,7 +17417,7 @@ mod tests {
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
         #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-        let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+        let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
@@ -17501,7 +17443,7 @@ mod tests {
             user_config_root: Some(state_root),
             auth_lease,
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-            oauth_flow_authority,
+            provider_auth_authority,
         }
     }
 
@@ -18734,7 +18676,7 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
-    fn test_interactive_oauth_login_uses_runtime_flow_authority_for_browser_state() {
+    fn test_interactive_oauth_login_delegates_browser_state_to_host_auth_service() {
         let source = include_str!("main.rs");
         let start = source
             .find("async fn interactive_login(")
@@ -18745,8 +18687,10 @@ mod tests {
             .expect("interactive_login successor exists");
         let interactive_login_source = &source[start..end];
         assert!(
-            interactive_login_source.contains(".oauth_flow_authority\n        .start("),
-            "CLI interactive OAuth login must admit browser state through the runtime OAuth flow authority"
+            interactive_login_source.contains("HostAuthService::new(")
+                && interactive_login_source.contains(".login_start(")
+                && interactive_login_source.contains(".login_complete("),
+            "CLI interactive OAuth login must delegate browser-state admission and terminal commit to HostAuthService"
         );
         assert!(
             !interactive_login_source.contains("let state_token = format!("),
@@ -26062,7 +26006,7 @@ supports_reasoning = true
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {
         #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-        let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+        let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
         #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
@@ -26085,7 +26029,7 @@ supports_reasoning = true
             user_config_root: None,
             auth_lease,
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-            oauth_flow_authority,
+            provider_auth_authority,
         }
     }
 

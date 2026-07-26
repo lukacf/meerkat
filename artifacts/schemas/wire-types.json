@@ -24713,6 +24713,10 @@
         ],
         "type": "string"
       },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "ConnectionTargetErrorKind": {
         "description": "Wire projection of `meerkat_core::connection::ConnectionTargetError`'s\nvariant set (closed; kinds only — the parameters stay in the diagnostic\n`reason` string).",
         "enum": [
@@ -24777,13 +24781,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -24820,6 +24854,21 @@
             "type": "object"
           }
         ]
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
       },
       "WireControlScope": {
         "description": "Closed control-plane scope vocabulary (A9). Grants and bridge scope\ndenials speak exactly this set.",
@@ -29220,13 +29269,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -41364,13 +41443,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -55367,13 +55476,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -71710,6 +71849,10 @@
         ],
         "type": "string"
       },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "ConnectionTargetErrorKind": {
         "description": "Wire projection of `meerkat_core::connection::ConnectionTargetError`'s\nvariant set (closed; kinds only — the parameters stay in the diagnostic\n`reason` string).",
         "enum": [
@@ -71723,6 +71866,21 @@
           "provider_mismatch",
           "realm_chain"
         ],
+        "type": "string"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
         "type": "string"
       }
     },
@@ -71775,13 +71933,43 @@
       },
       {
         "additionalProperties": false,
-        "description": "Credential material missing / needs login / expired / lease-gated.",
+        "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
         "properties": {
           "provider_auth": {
             "additionalProperties": false,
             "properties": {
+              "binding_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BindingId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "kind": {
                 "$ref": "#/$defs/AuthErrorKind"
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "realm_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RealmId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -72595,6 +72783,10 @@
         ],
         "type": "string"
       },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "BridgeRejectionCause": {
         "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.\n\nNot `Copy` since V4: several causes carry typed detail payloads.",
         "oneOf": [
@@ -73151,13 +73343,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -73194,6 +73416,21 @@
             "type": "object"
           }
         ]
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
       },
       "WireControlScope": {
         "description": "Closed control-plane scope vocabulary (A9). Grants and bridge scope\ndenials speak exactly this set.",
@@ -73284,6 +73521,10 @@
         ],
         "type": "string"
       },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "BridgeRejectionCause": {
         "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.\n\nNot `Copy` since V4: several causes carry typed detail payloads.",
         "oneOf": [
@@ -73840,13 +74081,43 @@
           },
           {
             "additionalProperties": false,
-            "description": "Credential material missing / needs login / expired / lease-gated.",
+            "description": "Credential material missing / needs login / expired / lease-gated.\n\nThe routing fields are additive so V4 payloads that carried only\n`kind` remain readable. New senders stamp the complete secret-free\nprovider/binding identity.",
             "properties": {
               "provider_auth": {
                 "additionalProperties": false,
                 "properties": {
+                  "binding_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BindingId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "$ref": "#/$defs/AuthErrorKind"
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Provider"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "realm_id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RealmId"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -73927,6 +74198,21 @@
             "type": "object"
           }
         ]
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
       },
       "WireControlScope": {
         "description": "Closed control-plane scope vocabulary (A9). Grants and bridge scope\ndenials speak exactly this set.",
@@ -83772,7 +84058,8 @@
           },
           "message": {
             "type": "string"
-          }
+          },
+          "structured_data": true
         },
         "required": [
           "cause",

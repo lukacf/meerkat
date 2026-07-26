@@ -15,11 +15,78 @@ use meerkat_core::service::{
     SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
-use sha2::{Digest, Sha256};
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::sync::{Mutex, OnceLock, Weak};
+
+/// Outcome of the explicit resume-seam durable read.
+///
+/// Exists because `Option<Session>` conflated three materially different
+/// answers — present, archived-and-refused, and genuinely absent — and every
+/// caller reported the union as "missing durable session snapshot". That
+/// message sent operators hunting for data that was intact on disk.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ResumeSessionLoad {
+    /// An ordinary, non-archived durable session.
+    Active(Box<Session>),
+    /// An archived document the lifecycle machine is able to revive.
+    Revivable(Box<Session>),
+    /// An archived document that is NOT revivable from its current runtime
+    /// state. The transcript is intact; only the lifecycle pairing refuses.
+    ArchivedNotRevivable {
+        runtime_state: Option<meerkat_runtime::RuntimeState>,
+    },
+    /// No durable session exists for this id.
+    Absent,
+}
+
+impl ResumeSessionLoad {
+    /// Why this read could not yield a resumable session, or `None` when it
+    /// did. Callers that own their own control flow (the restore/replacement
+    /// path) use this for a truthful message without changing behaviour.
+    #[must_use]
+    pub fn unavailable_reason(&self, session_id: &SessionId) -> Option<String> {
+        match self {
+            Self::Active(_) | Self::Revivable(_) => None,
+            Self::ArchivedNotRevivable { runtime_state } => {
+                let state = runtime_state.map_or_else(
+                    || "<no runtime record>".to_string(),
+                    |state| state.to_string(),
+                );
+                Some(format!(
+                    "durable session '{session_id}' is archived and not revivable from runtime \
+                     state {state}; the transcript is intact and preserved"
+                ))
+            }
+            Self::Absent => Some(format!(
+                "missing durable session snapshot for '{session_id}'"
+            )),
+        }
+    }
+
+    /// The single place resume failures are worded. Keeps "archived" from
+    /// being reported as "missing" across the three resume call sites.
+    pub fn into_session_or_error(self, resume_id: &SessionId) -> Result<Session, MobError> {
+        match self {
+            Self::Active(session) | Self::Revivable(session) => Ok(*session),
+            Self::ArchivedNotRevivable { runtime_state } => {
+                let state = runtime_state.map_or_else(
+                    || "<no runtime record>".to_string(),
+                    |state| state.to_string(),
+                );
+                Err(MobError::Internal(format!(
+                    "durable session '{resume_id}' is archived and not revivable from runtime \
+                     state {state}; the transcript is intact and preserved"
+                )))
+            }
+            Self::Absent => Err(MobError::Internal(format!(
+                "missing durable session snapshot for '{resume_id}'"
+            ))),
+        }
+    }
+}
 
 fn build_runtime_receipt(
     run_id: RunId,
@@ -27,16 +94,22 @@ fn build_runtime_receipt(
     contributing_input_ids: Vec<InputId>,
     session: &Session,
 ) -> Result<RunBoundaryReceiptDraft, SessionError> {
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
+    // MUST mint the digest the committed-boundary witness validation
+    // recomputes (`Session::transcript_content_digest`, the accumulator's
+    // canonical `sha256:<hex>` format, O(delta) on appends). The persistent
+    // producers were switched with the format change; this ephemeral
+    // runtime-adapter producer was missed, and a bare serde-JSON hash here
+    // fails every completed-run commit with a digest mismatch.
+    let conversation_digest = session.transcript_content_digest().map_err(|err| {
         SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-            "failed to serialize session for runtime receipt digest: {err}"
+            "failed to digest session for runtime receipt: {err}"
         )))
     })?;
     Ok(RunBoundaryReceiptDraft {
         run_id,
         boundary,
         contributing_input_ids,
-        conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
+        conversation_digest: Some(conversation_digest),
         message_count: session.messages().len(),
     })
 }
@@ -382,15 +455,49 @@ pub trait MobSessionService:
         Ok(None)
     }
 
-    /// Load a retired session only for an explicit resume/revival operation.
-    /// Ordinary reads remain archive-filtered. Implementations must return a
-    /// value only when an intact authoritative snapshot and a Retired runtime
-    /// lifecycle record coexist.
+    /// Load an archived session only for an explicit resume/revival operation.
+    /// Ordinary reads remain archive-filtered.
+    ///
+    /// Eligibility is the canonical durable document terminal FIRST — the
+    /// `SessionDocumentMachine` lifecycle terminal owns terminality and the
+    /// runtime record is only its realization. The runtime state is then
+    /// consulted solely to confirm quiescence, and the admitted set matches
+    /// exactly what the downstream revival transaction already accepts
+    /// (`revive_archived_session_document_inner`): `Retired`, or a
+    /// cold-normalized `Idle`.
+    ///
+    /// This method previously required `RuntimeState::Retired` and nothing
+    /// else. That gate was contract drift: retiring an identity stamps the
+    /// archived terminal on the durable document without leaving a `Retired`
+    /// runtime record, so an intact `Archived + Idle` document was hidden by
+    /// the ordinary loader AND rejected here, then reported as a missing
+    /// snapshot. Prefer [`Self::load_session_for_resume`], which distinguishes
+    /// "archived but not revivable" from "absent" instead of collapsing both
+    /// into `None`.
     async fn load_revivable_retired_session(
         &self,
         _session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         Ok(None)
+    }
+
+    /// Typed resume-seam read: never collapses "archived", "absent", and
+    /// "archived but not revivable" into one `None`.
+    ///
+    /// The default composes the two legacy reads so existing implementations
+    /// keep their current behavior; `PersistentSessionService` overrides it to
+    /// report the archived-but-refused case with its blocking runtime state.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
     }
 
     /// Load the persisted session METADATA view when available.
@@ -1155,6 +1262,15 @@ where
             .session_archived_by_authority(session_id, &session)
             .await?
         {
+            // The ordinary loader deliberately hides archived sessions; the
+            // typed resume seam (`load_session_for_resume`) is where archived
+            // stops reading as absent. Logged at debug because callers that
+            // treat this None as "missing" are the misdiagnosis this line
+            // exists to catch.
+            tracing::debug!(
+                session_id = %session_id,
+                "load_persisted_session hid an archived session (use the resume seam for revival)"
+            );
             return Ok(None);
         }
         Ok(Some(session))
@@ -1164,12 +1280,51 @@ where
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        if self.persisted_runtime_state(session_id).await?
-            != Some(meerkat_runtime::RuntimeState::Retired)
-        {
-            return Ok(None);
+        match self.load_session_for_resume(session_id).await? {
+            ResumeSessionLoad::Revivable(session) => Ok(Some(*session)),
+            // An ordinary active document is not this seam's business, and an
+            // archived-but-refused one must not read as a plain absence here.
+            ResumeSessionLoad::Active(_)
+            | ResumeSessionLoad::ArchivedNotRevivable { .. }
+            | ResumeSessionLoad::Absent => Ok(None),
         }
-        self.load_authoritative_session(session_id).await
+    }
+
+    /// Canonical durable terminal first; the runtime record only proves
+    /// quiescence. The admitted set is exactly what the downstream revival
+    /// transaction accepts, so this seam cannot hand back a document the
+    /// promotion step would then refuse.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        let Some(session) = self.load_authoritative_session(session_id).await? else {
+            return Ok(ResumeSessionLoad::Absent);
+        };
+        let runtime_state = self.persisted_runtime_state(session_id).await?;
+        let archived = session
+            .lifecycle_terminal()
+            .is_some_and(meerkat_core::SessionLifecycleTerminal::is_archived);
+        if !archived {
+            // A Retired runtime over a non-archived document stays revivable,
+            // preserving the pre-fix behaviour for that shape.
+            if runtime_state == Some(meerkat_runtime::RuntimeState::Retired) {
+                return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+            }
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        match runtime_state {
+            // Quiescent: no executor is attached and no run is in progress, so
+            // promoting the archived document cannot race a live writer.
+            Some(meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Idle) => {
+                Ok(ResumeSessionLoad::Revivable(Box::new(session)))
+            }
+            // Everything else (live/attached/running, or no runtime record at
+            // all) is unproven. Refuse, but say so truthfully.
+            other => Ok(ResumeSessionLoad::ArchivedNotRevivable {
+                runtime_state: other,
+            }),
+        }
     }
 
     /// Metadata-only authoritative read. Same visibility contract as

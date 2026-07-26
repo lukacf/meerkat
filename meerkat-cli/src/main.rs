@@ -12908,6 +12908,19 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    /// Delegate rather than inherit the composed default, so the wrapper keeps
+    /// the inner service's archived-vs-absent distinction.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::ResumeSessionLoad, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_session_for_resume(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn load_persisted_session_metadata(
         &self,
         session_id: &SessionId,
@@ -23922,33 +23935,21 @@ capabilities = ["rpc"]
     // Tokio worker's stack budget. Exercise the real CLI full-tools surface,
     // explicit auth binding, and mob_create -> mob_spawn_member dispatch on a
     // literal production-scale caller stack plus one production-scale worker.
+    //
+    // This asserts a 2 MiB Tokio worker-stack budget at opt-level = 0, where
+    // LLVM performs no stack-slot coloring (every local in every branch of a
+    // function gets its own slot), so it fails on exactly the debug-build
+    // frame bloat that release hides. It was #[ignore]d while `run_loop`'s
+    // 1700-line CallingLlm arm alone reserved ~800 KiB and child-agent
+    // construction nested inside the parent's poll stack; it went green
+    // again after the per-phase splits (`drive_calling_llm_boundary`,
+    // `SpawnActivateState`, `resolve_llm_client_phase`) and the fresh-task
+    // construction seams (`meerkat_runtime::stack_relief`) cut the deepest
+    // measured path from just under 2 MiB (macOS arm64; over 2 MiB on Linux
+    // x86_64) to ~1.05 MiB. Keep it failing honestly: never re-ignore it,
+    // raise the opt-level, or relax the 2 MiB budget.
     #[cfg(all(feature = "mob", feature = "openai"))]
     #[test]
-    // SKIPPED, DELIBERATELY AND VISIBLY — do not re-enable by relaxing it.
-    //
-    // This asserts a 2 MiB Tokio worker-stack budget, which is a RELEASE
-    // property. Release currently uses ~256-512 KiB of it, so production has
-    // roughly 4x margin and there is no user-facing crash here. In a debug
-    // build LLVM's stack-slot coloring does not run, so a large function
-    // reserves a separate slot for every local in every branch: `run_loop`
-    // reserves ~740 KiB for 1974 lines while its async generator is only
-    // 20 KiB. Debug therefore needs ~1.8-2 MiB on macOS arm64 and exceeds
-    // 2 MiB on Linux x86_64, whose frames are larger, and the test aborts
-    // there with SIGABRT.
-    //
-    // Two fixes were rejected on purpose. Raising the test profile to
-    // opt-level = 1 turns coloring on, but that makes an assertion with 4x
-    // headroom effectively unfailable — a green light that cannot go red is
-    // worse than none, because it retires the suspicion — and it taxes every
-    // build. Raising the 2 MiB number would abandon the budget the test
-    // exists to defend.
-    //
-    // So it is skipped, loudly, until the frames are actually smaller:
-    // split `Agent::run_loop` (state.rs, one 1700-line match arm) and
-    // `AgentFactory::build_agent` (factory.rs, 2194 lines) into per-phase
-    // functions, then delete this attribute and require it green at
-    // opt-level = 0 with the 2 MiB budget unchanged.
-    #[ignore = "debug-build frame bloat exceeds the 2 MiB budget; release has ~4x margin. Un-ignore only after run_loop/build_agent are split — never by relaxing the budget or raising opt-level."]
     fn tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget() {
         let test_thread = std::thread::Builder::new()
             .name("mob-spawn-small-stack".into())

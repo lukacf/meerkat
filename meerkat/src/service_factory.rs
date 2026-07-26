@@ -1119,17 +1119,25 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .map(|target| target.auth_binding)
         });
 
-        let agent = self
-            .factory
-            .build_agent(build_config, &config)
-            .await
-            .map_err(|error| {
-                build_agent_error_to_session_error(
-                    error,
-                    provider_error_context,
-                    auth_binding_error_context.as_ref(),
-                )
-            })?;
+        // Agent construction descends through provider resolution, tool
+        // composition, and session-runtime registration; at opt-level=0
+        // those poll frames are large, and this seam is reached both from
+        // surface create_session calls and from inside a parent agent's
+        // tool-dispatch poll (mob spawn/delegate). Build on a fresh task so
+        // child-agent construction never stacks onto the caller's poll
+        // chain (2 MiB production worker-stack budget).
+        let factory = self.factory.clone();
+        let agent = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            factory.build_agent(build_config, &config).await
+        })
+        .await
+        .map_err(|error| {
+            build_agent_error_to_session_error(
+                error,
+                provider_error_context,
+                auth_binding_error_context.as_ref(),
+            )
+        })?;
 
         Ok(FactoryAgent {
             agent,

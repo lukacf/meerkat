@@ -8777,13 +8777,23 @@ impl MobBuilder {
                             }
                             replacement_session
                         } else {
-                            record_restore_failure(
-                                bridge_session_id.clone(),
-                                format!(
-                                    "missing durable session snapshot for '{bridge_session_id}'"
-                                ),
-                            )
-                            .await;
+                            // Report WHY, truthfully: an archived-but-refused
+                            // document is intact on disk, and calling it
+                            // "missing" sends operators hunting for lost data.
+                            // Control flow is unchanged — the replacement
+                            // search above still owns the rotation case.
+                            let reason = session_service
+                                .load_session_for_resume(&bridge_session_id)
+                                .await
+                                .ok()
+                                .and_then(|load| load.unavailable_reason(&bridge_session_id))
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "missing durable session snapshot for \
+                                         '{bridge_session_id}'"
+                                    )
+                                });
+                            record_restore_failure(bridge_session_id.clone(), reason).await;
                             continue;
                         }
                     }

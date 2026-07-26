@@ -204,7 +204,7 @@ pub use runtime::{
     MobMachineStateChanges, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
     MobRespawnError, MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
     MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    ResumeSessionLoad, SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
     SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy,
     SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride, SpawnToolAdmission,
     SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire,

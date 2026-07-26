@@ -2072,6 +2072,13 @@ impl std::fmt::Debug for AgentFactory {
     }
 }
 
+/// Output of `AgentFactory::resolve_llm_client_phase` (build_agent phase 3).
+struct ResolvedLlmClientPhase {
+    llm_client: Option<Arc<dyn LlmClient>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    auto_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+}
+
 impl AgentFactory {
     fn resolve_realm_binding_for_provider(
         config: &Config,
@@ -4466,304 +4473,21 @@ impl AgentFactory {
             None
         };
 
-        // 3. Create LLM client.
+        // 3. Create LLM client (split out for opt-level=0 stack-frame size;
+        // see `resolve_llm_client_phase`).
+        let resolved_llm_client_phase = self
+            .resolve_llm_client_phase(
+                config,
+                &registry,
+                provider,
+                &self_hosted_server_id,
+                &mut build_config,
+            )
+            .await?;
+        let llm_client = resolved_llm_client_phase.llm_client;
         #[cfg(not(target_arch = "wasm32"))]
-        let mut auto_image_generation_executor: Option<
-            Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
-        > = None;
-        let llm_client: Option<Arc<dyn LlmClient>> = if build_config
-            .agent_llm_client_override
-            .is_some()
-        {
-            None
-        } else {
-            Some(match build_config.llm_client_override.as_ref() {
-                Some(client) => Arc::clone(client),
-                None if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") => {
-                    // Test shim: when RKAT_TEST_CLIENT=1 is set by integration
-                    // tests, short-circuit to an in-process TestClient so tests
-                    // don't need real provider credentials.
-                    Arc::new(meerkat_client::TestClient::for_provider(provider))
-                }
-                None => {
-                    if matches!(provider, Provider::SelfHosted) {
-                        let auth_lease_handle = if let RuntimeBuildMode::SessionOwned(bindings) =
-                            &build_config.runtime_build_mode
-                        {
-                            Some(bindings.auth_lease().clone())
-                        } else {
-                            None
-                        };
-                        let resolved = self
-                            .build_self_hosted_client_for_identity(
-                                config,
-                                &registry,
-                                &SessionLlmIdentity {
-                                    model: build_config.model.clone(),
-                                    provider,
-                                    self_hosted_server_id: self_hosted_server_id.clone(),
-                                    provider_params: build_config.provider_params.clone(),
-                                    auth_binding: build_config.auth_binding.clone(),
-                                },
-                                auth_lease_handle,
-                                build_config.realm_id.as_ref(),
-                            )
-                            .await
-                            .map_err(BuildAgentError::LlmClient)?;
-                        build_config.auth_binding = resolved.durable_auth_binding;
-                        resolved.client
-                    } else {
-                        // Provider-runtime registry needs the OAuth-backed
-                        // TokenStore attached so persisted tokens (written by
-                        // `rkat auth login`, server-side OAuth completion, etc.)
-                        // are read during resolve_binding.
-                        #[allow(unused_mut)]
-                        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if let Some(persistence) = self
-                                .resolution_provider_auth_persistence()
-                                .map_err(BuildAgentError::LlmClient)?
-                            {
-                                env = env.with_provider_auth_persistence(persistence);
-                            }
-                        }
-                        for (handle, resolver) in &self.external_auth_resolvers {
-                            env = env.with_external_resolver(handle.clone(), resolver.clone());
-                        }
-                        let explicit_auth_binding = build_config.auth_binding.is_some();
-                        let provider_registry = Arc::clone(&self.provider_registry);
-                        let mut first_resolution_error: Option<
-                            meerkat_llm_core::provider_runtime::ProviderAuthError,
-                        > = None;
-                        let mut resolved = None;
-                        let candidates = Self::resolve_realm_binding_candidates_for_provider(
-                            config,
-                            provider,
-                            build_config.auth_binding.as_ref(),
-                            build_config.realm_id.as_ref(),
-                        )
-                        .map_err(|e| {
-                            BuildAgentError::LlmClient(FactoryError::ConnectionTarget(e))
-                        })?;
-                        for target in candidates {
-                            let resolved_auth_binding = target.auth_binding.clone();
-                            let lease_auth_binding = if resolved_auth_binding.is_env_default()
-                                && !explicit_auth_binding
-                            {
-                                None
-                            } else {
-                                Some(resolved_auth_binding.clone())
-                            };
-                            let mut candidate_env = env.clone();
-                            if let RuntimeBuildMode::SessionOwned(bindings) =
-                                &build_config.runtime_build_mode
-                                && lease_auth_binding.is_some()
-                            {
-                                candidate_env = candidate_env
-                                    .with_auth_lease_handle(bindings.auth_lease().clone());
-                            }
-                            match provider_registry
-                                .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
-                                .await
-                            {
-                                Ok(connection) => {
-                                    if connection.provider != provider {
-                                        return Err(BuildAgentError::LlmClient(
-                                            FactoryError::ProviderAuth(
-                                                meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
-                                                    expected: provider,
-                                                    resolved: connection.provider,
-                                                },
-                                            ),
-                                        ));
-                                    }
-                                    // `build_config.model` is already the
-                                    // canonical surface resolution. Binding
-                                    // selection owns credentials only; it must
-                                    // not silently replace that final model
-                                    // merely because the original caller
-                                    // omitted an explicit model hint.
-                                    let resolved_model = build_config.model.clone();
-                                    resolved = Some((
-                                        connection,
-                                        resolved_auth_binding,
-                                        lease_auth_binding,
-                                        resolved_model,
-                                    ));
-                                    break;
-                                }
-                                Err(err) => {
-                                    first_resolution_error.get_or_insert(err);
-                                    if explicit_auth_binding {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
-                            resolved.ok_or_else(|| {
-                                BuildAgentError::LlmClient(FactoryError::ProviderAuth(
-                                    first_resolution_error.unwrap_or_else(|| {
-                                        meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
-                                            format!(
-                                                "no auth binding candidates resolved for provider '{}'",
-                                                provider.as_str()
-                                            ),
-                                        )
-                                    }),
-                                ))
-                            })?;
-                        if resolved_model.is_empty() {
-                            return Err(BuildAgentError::Config(format!(
-                                "auth binding realm '{}' binding '{}' has an empty default_model",
-                                resolved_auth_binding.realm, resolved_auth_binding.binding,
-                            )));
-                        }
-                        if let Some(reason) =
-                            registry.provider_override_mismatch_reason(provider, &resolved_model)
-                        {
-                            return Err(BuildAgentError::Config(reason));
-                        }
-                        build_config.model = resolved_model;
-
-                        // Publish immediately after resolve. Provider resolution can refresh and
-                        // persist OAuth token bytes; AuthMachine must observe the returned lease
-                        // before any later build step can fail.
-                        if let RuntimeBuildMode::SessionOwned(bindings) =
-                            &build_config.runtime_build_mode
-                            && let Some(lease_auth_binding) = lease_auth_binding.as_ref()
-                        {
-                            Self::publish_auth_lease(
-                                bindings.auth_lease(),
-                                lease_auth_binding,
-                                &connection,
-                            )
-                            .map_err(BuildAgentError::LlmClient)?;
-                        }
-
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            auto_image_generation_executor = provider_registry
-                                .build_image_generation_executor(connection.clone())
-                                .map_err(|e| {
-                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                                })?;
-                        }
-
-                        if lease_auth_binding.is_some() {
-                            build_config.auth_binding = Some(resolved_auth_binding);
-                        } else {
-                            build_config.auth_binding = None;
-                        }
-
-                        // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
-                        // cannot go through the Responses API — POST /v1/responses
-                        // returns 404 model_not_found. Route those through the
-                        // OpenAI Realtime WebSocket via `OpenAiRealtimeTextAdapter`.
-                        // Capability-driven routing owns this decision at the
-                        // composition seam (dogma §9).
-                        let realtime_route = matches!(provider, Provider::OpenAI)
-                            && is_openai_realtime_capable(&build_config.model);
-                        #[cfg(not(feature = "openai-realtime"))]
-                        if realtime_route {
-                            return Err(BuildAgentError::LlmClient(FactoryError::ClientBuild(
-                                meerkat_llm_core::provider_runtime::ProviderClientError::MissingFeature(
-                                    "openai-realtime",
-                                ),
-                            )));
-                        }
-                        #[cfg(feature = "openai-realtime")]
-                        if realtime_route {
-                            provider_registry
-                                .build_realtime_text_client(connection)
-                                .map_err(|e| {
-                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                                })?
-                        } else {
-                            provider_registry.build_client(connection).map_err(|e| {
-                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                            })?
-                        }
-                        #[cfg(not(feature = "openai-realtime"))]
-                        {
-                            provider_registry.build_client(connection).map_err(|e| {
-                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                            })?
-                        }
-                    }
-                }
-            })
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        if build_config.image_generation_executor_override.is_none() {
-            let mut executors: BTreeMap<
-                String,
-                Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
-            > = BTreeMap::new();
-            if let Some(executor) = auto_image_generation_executor.take() {
-                executors.insert(provider_key(provider).to_string(), executor);
-            }
-            for image_provider in [Provider::OpenAI, Provider::Gemini] {
-                let key = provider_key(image_provider).to_string();
-                if executors.contains_key(&key) {
-                    continue;
-                }
-                let Ok((realm, _binding_id, auth_binding)) =
-                    Self::resolve_image_binding_for_provider(
-                        config,
-                        image_provider,
-                        build_config.realm_id.as_ref(),
-                    )
-                else {
-                    continue;
-                };
-                #[allow(unused_mut)]
-                let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    if let Some(persistence) = self
-                        .resolution_provider_auth_persistence()
-                        .map_err(BuildAgentError::LlmClient)?
-                    {
-                        env = env.with_provider_auth_persistence(persistence);
-                    }
-                }
-                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
-                    && !auth_binding.is_env_default()
-                {
-                    env = env.with_auth_lease_handle(bindings.auth_lease().clone());
-                }
-                for (handle, resolver) in &self.external_auth_resolvers {
-                    env = env.with_external_resolver(handle.clone(), resolver.clone());
-                }
-                let Ok(connection) = self
-                    .provider_registry
-                    .resolve(&realm, &auth_binding, &env)
-                    .await
-                else {
-                    continue;
-                };
-                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
-                    && !auth_binding.is_env_default()
-                {
-                    Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
-                        .map_err(BuildAgentError::LlmClient)?;
-                }
-                let Ok(Some(executor)) = self
-                    .provider_registry
-                    .build_image_generation_executor(connection)
-                else {
-                    continue;
-                };
-                executors.insert(key, executor);
-            }
-            auto_image_generation_executor = match executors.len() {
-                0 => None,
-                _ => Some(Arc::new(RoutingImageGenerationExecutor::new(executors))
-                    as Arc<dyn meerkat_llm_core::ImageGenerationExecutor>),
-            };
-        }
+        let auto_image_generation_executor =
+            resolved_llm_client_phase.auto_image_generation_executor;
 
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
@@ -6483,6 +6207,327 @@ impl AgentFactory {
         }
 
         Ok(agent)
+    }
+
+    /// build_agent phase 3: create the LLM client and the automatic
+    /// image-generation executors.
+    ///
+    /// Extracted from `build_agent` so this branch-heavy region's locals
+    /// live in their own opt-level=0 poll frame instead of widening
+    /// `build_agent`'s (a debug build reserves a stack slot for every local
+    /// in every branch of a function; see the 2 MiB worker-stack budget
+    /// regression
+    /// `tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget`).
+    async fn resolve_llm_client_phase(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        provider: Provider,
+        self_hosted_server_id: &Option<String>,
+        build_config: &mut AgentBuildConfig,
+    ) -> Result<ResolvedLlmClientPhase, BuildAgentError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut auto_image_generation_executor: Option<
+            Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
+        > = None;
+        let llm_client: Option<Arc<dyn LlmClient>> = if build_config
+            .agent_llm_client_override
+            .is_some()
+        {
+            None
+        } else {
+            Some(match build_config.llm_client_override.as_ref() {
+                Some(client) => Arc::clone(client),
+                None if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") => {
+                    // Test shim: when RKAT_TEST_CLIENT=1 is set by integration
+                    // tests, short-circuit to an in-process TestClient so tests
+                    // don't need real provider credentials.
+                    Arc::new(meerkat_client::TestClient::for_provider(provider))
+                }
+                None => {
+                    if matches!(provider, Provider::SelfHosted) {
+                        let auth_lease_handle = if let RuntimeBuildMode::SessionOwned(bindings) =
+                            &build_config.runtime_build_mode
+                        {
+                            Some(bindings.auth_lease().clone())
+                        } else {
+                            None
+                        };
+                        let resolved = self
+                            .build_self_hosted_client_for_identity(
+                                config,
+                                registry,
+                                &SessionLlmIdentity {
+                                    model: build_config.model.clone(),
+                                    provider,
+                                    self_hosted_server_id: self_hosted_server_id.clone(),
+                                    provider_params: build_config.provider_params.clone(),
+                                    auth_binding: build_config.auth_binding.clone(),
+                                },
+                                auth_lease_handle,
+                                build_config.realm_id.as_ref(),
+                            )
+                            .await
+                            .map_err(BuildAgentError::LlmClient)?;
+                        build_config.auth_binding = resolved.durable_auth_binding;
+                        resolved.client
+                    } else {
+                        // Provider-runtime registry needs the OAuth-backed
+                        // TokenStore attached so persisted tokens (written by
+                        // `rkat auth login`, server-side OAuth completion, etc.)
+                        // are read during resolve_binding.
+                        #[allow(unused_mut)]
+                        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if let Some(persistence) = self
+                                .resolution_provider_auth_persistence()
+                                .map_err(BuildAgentError::LlmClient)?
+                            {
+                                env = env.with_provider_auth_persistence(persistence);
+                            }
+                        }
+                        for (handle, resolver) in &self.external_auth_resolvers {
+                            env = env.with_external_resolver(handle.clone(), resolver.clone());
+                        }
+                        let explicit_auth_binding = build_config.auth_binding.is_some();
+                        let provider_registry = Arc::clone(&self.provider_registry);
+                        let mut first_resolution_error: Option<
+                            meerkat_llm_core::provider_runtime::ProviderAuthError,
+                        > = None;
+                        let mut resolved = None;
+                        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+                            config,
+                            provider,
+                            build_config.auth_binding.as_ref(),
+                            build_config.realm_id.as_ref(),
+                        )
+                        .map_err(|e| {
+                            BuildAgentError::LlmClient(FactoryError::ConnectionTarget(e))
+                        })?;
+                        for target in candidates {
+                            let resolved_auth_binding = target.auth_binding.clone();
+                            let lease_auth_binding = if resolved_auth_binding.is_env_default()
+                                && !explicit_auth_binding
+                            {
+                                None
+                            } else {
+                                Some(resolved_auth_binding.clone())
+                            };
+                            let mut candidate_env = env.clone();
+                            if let RuntimeBuildMode::SessionOwned(bindings) =
+                                &build_config.runtime_build_mode
+                                && lease_auth_binding.is_some()
+                            {
+                                candidate_env = candidate_env
+                                    .with_auth_lease_handle(bindings.auth_lease().clone());
+                            }
+                            match provider_registry
+                                .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
+                                .await
+                            {
+                                Ok(connection) => {
+                                    if connection.provider != provider {
+                                        return Err(BuildAgentError::LlmClient(
+                                            FactoryError::ProviderAuth(
+                                                meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
+                                                    expected: provider,
+                                                    resolved: connection.provider,
+                                                },
+                                            ),
+                                        ));
+                                    }
+                                    // `build_config.model` is already the
+                                    // canonical surface resolution. Binding
+                                    // selection owns credentials only; it must
+                                    // not silently replace that final model
+                                    // merely because the original caller
+                                    // omitted an explicit model hint.
+                                    let resolved_model = build_config.model.clone();
+                                    resolved = Some((
+                                        connection,
+                                        resolved_auth_binding,
+                                        lease_auth_binding,
+                                        resolved_model,
+                                    ));
+                                    break;
+                                }
+                                Err(err) => {
+                                    first_resolution_error.get_or_insert(err);
+                                    if explicit_auth_binding {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
+                            resolved.ok_or_else(|| {
+                                BuildAgentError::LlmClient(FactoryError::ProviderAuth(
+                                    first_resolution_error.unwrap_or_else(|| {
+                                        meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                                            format!(
+                                                "no auth binding candidates resolved for provider '{}'",
+                                                provider.as_str()
+                                            ),
+                                        )
+                                    }),
+                                ))
+                            })?;
+                        if resolved_model.is_empty() {
+                            return Err(BuildAgentError::Config(format!(
+                                "auth binding realm '{}' binding '{}' has an empty default_model",
+                                resolved_auth_binding.realm, resolved_auth_binding.binding,
+                            )));
+                        }
+                        if let Some(reason) =
+                            registry.provider_override_mismatch_reason(provider, &resolved_model)
+                        {
+                            return Err(BuildAgentError::Config(reason));
+                        }
+                        build_config.model = resolved_model;
+
+                        // Publish immediately after resolve. Provider resolution can refresh and
+                        // persist OAuth token bytes; AuthMachine must observe the returned lease
+                        // before any later build step can fail.
+                        if let RuntimeBuildMode::SessionOwned(bindings) =
+                            &build_config.runtime_build_mode
+                            && let Some(lease_auth_binding) = lease_auth_binding.as_ref()
+                        {
+                            Self::publish_auth_lease(
+                                bindings.auth_lease(),
+                                lease_auth_binding,
+                                &connection,
+                            )
+                            .map_err(BuildAgentError::LlmClient)?;
+                        }
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            auto_image_generation_executor = provider_registry
+                                .build_image_generation_executor(connection.clone())
+                                .map_err(|e| {
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                                })?;
+                        }
+
+                        if lease_auth_binding.is_some() {
+                            build_config.auth_binding = Some(resolved_auth_binding);
+                        } else {
+                            build_config.auth_binding = None;
+                        }
+
+                        // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
+                        // cannot go through the Responses API — POST /v1/responses
+                        // returns 404 model_not_found. Route those through the
+                        // OpenAI Realtime WebSocket via `OpenAiRealtimeTextAdapter`.
+                        // Capability-driven routing owns this decision at the
+                        // composition seam (dogma §9).
+                        let realtime_route = matches!(provider, Provider::OpenAI)
+                            && is_openai_realtime_capable(&build_config.model);
+                        #[cfg(not(feature = "openai-realtime"))]
+                        if realtime_route {
+                            return Err(BuildAgentError::LlmClient(FactoryError::ClientBuild(
+                                meerkat_llm_core::provider_runtime::ProviderClientError::MissingFeature(
+                                    "openai-realtime",
+                                ),
+                            )));
+                        }
+                        #[cfg(feature = "openai-realtime")]
+                        if realtime_route {
+                            provider_registry
+                                .build_realtime_text_client(connection)
+                                .map_err(|e| {
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                                })?
+                        } else {
+                            provider_registry.build_client(connection).map_err(|e| {
+                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                            })?
+                        }
+                        #[cfg(not(feature = "openai-realtime"))]
+                        {
+                            provider_registry.build_client(connection).map_err(|e| {
+                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                            })?
+                        }
+                    }
+                }
+            })
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if build_config.image_generation_executor_override.is_none() {
+            let mut executors: BTreeMap<
+                String,
+                Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
+            > = BTreeMap::new();
+            if let Some(executor) = auto_image_generation_executor.take() {
+                executors.insert(provider_key(provider).to_string(), executor);
+            }
+            for image_provider in [Provider::OpenAI, Provider::Gemini] {
+                let key = provider_key(image_provider).to_string();
+                if executors.contains_key(&key) {
+                    continue;
+                }
+                let Ok((realm, _binding_id, auth_binding)) =
+                    Self::resolve_image_binding_for_provider(
+                        config,
+                        image_provider,
+                        build_config.realm_id.as_ref(),
+                    )
+                else {
+                    continue;
+                };
+                #[allow(unused_mut)]
+                let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(persistence) = self
+                        .resolution_provider_auth_persistence()
+                        .map_err(BuildAgentError::LlmClient)?
+                    {
+                        env = env.with_provider_auth_persistence(persistence);
+                    }
+                }
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
+                    && !auth_binding.is_env_default()
+                {
+                    env = env.with_auth_lease_handle(bindings.auth_lease().clone());
+                }
+                for (handle, resolver) in &self.external_auth_resolvers {
+                    env = env.with_external_resolver(handle.clone(), resolver.clone());
+                }
+                let Ok(connection) = self
+                    .provider_registry
+                    .resolve(&realm, &auth_binding, &env)
+                    .await
+                else {
+                    continue;
+                };
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
+                    && !auth_binding.is_env_default()
+                {
+                    Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
+                        .map_err(BuildAgentError::LlmClient)?;
+                }
+                let Ok(Some(executor)) = self
+                    .provider_registry
+                    .build_image_generation_executor(connection)
+                else {
+                    continue;
+                };
+                executors.insert(key, executor);
+            }
+            auto_image_generation_executor = match executors.len() {
+                0 => None,
+                _ => Some(Arc::new(RoutingImageGenerationExecutor::new(executors))
+                    as Arc<dyn meerkat_llm_core::ImageGenerationExecutor>),
+            };
+        }
+        Ok(ResolvedLlmClientPhase {
+            llm_client,
+            #[cfg(not(target_arch = "wasm32"))]
+            auto_image_generation_executor,
+        })
     }
 }
 

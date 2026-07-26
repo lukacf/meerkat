@@ -102,16 +102,23 @@ fn mob_create_with_owner_bridge_boxed(
     definition: MobDefinition,
     owner_bridge_session_id: SessionId,
 ) -> MobCreateFuture {
-    Box::pin(async move {
-        state
-            .mob_create_definition_with_owner_bridge_session(
-                definition,
-                owner_bridge_session_id,
-                true,
-                false,
-            )
-            .await
-    })
+    // Mob creation (definition validation, store bootstrap, actor start)
+    // is reached from inside the calling agent's tool-dispatch poll; its
+    // opt-level=0 poll frames are large, so run it on its own task instead
+    // of stacking those frames onto the caller's run-loop chain (2 MiB
+    // production worker-stack budget).
+    Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
+        move || async move {
+            state
+                .mob_create_definition_with_owner_bridge_session(
+                    definition,
+                    owner_bridge_session_id,
+                    true,
+                    false,
+                )
+                .await
+        },
+    ))
 }
 
 // ─── ResolvedSpawnTooling ────────────────────────────────────────────────
@@ -204,9 +211,22 @@ impl AgentMobToolSurface {
     /// exactly like the RPC/REST/MCP handlers). The agent-lane `ensure_*`
     /// gates on the machine-composed authority context stay, additive.
     async fn bound_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
-        Ok(self.state.handle_for(mob_id).await?.with_command_authority(
-            meerkat_mob::CommandAuthority::principal(self.control_principal.clone()),
-        ))
+        // Handle resolution (store restore + runtime rebind in
+        // `MobMcpState::ensure_restored`) is reached from inside the calling
+        // agent's tool-dispatch poll; run it on its own task so its
+        // opt-level=0 poll frames do not stack onto the caller's run-loop
+        // chain (2 MiB production worker-stack budget).
+        let state = Arc::clone(&self.state);
+        let mob_id = mob_id.clone();
+        let handle = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            state.handle_for(&mob_id).await
+        })
+        .await?;
+        Ok(
+            handle.with_command_authority(meerkat_mob::CommandAuthority::principal(
+                self.control_principal.clone(),
+            )),
+        )
     }
 
     fn trusted_descriptor_from_runtime(
@@ -1350,12 +1370,20 @@ impl AgentMobToolSurface {
         handle: &'a MobHandle,
         spec: SpawnMemberSpec,
     ) -> AgentOperationFuture<'a, Result<meerkat_mob::SpawnResult, MobError>> {
-        Box::pin(
-            handle.spawn_spec_with_generated_owner_context(
-                spec,
-                self.owner_bridge_session_id.clone(),
-            ),
-        )
+        // Member spawn (owner-binding preparation + the machine spawn
+        // command) is reached from inside the calling agent's tool-dispatch
+        // poll; run it on its own task so its opt-level=0 poll frames do not
+        // stack onto the caller's run-loop chain (2 MiB production
+        // worker-stack budget).
+        let handle = handle.clone();
+        let owner_bridge_session_id = self.owner_bridge_session_id.clone();
+        Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
+            move || async move {
+                handle
+                    .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
+                    .await
+            },
+        ))
     }
 
     async fn dispatch_conclude_objective(

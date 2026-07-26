@@ -1267,6 +1267,19 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    /// Delegate rather than inherit the composed default, so the wrapper keeps
+    /// the inner service's archived-vs-absent distinction.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::ResumeSessionLoad, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_session_for_resume(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn session_known_to_archive_authority(
         &self,
         session_id: &SessionId,

@@ -452,6 +452,7 @@ mod tests {
                 self.allow_finish.notified().await;
                 self.apply_finished.notify_waiters();
                 Ok(CoreApplyOutput {
+                    session: None,
                     receipt: RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,
@@ -609,6 +610,7 @@ mod tests {
                 self.apply_started.notify_waiters();
                 self.allow_finish.notified().await;
                 Ok(CoreApplyOutput {
+                    session: None,
                     receipt: RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,

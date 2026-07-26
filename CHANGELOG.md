@@ -13,6 +13,78 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_mob::MobSessionService` gains `load_session_for_resume` returning
+  the new `ResumeSessionLoad` enum; `RuntimeProjectionRollbackDisposition` /
+  `ResolveRuntimeProjectionRollback` are replaced by
+  `RuntimeProjectionConflictDisposition` / `ResolveRuntimeProjectionConflict`
+  (and `RebuildToAuthority` no longer exists);
+  `SessionCheckpointProvenance` gains `RecoveredRunBoundaryCommit` and
+  `RecoveredInterruptedBoundary` (older binaries cannot deserialize sessions
+  stamped with them); `CoreApplyOutput` gains a `session` field;
+  `commit_runtime_loop_run` takes the typed session witness;
+  `ResolveRuntimeSnapshotReadSource` input/effect shapes changed.
+
+### Fixed
+
+- **Head-canonical cold resume no longer serves a stale runtime snapshot in
+  place of the committed durable head** (advisory
+  `ADVISORY-0.8.6-head-canonical-resume.md`, form 1) and **archived sessions
+  are no longer reported as missing** (form 2). Cold reads drive a typed,
+  machine-owned read-source table; a durable tail whose boundary commit lost
+  a shutdown race is RECOVERED through a machine-authorized pipeline
+  (classification → authorization → one atomic `atomic_apply` of recovered
+  snapshot + receipt + input terminalization) under new recovered-boundary
+  provenances anchored to the last committed authority. The recovery rule:
+  every verified durable descendant is preserved — committed as completed,
+  closed as interrupted (synthetic `outcome_unknown` tool results, typed
+  recovery notice, input terminalized not requeued), or held intact. Nothing
+  rolls back; `RebuildToAuthority` is deleted, with
+  `ConvergeSupersededProjection` covering the abort-replay projection case
+  its wedge invariant proves safe. Exactly-once holds across recovery: the
+  commit terminalizes the consumed input so the delivery layer does not
+  re-run a recovered turn.
+- **P0: process-global verification memos no longer bless bytes nobody
+  validated.** The transcript-graph decode memo stores the proven graph
+  object (a hit substitutes proven content) with `digest_format` and
+  per-body `created_at` pinned into its key; the global stamp-verification
+  cache is replaced by a per-`Session` seal cleared by every content
+  mutation, including the three that do not bump `updated_at`.
+- Slim head-canonical projections whose carried transcript-history witness
+  exactly matches the previous graph's derived witness no longer read as
+  "would erase retained transcript history state" (both erase sites).
+- Conversation digests unified on the canonical `sha256:<hex>` accumulator
+  format across every producer and validator (the mob ephemeral producer and
+  the machine-terminal validation still minted/expected bare hex — failing
+  every completed-run commit on those paths).
+- `cargo check -p meerkat-core --no-default-features` compiles again
+  (ungated `JsonSchema` derive demanded a feature-gated impl; fixed with a
+  schema-invariant `cfg_attr` skip).
+- Debug-build stack overflow at 2 MiB worker stacks: the agent loop's
+  1700-line polling arm is split per-phase (813K → 170K frame), child-agent
+  construction runs on a fresh task via the new
+  `meerkat_runtime::stack_relief` (never nested in a parent's poll stack),
+  and the mob stack-budget gate is un-ignored at 2 MiB / opt-level 0
+  (measured high-water 1.9–2.0 MiB before, ≤1.125 MiB after; budget and
+  opt-level untouched).
+
+### Changed
+
+- The turn-latency gate asserts BYTES hashed per turn on both fixtures with
+  a calibrated small-side band; wall-clock and CPU are diagnostics. A
+  deliberately inflated baseline that turned the old CPU-ratio gate green is
+  refused with absolute numbers.
+- Large-fixture turn cost 479 → 435 MB hashed per turn (sealed
+  transcript-history threading; the 8 per-turn document decodes reuse the
+  sealed parse; transcript-history extracted from `session.rs` into
+  `session/transcript_history/`). Not flat yet — remaining drivers are fully
+  attributed (history witness 109 MB/turn with a format-v3 design under
+  review; restore-seam revalidation 47; compaction-path revalidations ~59;
+  per-decode graph validation 55, proven not memoizable; checkpoint
+  canonical passes 36). Note the large fixture runs a compaction rewrite
+  every measured turn; real sessions pay that share at compaction cadence.
+
 ### Added
 
 - **`claude-opus-5`**: Claude Opus 5 joins the curated Anthropic catalog

@@ -16,13 +16,13 @@ The canonical registry is `canonical_machine_schemas()` in
 
 | Machine | Production owner | Scope |
 | --- | --- | --- |
-| `MeerkatMachine` | `meerkat-runtime` | Session runtime lifecycle, input admission, turn execution, tool visibility, comms drain, peer interaction. |
+| `MeerkatMachine` | `meerkat-runtime` | Session runtime lifecycle, input admission, turn execution, tool visibility, comms drain, peer interaction, durable-tail recovery authorization. |
 | `MobMachine` | `meerkat-mob` | Mob lifecycle, roster, member runtime bindings, wiring, flows, tasks, and supervisor handoffs. |
 | `AuthMachine` | `meerkat-runtime` auth handles | Per-binding auth lease and OAuth flow lifecycle. |
 | `ApprovalLifecycleMachine` | `meerkat-core` | Approval request and decision lifecycle and gating. |
 | `DetachedJobMachine` | `meerkat-jobs` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
 | `RuntimeDeliveryMachine` | `meerkat-runtime` | Stable durable-inbox identity, monotonic delivery/feed sequence assignment, exact replay, and ordered application cursor. |
-| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, pending-continuation lifecycle, and the session lifecycle terminal fact for all profiles. |
+| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, pending-continuation lifecycle, the session lifecycle terminal fact for all profiles, cold-read source disposition, and durable-tail recovery classification. |
 | `SessionTurnAdmissionMachine` | `meerkat-session` | Per-turn input admission and classification lifecycle. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule` | Claimed occurrence delivery and terminal outcomes. |
@@ -66,6 +66,62 @@ durability is a runtime-metadata record (`MobOperatorGrantRecord`) written
 only under `GrantRecorded`/`GrantRevoked` transition witnesses and replayed
 on resume through the machine's own `GrantOperatorScopes` input — never a
 second enforcement source.
+
+## Durable-Tail Recovery Ownership
+
+A session's canonical store can hold a durable transcript row that is ahead of
+the committed runtime authority: the intra-turn checkpointer writes to the
+canonical store outside the boundary transaction, so a shutdown race can leave
+a durable tail — up to and including a fully completed turn — whose boundary
+commit never landed. Durable is not the same as runtime-committed, and the
+recovery of that tail is machine-owned end to end. Ownership splits three
+ways:
+
+- **`SessionDocumentMachine` classifies and retains.**
+  `ResolveRuntimeSnapshotReadSource` decides what a reader may be served
+  (`UseRuntimeSnapshot`, `UseCommittedStoreHead`, `RecoveryRequired`,
+  `Quarantine`); a recovery candidate is never returned as an ordinary
+  session. `ClassifyDurableTail` consumes the mechanically extracted tail
+  shape (head relation, run-id cardinality, terminal stop reason,
+  dangling/orphan tool counts) and emits `DurableTailClassified` with a
+  `DurableTailRecoveryClass`: `CompletedCandidate`,
+  `InterruptedRepairableCandidate`, or `Ambiguous`. The classification
+  transitions are total and disjoint over the observation. The
+  `RecoveryCandidateId` binds the exact evidence (session, authority stamp,
+  store-head digest, CAS token, observed run identity), so classifying one
+  head can never authorize mutating a later head.
+- **`MeerkatMachine` authorizes.** `AuthorizeDurableTailRecovery` consumes the
+  exact classified candidate and compares its run identity against the
+  machine's own run facts. It emits `DurableTailRecoveryAuthorized` with a
+  `DurableTailRecoveryDisposition`: `CommitCompleted`,
+  `RepairAndCommitInterrupted`, `HoldIntact`, or `RefuseRecovery`. Recovery is
+  admissible only from a quiescent phase (`Idle` or `Retired`) with no current
+  run and no recorded terminal for the candidate's run; every other phase, and
+  any conflicting run fact, refuses. All decision transitions are self-loops —
+  authorization never mutates lifecycle or run state.
+- **`RuntimeStore` realizes.** Only the authorizing effect may drive the
+  recovery commit, and it lands through `RuntimeStore::atomic_apply` as one
+  boundary: recovered session snapshot, boundary receipt, input lifecycle
+  transitions, terminal outcome, and outbox rows commit together. No shell
+  promotes or discards the tail.
+
+The recovery rule is never-discard: every verified durable descendant is
+preserved. Recovery commits a completed tail as a recovered run boundary,
+closes an interrupted tail as interrupted (content preserved, provider-invalid
+structure repaired with synthetic interrupted tool results and a typed
+recovery notice, the original run terminalized — never requeued), or holds
+ambiguous evidence intact with autonomous execution blocked. The
+`SessionDocumentMachine` conflict input `ResolveRuntimeProjectionConflict`
+resolves a verified strict descendant to `RetainForRecovery`; the former
+`RebuildToAuthority` disposition, which authorized shrinking an ahead row, no
+longer exists.
+
+Recovered commits carry their own checkpoint provenances,
+`RecoveredRunBoundaryCommit` (completed tail) and
+`RecoveredInterruptedBoundary` (interrupted tail), defined in
+`meerkat-core/src/checkpoint.rs`. Both are typed successors anchored to the
+last committed runtime snapshot — never to the intra-turn projection, which
+remains forbidden as an authority base.
 
 ## Canonical Compositions
 

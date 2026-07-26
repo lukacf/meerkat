@@ -48,10 +48,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, self_hosted_server_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
-- `ResolveRuntimeProjectionRollback`(session_id: SessionId, row_continues_authority: Bool, row_is_runtime_checkpoint: Bool)
+- `ResolveRuntimeProjectionConflict`(session_id: SessionId, relation: DurableHeadRelation, authority_supersedes_row: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
 - `ResolveLegacyCheckpointMigration`(session_id: SessionId, runtime_snapshot_present: Bool, runtime_snapshot_legacy: Bool, store_row_present: Bool, store_row_legacy: Bool, transcript_relation: LegacyCheckpointTranscriptRelation)
-- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, store_head_extends_snapshot: Bool, store_head_is_runtime_checkpoint: Bool, session_is_live: Bool)
+- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, relation: DurableHeadRelation, store_provenance: CheckpointProvenanceClass, session_is_live: Bool)
+- `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -89,10 +90,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
-- `RuntimeProjectionRollbackResolved`(disposition: RuntimeProjectionRollbackDisposition)
+- `RuntimeProjectionConflictResolved`(disposition: RuntimeProjectionConflictDisposition)
 - `RuntimeCheckpointProjectionResolved`(disposition: RuntimeCheckpointProjectionDisposition)
 - `LegacyCheckpointMigrationResolved`(disposition: LegacyCheckpointMigrationDisposition)
-- `RuntimeSnapshotReadSourceResolved`(read_from_store_head: Bool)
+- `RuntimeSnapshotReadSourceResolved`(disposition: RuntimeSnapshotReadDisposition)
+- `DurableTailClassified`(candidate_id: RecoveryCandidateId, class: DurableTailRecoveryClass)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
 - `SessionLifecycleTerminalRecovered`
@@ -881,9 +883,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionStoreRecoverySourceResolved`
 - To: `Ready`
 
-### `ResolveRuntimeSnapshotReadSourceStoreHead`
+### `ResolveRuntimeSnapshotReadSourceCommittedHead`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- Guards:
+  - ``
+- Emits: `RuntimeSnapshotReadSourceResolved`
+- To: `Ready`
+
+### `ResolveRuntimeSnapshotReadSourceRecoveryRequired`
+- From: `Ready`
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- Guards:
+  - ``
+- Emits: `RuntimeSnapshotReadSourceResolved`
+- To: `Ready`
+
+### `ResolveRuntimeSnapshotReadSourceQuarantine`
+- From: `Ready`
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
@@ -891,26 +909,58 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeSnapshotReadSourceSnapshot`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
 - To: `Ready`
 
-### `ResolveRuntimeProjectionRollbackRebuild`
+### `ClassifyDurableTailCompleted`
 - From: `Ready`
-- On: `ResolveRuntimeProjectionRollback`(session_id, row_continues_authority, row_is_runtime_checkpoint)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
 - Guards:
   - ``
-- Emits: `RuntimeProjectionRollbackResolved`
+- Emits: `DurableTailClassified`
 - To: `Ready`
 
-### `ResolveRuntimeProjectionRollbackReject`
+### `ClassifyDurableTailRepairable`
 - From: `Ready`
-- On: `ResolveRuntimeProjectionRollback`(session_id, row_continues_authority, row_is_runtime_checkpoint)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
 - Guards:
   - ``
-- Emits: `RuntimeProjectionRollbackResolved`
+- Emits: `DurableTailClassified`
+- To: `Ready`
+
+### `ClassifyDurableTailAmbiguous`
+- From: `Ready`
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
+- Guards:
+  - ``
+- Emits: `DurableTailClassified`
+- To: `Ready`
+
+### `ResolveRuntimeProjectionConflictRetain`
+- From: `Ready`
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- Guards:
+  - ``
+- Emits: `RuntimeProjectionConflictResolved`
+- To: `Ready`
+
+### `ResolveRuntimeProjectionConflictConverge`
+- From: `Ready`
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- Guards:
+  - ``
+- Emits: `RuntimeProjectionConflictResolved`
+- To: `Ready`
+
+### `ResolveRuntimeProjectionConflictReject`
+- From: `Ready`
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- Guards:
+  - ``
+- Emits: `RuntimeProjectionConflictResolved`
 - To: `Ready`
 
 ### `ResolveRuntimeCheckpointProjectionActive`

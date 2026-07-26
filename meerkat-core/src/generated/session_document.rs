@@ -211,10 +211,63 @@ pub enum LiveSessionAuthorityReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeProjectionRollbackDisposition {
+pub enum CheckpointProvenanceClass {
+    #[default]
+    Unstamped,
+    Committed,
+    IntraTurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeSnapshotReadDisposition {
+    #[default]
+    UseRuntimeSnapshot,
+    UseCommittedStoreHead,
+    RecoveryRequired,
+    Quarantine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RunIdCardinality {
+    #[default]
+    NoRunId,
+    SingleRunId,
+    MultipleRunIds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailStopReason {
+    #[default]
+    Absent,
+    EndTurn,
+    ToolUse,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRecoveryClass {
+    CompletedCandidate,
+    InterruptedRepairableCandidate,
+    #[default]
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableHeadRelation {
+    #[default]
+    AbsentOrExact,
+    RuntimeSnapshotAhead,
+    VerifiedStrictDescendant,
+    Diverged,
+    Unverifiable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeProjectionConflictDisposition {
     #[default]
     RejectDivergent,
-    RebuildToAuthority,
+    ConvergeSupersededProjection,
+    RetainForRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -470,10 +523,10 @@ pub enum SessionDocumentInput {
         has_build_state: bool,
         runtime_projection_quarantined: bool,
     },
-    ResolveRuntimeProjectionRollback {
+    ResolveRuntimeProjectionConflict {
         session_id: SessionDocumentKey,
-        row_continues_authority: bool,
-        row_is_runtime_checkpoint: bool,
+        relation: DurableHeadRelation,
+        authority_supersedes_row: bool,
     },
     ResolveRuntimeCheckpointProjection {
         session_id: SessionDocumentKey,
@@ -488,9 +541,19 @@ pub enum SessionDocumentInput {
     },
     ResolveRuntimeSnapshotReadSource {
         session_id: SessionDocumentKey,
-        store_head_extends_snapshot: bool,
-        store_head_is_runtime_checkpoint: bool,
+        relation: DurableHeadRelation,
+        store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
+    },
+    ClassifyDurableTail {
+        session_id: SessionDocumentKey,
+        candidate_id: String,
+        relation: DurableHeadRelation,
+        run_id_cardinality: RunIdCardinality,
+        terminal_stop_reason: DurableTailStopReason,
+        dangling_tool_use_count: u64,
+        orphan_tool_result_count: u64,
+        messages_after_terminal: bool,
     },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
@@ -610,8 +673,8 @@ pub enum SessionDocumentEffect {
     SessionStoreRecoverySourceResolved {
         recoverable: bool,
     },
-    RuntimeProjectionRollbackResolved {
-        disposition: RuntimeProjectionRollbackDisposition,
+    RuntimeProjectionConflictResolved {
+        disposition: RuntimeProjectionConflictDisposition,
     },
     RuntimeCheckpointProjectionResolved {
         disposition: RuntimeCheckpointProjectionDisposition,
@@ -620,7 +683,11 @@ pub enum SessionDocumentEffect {
         disposition: LegacyCheckpointMigrationDisposition,
     },
     RuntimeSnapshotReadSourceResolved {
-        read_from_store_head: bool,
+        disposition: RuntimeSnapshotReadDisposition,
+    },
+    DurableTailClassified {
+        candidate_id: String,
+        class: DurableTailRecoveryClass,
     },
     SessionToolResultsApplied {
         session_id: SessionDocumentKey,
@@ -775,10 +842,16 @@ enum SessionDocumentTransition {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
-    ResolveRuntimeSnapshotReadSourceStoreHead,
+    ResolveRuntimeSnapshotReadSourceCommittedHead,
+    ResolveRuntimeSnapshotReadSourceRecoveryRequired,
+    ResolveRuntimeSnapshotReadSourceQuarantine,
     ResolveRuntimeSnapshotReadSourceSnapshot,
-    ResolveRuntimeProjectionRollbackRebuild,
-    ResolveRuntimeProjectionRollbackReject,
+    ClassifyDurableTailCompleted,
+    ClassifyDurableTailRepairable,
+    ClassifyDurableTailAmbiguous,
+    ResolveRuntimeProjectionConflictRetain,
+    ResolveRuntimeProjectionConflictConverge,
+    ResolveRuntimeProjectionConflictReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
     ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,
@@ -3227,46 +3300,59 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::ResolveRuntimeProjectionRollback {
+            SessionDocumentInput::ResolveRuntimeProjectionConflict {
                 session_id,
-                row_continues_authority,
-                row_is_runtime_checkpoint,
+                relation,
+                authority_supersedes_row,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((row_continues_authority == true) && (row_is_runtime_checkpoint == true))
+                    && (relation == DurableHeadRelation::VerifiedStrictDescendant)
                 {
-                    matches
-                        .push(SessionDocumentTransition::ResolveRuntimeProjectionRollbackRebuild);
+                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionConflictRetain);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((row_continues_authority == false) || (row_is_runtime_checkpoint == false))
+                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                        && (authority_supersedes_row == true))
                 {
-                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionRollbackReject);
+                    matches
+                        .push(SessionDocumentTransition::ResolveRuntimeProjectionConflictConverge);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                        && (authority_supersedes_row == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionConflictReject);
                 }
                 let transition =
-                    Self::single_transition(matches, "ResolveRuntimeProjectionRollback")?;
+                    Self::single_transition(matches, "ResolveRuntimeProjectionConflict")?;
                 match transition {
-                    SessionDocumentTransition::ResolveRuntimeProjectionRollbackRebuild => {
+                    SessionDocumentTransition::ResolveRuntimeProjectionConflictRetain => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeProjectionRollbackResolved {
+                            SessionDocumentEffect::RuntimeProjectionConflictResolved {
                                 disposition:
-                                    RuntimeProjectionRollbackDisposition::RebuildToAuthority,
+                                    RuntimeProjectionConflictDisposition::RetainForRecovery,
                             },
                         ])
                     }
-                    SessionDocumentTransition::ResolveRuntimeProjectionRollbackReject => {
+                    SessionDocumentTransition::ResolveRuntimeProjectionConflictConverge => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeProjectionRollbackResolved {
-                                disposition: RuntimeProjectionRollbackDisposition::RejectDivergent,
+                            SessionDocumentEffect::RuntimeProjectionConflictResolved { disposition: RuntimeProjectionConflictDisposition::ConvergeSupersededProjection, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeProjectionConflictReject => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeProjectionConflictResolved {
+                                disposition: RuntimeProjectionConflictDisposition::RejectDivergent,
                             },
                         ])
                     }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
-                        op: "ResolveRuntimeProjectionRollback_transition",
+                        op: "ResolveRuntimeProjectionConflict_transition",
                     }),
                 }
             }
@@ -3515,23 +3601,44 @@ impl SessionDocumentMachineAuthority {
             }
             SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
                 session_id,
-                store_head_extends_snapshot,
-                store_head_is_runtime_checkpoint,
+                relation,
+                store_provenance,
                 session_is_live,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((store_head_extends_snapshot == true)
-                        && (store_head_is_runtime_checkpoint == false)
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (store_provenance == CheckpointProvenanceClass::Committed)
                         && (session_is_live == false))
                 {
-                    matches
-                        .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceStoreHead);
+                    matches.push(
+                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead,
+                    );
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((store_head_extends_snapshot == false)
-                        || (store_head_is_runtime_checkpoint == true)
-                        || (session_is_live == true))
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (store_provenance != CheckpointProvenanceClass::Committed)
+                        && (session_is_live == false))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((relation == DurableHeadRelation::Diverged)
+                        && (store_provenance != CheckpointProvenanceClass::IntraTurn))
+                        || (relation == DurableHeadRelation::Unverifiable))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation != DurableHeadRelation::Unverifiable)
+                        && ((relation != DurableHeadRelation::Diverged)
+                            || (store_provenance == CheckpointProvenanceClass::IntraTurn))
+                        && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                            || (session_is_live == true)))
                 {
                     matches
                         .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot);
@@ -3539,11 +3646,27 @@ impl SessionDocumentMachineAuthority {
                 let transition =
                     Self::single_transition(matches, "ResolveRuntimeSnapshotReadSource")?;
                 match transition {
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceStoreHead => {
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                read_from_store_head: true,
+                                disposition: RuntimeSnapshotReadDisposition::UseCommittedStoreHead,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
+                                disposition: RuntimeSnapshotReadDisposition::RecoveryRequired,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
+                                disposition: RuntimeSnapshotReadDisposition::Quarantine,
                             },
                         ])
                     }
@@ -3551,13 +3674,84 @@ impl SessionDocumentMachineAuthority {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                read_from_store_head: false,
+                                disposition: RuntimeSnapshotReadDisposition::UseRuntimeSnapshot,
                             },
                         ])
                     }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
                         op: "ResolveRuntimeSnapshotReadSource_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ClassifyDurableTail {
+                session_id,
+                candidate_id,
+                relation,
+                run_id_cardinality,
+                terminal_stop_reason,
+                dangling_tool_use_count,
+                orphan_tool_result_count,
+                messages_after_terminal,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (run_id_cardinality == RunIdCardinality::SingleRunId)
+                        && (terminal_stop_reason == DurableTailStopReason::EndTurn)
+                        && (dangling_tool_use_count == 0)
+                        && (orphan_tool_result_count == 0)
+                        && (messages_after_terminal == false))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyDurableTailCompleted);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (run_id_cardinality == RunIdCardinality::SingleRunId)
+                        && (orphan_tool_result_count == 0)
+                        && (messages_after_terminal == false)
+                        && ((terminal_stop_reason == DurableTailStopReason::ToolUse)
+                            || (terminal_stop_reason == DurableTailStopReason::Absent)))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyDurableTailRepairable);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                        || (run_id_cardinality != RunIdCardinality::SingleRunId)
+                        || (orphan_tool_result_count != 0)
+                        || (messages_after_terminal == true)
+                        || (terminal_stop_reason == DurableTailStopReason::Other)
+                        || ((terminal_stop_reason == DurableTailStopReason::EndTurn)
+                            && (dangling_tool_use_count != 0)))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyDurableTailAmbiguous);
+                }
+                let transition = Self::single_transition(matches, "ClassifyDurableTail")?;
+                match transition {
+                    SessionDocumentTransition::ClassifyDurableTailCompleted => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
+                            candidate_id: candidate_id,
+                            class: DurableTailRecoveryClass::CompletedCandidate,
+                        }])
+                    }
+                    SessionDocumentTransition::ClassifyDurableTailRepairable => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
+                            candidate_id: candidate_id,
+                            class: DurableTailRecoveryClass::InterruptedRepairableCandidate,
+                        }])
+                    }
+                    SessionDocumentTransition::ClassifyDurableTailAmbiguous => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
+                            candidate_id: candidate_id,
+                            class: DurableTailRecoveryClass::Ambiguous,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ClassifyDurableTail_transition",
                     }),
                 }
             }
@@ -4250,16 +4444,16 @@ impl SessionDocumentMachineAuthority {
         })
     }
 
-    pub fn resolve_runtime_projection_rollback(
+    pub fn resolve_runtime_projection_conflict(
         &mut self,
         session_id: SessionDocumentKey,
-        row_continues_authority: bool,
-        row_is_runtime_checkpoint: bool,
+        relation: DurableHeadRelation,
+        authority_supersedes_row: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveRuntimeProjectionRollback {
+        self.apply_input(SessionDocumentInput::ResolveRuntimeProjectionConflict {
             session_id,
-            row_continues_authority,
-            row_is_runtime_checkpoint,
+            relation,
+            authority_supersedes_row,
         })
     }
 
@@ -4292,15 +4486,38 @@ impl SessionDocumentMachineAuthority {
     pub fn resolve_runtime_snapshot_read_source(
         &mut self,
         session_id: SessionDocumentKey,
-        store_head_extends_snapshot: bool,
-        store_head_is_runtime_checkpoint: bool,
+        relation: DurableHeadRelation,
+        store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
             session_id,
-            store_head_extends_snapshot,
-            store_head_is_runtime_checkpoint,
+            relation,
+            store_provenance,
             session_is_live,
+        })
+    }
+
+    pub fn classify_durable_tail(
+        &mut self,
+        session_id: SessionDocumentKey,
+        candidate_id: String,
+        relation: DurableHeadRelation,
+        run_id_cardinality: RunIdCardinality,
+        terminal_stop_reason: DurableTailStopReason,
+        dangling_tool_use_count: u64,
+        orphan_tool_result_count: u64,
+        messages_after_terminal: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ClassifyDurableTail {
+            session_id,
+            candidate_id,
+            relation,
+            run_id_cardinality,
+            terminal_stop_reason,
+            dangling_tool_use_count,
+            orphan_tool_result_count,
+            messages_after_terminal,
         })
     }
 

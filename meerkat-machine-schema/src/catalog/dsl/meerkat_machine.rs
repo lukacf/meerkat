@@ -37,6 +37,36 @@ pub struct RuntimeEpochId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RunId(pub String);
 
+/// What kind of recovery a classified durable tail admits. Mirrors the
+/// SessionDocumentMachine's classification vocabulary — each machine carries
+/// its own bridging type per DSL convention; the string-enum binding keeps the
+/// wire vocabulary identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRecoveryClass {
+    CompletedCandidate,
+    InterruptedRepairableCandidate,
+    #[default]
+    Ambiguous,
+}
+
+/// The machine's recovery verdict. Nothing here ever authorizes discarding
+/// the durable tail; refusal and hold both retain it intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRecoveryDisposition {
+    /// Not admissible from the machine's current state (live run, non-quiescent
+    /// phase, or contradictory run facts). Retain; retry later.
+    #[default]
+    RefuseRecovery,
+    /// Commit the completed tail as a recovered run boundary.
+    CommitCompleted,
+    /// Repair the interrupted tail (synthetic interrupted tool results, typed
+    /// recovery notice) and commit it as a recovered interrupted boundary.
+    RepairAndCommitInterrupted,
+    /// Ambiguous evidence: hold intact, block autonomous execution, clear only
+    /// through reconciliation.
+    HoldIntact,
+}
+
 impl RunId {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -3454,6 +3484,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         input MeerkatMachineInput {
             // Direct inputs
             RegisterSession { session_id: SessionId },
+            // Durable-tail recovery authorization (spec: SessionDocumentMachine
+            // classifies, THIS machine authorizes, RuntimeStore realizes the
+            // atomic boundary). The candidate run id comes from the tail's
+            // observed run identity; the MACHINE compares it against its own
+            // recorded run facts — no shell boolean stands in for that
+            // comparison. Only the effect emitted here may drive the recovery
+            // commit through RuntimeStore::atomic_apply.
+            AuthorizeDurableTailRecovery {
+                session_id: SessionId,
+                candidate_id: String,
+                candidate_run_id: RunId,
+                class: Enum<DurableTailRecoveryClass>,
+            },
             PrepareTerminalSupervisorCleanupBindings { session_id: SessionId },
             // Two-phase unregister (D1): BeginUnregisterSession opens the
             // drain window and emits one drain-request effect per in-process
@@ -4632,6 +4675,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 boundary_sequence: u64,
             },
             TurnRunCompleted { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
+            // Recovery verdict for a classified durable tail. Total over the
+            // input domain (emitted on every branch). Only this effect may
+            // drive the recovery commit; no disposition authorizes discarding
+            // the tail.
+            DurableTailRecoveryAuthorized {
+                candidate_id: String,
+                disposition: Enum<DurableTailRecoveryDisposition>,
+            },
             // `error` is a display message projection. The terminal cause is
             // carried by `terminal_cause_kind`, not inferred from this string.
             TurnRunFailed {
@@ -5295,6 +5346,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnBoundaryApplied => local seam NoOwnerRealization,
         disposition LiveBoundaryContextReceiptResolved => local seam NoOwnerRealization,
         disposition TurnRunCompleted => local seam NoOwnerRealization,
+        disposition DurableTailRecoveryAuthorized => local seam NoOwnerRealization,
         disposition TurnRunFailed => local seam NoOwnerRealization,
         disposition TurnRunCancelled => local seam NoOwnerRealization,
         disposition TurnCheckCompaction => local seam NoOwnerRealization,
@@ -6228,6 +6280,124 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Initializing }
             update {}
             to Idle
+        }
+
+        // Durable-tail recovery authorization. Decision self-loops: no
+        // transition here mutates lifecycle or run state — the machine
+        // ANSWERS whether its current facts admit a recovery commit, and the
+        // shell realizes the commit through RuntimeStore::atomic_apply only
+        // on an authorizing disposition.
+        //
+        // Admissible only when quiescent (Idle or Retired), with no current
+        // run, and no recorded terminal for the candidate's run (a recorded
+        // terminal for that run contradicts "its boundary never landed" —
+        // atomic_apply cannot half-commit — so the evidence is contradictory
+        // and recovery refuses). Every other phase refuses. Refusal and hold
+        // both retain the durable tail intact.
+
+        transition AuthorizeDurableTailRecoveryCommit {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "completed_class" {
+                class == DurableTailRecoveryClass::CompletedCandidate
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::CommitCompleted
+            }
+        }
+
+        transition AuthorizeDurableTailRecoveryRepair {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "repairable_class" {
+                class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+            }
+        }
+
+        transition AuthorizeDurableTailRecoveryHold {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "ambiguous_class" {
+                class == DurableTailRecoveryClass::Ambiguous
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::HoldIntact
+            }
+        }
+
+        transition AuthorizeDurableTailRecoveryRefuseRunFacts {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class
+            }
+            guard "conflicting_run_facts" {
+                self.current_run_id != None
+                    || self.turn_terminal_run_id == Some(candidate_run_id)
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::RefuseRecovery
+            }
+        }
+
+        transition AuthorizeDurableTailRecoveryRefuseNonQuiescent {
+            per_phase [Initializing, Attached, Running, Stopped, Destroyed]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::RefuseRecovery
+            }
         }
 
         // 2. RegisterSession: per-phase self-loop. Binding a NEW session id

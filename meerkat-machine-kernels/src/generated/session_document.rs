@@ -27,6 +27,234 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum CheckpointProvenanceClass {
+    #[default]
+    #[serde(rename = "Unstamped")]
+    Unstamped,
+    #[serde(rename = "Committed")]
+    Committed,
+    #[serde(rename = "IntraTurn")]
+    IntraTurn,
+}
+impl CheckpointProvenanceClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unstamped => "Unstamped",
+            Self::Committed => "Committed",
+            Self::IntraTurn => "IntraTurn",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CheckpointProvenanceClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unstamped" => Ok(Self::Unstamped),
+            "Committed" => Ok(Self::Committed),
+            "IntraTurn" => Ok(Self::IntraTurn),
+            other => Err(format!("invalid CheckpointProvenanceClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CheckpointProvenanceClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CheckpointProvenanceClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DurableHeadRelation {
+    #[default]
+    #[serde(rename = "AbsentOrExact")]
+    AbsentOrExact,
+    #[serde(rename = "RuntimeSnapshotAhead")]
+    RuntimeSnapshotAhead,
+    #[serde(rename = "VerifiedStrictDescendant")]
+    VerifiedStrictDescendant,
+    #[serde(rename = "Diverged")]
+    Diverged,
+    #[serde(rename = "Unverifiable")]
+    Unverifiable,
+}
+impl DurableHeadRelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AbsentOrExact => "AbsentOrExact",
+            Self::RuntimeSnapshotAhead => "RuntimeSnapshotAhead",
+            Self::VerifiedStrictDescendant => "VerifiedStrictDescendant",
+            Self::Diverged => "Diverged",
+            Self::Unverifiable => "Unverifiable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableHeadRelation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AbsentOrExact" => Ok(Self::AbsentOrExact),
+            "RuntimeSnapshotAhead" => Ok(Self::RuntimeSnapshotAhead),
+            "VerifiedStrictDescendant" => Ok(Self::VerifiedStrictDescendant),
+            "Diverged" => Ok(Self::Diverged),
+            "Unverifiable" => Ok(Self::Unverifiable),
+            other => Err(format!("invalid DurableHeadRelation value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableHeadRelation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableHeadRelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DurableTailRecoveryClass {
+    #[default]
+    #[serde(rename = "CompletedCandidate")]
+    CompletedCandidate,
+    #[serde(rename = "InterruptedRepairableCandidate")]
+    InterruptedRepairableCandidate,
+    #[serde(rename = "Ambiguous")]
+    Ambiguous,
+}
+impl DurableTailRecoveryClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletedCandidate => "CompletedCandidate",
+            Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
+            Self::Ambiguous => "Ambiguous",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CompletedCandidate" => Ok(Self::CompletedCandidate),
+            "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
+            "Ambiguous" => Ok(Self::Ambiguous),
+            other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailRecoveryClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailRecoveryClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DurableTailStopReason {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "EndTurn")]
+    EndTurn,
+    #[serde(rename = "ToolUse")]
+    ToolUse,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl DurableTailStopReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::EndTurn => "EndTurn",
+            Self::ToolUse => "ToolUse",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailStopReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "EndTurn" => Ok(Self::EndTurn),
+            "ToolUse" => Ok(Self::ToolUse),
+            "Other" => Ok(Self::Other),
+            other => Err(format!("invalid DurableTailStopReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailStopReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailStopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LegacyCheckpointMigrationDisposition {
     #[default]
     #[serde(rename = "RefuseDivergent")]
@@ -877,6 +1105,34 @@ impl std::fmt::Display for RealtimeUserContentIdentityDisposition {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RecoveryCandidateId(pub String);
+impl From<String> for RecoveryCandidateId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RecoveryCandidateId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RecoveryCandidateId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1049,6 +1305,60 @@ impl std::fmt::Display for ResumeSelfHostedSelection {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RunIdCardinality {
+    #[default]
+    #[serde(rename = "NoRunId")]
+    NoRunId,
+    #[serde(rename = "SingleRunId")]
+    SingleRunId,
+    #[serde(rename = "MultipleRunIds")]
+    MultipleRunIds,
+}
+impl RunIdCardinality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoRunId => "NoRunId",
+            Self::SingleRunId => "SingleRunId",
+            Self::MultipleRunIds => "MultipleRunIds",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RunIdCardinality {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoRunId" => Ok(Self::NoRunId),
+            "SingleRunId" => Ok(Self::SingleRunId),
+            "MultipleRunIds" => Ok(Self::MultipleRunIds),
+            other => Err(format!("invalid RunIdCardinality value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RunIdCardinality {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RunIdCardinality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeCheckpointProjectionDisposition {
     #[default]
     #[serde(rename = "IgnoreArchived")]
@@ -1101,40 +1411,104 @@ impl std::fmt::Display for RuntimeCheckpointProjectionDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum RuntimeProjectionRollbackDisposition {
+pub enum RuntimeProjectionConflictDisposition {
     #[default]
     #[serde(rename = "RejectDivergent")]
     RejectDivergent,
-    #[serde(rename = "RebuildToAuthority")]
-    RebuildToAuthority,
+    #[serde(rename = "ConvergeSupersededProjection")]
+    ConvergeSupersededProjection,
+    #[serde(rename = "RetainForRecovery")]
+    RetainForRecovery,
 }
-impl RuntimeProjectionRollbackDisposition {
+impl RuntimeProjectionConflictDisposition {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RejectDivergent => "RejectDivergent",
-            Self::RebuildToAuthority => "RebuildToAuthority",
+            Self::ConvergeSupersededProjection => "ConvergeSupersededProjection",
+            Self::RetainForRecovery => "RetainForRecovery",
         }
     }
 }
-impl std::convert::TryFrom<&str> for RuntimeProjectionRollbackDisposition {
+impl std::convert::TryFrom<&str> for RuntimeProjectionConflictDisposition {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "RejectDivergent" => Ok(Self::RejectDivergent),
-            "RebuildToAuthority" => Ok(Self::RebuildToAuthority),
+            "ConvergeSupersededProjection" => Ok(Self::ConvergeSupersededProjection),
+            "RetainForRecovery" => Ok(Self::RetainForRecovery),
             other => Err(format!(
-                "invalid RuntimeProjectionRollbackDisposition value `{other}`"
+                "invalid RuntimeProjectionConflictDisposition value `{other}`"
             )),
         }
     }
 }
-impl std::convert::TryFrom<String> for RuntimeProjectionRollbackDisposition {
+impl std::convert::TryFrom<String> for RuntimeProjectionConflictDisposition {
     type Error = String;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::try_from(value.as_str())
     }
 }
-impl std::fmt::Display for RuntimeProjectionRollbackDisposition {
+impl std::fmt::Display for RuntimeProjectionConflictDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeSnapshotReadDisposition {
+    #[default]
+    #[serde(rename = "UseRuntimeSnapshot")]
+    UseRuntimeSnapshot,
+    #[serde(rename = "UseCommittedStoreHead")]
+    UseCommittedStoreHead,
+    #[serde(rename = "RecoveryRequired")]
+    RecoveryRequired,
+    #[serde(rename = "Quarantine")]
+    Quarantine,
+}
+impl RuntimeSnapshotReadDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UseRuntimeSnapshot => "UseRuntimeSnapshot",
+            Self::UseCommittedStoreHead => "UseCommittedStoreHead",
+            Self::RecoveryRequired => "RecoveryRequired",
+            Self::Quarantine => "Quarantine",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeSnapshotReadDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UseRuntimeSnapshot" => Ok(Self::UseRuntimeSnapshot),
+            "UseCommittedStoreHead" => Ok(Self::UseCommittedStoreHead),
+            "RecoveryRequired" => Ok(Self::RecoveryRequired),
+            "Quarantine" => Ok(Self::Quarantine),
+            other => Err(format!(
+                "invalid RuntimeSnapshotReadDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeSnapshotReadDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeSnapshotReadDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1972,10 +2346,10 @@ pub mod inputs {
         pub runtime_projection_quarantined: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveRuntimeProjectionRollback {
+    pub struct ResolveRuntimeProjectionConflict {
         pub session_id: SessionId,
-        pub row_continues_authority: bool,
-        pub row_is_runtime_checkpoint: bool,
+        pub relation: DurableHeadRelation,
+        pub authority_supersedes_row: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeCheckpointProjection {
@@ -1993,9 +2367,20 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeSnapshotReadSource {
         pub session_id: SessionId,
-        pub store_head_extends_snapshot: bool,
-        pub store_head_is_runtime_checkpoint: bool,
+        pub relation: DurableHeadRelation,
+        pub store_provenance: CheckpointProvenanceClass,
         pub session_is_live: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyDurableTail {
+        pub session_id: SessionId,
+        pub candidate_id: RecoveryCandidateId,
+        pub relation: DurableHeadRelation,
+        pub run_id_cardinality: RunIdCardinality,
+        pub terminal_stop_reason: DurableTailStopReason,
+        pub dangling_tool_use_count: u64,
+        pub orphan_tool_result_count: u64,
+        pub messages_after_terminal: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
@@ -2062,10 +2447,11 @@ pub enum Input {
     AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
-    ResolveRuntimeProjectionRollback(inputs::ResolveRuntimeProjectionRollback),
+    ResolveRuntimeProjectionConflict(inputs::ResolveRuntimeProjectionConflict),
     ResolveRuntimeCheckpointProjection(inputs::ResolveRuntimeCheckpointProjection),
     ResolveLegacyCheckpointMigration(inputs::ResolveLegacyCheckpointMigration),
     ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
+    ClassifyDurableTail(inputs::ClassifyDurableTail),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
     RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
@@ -2138,8 +2524,8 @@ impl Input {
             Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
             Self::ClassifyLiveSessionAuthority(_) => InputKind::ClassifyLiveSessionAuthority,
             Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
-            Self::ResolveRuntimeProjectionRollback(_) => {
-                InputKind::ResolveRuntimeProjectionRollback
+            Self::ResolveRuntimeProjectionConflict(_) => {
+                InputKind::ResolveRuntimeProjectionConflict
             }
             Self::ResolveRuntimeCheckpointProjection(_) => {
                 InputKind::ResolveRuntimeCheckpointProjection
@@ -2150,6 +2536,7 @@ impl Input {
             Self::ResolveRuntimeSnapshotReadSource(_) => {
                 InputKind::ResolveRuntimeSnapshotReadSource
             }
+            Self::ClassifyDurableTail(_) => InputKind::ClassifyDurableTail,
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
             Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
@@ -2195,10 +2582,11 @@ pub enum InputKind {
     AuthorizeSessionResumeOverrides,
     ClassifyLiveSessionAuthority,
     RecoverSessionFromStore,
-    ResolveRuntimeProjectionRollback,
+    ResolveRuntimeProjectionConflict,
     ResolveRuntimeCheckpointProjection,
     ResolveLegacyCheckpointMigration,
     ResolveRuntimeSnapshotReadSource,
+    ClassifyDurableTail,
     ApplyPendingToolResults,
     TranscriptEdit,
     RecoverSessionLifecycleTerminal,
@@ -2331,8 +2719,8 @@ pub mod effects {
         pub recoverable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RuntimeProjectionRollbackResolved {
-        pub disposition: RuntimeProjectionRollbackDisposition,
+    pub struct RuntimeProjectionConflictResolved {
+        pub disposition: RuntimeProjectionConflictDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeCheckpointProjectionResolved {
@@ -2344,7 +2732,12 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeSnapshotReadSourceResolved {
-        pub read_from_store_head: bool,
+        pub disposition: RuntimeSnapshotReadDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DurableTailClassified {
+        pub candidate_id: RecoveryCandidateId,
+        pub class: DurableTailRecoveryClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionToolResultsApplied {
@@ -2402,10 +2795,11 @@ pub enum Effect {
     SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
-    RuntimeProjectionRollbackResolved(effects::RuntimeProjectionRollbackResolved),
+    RuntimeProjectionConflictResolved(effects::RuntimeProjectionConflictResolved),
     RuntimeCheckpointProjectionResolved(effects::RuntimeCheckpointProjectionResolved),
     LegacyCheckpointMigrationResolved(effects::LegacyCheckpointMigrationResolved),
     RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
+    DurableTailClassified(effects::DurableTailClassified),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
     SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
@@ -2442,10 +2836,11 @@ pub enum EffectKind {
     SessionResumeOverridesRejected,
     LiveSessionAuthorityClassified,
     SessionStoreRecoverySourceResolved,
-    RuntimeProjectionRollbackResolved,
+    RuntimeProjectionConflictResolved,
     RuntimeCheckpointProjectionResolved,
     LegacyCheckpointMigrationResolved,
     RuntimeSnapshotReadSourceResolved,
+    DurableTailClassified,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
     SessionLifecycleTerminalRecovered,
@@ -2551,10 +2946,16 @@ pub enum TransitionId {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
-    ResolveRuntimeSnapshotReadSourceStoreHead,
+    ResolveRuntimeSnapshotReadSourceCommittedHead,
+    ResolveRuntimeSnapshotReadSourceRecoveryRequired,
+    ResolveRuntimeSnapshotReadSourceQuarantine,
     ResolveRuntimeSnapshotReadSourceSnapshot,
-    ResolveRuntimeProjectionRollbackRebuild,
-    ResolveRuntimeProjectionRollbackReject,
+    ClassifyDurableTailCompleted,
+    ClassifyDurableTailRepairable,
+    ClassifyDurableTailAmbiguous,
+    ResolveRuntimeProjectionConflictRetain,
+    ResolveRuntimeProjectionConflictConverge,
+    ResolveRuntimeProjectionConflictReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
     ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,

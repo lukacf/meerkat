@@ -307,16 +307,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverSessionFromStoreUnrecoverable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveRuntimeSnapshotReadSourceStoreHead`
+- `ResolveRuntimeSnapshotReadSourceCommittedHead`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeSnapshotReadSourceRecoveryRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeSnapshotReadSourceQuarantine`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveRuntimeSnapshotReadSourceSnapshot`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveRuntimeProjectionRollbackRebuild`
+- `ClassifyDurableTailCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveRuntimeProjectionRollbackReject`
+- `ClassifyDurableTailRepairable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyDurableTailAmbiguous`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeProjectionConflictRetain`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeProjectionConflictConverge`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeProjectionConflictReject`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveRuntimeCheckpointProjectionActive`
@@ -471,7 +489,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionStoreRecoverySourceResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `RuntimeProjectionRollbackResolved`
+- `RuntimeProjectionConflictResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeCheckpointProjectionResolved`
@@ -481,6 +499,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `RuntimeSnapshotReadSourceResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DurableTailClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionToolResultsApplied`

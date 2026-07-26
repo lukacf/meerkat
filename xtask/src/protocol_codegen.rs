@@ -4617,7 +4617,13 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
-        "RuntimeProjectionRollbackDisposition",
+        "CheckpointProvenanceClass",
+        "RuntimeSnapshotReadDisposition",
+        "RunIdCardinality",
+        "DurableTailStopReason",
+        "DurableTailRecoveryClass",
+        "DurableHeadRelation",
+        "RuntimeProjectionConflictDisposition",
         "RuntimeCheckpointProjectionDisposition",
         "LegacyCheckpointTranscriptRelation",
         "LegacyCheckpointMigrationDisposition",
@@ -4718,7 +4724,13 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ResumeSelfHostedSelection" => Ok("Clear"),
         "LiveSessionAuthorityKind" => Ok("LiveAuthoritative"),
         "LiveSessionAuthorityReason" => Ok("StoredArchived"),
-        "RuntimeProjectionRollbackDisposition" => Ok("RejectDivergent"),
+        "CheckpointProvenanceClass" => Ok("Unstamped"),
+        "RuntimeSnapshotReadDisposition" => Ok("UseRuntimeSnapshot"),
+        "RunIdCardinality" => Ok("NoRunId"),
+        "DurableTailStopReason" => Ok("Absent"),
+        "DurableTailRecoveryClass" => Ok("Ambiguous"),
+        "DurableHeadRelation" => Ok("AbsentOrExact"),
+        "RuntimeProjectionConflictDisposition" => Ok("RejectDivergent"),
         "RuntimeCheckpointProjectionDisposition" => Ok("IgnoreArchived"),
         "LegacyCheckpointTranscriptRelation" => Ok("Divergent"),
         "LegacyCheckpointMigrationDisposition" => Ok("RefuseDivergent"),
@@ -5161,6 +5173,9 @@ fn render_session_document_type_ref(ty: &TypeRef) -> Result<String> {
         TypeRef::Named(name) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED => {
             Ok(SESSION_DOCUMENT_KEY_TYPE.to_string())
         }
+        // Opaque string-backed identity: the DSL-level newtype documents the
+        // binding contract; the generated authority carries it as a String.
+        TypeRef::Named(name) if name.as_str() == "RecoveryCandidateId" => Ok("String".to_string()),
         TypeRef::Option(inner) => Ok(format!(
             "Option<{}>",
             render_session_document_type_ref(inner)?
@@ -5670,7 +5685,13 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
-        "RuntimeProjectionRollbackDisposition",
+        "CheckpointProvenanceClass",
+        "RuntimeSnapshotReadDisposition",
+        "RunIdCardinality",
+        "DurableTailStopReason",
+        "DurableTailRecoveryClass",
+        "DurableHeadRelation",
+        "RuntimeProjectionConflictDisposition",
         "RuntimeCheckpointProjectionDisposition",
         "LegacyCheckpointTranscriptRelation",
         "LegacyCheckpointMigrationDisposition",

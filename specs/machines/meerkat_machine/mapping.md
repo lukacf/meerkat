@@ -29,6 +29,45 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Initialize`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `AuthorizeDurableTailRecoveryCommitIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryCommitRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRepairIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRepairRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryHoldIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryHoldRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseRunFactsIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseRunFactsRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseNonQuiescentInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseNonQuiescentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseNonQuiescentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseNonQuiescentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRefuseNonQuiescentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareTerminalSupervisorCleanupBindings`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5892,6 +5931,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `TurnRunCompleted`
   - anchors: `meerkat_machine`
+  - scenarios: (unclaimed)
+- `DurableTailRecoveryAuthorized`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `TurnRunFailed`
   - anchors: `meerkat_machine`

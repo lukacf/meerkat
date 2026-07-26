@@ -309,6 +309,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
+- `AuthorizeDurableTailRecovery`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -638,6 +639,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnBoundaryApplied`(run_id: RunId, boundary_sequence: u64)
 - `LiveBoundaryContextReceiptResolved`(run_id: RunId, input_id: String, boundary: AdmissionRunApplyBoundary, boundary_sequence: u64)
 - `TurnRunCompleted`(run_id: RunId, outcome: TurnTerminalOutcome)
+- `DurableTailRecoveryAuthorized`(candidate_id: String, disposition: DurableTailRecoveryDisposition)
 - `TurnRunFailed`(run_id: RunId, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `TurnRunCancelled`(run_id: RunId, reason: TurnCancellationReason)
 - `TurnCheckCompaction`
@@ -1050,6 +1052,112 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Initializing`
 - On: `Initialize`()
 - To: `Idle`
+
+### `AuthorizeDurableTailRecoveryCommitIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `completed_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryCommitRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `completed_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryRepairIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `repairable_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryRepairRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `repairable_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryHoldIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `ambiguous_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryHoldRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `ambiguous_class`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryRefuseRunFactsIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `conflicting_run_facts`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryRefuseRunFactsRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Guards:
+  - `conflicting_run_facts`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryRefuseNonQuiescentInitializing`
+- From: `Initializing`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Initializing`
+
+### `AuthorizeDurableTailRecoveryRefuseNonQuiescentAttached`
+- From: `Attached`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Attached`
+
+### `AuthorizeDurableTailRecoveryRefuseNonQuiescentRunning`
+- From: `Running`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Running`
+
+### `AuthorizeDurableTailRecoveryRefuseNonQuiescentStopped`
+- From: `Stopped`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Stopped`
+
+### `AuthorizeDurableTailRecoveryRefuseNonQuiescentDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Destroyed`
 
 ### `PrepareTerminalSupervisorCleanupBindings`
 - From: `Destroyed`

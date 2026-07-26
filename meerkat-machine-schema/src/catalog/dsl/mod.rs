@@ -685,6 +685,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // newtype (`SessionId(pub String)`) so the `Map` key satisfies
             // `Ord + Hash + Clone`; the model domain is the string identity.
             NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string("RecoveryCandidateId"),
             // WAVE G1 fold (#86): machine-owned transcript edit directive.
             NamedTypeBinding::string_enum("TranscriptEditKind", &["Fork", "Rewrite"]),
             NamedTypeBinding::string_enum(
@@ -798,12 +799,57 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "LiveSessionAuthorityKind",
                 &["LiveAuthoritative", "DurableAuthoritative"],
             ),
-            // Runtime-projection-rollback region typed vocabulary (disposition
-            // for a runtime-authoritative projection save whose durable row
-            // ran ahead of the authority transcript).
+            // Runtime-projection-conflict region typed vocabulary: how a
+            // durable row relates to the committed authority transcript, and
+            // the disposition of a save whose durable row ran ahead of it.
+            // RetainForRecovery replaced RebuildToAuthority — no disposition
+            // may authorize shrinking a verified durable descendant.
             NamedTypeBinding::string_enum(
-                "RuntimeProjectionRollbackDisposition",
-                &["RejectDivergent", "RebuildToAuthority"],
+                "CheckpointProvenanceClass",
+                &["Unstamped", "Committed", "IntraTurn"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeSnapshotReadDisposition",
+                &[
+                    "UseRuntimeSnapshot",
+                    "UseCommittedStoreHead",
+                    "RecoveryRequired",
+                    "Quarantine",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RunIdCardinality",
+                &["NoRunId", "SingleRunId", "MultipleRunIds"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableTailStopReason",
+                &["Absent", "EndTurn", "ToolUse", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableTailRecoveryClass",
+                &[
+                    "CompletedCandidate",
+                    "InterruptedRepairableCandidate",
+                    "Ambiguous",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableHeadRelation",
+                &[
+                    "AbsentOrExact",
+                    "RuntimeSnapshotAhead",
+                    "VerifiedStrictDescendant",
+                    "Diverged",
+                    "Unverifiable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeProjectionConflictDisposition",
+                &[
+                    "RejectDivergent",
+                    "ConvergeSupersededProjection",
+                    "RetainForRecovery",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCheckpointProjectionDisposition",
@@ -1115,6 +1161,26 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             // WAVE G1 fold (#51): machine-owned staged realtime transcript item
             // role/lane classifiers carried on the RealtimeTranscriptAppended effect.
             NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            // Durable-tail recovery authorization vocabulary. The class
+            // mirrors SessionDocumentMachine's classification (same wire
+            // strings); the disposition is this machine's verdict.
+            NamedTypeBinding::string_enum(
+                "DurableTailRecoveryClass",
+                &[
+                    "CompletedCandidate",
+                    "InterruptedRepairableCandidate",
+                    "Ambiguous",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableTailRecoveryDisposition",
+                &[
+                    "RefuseRecovery",
+                    "CommitCompleted",
+                    "RepairAndCommitInterrupted",
+                    "HoldIntact",
+                ],
+            ),
             NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
             NamedTypeBinding::string("AuthBindingRef"),
             NamedTypeBinding::string_enum(

@@ -1464,6 +1464,120 @@ impl std::fmt::Display for DrainPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DurableTailRecoveryClass {
+    #[default]
+    #[serde(rename = "CompletedCandidate")]
+    CompletedCandidate,
+    #[serde(rename = "InterruptedRepairableCandidate")]
+    InterruptedRepairableCandidate,
+    #[serde(rename = "Ambiguous")]
+    Ambiguous,
+}
+impl DurableTailRecoveryClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletedCandidate => "CompletedCandidate",
+            Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
+            Self::Ambiguous => "Ambiguous",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CompletedCandidate" => Ok(Self::CompletedCandidate),
+            "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
+            "Ambiguous" => Ok(Self::Ambiguous),
+            other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailRecoveryClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailRecoveryClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DurableTailRecoveryDisposition {
+    #[default]
+    #[serde(rename = "RefuseRecovery")]
+    RefuseRecovery,
+    #[serde(rename = "CommitCompleted")]
+    CommitCompleted,
+    #[serde(rename = "RepairAndCommitInterrupted")]
+    RepairAndCommitInterrupted,
+    #[serde(rename = "HoldIntact")]
+    HoldIntact,
+}
+impl DurableTailRecoveryDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RefuseRecovery => "RefuseRecovery",
+            Self::CommitCompleted => "CommitCompleted",
+            Self::RepairAndCommitInterrupted => "RepairAndCommitInterrupted",
+            Self::HoldIntact => "HoldIntact",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RefuseRecovery" => Ok(Self::RefuseRecovery),
+            "CommitCompleted" => Ok(Self::CommitCompleted),
+            "RepairAndCommitInterrupted" => Ok(Self::RepairAndCommitInterrupted),
+            "HoldIntact" => Ok(Self::HoldIntact),
+            other => Err(format!(
+                "invalid DurableTailRecoveryDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailRecoveryDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ExternalToolSurfaceBaseState {
     #[default]
     #[serde(rename = "Absent")]
@@ -11120,6 +11234,13 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeDurableTailRecovery {
+        pub session_id: SessionId,
+        pub candidate_id: String,
+        pub candidate_run_id: RunId,
+        pub class: DurableTailRecoveryClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PrepareTerminalSupervisorCleanupBindings {
         pub session_id: SessionId,
     }
@@ -12790,6 +12911,7 @@ pub mod inputs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     RegisterSession(inputs::RegisterSession),
+    AuthorizeDurableTailRecovery(inputs::AuthorizeDurableTailRecovery),
     PrepareTerminalSupervisorCleanupBindings(inputs::PrepareTerminalSupervisorCleanupBindings),
     BeginUnregisterSession(inputs::BeginUnregisterSession),
     BeginUnregisterUnservedAttachment(inputs::BeginUnregisterUnservedAttachment),
@@ -13097,6 +13219,7 @@ impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
             Self::RegisterSession(_) => InputKind::RegisterSession,
+            Self::AuthorizeDurableTailRecovery(_) => InputKind::AuthorizeDurableTailRecovery,
             Self::PrepareTerminalSupervisorCleanupBindings(_) => {
                 InputKind::PrepareTerminalSupervisorCleanupBindings
             }
@@ -13489,6 +13612,7 @@ impl Input {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
     RegisterSession,
+    AuthorizeDurableTailRecovery,
     PrepareTerminalSupervisorCleanupBindings,
     BeginUnregisterSession,
     BeginUnregisterUnservedAttachment,
@@ -13899,6 +14023,11 @@ pub mod effects {
     pub struct TurnRunCompleted {
         pub run_id: RunId,
         pub outcome: TurnTerminalOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DurableTailRecoveryAuthorized {
+        pub candidate_id: String,
+        pub disposition: DurableTailRecoveryDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnRunFailed {
@@ -14750,6 +14879,7 @@ pub enum Effect {
     TurnBoundaryApplied(effects::TurnBoundaryApplied),
     LiveBoundaryContextReceiptResolved(effects::LiveBoundaryContextReceiptResolved),
     TurnRunCompleted(effects::TurnRunCompleted),
+    DurableTailRecoveryAuthorized(effects::DurableTailRecoveryAuthorized),
     TurnRunFailed(effects::TurnRunFailed),
     TurnRunCancelled(effects::TurnRunCancelled),
     TurnCheckCompaction(effects::TurnCheckCompaction),
@@ -14920,6 +15050,7 @@ pub enum EffectKind {
     TurnBoundaryApplied,
     LiveBoundaryContextReceiptResolved,
     TurnRunCompleted,
+    DurableTailRecoveryAuthorized,
     TurnRunFailed,
     TurnRunCancelled,
     TurnCheckCompaction,
@@ -15482,6 +15613,19 @@ pub mod command_capabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
     Initialize,
+    AuthorizeDurableTailRecoveryCommitIdle,
+    AuthorizeDurableTailRecoveryCommitRetired,
+    AuthorizeDurableTailRecoveryRepairIdle,
+    AuthorizeDurableTailRecoveryRepairRetired,
+    AuthorizeDurableTailRecoveryHoldIdle,
+    AuthorizeDurableTailRecoveryHoldRetired,
+    AuthorizeDurableTailRecoveryRefuseRunFactsIdle,
+    AuthorizeDurableTailRecoveryRefuseRunFactsRetired,
+    AuthorizeDurableTailRecoveryRefuseNonQuiescentInitializing,
+    AuthorizeDurableTailRecoveryRefuseNonQuiescentAttached,
+    AuthorizeDurableTailRecoveryRefuseNonQuiescentRunning,
+    AuthorizeDurableTailRecoveryRefuseNonQuiescentStopped,
+    AuthorizeDurableTailRecoveryRefuseNonQuiescentDestroyed,
     PrepareTerminalSupervisorCleanupBindings,
     RegisterSessionIdle,
     RegisterSessionAttached,

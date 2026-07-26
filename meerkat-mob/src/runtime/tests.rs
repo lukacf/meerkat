@@ -1908,7 +1908,7 @@ impl MockSessionService {
     }
 
     fn start_turn_call_count(&self) -> u64 {
-        self.start_turn_calls.load(Ordering::Relaxed)
+        self.start_turn_calls.load(Ordering::Acquire)
     }
 
     fn keep_alive_start_turn_call_count(&self) -> u64 {
@@ -2523,7 +2523,6 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), req.runtime.turn_tool_overlay.clone()));
-        self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         self.start_turn_prompts
             .write()
             .await
@@ -2556,6 +2555,10 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), req.runtime.turn_metadata.clone()));
+        // Publish the observable call count only after every request record is
+        // committed. Tests use this counter as the readiness signal before
+        // reading those async record buffers.
+        self.start_turn_calls.fetch_add(1, Ordering::Release);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);

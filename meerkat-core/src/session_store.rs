@@ -32,7 +32,7 @@ use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, SystemMessage, Usage};
 use crate::{
     Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteRecord,
-    transcript_messages_digest,
+    ValidatedTranscriptHistory, transcript_messages_digest,
 };
 
 /// Filter for listing sessions.
@@ -212,6 +212,51 @@ fn resolve_transcript_revision(
         .map_err(SessionStoreError::from)
 }
 
+/// Whether an incoming document without an inline transcript graph is a slim
+/// projection CARRYING the previous graph out of line, rather than one erasing
+/// it.
+///
+/// A head-canonical (slim) materialization keeps its revision bodies in
+/// separate rows and carries the storage-invariant witness under a reserved
+/// metadata key instead of an inline graph — that equivalence is the
+/// documented contract of `session_transcript_history_checkpoint_digest`.
+/// Without this carve-out every load-from-head -> save round trip reads as
+/// "erases the retained history", which is exactly how a head-canonical
+/// session wedges itself permanently: the durable head becomes unsaveable and
+/// the identity cannot resume.
+///
+/// Fail-closed: only an EXACT witness match counts. A missing witness, an
+/// unreadable one, or one naming a different graph is treated as genuine
+/// erasure, so real graph loss still fails. Malformed evidence PROPAGATES as
+/// an error and is never reduced to `false`.
+///
+/// The previous side is taken as the graph VALUE, not as a session, on
+/// purpose: the reference witness must be DERIVED from a canonical graph that
+/// is actually present. Two matching but unverified carried strings must never
+/// establish history equivalence between themselves — that would let a pair of
+/// slim projections agree the graph exists while neither holds it.
+fn incoming_carries_previous_history_witness(
+    incoming: &Session,
+    previous_state: &crate::TranscriptHistoryState,
+) -> Result<bool, SessionStoreError> {
+    let carried = crate::checkpoint::session_transcript_history_checkpoint_digest(incoming)
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history witness is malformed: {err}"),
+        })?;
+    let Some(carried) = carried else {
+        return Ok(false);
+    };
+    let derived =
+        crate::checkpoint::transcript_history_checkpoint_digest(previous_state).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("previous transcript history witness is malformed: {err}"),
+            }
+        })?;
+    Ok(derived == carried)
+}
+
 pub fn append_only_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
@@ -230,6 +275,8 @@ pub fn append_only_save_guard_with_witness(
     previous: Option<&Session>,
     witness: SaveGuardWitness<'_>,
 ) -> Result<(), SessionStoreError> {
+    let _digest_site =
+        crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_APPEND_GUARD);
     incoming
         .validate_transcript_history_state()
         .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
@@ -279,9 +326,11 @@ pub fn append_only_save_guard_with_witness(
             reason: format!("previous transcript history state is malformed: {err}"),
         }
     })?;
-    let previous_had_history = previous_state.is_some();
     let incoming_has_history = incoming_state.is_some();
-    if previous_had_history && !incoming_has_history {
+    if let Some(previous_graph) = previous_state.as_deref()
+        && !incoming_has_history
+        && !incoming_carries_previous_history_witness(incoming, previous_graph)?
+    {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: "incoming save would erase retained transcript history state".to_string(),
@@ -389,6 +438,14 @@ fn validate_plain_save_transcript_history_preservation(
         return Ok(());
     };
     let Some(incoming_state) = incoming_state else {
+        // Same slim-projection carve-out as the plain-save guard: a
+        // head-canonical materialization keeps its revision bodies in
+        // separate rows and carries the storage-invariant witness instead of
+        // an inline graph. An EXACT witness match proves the graph is carried,
+        // not erased; anything else is genuine erasure and still fails.
+        if incoming_carries_previous_history_witness(incoming, previous_state)? {
+            return Ok(());
+        }
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: "incoming append-only save would erase retained transcript history state"
@@ -731,6 +788,8 @@ pub fn run_boundary_snapshot_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
 ) -> Result<(), SessionStoreError> {
+    let _digest_site =
+        crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_BOUNDARY_GUARD);
     match append_only_save_guard(incoming, previous) {
         Ok(()) => Ok(()),
         Err(append_error) => {
@@ -763,36 +822,34 @@ pub fn run_boundary_snapshot_save_guard(
                 }
                 return Err(append_error);
             };
-            let incoming_revision =
-                transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
-            let Some(state) = incoming.transcript_history_state().map_err(|err| {
-                SessionStoreError::InvalidTranscriptRewrite {
-                    id: incoming.id().clone(),
-                    reason: format!("incoming transcript history state is malformed: {err}"),
-                }
-            })?
-            else {
-                return Err(append_error);
-            };
+            let incoming_revision = incoming
+                .transcript_content_digest()
+                .map_err(SessionStoreError::from)?;
             // append_only_save_guard's digest validation of the incoming
             // history state was discarded with its error above; a
             // digest-inconsistent witness body must not be able to prove a
-            // fork as a plain append on this branch either.
-            incoming
-                .validate_transcript_history_state()
+            // fork as a plain append on this branch either. Sealing the parse
+            // keeps that obligation and carries it to the consumers below,
+            // which previously each re-established it from scratch.
+            let Some(sealed) = incoming
+                .validated_transcript_history_state()
                 .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
                     id: incoming.id().clone(),
                     reason: format!("incoming transcript history state is malformed: {err}"),
-                })?;
-            validate_rewrite_save_retains_previous_commits(incoming, previous, &state)?;
+                })?
+            else {
+                return Err(append_error);
+            };
+            let state = sealed.state();
+            validate_rewrite_save_retains_previous_commits(incoming, previous, state)?;
             let commits = find_transcript_rewrite_commit_chain_extending_session(
-                &state,
+                &sealed,
                 previous,
                 &incoming_revision,
             )?;
             if commits.is_none()
                 && run_boundary_context_summary_tail_projection_save_guard(
-                    incoming, previous, &state,
+                    incoming, previous, state,
                 )?
             {
                 return Ok(());
@@ -819,18 +876,18 @@ pub fn run_boundary_snapshot_save_guard(
                     });
                 }
                 for commit in &state.commits {
-                    validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+                    validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
                 }
                 return Ok(());
             };
-            transcript_rewrite_bridge_save_guard(incoming, commit, &state, &incoming_revision)?;
+            transcript_rewrite_bridge_save_guard(incoming, commit, state, &incoming_revision)?;
             // Validate every retained commit's recorded bodies, not only the
             // walked chain: a plain-continuation proof can legitimately end
             // the walk before trailing rebookkept commits, and those must
             // stay digest-consistent to ride along (mirrors the empty-chain
             // arm above).
             for commit in &state.commits {
-                validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+                validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
             }
             Ok(())
         }
@@ -1033,19 +1090,25 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
 /// `SessionStore`. In that case the first rewrite commit's parent revision is
 /// not equal to the persisted row's digest, but its retained parent body proves
 /// a normal append path from that persisted row.
+///
+/// The graph arrives already proved. This walk reads revision strings and
+/// retained bodies as authority, so it needs the whole-graph validation to have
+/// happened — but every caller stands immediately downstream of a session that
+/// already established it, and re-deriving it here cost one full
+/// canonicalize-and-hash pass over every retained body per call (the
+/// storage-normalization wrapper calls this once per retained commit). Demanding
+/// [`ValidatedTranscriptHistory`] keeps the requirement and drops the repetition.
 pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
-    state: &'a TranscriptHistoryState,
+    state: &'a ValidatedTranscriptHistory,
     previous: &Session,
     incoming_revision: &str,
 ) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
-    crate::session::validate_transcript_history_state(state).map_err(|error| {
-        SessionStoreError::InvalidTranscriptRewrite {
-            id: previous.id().clone(),
-            reason: format!("incoming transcript history state is malformed: {error}"),
-        }
-    })?;
-    let previous_revision =
-        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    let _digest_site =
+        crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_REWRITE_CHAIN_WALK);
+    let state = state.state();
+    let previous_revision = previous
+        .transcript_content_digest()
+        .map_err(SessionStoreError::from)?;
     let mut chain = Vec::new();
     let mut cursor = previous_revision.as_str();
     let mut visited = std::collections::BTreeSet::new();

@@ -1470,7 +1470,13 @@ pub struct ModelFallbackTarget {
     /// Optional realm-scoped auth binding for this target. When omitted, the
     /// provider's default binding is resolved by the existing provider-runtime
     /// registry.
+    ///
+    /// `AuthBindingRef` only derives `JsonSchema` under the `schema` feature
+    /// (its slug newtypes gate the same way), while this struct's derive is
+    /// unconditional; without the schema-off skip, `--no-default-features`
+    /// fails to compile. The emitted schema (feature on) is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(not(feature = "schema"), schemars(skip))]
     pub auth_binding: Option<crate::AuthBindingRef>,
 }
 

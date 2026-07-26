@@ -15,9 +15,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
-use std::collections::{HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
 
 /// Current durable schema for [`SessionCheckpointStamp`].
 pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION: u32 = 1;
@@ -178,6 +176,16 @@ pub enum SessionCheckpointProvenance {
     RunBoundaryCommit,
     TranscriptRewrite,
     RecoveryMigration,
+    /// A machine-authorized recovery commit of a COMPLETED durable tail whose
+    /// original run-boundary commit never landed (lost to a shutdown race).
+    /// Anchored to the last committed runtime snapshot — never to the
+    /// intra-turn projection, which remains forbidden as an authority base.
+    RecoveredRunBoundaryCommit,
+    /// A machine-authorized recovery commit that CLOSED an interrupted
+    /// durable tail: content preserved, provider-invalid structure repaired
+    /// (synthetic interrupted tool results, typed recovery notice), the
+    /// original run terminalized as interrupted — never requeued.
+    RecoveredInterruptedBoundary,
 }
 
 /// Exact canonical authority from which a non-root checkpoint was derived.
@@ -390,9 +398,12 @@ impl SessionCheckpointStamp {
             SessionCheckpointProvenance::IntraTurnCheckpoint
                 | SessionCheckpointProvenance::RunBoundaryCommit
                 | SessionCheckpointProvenance::TranscriptRewrite
+                | SessionCheckpointProvenance::RecoveredRunBoundaryCommit
+                | SessionCheckpointProvenance::RecoveredInterruptedBoundary
         ) {
             return Err(SessionCheckpointError::AuthorityBaseConflict(
-                "checkpoint successor provenance must be checkpoint, boundary, or rewrite"
+                "checkpoint successor provenance must be checkpoint, boundary, rewrite, \
+                 or a recovered boundary"
                     .to_string(),
             ));
         }
@@ -565,9 +576,12 @@ impl SessionCheckpointStamp {
                     SessionCheckpointProvenance::IntraTurnCheckpoint
                         | SessionCheckpointProvenance::RunBoundaryCommit
                         | SessionCheckpointProvenance::TranscriptRewrite
+                        | SessionCheckpointProvenance::RecoveredRunBoundaryCommit
+                        | SessionCheckpointProvenance::RecoveredInterruptedBoundary
                 ) {
                     return Err(SessionCheckpointError::AuthorityBaseConflict(
-                        "typed authority base requires checkpoint, boundary, or rewrite provenance"
+                        "typed authority base requires checkpoint, boundary, rewrite, or \
+                         recovered-boundary provenance"
                             .to_string(),
                     ));
                 }
@@ -914,117 +928,101 @@ pub fn session_content_digest_bytes() -> u64 {
 
 pub(crate) fn record_content_digest_bytes(bytes: u64) {
     CONTENT_DIGEST_BYTES.with(|count| count.set(count.get().saturating_add(bytes)));
+    GLOBAL_CONTENT_DIGEST_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    DIGEST_SITE_BYTES[CURRENT_DIGEST_SITE.with(Cell::get)]
+        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Identity under which one full stamp verification is memoized.
+/// Process-wide companion to [`session_content_digest_bytes`].
 ///
-/// The digest string alone cannot see an in-process content mutation that
-/// leaves a stale stamp in place, so the key also carries the document's
-/// cheap O(1) shape: every `Session` content mutation seam changes the
-/// message count, the metadata entry count, or `updated_at`, which re-keys
-/// the memo and forces a full re-verification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VerifiedStampKey {
-    session_id: String,
-    digest: String,
-    message_count: usize,
-    metadata_entries: usize,
-    created_at: crate::time_compat::SystemTime,
-    updated_at: crate::time_compat::SystemTime,
+/// The thread-local counter cannot see a turn whose digest work is spread
+/// across the runtime's worker and blocking pools, which is exactly where the
+/// boundary passes run. Structural size-independence assertions need the
+/// process total.
+static GLOBAL_CONTENT_DIGEST_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide count of bytes fed into session content-digest passes.
+#[doc(hidden)]
+#[must_use]
+pub fn global_session_content_digest_bytes() -> u64 {
+    GLOBAL_CONTENT_DIGEST_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn verified_stamp_key(session: &Session, digest: &SessionCheckpointDigest) -> VerifiedStampKey {
-    VerifiedStampKey {
-        session_id: session.id().to_string(),
-        digest: digest.as_str().to_string(),
-        message_count: session.messages().len(),
-        metadata_entries: session.metadata().len(),
-        created_at: session.created_at(),
-        updated_at: session.updated_at(),
-    }
+/// Number of buckets in the content-digest byte attribution table.
+pub(crate) const DIGEST_SITE_COUNT: usize = 8;
+
+/// Digest-byte attribution bucket for work with no enclosing named pass.
+pub(crate) const DIGEST_SITE_OTHER: usize = 0;
+/// Typed `Session` deserialization (durable-document decode ingress).
+pub(crate) const DIGEST_SITE_DECODE: usize = 1;
+/// Typed `Session` serialization (snapshot mint).
+pub(crate) const DIGEST_SITE_ENCODE: usize = 2;
+/// Whole-document checkpoint digest.
+pub(crate) const DIGEST_SITE_CHECKPOINT_DIGEST: usize = 3;
+/// Transcript-history witness derivation.
+pub(crate) const DIGEST_SITE_WITNESS: usize = 4;
+/// Rewrite-commit chain discovery over a session's transcript graph.
+pub(crate) const DIGEST_SITE_REWRITE_CHAIN_WALK: usize = 5;
+/// Append-only save guard.
+pub(crate) const DIGEST_SITE_APPEND_GUARD: usize = 6;
+/// Run-boundary snapshot save guard, excluding the two buckets above.
+pub(crate) const DIGEST_SITE_BOUNDARY_GUARD: usize = 7;
+
+/// Human-readable names for [`digest_site_bytes`], in bucket order.
+#[doc(hidden)]
+pub const DIGEST_SITE_LABELS: [&str; DIGEST_SITE_COUNT] = [
+    "other",
+    "decode",
+    "encode",
+    "checkpoint-digest",
+    "witness",
+    "rewrite-chain-walk",
+    "append-guard",
+    "boundary-guard",
+];
+
+static DIGEST_SITE_BYTES: [std::sync::atomic::AtomicU64; DIGEST_SITE_COUNT] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; DIGEST_SITE_COUNT];
+
+thread_local! {
+    /// Innermost named digest pass currently executing on this thread.
+    ///
+    /// Attribution is innermost-wins so a pass that a broader guard delegates
+    /// to (the rewrite-chain walk inside the boundary guard, the witness
+    /// derivation inside the checkpoint digest) is charged to itself rather
+    /// than disappearing into its caller.
+    static CURRENT_DIGEST_SITE: Cell<usize> = const { Cell::new(DIGEST_SITE_OTHER) };
 }
 
-/// Process-lifetime memo of checkpoint stamps whose digest was fully
-/// verified against session content.
+/// Process-wide content-digest bytes, split by the pass that requested them.
 ///
-/// The memo only ever ADDS the fact "a document of this exact shape and
-/// content digest was proved for this session in this process": entry
-/// admission requires one complete canonical-content verification, so the
-/// first read after boot always hashes, and changed content re-keys (via
-/// digest or document shape) and re-verifies. Bounded FIFO eviction only
-/// forces a redundant re-verification, never a stale trust decision for a
-/// key that was never proved.
-struct BoundedStampVerificationCache {
-    capacity: usize,
-    entries: HashSet<VerifiedStampKey>,
-    order: VecDeque<VerifiedStampKey>,
+/// Observability seam for the turn-boundary size-independence work only: the
+/// aggregate counter says a turn hashed the whole document N times but not
+/// which passes did it, which is the difference between fixing a boundary and
+/// guessing at one.
+#[doc(hidden)]
+#[must_use]
+pub fn digest_site_bytes() -> [u64; DIGEST_SITE_COUNT] {
+    std::array::from_fn(|site| DIGEST_SITE_BYTES[site].load(std::sync::atomic::Ordering::Relaxed))
 }
 
-impl BoundedStampVerificationCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: HashSet::new(),
-            order: VecDeque::new(),
-        }
-    }
+/// Restores the enclosing attribution bucket when the named pass returns.
+pub(crate) struct DigestSiteScope(usize);
 
-    fn contains(&self, key: &VerifiedStampKey) -> bool {
-        self.entries.contains(key)
-    }
-
-    fn record(&mut self, key: VerifiedStampKey) {
-        if self.entries.contains(&key) {
-            return;
-        }
-        while self.entries.len() >= self.capacity {
-            let Some(evicted) = self.order.pop_front() else {
-                break;
-            };
-            self.entries.remove(&evicted);
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key);
+impl Drop for DigestSiteScope {
+    fn drop(&mut self) {
+        CURRENT_DIGEST_SITE.with(|site| site.set(self.0));
     }
 }
 
-const VERIFIED_STAMP_CACHE_CAPACITY: usize = 4096;
-
-static VERIFIED_STAMP_CACHE: OnceLock<Mutex<BoundedStampVerificationCache>> = OnceLock::new();
-
-fn verified_stamp_cache() -> &'static Mutex<BoundedStampVerificationCache> {
-    VERIFIED_STAMP_CACHE.get_or_init(|| {
-        Mutex::new(BoundedStampVerificationCache::new(
-            VERIFIED_STAMP_CACHE_CAPACITY,
-        ))
+/// Charge content-digest bytes to `site` until the returned guard drops.
+pub(crate) fn enter_digest_site(site: usize) -> DigestSiteScope {
+    CURRENT_DIGEST_SITE.with(|current| {
+        let enclosing = current.get();
+        current.set(site);
+        DigestSiteScope(enclosing)
     })
-}
-
-/// Whether this exact document shape and digest were already fully verified
-/// in this process. A poisoned lock degrades to "not cached": the caller
-/// re-verifies.
-pub(crate) fn checkpoint_stamp_verification_is_cached(
-    session: &Session,
-    digest: &SessionCheckpointDigest,
-) -> bool {
-    let key = verified_stamp_key(session, digest);
-    verified_stamp_cache()
-        .lock()
-        .map(|cache| cache.contains(&key))
-        .unwrap_or(false)
-}
-
-/// Record one completed full verification of this exact document shape and
-/// digest. Callers must have just proved the digest against canonical
-/// content of `session` in its current shape.
-pub(crate) fn record_checkpoint_stamp_verification(
-    session: &Session,
-    digest: &SessionCheckpointDigest,
-) {
-    let key = verified_stamp_key(session, digest);
-    if let Ok(mut cache) = verified_stamp_cache().lock() {
-        cache.record(key);
-    }
 }
 
 /// Compute the pinned canonical checkpoint digest.
@@ -1036,14 +1034,15 @@ pub(crate) fn record_checkpoint_stamp_verification(
 pub fn session_checkpoint_digest(
     session: &Session,
 ) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    let _digest_site = enter_digest_site(DIGEST_SITE_CHECKPOINT_DIGEST);
     let digest = session_checkpoint_digest_uncached(session)?;
-    // Computing this digest IS a complete canonical verification of this exact
-    // document, so record it under the same memo a successful stamp compare
-    // records. A stamp minted here and installed back-to-back on the same
-    // unmutated document then costs ONE canonical pass instead of two; a
-    // document that changed in between re-keys the memo (message count,
-    // metadata entry count, or `updated_at`) and pays the full recompute.
-    record_checkpoint_stamp_verification(session, &digest);
+    // Computing this digest IS a complete canonical verification of this
+    // exact document, so seal the proof on the document itself — it cannot
+    // survive a mutation of that document or leak to a different one. A
+    // stamp minted here and installed back-to-back on the same unmutated
+    // document then costs ONE canonical pass instead of two; any content
+    // mutation in between clears the seal and pays the full recompute.
+    session.seal_verified_checkpoint_digest(&digest);
     Ok(digest)
 }
 
@@ -1677,8 +1676,8 @@ mod tests {
 
     #[test]
     fn cached_checkpoint_state_verifies_first_sight_then_skips_recomputation() {
-        // `stamped_root` installs the stamp via document JSON, never through
-        // a verifying seam, so this digest key starts unseen by the memo.
+        // `stamped_root` builds the session through `Session::deserialize`,
+        // so its per-session seal starts empty.
         let session = stamped_root(&session_with_text("cached read"));
         let before = session_content_digest_computations();
         assert!(matches!(
@@ -1741,47 +1740,193 @@ mod tests {
     }
 
     #[test]
-    fn stamp_verification_memo_is_bounded_with_fifo_eviction() {
-        let mut cache = BoundedStampVerificationCache::new(2);
-        let session = session_with_text("bounded memo");
-        let key = |fill: char| {
-            verified_stamp_key(
-                &session,
-                &SessionCheckpointDigest::parse(format!("sha256:{}", fill.to_string().repeat(64)))
-                    .expect("digest"),
-            )
-        };
-        let (k1, k2, k3) = (key('1'), key('2'), key('3'));
-        cache.record(k1.clone());
-        cache.record(k2.clone());
-        assert!(cache.contains(&k1));
-        assert!(cache.contains(&k2));
-        // Re-recording a present key must not evict.
-        cache.record(k2.clone());
-        assert!(cache.contains(&k1));
-        cache.record(k3.clone());
-        assert!(
-            !cache.contains(&k1),
-            "capacity overflow must evict the oldest entry, forcing re-verification"
-        );
-        assert!(cache.contains(&k2));
-        assert!(cache.contains(&k3));
-    }
-
-    #[test]
     fn cached_checkpoint_state_reverifies_after_in_process_content_mutation() {
         let session = stamped_root(&session_with_text("shape keyed"));
         assert!(matches!(
             session.try_checkpoint_state_cached().expect("seed memo"),
             SessionCheckpointState::Verified(_)
         ));
-        // Metadata mutation with the stale stamp left in place: the document
-        // shape (entry count, updated_at) re-keys the memo, so the cached
-        // seam re-verifies and fails closed within the same process.
+        // Metadata mutation with the stale stamp left in place: set_metadata
+        // clears the per-session seal, so the cached seam re-verifies and
+        // fails closed within the same process.
         let mut mutated = session;
         mutated.set_metadata("caller_fact", serde_json::json!("drift"));
         assert!(matches!(
             mutated.try_checkpoint_state_cached(),
+            Err(SessionCheckpointError::DigestMismatch { .. })
+        ));
+    }
+
+    /// Minimal in-memory [`crate::blob::BlobStore`] for the seal-invalidation
+    /// tests: `put_image` really stores and returns a `BlobRef` (so
+    /// externalization rewrites the block), `get` serves stored payloads (so
+    /// hydration rewrites the block).
+    #[derive(Default)]
+    struct StubBlobStore {
+        blobs: std::sync::Mutex<
+            std::collections::HashMap<crate::blob::BlobId, crate::blob::BlobPayload>,
+        >,
+    }
+
+    impl StubBlobStore {
+        fn with_payload(payload: crate::blob::BlobPayload) -> Self {
+            Self {
+                blobs: std::sync::Mutex::new(std::collections::HashMap::from([(
+                    payload.blob_id.clone(),
+                    payload,
+                )])),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::blob::BlobStore for StubBlobStore {
+        async fn put_image(
+            &self,
+            media_type: &str,
+            data: &str,
+        ) -> Result<crate::blob::BlobRef, crate::blob::BlobStoreError> {
+            let blob_id = crate::blob::BlobId::new(format!("sha256:stub-{}", data.len()));
+            self.blobs.lock().expect("stub blob store lock").insert(
+                blob_id.clone(),
+                crate::blob::BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(crate::blob::BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(
+            &self,
+            blob_id: &crate::blob::BlobId,
+        ) -> Result<crate::blob::BlobPayload, crate::blob::BlobStoreError> {
+            self.blobs
+                .lock()
+                .expect("stub blob store lock")
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| crate::blob::BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(
+            &self,
+            _blob_id: &crate::blob::BlobId,
+        ) -> Result<(), crate::blob::BlobStoreError> {
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
+
+    fn stamped_session_with_image(data: crate::types::ImageData) -> Session {
+        let mut session = Session::new();
+        session.push(Message::User(crate::types::UserMessage::with_blocks(vec![
+            crate::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data,
+            },
+        ])));
+        stamped_root(&session)
+    }
+
+    // The three content-mutation seams that deliberately do NOT advance
+    // `updated_at`. Under the retired process-global VerifiedStampKey memo,
+    // `externalize_media` and `hydrate_realtime_user_images_with_usage`
+    // rewrote message content while leaving every key field byte-identical,
+    // so the cached seam kept reporting Verified over a stale stamp — a
+    // live integrity hole needing no key collision. Each seam must clear
+    // the per-session seal explicitly.
+
+    #[tokio::test]
+    async fn cached_checkpoint_state_fails_closed_after_media_externalization() {
+        let mut session = stamped_session_with_image(crate::types::ImageData::Inline {
+            data: "iVBORw0KGgo=".to_string(),
+        });
+        // Seed the seal with one full verification of the stamped document.
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("seed seal"),
+            SessionCheckpointState::Verified(_)
+        ));
+        let store = StubBlobStore::default();
+        session
+            .externalize_media(&store, 0)
+            .await
+            .expect("externalize inline image");
+        // Message content changed in place; message count, metadata entry
+        // count, created_at, and updated_at are all unchanged. The stale
+        // stamp must no longer be served from memoized trust.
+        assert!(matches!(
+            session.try_checkpoint_state_cached(),
+            Err(SessionCheckpointError::DigestMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cached_checkpoint_state_reproves_after_realtime_image_hydration() {
+        // Hydration verifies the blob id against content, so the fixture id
+        // must be the canonical content-addressed one — which also makes
+        // hydration digest-INVARIANT (the canonical digest form of an image
+        // IS its content-addressed identity, see
+        // `canonicalize_digest_image_blocks`). The seam's obligation is
+        // therefore not a mismatch: it exposed the message buffer for
+        // mutation, so it must clear the seal and force the next cached
+        // read to RE-PROVE the stamp against current bytes instead of
+        // serving the pre-hydration seal.
+        let blob_id = crate::blob::content_blob_id("image/png", "iVBORw0KGgo=");
+        let store = StubBlobStore::with_payload(crate::blob::BlobPayload {
+            blob_id: blob_id.clone(),
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo=".to_string(),
+        });
+        let mut session = stamped_session_with_image(crate::types::ImageData::Blob { blob_id });
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("seed seal"),
+            SessionCheckpointState::Verified(_)
+        ));
+        let sealed_reads = session_content_digest_computations();
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("sealed read"),
+            SessionCheckpointState::Verified(_)
+        ));
+        assert_eq!(
+            session_content_digest_computations(),
+            sealed_reads,
+            "steady-state sealed reads must not recompute digests"
+        );
+        session
+            .hydrate_realtime_user_images_with_usage(&store, 1024 * 1024)
+            .await
+            .expect("hydrate blob-backed image");
+        let before_reproof = session_content_digest_computations();
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("re-proof"),
+            SessionCheckpointState::Verified(_)
+        ));
+        assert!(
+            session_content_digest_computations() > before_reproof,
+            "hydration exposed the buffer for in-place mutation, so the \
+             cached seam must re-prove the stamp, not trust the stale seal"
+        );
+    }
+
+    #[test]
+    fn cached_checkpoint_state_fails_closed_after_metadata_backfill() {
+        let mut session = stamped_root(&session_with_text("seal backfill"));
+        assert!(matches!(
+            session.try_checkpoint_state_cached().expect("seed seal"),
+            SessionCheckpointState::Verified(_)
+        ));
+        assert!(session.backfill_metadata_if_absent("compat_projection", serde_json::json!("v1")));
+        assert!(matches!(
+            session.try_checkpoint_state_cached(),
             Err(SessionCheckpointError::DigestMismatch { .. })
         ));
     }

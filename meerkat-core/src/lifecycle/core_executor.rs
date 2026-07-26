@@ -415,6 +415,27 @@ pub struct CoreApplyOutput {
     /// Optional serialized session snapshot to durably commit atomically with
     /// the receipt and input-state updates.
     pub session_snapshot: Option<Vec<u8>>,
+    /// The same session, typed, when the producer had it in hand.
+    ///
+    /// `session_snapshot` is the durable form and stays authoritative. This
+    /// is a fast path, not a second source of truth: every consumer that
+    /// takes it must produce the identical answer it would have produced by
+    /// deserializing the bytes.
+    ///
+    /// It exists because the boundary path otherwise pays O(document) three
+    /// more times per turn on top of the one serialization it genuinely
+    /// needs: the witness validator deserializes the bytes back into a
+    /// `Session`, re-serializes its messages, and SHA-256s them. On a 94 MB
+    /// transcript that is the difference between a turn costing milliseconds
+    /// and costing minutes, and none of it scales with the size of the delta
+    /// the turn actually appended.
+    ///
+    /// Carrying the typed session also preserves its retained digest
+    /// midstate. A `Session` recovered via `from_slice` starts with a cold
+    /// accumulator, so its first digest is a full pass no matter how small
+    /// the append was — which is why round-tripping through bytes silently
+    /// discards the incremental digest work.
+    pub session: Option<std::sync::Arc<crate::Session>>,
     /// Terminal payload observation produced by runtime-backed execution.
     ///
     /// `None` means the primitive committed successfully but did not produce
@@ -600,6 +621,7 @@ impl CoreApplyOutput {
         run_result: RunResult,
     ) -> Self {
         Self {
+            session: None,
             receipt,
             session_snapshot,
             terminal: Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
@@ -614,6 +636,7 @@ impl CoreApplyOutput {
         args: Value,
     ) -> Self {
         Self {
+            session: None,
             receipt,
             session_snapshot,
             terminal: Some(CoreApplyTerminal::CallbackPending {
@@ -630,10 +653,25 @@ impl CoreApplyOutput {
         pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
     ) -> Self {
         Self {
+            session: None,
             receipt,
             session_snapshot,
             terminal: Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }),
         }
+    }
+
+    /// Attach the typed session that produced `session_snapshot`.
+    ///
+    /// The bytes stay authoritative; this only lets downstream consumers skip
+    /// deserializing them back into the very `Session` the producer already
+    /// held, and keeps that session's retained digest midstate alive across
+    /// the boundary. Pass the SAME session the snapshot was serialized from —
+    /// a mismatched pair would let the fast path and the durable form
+    /// disagree.
+    #[must_use]
+    pub fn with_session(mut self, session: std::sync::Arc<crate::Session>) -> Self {
+        self.session = Some(session);
+        self
     }
 
     pub fn without_terminal(
@@ -643,6 +681,7 @@ impl CoreApplyOutput {
         Self {
             receipt,
             session_snapshot,
+            session: None,
             terminal: None,
         }
     }

@@ -31,12 +31,24 @@ use crate::types::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 mod digest_accumulator;
+mod transcript_history;
 
 use digest_accumulator::TranscriptMessages;
+
+use transcript_history::decode_memo::TranscriptGraphValidationMode;
+pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_CURRENT;
+pub(crate) use transcript_history::validate::validate_transcript_history_state;
+use transcript_history::validate::{
+    assistant_tool_use_ids, message_role_name, validate_transcript_tool_result_shape,
+};
+pub use transcript_history::{
+    TranscriptHistoryState, TranscriptRevisionBody, TranscriptRewriteCommit,
+    TranscriptRewriteRecord, ValidatedTranscriptHistory,
+};
 
 /// Current session format version.
 ///
@@ -259,497 +271,6 @@ impl std::fmt::Display for TranscriptRewriteReason {
     }
 }
 
-/// Immutable rewrite commit that advances a session transcript head.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub struct TranscriptRewriteCommit {
-    pub parent_revision: String,
-    pub revision: String,
-    pub selection: TranscriptRewriteSelection,
-    pub original_span_digest: String,
-    pub replacement_digest: String,
-    pub messages_before: usize,
-    pub messages_after: usize,
-    pub reason: TranscriptRewriteReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<String>,
-    #[cfg_attr(feature = "schema", schemars(with = "SchemaSystemTime"))]
-    pub committed_at: SystemTime,
-}
-
-/// Immutable transcript revision body retained by the session-local graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub struct TranscriptRevisionBody {
-    pub revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_revision: Option<String>,
-    #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
-    pub messages: Vec<Message>,
-    #[cfg_attr(feature = "schema", schemars(with = "SchemaSystemTime"))]
-    pub created_at: SystemTime,
-}
-
-#[cfg(feature = "schema")]
-#[allow(dead_code)]
-#[derive(schemars::JsonSchema)]
-#[schemars(rename = "SystemTime")]
-struct SchemaSystemTime {
-    secs_since_epoch: u64,
-    nanos_since_epoch: u32,
-}
-
-/// Self-contained append-only transcript rewrite record.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub struct TranscriptRewriteRecord {
-    pub commit: TranscriptRewriteCommit,
-    pub parent_body: TranscriptRevisionBody,
-    pub revision_body: TranscriptRevisionBody,
-}
-
-impl<'de> Deserialize<'de> for TranscriptRewriteRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        struct Wire {
-            commit: TranscriptRewriteCommit,
-            parent_body: TranscriptRevisionBody,
-            revision_body: TranscriptRevisionBody,
-        }
-        let wire = Wire::deserialize(deserializer)?;
-        let mut revisions = vec![wire.parent_body, wire.revision_body];
-        let mut commits = vec![wire.commit];
-        heal_legacy_revision_strings(&mut revisions, &mut commits, None)
-            .map_err(serde::de::Error::custom)?;
-        heal_legacy_compaction_rewrite_semantics(&mut commits, &revisions);
-        let mut revisions = revisions.into_iter();
-        let parent_body = revisions
-            .next()
-            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its parent body"))?;
-        let revision_body = revisions
-            .next()
-            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its revision body"))?;
-        let commit = commits
-            .into_iter()
-            .next()
-            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its commit"))?;
-        Ok(Self {
-            commit,
-            parent_body,
-            revision_body,
-        })
-    }
-}
-
-impl TranscriptRewriteRecord {
-    pub fn new(
-        commit: TranscriptRewriteCommit,
-        parent_body: TranscriptRevisionBody,
-        revision_body: TranscriptRevisionBody,
-    ) -> Result<Self, TranscriptEditError> {
-        validate_transcript_rewrite_record(&commit, &parent_body, &revision_body)?;
-        Ok(Self {
-            commit,
-            parent_body,
-            revision_body,
-        })
-    }
-}
-
-/// Typed session-local transcript revision graph state.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub struct TranscriptHistoryState {
-    pub head: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub commits: Vec<TranscriptRewriteCommit>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub revisions: Vec<TranscriptRevisionBody>,
-    /// Digest-format generation of the revision strings. Documents stamped
-    /// `>= 2` were written by the content-addressed digest format, so decode
-    /// skips the per-decode legacy-heal probe (a full-transcript hash);
-    /// absent/0 means unknown provenance and the probe runs once — the next
-    /// save persists the marker. A compatibility convenience, not an
-    /// integrity boundary (checkpoint stamps own integrity).
-    #[serde(default, skip_serializing_if = "digest_format_is_unknown")]
-    pub digest_format: u32,
-}
-
-fn digest_format_is_unknown(format: &u32) -> bool {
-    *format == 0
-}
-
-/// The digest-format generation minted by [`transcript_messages_digest`].
-pub(crate) const TRANSCRIPT_DIGEST_FORMAT_CURRENT: u32 = 2;
-
-/// Decode-memo fact: the retained head body's content digest equals the
-/// stored head revision string (the legacy heal probe found nothing to heal).
-const TRANSCRIPT_GRAPH_FACT_HEAL_PROBE_CURRENT: u8 = 1;
-/// Decode-memo fact: [`validate_transcript_history_state`] fully succeeded
-/// for a graph of this exact shape.
-const TRANSCRIPT_GRAPH_FACT_VALIDATED: u8 = 2;
-
-/// Cheap structural identity of a transcript revision graph for the
-/// process-lifetime decode memo.
-///
-/// The key pins everything the decode-time digest work reads EXCEPT retained
-/// message content: the head revision string, every retained body's
-/// content-addressed revision string, parent pointer, and message count, and
-/// the full serialized commit log (span digests, selection bounds, counts).
-/// Message bodies are trusted through their content-addressed revision
-/// strings once one full verification proved them in this process — the same
-/// read-trusts/write-verifies model as the checkpoint-stamp memo. The `fact`
-/// tag namespaces independently proven facts so one can never satisfy a
-/// consult for the other. Hashing here is O(graph structure), never
-/// O(message content), and deliberately does not count as a content-digest
-/// computation.
-fn transcript_graph_shape_key(
-    fact: u8,
-    head: &str,
-    commits: &[TranscriptRewriteCommit],
-    revisions: &[TranscriptRevisionBody],
-) -> Option<String> {
-    let mut hasher = Sha256::new();
-    hasher.update([fact]);
-    hasher.update((head.len() as u64).to_le_bytes());
-    hasher.update(head.as_bytes());
-    hasher.update((revisions.len() as u64).to_le_bytes());
-    for body in revisions {
-        hasher.update((body.revision.len() as u64).to_le_bytes());
-        hasher.update(body.revision.as_bytes());
-        match body.parent_revision.as_deref() {
-            Some(parent) => {
-                hasher.update([1]);
-                hasher.update((parent.len() as u64).to_le_bytes());
-                hasher.update(parent.as_bytes());
-            }
-            None => hasher.update([0]),
-        }
-        hasher.update((body.messages.len() as u64).to_le_bytes());
-    }
-    hasher.update((commits.len() as u64).to_le_bytes());
-    for commit in commits {
-        let bytes = serde_json::to_vec(commit).ok()?;
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(2 + digest.len() * 2);
-    out.push(char::from(b'0' + fact));
-    out.push(':');
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in digest {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Some(out)
-}
-
-/// Process-lifetime bounded memo of decode-time transcript-graph digest
-/// facts (heal-probe outcome, full graph validation).
-///
-/// Marker-less documents (written by pre-marker code) and every decoded
-/// document's graph validation otherwise pay a full canonical-JSON + SHA-256
-/// pass over retained transcript bodies on EVERY decode — O(document) work
-/// per repeat load of unchanged bytes. The memo only ever ADDS the fact "a
-/// graph of this exact shape was proved on this process's decode path":
-/// admission requires one complete verification, so the first decode after
-/// boot always hashes, and changed content re-keys the memo (revision
-/// strings, counts, parents, or commit bytes change) and re-verifies.
-/// Bounded FIFO eviction only forces a redundant re-verification, never a
-/// stale trust decision for a key that was never proved. Write and typed
-/// mutation seams never consult this memo.
-struct BoundedTranscriptGraphDecodeMemo {
-    capacity: usize,
-    entries: HashSet<String>,
-    order: VecDeque<String>,
-}
-
-impl BoundedTranscriptGraphDecodeMemo {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: HashSet::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn contains(&self, key: &str) -> bool {
-        self.entries.contains(key)
-    }
-
-    fn record(&mut self, key: String) {
-        if self.entries.contains(&key) {
-            return;
-        }
-        while self.entries.len() >= self.capacity {
-            let Some(evicted) = self.order.pop_front() else {
-                break;
-            };
-            self.entries.remove(&evicted);
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key);
-    }
-}
-
-const TRANSCRIPT_GRAPH_DECODE_MEMO_CAPACITY: usize = 4096;
-
-static TRANSCRIPT_GRAPH_DECODE_MEMO: OnceLock<Mutex<BoundedTranscriptGraphDecodeMemo>> =
-    OnceLock::new();
-
-fn transcript_graph_decode_memo() -> &'static Mutex<BoundedTranscriptGraphDecodeMemo> {
-    TRANSCRIPT_GRAPH_DECODE_MEMO.get_or_init(|| {
-        Mutex::new(BoundedTranscriptGraphDecodeMemo::new(
-            TRANSCRIPT_GRAPH_DECODE_MEMO_CAPACITY,
-        ))
-    })
-}
-
-/// Whether this exact graph-shape fact was already proved on this process's
-/// decode path. A poisoned lock degrades to "not cached": the caller
-/// re-verifies.
-///
-/// Setting `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` (any value) forces every
-/// lookup to miss, reproducing the pre-memo decode cost. It is a diagnostic
-/// kill-switch with exactly two uses: red-first verification of the e2e
-/// gates that assert this memo absorbs repeat decodes (see the marker-less
-/// resume-cost assertion in `meerkat-mob/tests/smoke_mob_idle_burn.rs`),
-/// and ruling the memo in or out when stale memoized trust is suspected.
-/// It must never be set in production — it restores the
-/// O(document)-per-decode verification cost this memo exists to remove.
-fn transcript_graph_fact_is_memoized(key: &str) -> bool {
-    if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
-        return false;
-    }
-    transcript_graph_decode_memo()
-        .lock()
-        .map(|memo| memo.contains(key))
-        .unwrap_or(false)
-}
-
-/// Record one completed decode-path proof of this exact graph-shape fact.
-fn record_transcript_graph_fact(key: String) {
-    if let Ok(mut memo) = transcript_graph_decode_memo().lock() {
-        memo.record(key);
-    }
-}
-
-/// Validation trust mode for
-/// [`TranscriptHistoryState::compact_mechanical_revision_bodies_for`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscriptGraphValidationMode {
-    /// Always run the full per-body digest validation. Every write, typed
-    /// mutation, and serialization seam uses this mode: a cached hit is
-    /// memoized trust, not a fresh proof of current bytes.
-    FullVerify,
-    /// Decode path for durable documents: a graph shape whose full
-    /// validation already succeeded on this process's decode path may skip
-    /// the per-body digest re-verification. First sight still verifies
-    /// fully and admits the shape into the bounded decode memo.
-    DecodeMemoized,
-}
-
-impl<'de> Deserialize<'de> for TranscriptHistoryState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        struct Wire {
-            head: String,
-            #[serde(default)]
-            commits: Vec<TranscriptRewriteCommit>,
-            #[serde(default)]
-            revisions: Vec<TranscriptRevisionBody>,
-            #[serde(default)]
-            digest_format: u32,
-        }
-        let wire = Wire::deserialize(deserializer)?;
-        let mut state = TranscriptHistoryState {
-            head: wire.head,
-            commits: wire.commits,
-            revisions: wire.revisions,
-            digest_format: wire.digest_format,
-        };
-        // Pre-parent-pointer v1 snapshots serialized each body as
-        // {created_at,messages,revision}. When every non-root body lacks a
-        // parent, the append order is the only lineage the old format
-        // carried; reconstruct that exact linear order before digest healing
-        // and full validation.
-        if state.revisions.len() > 1
-            && state
-                .revisions
-                .iter()
-                .skip(1)
-                .all(|body| body.parent_revision.is_none())
-        {
-            for index in 1..state.revisions.len() {
-                let parent = state.revisions[index - 1].revision.clone();
-                state.revisions[index].parent_revision = Some(parent);
-            }
-        }
-        // Fast path: a graph stamped with the current digest format skips the
-        // heal probe outright — the probe hashes the full head transcript,
-        // which is decode-hot (every session load). Unstamped graphs (legacy
-        // or pre-marker writers) pay the probe once per process per shape
-        // (the bounded decode memo absorbs repeat decodes of unchanged
-        // marker-less bytes); their next save persists the marker.
-        let head_is_current = state.digest_format >= TRANSCRIPT_DIGEST_FORMAT_CURRENT
-            || match state
-                .revisions
-                .iter()
-                .find(|body| body.revision == state.head)
-            {
-                Some(head_body) => {
-                    let probe_key = transcript_graph_shape_key(
-                        TRANSCRIPT_GRAPH_FACT_HEAL_PROBE_CURRENT,
-                        &state.head,
-                        &state.commits,
-                        &state.revisions,
-                    );
-                    if probe_key
-                        .as_deref()
-                        .is_some_and(transcript_graph_fact_is_memoized)
-                    {
-                        true
-                    } else {
-                        let current = transcript_messages_digest(&head_body.messages)
-                            .map_err(serde::de::Error::custom)?
-                            == state.head;
-                        // Only the idempotent outcome is memoizable: a
-                        // stale-format head must keep healing on every
-                        // decode until a save persists the healed strings.
-                        if current && let Some(key) = probe_key {
-                            record_transcript_graph_fact(key);
-                        }
-                        current
-                    }
-                }
-                None => true,
-            };
-        state.digest_format = TRANSCRIPT_DIGEST_FORMAT_CURRENT;
-        if !head_is_current {
-            let TranscriptHistoryState {
-                head,
-                commits,
-                digest_format: _,
-                revisions,
-            } = &mut state;
-            heal_legacy_revision_strings(revisions, commits, Some(head))
-                .map_err(serde::de::Error::custom)?;
-        }
-        heal_legacy_compaction_rewrite_semantics(&mut state.commits, &state.revisions);
-        Ok(state)
-    }
-}
-
-impl TranscriptHistoryState {
-    /// Drop mechanical append-head snapshots while preserving every body that
-    /// is an endpoint of an audited rewrite plus the current live head.
-    ///
-    /// Ordinary appends previously accumulated a complete transcript body on
-    /// every message mutation once any rewrite had occurred. Those bodies are
-    /// not rewrite history and are never selected for restore. Repointing the
-    /// live head directly at the latest rewrite endpoint keeps the existing
-    /// full-body lineage validator intact after the intermediate append heads
-    /// are removed.
-    fn compact_mechanical_revision_bodies(&mut self) -> Result<(), TranscriptEditError> {
-        self.compact_mechanical_revision_bodies_for(TranscriptGraphValidationMode::FullVerify)
-    }
-
-    /// [`Self::compact_mechanical_revision_bodies`] with an explicit
-    /// validation trust mode. Only the durable-document decode seam passes
-    /// [`TranscriptGraphValidationMode::DecodeMemoized`]; typed mutation and
-    /// serialization seams keep the unconditional full validation.
-    ///
-    /// MERGE NOTE (class2 integration): this composes the decode memo (which
-    /// absorbs repeat decodes of unchanged marker-less documents) with the
-    /// extracted pruning half below (which the append fast path calls with
-    /// its own O(1) validity proof, skipping validation entirely). Both
-    /// mechanisms are load-bearing; neither replaces the other.
-    fn compact_mechanical_revision_bodies_for(
-        &mut self,
-        mode: TranscriptGraphValidationMode,
-    ) -> Result<(), TranscriptEditError> {
-        let validated_key = match mode {
-            TranscriptGraphValidationMode::FullVerify => None,
-            TranscriptGraphValidationMode::DecodeMemoized => transcript_graph_shape_key(
-                TRANSCRIPT_GRAPH_FACT_VALIDATED,
-                &self.head,
-                &self.commits,
-                &self.revisions,
-            ),
-        };
-        let already_proved = validated_key
-            .as_deref()
-            .is_some_and(transcript_graph_fact_is_memoized);
-        if !already_proved {
-            validate_transcript_history_state(self)?;
-            if let Some(key) = validated_key {
-                record_transcript_graph_fact(key);
-            }
-        }
-        self.prune_mechanical_revision_bodies();
-        Ok(())
-    }
-
-    /// The pruning half of [`Self::compact_mechanical_revision_bodies`],
-    /// without the full graph validation.
-    ///
-    /// Callable ONLY when the graph's validity is already established: pruning
-    /// drops bodies, so running it over an unvalidated graph could launder a
-    /// corrupt body out of sight. The append fast path in
-    /// `transcript_history_state_after_message_mutation` is the one caller,
-    /// and it proves the two facts that pruning needs (previously validated
-    /// graph, new head extends the previous head) before calling.
-    fn prune_mechanical_revision_bodies(&mut self) {
-        let mut retained = BTreeSet::from([self.head.clone()]);
-        for commit in &self.commits {
-            retained.insert(commit.parent_revision.clone());
-            retained.insert(commit.revision.clone());
-        }
-
-        let head_is_audited_endpoint = self
-            .commits
-            .iter()
-            .any(|commit| commit.parent_revision == self.head || commit.revision == self.head);
-        if !head_is_audited_endpoint
-            && let Some(last_commit) = self
-                .commits
-                .last()
-                .filter(|commit| commit.revision != self.head)
-            && let Some(head_body) = self
-                .revisions
-                .iter_mut()
-                .find(|body| body.revision == self.head)
-        {
-            head_body.parent_revision = Some(last_commit.revision.clone());
-        }
-
-        let mut seen = BTreeSet::new();
-        self.revisions
-            .retain(|body| retained.contains(&body.revision) && seen.insert(body.revision.clone()));
-
-        // The full graph was validated before any pruning, so corrupt bodies
-        // cannot be laundered by dropping them. The transformation changes no
-        // message, revision digest, commit, or audited endpoint: it only
-        // de-duplicates bodies by revision, removes non-endpoint mechanical
-        // bodies, and points an unaudited live head directly at the already
-        // validated latest commit. Re-hashing every retained transcript here
-        // would repeat the dominant snapshot cost without adding evidence.
-    }
-}
-
 /// Shape of a message mutation, as known by the seam that performed it.
 ///
 /// The transcript-head refresh is the only consumer: an append can reuse the
@@ -761,211 +282,6 @@ enum TranscriptMutationShape {
     Appended,
     /// The transcript was replaced or rewritten in place.
     Rewritten,
-}
-
-/// Re-derive pre-0.7.14 (bookkeeping-inclusive) transcript revision strings to
-/// the current content-addressed format at the durable-format parse boundary.
-///
-/// Retained revision bodies carry their full message lists, so every legacy
-/// string can be re-verified against the bytes it was computed from. Only
-/// strings that verify under the legacy digest of their own retained body are
-/// rewritten; anything else is left untouched for the validators to reject
-/// exactly as they would have before.
-fn heal_legacy_revision_strings(
-    revisions: &mut [TranscriptRevisionBody],
-    commits: &mut [TranscriptRewriteCommit],
-    head: Option<&mut String>,
-) -> Result<(), serde_json::Error> {
-    let mut remap: BTreeMap<String, String> = BTreeMap::new();
-    for body in revisions.iter() {
-        let content = transcript_messages_digest(&body.messages)?;
-        if body.revision == content {
-            continue;
-        }
-        if body.revision == legacy_transcript_messages_digest(&body.messages)? {
-            remap.insert(body.revision.clone(), content);
-        }
-    }
-    if remap.is_empty() {
-        return Ok(());
-    }
-    for body in revisions.iter_mut() {
-        if let Some(current) = remap.get(&body.revision) {
-            body.revision = current.clone();
-        }
-        if let Some(parent) = body.parent_revision.as_ref()
-            && let Some(current) = remap.get(parent)
-        {
-            body.parent_revision = Some(current.clone());
-        }
-    }
-    for commit in commits.iter_mut() {
-        if let Some(current) = remap.get(&commit.parent_revision) {
-            commit.parent_revision = current.clone();
-        }
-        if let Some(current) = remap.get(&commit.revision) {
-            commit.revision = current.clone();
-        }
-        heal_legacy_commit_span_digests(commit, revisions)?;
-    }
-    if let Some(head) = head
-        && let Some(current) = remap.get(head.as_str())
-    {
-        *head = current.clone();
-    }
-    Ok(())
-}
-
-/// Re-derive a legacy commit's span digests from its retained bodies.
-///
-/// Span digests are only rewritten when the stored value verifies under the
-/// legacy digest of the same span; malformed commits keep their stored bytes
-/// so [`validate_transcript_rewrite_record`] rejects them unchanged.
-fn heal_legacy_commit_span_digests(
-    commit: &mut TranscriptRewriteCommit,
-    revisions: &[TranscriptRevisionBody],
-) -> Result<(), serde_json::Error> {
-    let Some(parent_body) = revisions
-        .iter()
-        .find(|body| body.revision == commit.parent_revision)
-    else {
-        return Ok(());
-    };
-    let Some(revision_body) = revisions
-        .iter()
-        .find(|body| body.revision == commit.revision)
-    else {
-        return Ok(());
-    };
-    let (start, end) = commit.selection.bounds();
-    if start > end || end > parent_body.messages.len() {
-        return Ok(());
-    }
-    let removed_len = end - start;
-    let Some(retained_len) = commit.messages_before.checked_sub(removed_len) else {
-        return Ok(());
-    };
-    let Some(replacement_len) = commit.messages_after.checked_sub(retained_len) else {
-        return Ok(());
-    };
-    let Some(replacement_end) = start.checked_add(replacement_len) else {
-        return Ok(());
-    };
-    if replacement_end > revision_body.messages.len() {
-        return Ok(());
-    }
-    let original_span = &parent_body.messages[start..end];
-    if commit.original_span_digest == legacy_transcript_messages_digest(original_span)? {
-        commit.original_span_digest = transcript_messages_digest(original_span)?;
-    }
-    let replacement_span = &revision_body.messages[start..replacement_end];
-    if commit.replacement_digest == legacy_transcript_messages_digest(replacement_span)? {
-        commit.replacement_digest = transcript_messages_digest(replacement_span)?;
-    }
-    Ok(())
-}
-
-/// Upgrade pre-semantic-field compaction records from retained typed transcript
-/// evidence, never from the free-form audit reason.
-///
-/// Old compaction commits used the generic `message_range` selection, but their
-/// revision body already carries the runtime-minted `CompactionSummary` role.
-/// A full-transcript, shrinking rewrite with exactly one such summary is the
-/// complete legacy witness. Other edits remain ordinary edits even when their
-/// display reason happens to say "compaction".
-fn heal_legacy_compaction_rewrite_semantics(
-    commits: &mut [TranscriptRewriteCommit],
-    revisions: &[TranscriptRevisionBody],
-) {
-    for commit in commits {
-        if !commit.selection.is_legacy_untyped() {
-            continue;
-        }
-        let (start, end) = commit.selection.bounds();
-        if start != 0
-            || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
-        {
-            continue;
-        }
-        let Some(parent) = revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-        else {
-            continue;
-        };
-        let Some(revision) = revisions
-            .iter()
-            .find(|body| body.revision == commit.revision)
-        else {
-            continue;
-        };
-        if parent.messages.len() != commit.messages_before
-            || revision.messages.len() != commit.messages_after
-        {
-            continue;
-        }
-        let summary_count = revision
-            .messages
-            .iter()
-            .filter(|message| {
-                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
-            })
-            .count();
-        if summary_count == 1 {
-            commit.selection = TranscriptRewriteSelection::migrated_legacy_compaction(start, end);
-        }
-    }
-}
-
-impl TranscriptHistoryState {
-    /// Rebuild transcript revision graph state from append-only rewrite records.
-    pub fn from_rewrite_records<I>(records: I) -> Result<Option<Self>, TranscriptEditError>
-    where
-        I: IntoIterator<Item = TranscriptRewriteRecord>,
-    {
-        let mut state: Option<Self> = None;
-        for record in records {
-            validate_transcript_rewrite_record(
-                &record.commit,
-                &record.parent_body,
-                &record.revision_body,
-            )?;
-            let state = state.get_or_insert_with(|| Self {
-                head: record.commit.parent_revision.clone(),
-                commits: Vec::new(),
-                revisions: Vec::new(),
-                digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            });
-            if record.commit.parent_revision != state.head {
-                if revision_body_extends_head(&record.parent_body, &state.revisions, &state.head)? {
-                    state.head = record.commit.parent_revision.clone();
-                } else {
-                    return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                        "rewrite record parent {} does not extend transcript head {}",
-                        record.commit.parent_revision, state.head
-                    )));
-                }
-            }
-            if !state
-                .revisions
-                .iter()
-                .any(|body| body.revision == record.parent_body.revision)
-            {
-                state.revisions.push(record.parent_body);
-            }
-            if !state
-                .revisions
-                .iter()
-                .any(|body| body.revision == record.revision_body.revision)
-            {
-                state.revisions.push(record.revision_body);
-            }
-            state.head = record.commit.revision.clone();
-            state.commits.push(record.commit);
-        }
-        Ok(state)
-    }
 }
 
 /// Invalid typed transcript edit request.
@@ -1002,90 +318,6 @@ pub enum TranscriptEditError {
     HistoryStateMalformed(String),
     #[error("invalid transcript shape after rewrite: {0}")]
     InvalidTranscriptShape(String),
-}
-
-fn message_role_name(message: &Message) -> &'static str {
-    match message {
-        Message::System(_) => "system",
-        Message::SystemNotice(_) => "system_notice",
-        Message::User(_) => "user",
-        Message::BlockAssistant(_) => "block_assistant",
-        Message::ToolResults { .. } => "tool_results",
-    }
-}
-
-fn assistant_tool_use_ids(message: &Message) -> Vec<&str> {
-    match message {
-        Message::BlockAssistant(assistant) => assistant
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                AssistantBlock::ToolUse { id, .. } => Some(id.as_str()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), TranscriptEditError> {
-    for (index, message) in messages.iter().enumerate() {
-        if let Message::ToolResults { results, .. } = message {
-            let Some(previous) = index
-                .checked_sub(1)
-                .and_then(|previous| messages.get(previous))
-            else {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "tool_results at message {index} has no preceding assistant tool-use message"
-                )));
-            };
-            let expected = assistant_tool_use_ids(previous);
-            if expected.is_empty() {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "tool_results at message {index} follows {}, not an assistant tool-use message",
-                    message_role_name(previous)
-                )));
-            }
-            let actual = results
-                .iter()
-                .map(|result| result.tool_use_id.as_str())
-                .collect::<Vec<_>>();
-            let actual_set = actual.iter().copied().collect::<BTreeSet<_>>();
-            let expected_set = expected.iter().copied().collect::<BTreeSet<_>>();
-            if actual.len() != actual_set.len() {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "tool_results at message {index} contains duplicate tool ids"
-                )));
-            }
-            if expected.len() != expected_set.len() {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "assistant tool-use message before tool_results at message {index} contains duplicate tool ids"
-                )));
-            }
-            if actual_set != expected_set {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "tool_results at message {index} resolve tool ids {actual_set:?}, expected {expected_set:?}"
-                )));
-            }
-        }
-
-        let tool_use_ids = assistant_tool_use_ids(message);
-        if tool_use_ids.is_empty() {
-            continue;
-        }
-        let Some(next) = messages.get(index + 1) else {
-            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                "assistant tool-use message {index} has no following tool_results"
-            )));
-        };
-        if !matches!(next, Message::ToolResults { .. }) {
-            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                "assistant tool-use message {index} is followed by {}, not tool_results",
-                message_role_name(next)
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
@@ -1375,318 +607,6 @@ pub(crate) fn transcript_messages_digest_uncounted(
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-/// Digest format used by pre-0.7.14 transcript revision strings.
-///
-/// The legacy canonicalization only normalized image payloads, so persisted
-/// revision strings from older stores include construction bookkeeping
-/// (`identity`, `created_at`). This is a durable-format decoder: it exists
-/// solely so [`heal_legacy_revision_strings`] can verify a stored string
-/// against its retained body before re-deriving it to the current
-/// content-addressed format. Never mint new revisions with it.
-fn legacy_transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
-    sha256_json_digest(&canonicalize_message_images_for_digest(messages))
-}
-
-fn validate_transcript_rewrite_record(
-    commit: &TranscriptRewriteCommit,
-    parent_body: &TranscriptRevisionBody,
-    revision_body: &TranscriptRevisionBody,
-) -> Result<(), TranscriptEditError> {
-    if parent_body.revision != commit.parent_revision {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "parent body revision {} does not match commit parent {}",
-            parent_body.revision, commit.parent_revision
-        )));
-    }
-    if revision_body.revision != commit.revision {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "revision body {} does not match commit revision {}",
-            revision_body.revision, commit.revision
-        )));
-    }
-    if commit.parent_revision == commit.revision {
-        return Err(TranscriptEditError::NoOpRewrite {
-            revision: commit.revision.clone(),
-        });
-    }
-    let parent_digest = transcript_messages_digest(&parent_body.messages)
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if parent_digest != commit.parent_revision {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "parent body digest {parent_digest} does not match commit parent {}",
-            commit.parent_revision
-        )));
-    }
-    let revision_digest = transcript_messages_digest(&revision_body.messages)
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if revision_digest != commit.revision {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "revision body digest {revision_digest} does not match commit revision {}",
-            commit.revision
-        )));
-    }
-    let (start, end) = commit.selection.bounds();
-    if start > end || end > parent_body.messages.len() {
-        return Err(TranscriptEditError::InvalidRewriteRange {
-            start,
-            end,
-            message_count: parent_body.messages.len(),
-        });
-    }
-    if commit.messages_before != parent_body.messages.len()
-        || commit.messages_after != revision_body.messages.len()
-    {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "commit message counts {} -> {} do not match revision bodies {} -> {}",
-            commit.messages_before,
-            commit.messages_after,
-            parent_body.messages.len(),
-            revision_body.messages.len()
-        )));
-    }
-    let original_span_digest = transcript_messages_digest(&parent_body.messages[start..end])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if original_span_digest != commit.original_span_digest {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "original span digest {original_span_digest} does not match commit digest {}",
-            commit.original_span_digest
-        )));
-    }
-    let removed_len = end - start;
-    let retained_len = commit
-        .messages_before
-        .checked_sub(removed_len)
-        .ok_or_else(|| {
-            TranscriptEditError::HistoryStateMalformed(
-                "commit removed more messages than it recorded before rewrite".to_string(),
-            )
-        })?;
-    let replacement_len = commit
-        .messages_after
-        .checked_sub(retained_len)
-        .ok_or_else(|| {
-            TranscriptEditError::HistoryStateMalformed(
-                "commit message counts cannot describe a replacement span".to_string(),
-            )
-        })?;
-    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
-        TranscriptEditError::HistoryStateMalformed("replacement span end overflowed".to_string())
-    })?;
-    if replacement_end > revision_body.messages.len() {
-        return Err(TranscriptEditError::InvalidRewriteRange {
-            start,
-            end: replacement_end,
-            message_count: revision_body.messages.len(),
-        });
-    }
-    if commit.selection.semantic() == TranscriptRewriteSemantic::Compaction {
-        let summary_count = revision_body.messages[start..replacement_end]
-            .iter()
-            .filter(|message| {
-                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
-            })
-            .count();
-        if start != 0
-            || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
-            || summary_count != 1
-        {
-            return Err(TranscriptEditError::HistoryStateMalformed(
-                "typed compaction rewrite must shrink the full transcript and carry exactly one CompactionSummary"
-                    .to_string(),
-            ));
-        }
-    }
-    let parent_prefix_digest = transcript_messages_digest(&parent_body.messages[..start])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let revision_prefix_digest = transcript_messages_digest(&revision_body.messages[..start])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if parent_prefix_digest != revision_prefix_digest {
-        return Err(TranscriptEditError::HistoryStateMalformed(
-            "rewrite revision changed messages before the selected span".to_string(),
-        ));
-    }
-    let parent_suffix_digest = transcript_messages_digest(&parent_body.messages[end..])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let revision_suffix_digest =
-        transcript_messages_digest(&revision_body.messages[replacement_end..])
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if parent_suffix_digest != revision_suffix_digest {
-        return Err(TranscriptEditError::HistoryStateMalformed(
-            "rewrite revision changed messages after the selected span".to_string(),
-        ));
-    }
-    let replacement_digest =
-        transcript_messages_digest(&revision_body.messages[start..replacement_end])
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if replacement_digest != commit.replacement_digest {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "replacement span digest {replacement_digest} does not match commit digest {}",
-            commit.replacement_digest
-        )));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_transcript_history_state(
-    state: &TranscriptHistoryState,
-) -> Result<(), TranscriptEditError> {
-    if state
-        .revisions
-        .iter()
-        .all(|body| body.revision != state.head)
-    {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "missing transcript head body {}",
-            state.head
-        )));
-    }
-    for body in &state.revisions {
-        let digest = transcript_messages_digest(&body.messages)
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        if digest != body.revision {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "transcript revision body {} has digest {digest}",
-                body.revision
-            )));
-        }
-    }
-    for commit in &state.commits {
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing parent transcript body {}",
-                    commit.parent_revision
-                ))
-            })?;
-        let revision_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing transcript revision body {}",
-                    commit.revision
-                ))
-            })?;
-        validate_transcript_rewrite_record(commit, parent_body, revision_body)?;
-    }
-    let Some(first_commit) = state.commits.first() else {
-        return Ok(());
-    };
-    let mut expected_head = first_commit.parent_revision.clone();
-    for commit in &state.commits {
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing parent transcript body {}",
-                    commit.parent_revision
-                ))
-            })?;
-        if commit.parent_revision != expected_head
-            && !revision_body_extends_head(parent_body, &state.revisions, &expected_head)?
-        {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "rewrite commit parent {} does not extend transcript head {}",
-                commit.parent_revision, expected_head
-            )));
-        }
-        expected_head = commit.revision.clone();
-    }
-    let head_is_audited_endpoint = state
-        .commits
-        .iter()
-        .any(|commit| commit.parent_revision == state.head || commit.revision == state.head);
-    let head_extends_latest_commit = if head_is_audited_endpoint {
-        let Some(head_body) = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == state.head)
-        else {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "missing transcript head body {}",
-                state.head
-            )));
-        };
-        revision_body_extends_head(head_body, &state.revisions, &expected_head)?
-    } else {
-        let mut cursor = state.head.as_str();
-        let mut visited = BTreeSet::new();
-        while cursor != expected_head {
-            if !visited.insert(cursor.to_string()) {
-                break;
-            }
-            let Some(head_body) = state.revisions.iter().find(|body| body.revision == cursor)
-            else {
-                break;
-            };
-            let Some(parent) = head_body.parent_revision.as_deref() else {
-                break;
-            };
-            cursor = parent;
-        }
-        cursor == expected_head
-    };
-    if !head_extends_latest_commit {
-        return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "transcript head {} does not extend the rewrite chain",
-            state.head
-        )));
-    }
-    Ok(())
-}
-
-fn revision_body_extends_head(
-    candidate: &TranscriptRevisionBody,
-    revisions: &[TranscriptRevisionBody],
-    head: &str,
-) -> Result<bool, TranscriptEditError> {
-    let Some(head_body) = revisions.iter().find(|body| body.revision == head) else {
-        return Ok(false);
-    };
-    if candidate.revision == head {
-        return Ok(true);
-    }
-    if candidate.messages.len() < head_body.messages.len() {
-        return Ok(false);
-    }
-    let prefix_digest = transcript_messages_digest(&candidate.messages[..head_body.messages.len()])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if prefix_digest == head {
-        return Ok(true);
-    }
-
-    // A resume-time system refresh may replace the single leading System
-    // projection while preserving (and possibly appending to) the exact
-    // conversation tail. Prove that content shape directly; a historical
-    // parent_revision pointer is not occurrence identity and must never, by
-    // itself, authorize a later commit after a digest has recurred.
-    let (Some(Message::System(_)), Some(Message::System(_))) =
-        (candidate.messages.first(), head_body.messages.first())
-    else {
-        return Ok(false);
-    };
-    let head_tail_len = head_body.messages.len().saturating_sub(1);
-    if head_tail_len == 0 {
-        return Ok(true);
-    }
-    let candidate_tail = &candidate.messages[1..];
-    if candidate_tail.len() < head_tail_len {
-        return Ok(false);
-    }
-    let head_tail_digest = transcript_messages_digest(&head_body.messages[1..])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let candidate_tail_prefix_digest = transcript_messages_digest(&candidate_tail[..head_tail_len])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    Ok(candidate_tail_prefix_digest == head_tail_digest)
-}
-
 use digest_accumulator::take_verification_sample as digest_accumulator_take_verification_sample;
 
 fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
@@ -1725,6 +645,10 @@ pub(crate) struct SessionHistoryCaches {
     assembly: HistoryWitnessAssemblyCache,
     /// Shared parsed form of the current history graph.
     shared_state: SharedTranscriptHistoryState,
+    /// Canonical checkpoint digest most recently PROVED against this exact
+    /// in-memory document. Derived cache only; cleared by every content
+    /// mutation.
+    verified_checkpoint_digest: std::sync::OnceLock<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1818,6 +742,8 @@ impl Serialize for Session {
     where
         S: Serializer,
     {
+        let _digest_site =
+            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_ENCODE);
         let compacted_metadata = if self.transcript_history_metadata_validation
             == TranscriptHistoryMetadataValidation::RequiresValidation
         {
@@ -1845,12 +771,20 @@ impl Serialize for Session {
     }
 }
 
+/// Validate-and-compact the transcript-history metadata value in place, and
+/// return the sealed proof of the exact graph that was installed.
+///
+/// Returning the proof is the sealed-capability seam: the graph this function
+/// just validated (or substituted from the proven decode memo) used to be
+/// dropped on the floor, so the first consumer after a decode re-parsed the
+/// very value serialized from it one statement earlier. `Ok(None)` means the
+/// metadata carries no transcript-history graph at all.
 fn compact_transcript_history_metadata_for_snapshot(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     mode: TranscriptGraphValidationMode,
-) -> Result<(), String> {
+) -> Result<Option<ValidatedTranscriptHistory>, String> {
     let Some(value) = metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
-        return Ok(());
+        return Ok(None);
     };
     let mut state: TranscriptHistoryState =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
@@ -1859,9 +793,11 @@ fn compact_transcript_history_metadata_for_snapshot(
         .map_err(|error| error.to_string())?;
     metadata.insert(
         SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
-        serde_json::to_value(state).map_err(|error| error.to_string())?,
+        serde_json::to_value(&state).map_err(|error| error.to_string())?,
     );
-    Ok(())
+    Ok(Some(ValidatedTranscriptHistory::adopt_compacted_snapshot(
+        std::sync::Arc::new(state),
+    )))
 }
 
 impl<'de> Deserialize<'de> for Session {
@@ -1869,6 +805,8 @@ impl<'de> Deserialize<'de> for Session {
     where
         D: Deserializer<'de>,
     {
+        let _digest_site =
+            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_DECODE);
         let serde_repr = SessionSerde::deserialize(deserializer)?;
         let version = session_persistence_version_authority::restore_session_envelope_version(
             serde_repr.version,
@@ -1878,12 +816,12 @@ impl<'de> Deserialize<'de> for Session {
         // Durable-document decode seam: repeat decodes of an unchanged graph
         // shape skip the per-body digest re-verification via the bounded
         // process-lifetime decode memo (first sight still verifies fully).
-        compact_transcript_history_metadata_for_snapshot(
+        let sealed = compact_transcript_history_metadata_for_snapshot(
             &mut metadata,
             TranscriptGraphValidationMode::DecodeMemoized,
         )
         .map_err(<D::Error as serde::de::Error>::custom)?;
-        Ok(Session {
+        let session = Session {
             version,
             id: serde_repr.id,
             messages: TranscriptMessages::from_vec(serde_repr.messages),
@@ -1893,7 +831,16 @@ impl<'de> Deserialize<'de> for Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: serde_repr.usage,
-        })
+        };
+        // Seed the per-instance shared parse with the graph this decode just
+        // proved and installed. Without this, the first consumer after every
+        // decode re-parses the very metadata value that was serialized from
+        // this exact state one statement earlier — a whole-graph O(document)
+        // parse per load on the measured hot seam.
+        if let Some(sealed) = sealed {
+            session.history_caches.shared_state.set(sealed.shared());
+        }
+        Ok(session)
     }
 }
 
@@ -2040,9 +987,20 @@ impl Session {
             )
             .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         }
-        if let Some(history) = metadata.get_mut(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
-            *history = canonicalize_checkpoint_history_value(history)?;
-        }
+        // Deliberately NOT canonicalized here.
+        //
+        // The sole caller (`checkpoint::session_checkpoint_digest_uncached`)
+        // removes SESSION_TRANSCRIPT_HISTORY_STATE_KEY from this document and
+        // substitutes a compact history marker before hashing, so canonicalizing
+        // the graph is work whose entire output is discarded — and on a
+        // history-bearing session that graph is document-sized. The resulting
+        // digest is byte-identical either way because the key never reaches the
+        // hash.
+        //
+        // If a second caller ever needs the canonicalized graph IN the document,
+        // it must ask for it explicitly rather than reinstating it here for
+        // everyone.
+        metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
         if let Some(deferred) = metadata.get_mut(SESSION_DEFERRED_TURN_STATE_KEY) {
             *deferred = canonicalize_checkpoint_deferred_turn_value(deferred)?;
         }
@@ -5404,7 +4362,7 @@ impl Session {
         // SEAM 1 (non-append): synthetic notices are stripped from anywhere in
         // the vector, so the retained midstate and prefix ring are discarded.
         self.messages.replace(refreshed);
-        self.updated_at = updated_at;
+        self.mark_content_mutated(updated_at);
         if let Some(value) = realtime_state {
             self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
         }
@@ -5430,7 +4388,7 @@ impl Session {
     pub fn push(&mut self, message: Message) {
         // SEAM 2 (append): the accumulator folds only the appended bytes.
         self.messages.push(message);
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
         self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Appended);
     }
 
@@ -5443,7 +4401,7 @@ impl Session {
         }
         // SEAM 3 (append): the accumulator folds only the appended batch.
         self.messages.extend_batch(messages);
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
         self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Appended);
     }
 
@@ -5486,10 +4444,16 @@ impl Session {
                 // The scan may have externalized part of the buffer before
                 // failing; fail safe by discarding the parked midstate.
                 self.messages.finish_in_place_scan(Some(start));
+                self.clear_checkpoint_digest_seal();
                 return Err(error);
             }
         };
         self.messages.finish_in_place_scan(lowest_mutated);
+        // This seam rewrites message CONTENT without advancing `updated_at`,
+        // so the checkpoint-digest seal must be cleared explicitly — and
+        // unconditionally: the scan exposed the buffer for mutation, so the
+        // seal must not depend on the scan's own mutation report.
+        self.clear_checkpoint_digest_seal();
         if lowest_mutated.is_some()
             && let Some(previous_digest) = previous_digest
             && self.messages.digest().ok().as_ref() != Some(&previous_digest)
@@ -5544,10 +4508,15 @@ impl Session {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     self.messages.finish_in_place_scan(Some(0));
+                    self.clear_checkpoint_digest_seal();
                     return Err(error);
                 }
             };
         self.messages.finish_in_place_scan(lowest_mutated);
+        // Same contract as `externalize_media`: content may have been
+        // rewritten in place without an `updated_at` bump, so the seal is
+        // cleared unconditionally.
+        self.clear_checkpoint_digest_seal();
         if lowest_mutated.is_some()
             && let Some(previous_digest) = previous_digest
             && self.messages.digest().ok().as_ref() != Some(&previous_digest)
@@ -5557,11 +4526,25 @@ impl Session {
         Ok(decoded_total)
     }
 
+    /// Advance `updated_at` and clear the per-session checkpoint-digest
+    /// seal.
+    ///
+    /// Every content mutation that bumps the timestamp must route through
+    /// here: `updated_at` is part of the canonical digest document, so any
+    /// write to it invalidates the sealed proof. Content mutations that
+    /// deliberately do NOT advance `updated_at` (`externalize_media`,
+    /// `hydrate_realtime_user_images_with_usage`,
+    /// `backfill_metadata_if_absent`) must clear the seal explicitly.
+    fn mark_content_mutated(&mut self, at: SystemTime) {
+        self.updated_at = at;
+        self.clear_checkpoint_digest_seal();
+    }
+
     /// Explicitly update the timestamp
     ///
     /// Call this after bulk operations that don't update timestamps automatically.
     pub fn touch(&mut self) {
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
     }
 
     /// Get the last N messages
@@ -5583,7 +4566,7 @@ impl Session {
     /// Update cumulative usage after an LLM call.
     pub fn record_usage(&mut self, turn_usage: Usage) {
         self.usage.add(&turn_usage);
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
     }
 
     /// Append externally-produced user content to the canonical transcript.
@@ -5828,7 +4811,7 @@ impl Session {
         } else {
             inner.insert(0, Message::System(message));
         }
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
         self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Rewritten);
     }
 
@@ -6256,6 +5239,35 @@ impl Session {
         self.history_caches.witness.get().map(String::as_str)
     }
 
+    /// Whether this exact in-memory document was already PROVED to carry
+    /// `digest` (per-session seal, never a process-global map). `false`
+    /// means "not proved on this instance": the caller re-verifies.
+    pub(crate) fn checkpoint_digest_seal_matches(
+        &self,
+        digest: &crate::checkpoint::SessionCheckpointDigest,
+    ) -> bool {
+        self.history_caches
+            .verified_checkpoint_digest
+            .get()
+            .is_some_and(|sealed| sealed == digest.as_str())
+    }
+
+    /// Seal the canonical checkpoint digest just proved against this exact
+    /// in-memory document. Every content mutation clears the seal.
+    pub(crate) fn seal_verified_checkpoint_digest(
+        &self,
+        digest: &crate::checkpoint::SessionCheckpointDigest,
+    ) {
+        let _ = self
+            .history_caches
+            .verified_checkpoint_digest
+            .set(digest.as_str().to_string());
+    }
+
+    fn clear_checkpoint_digest_seal(&mut self) {
+        self.history_caches.verified_checkpoint_digest = std::sync::OnceLock::new();
+    }
+
     /// Record the canonical witness derived from the CURRENT history value.
     pub(crate) fn record_transcript_history_witness(&self, witness: &str) {
         let _ = self.history_caches.witness.set(witness.to_string());
@@ -6283,6 +5295,8 @@ impl Session {
         history: &serde_json::Value,
     ) -> Option<crate::checkpoint::SessionCheckpointDigest> {
         use sha2::Digest as _;
+        let _digest_site =
+            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_WITNESS);
         if self.transcript_history_metadata_validation
             != TranscriptHistoryMetadataValidation::Validated
         {
@@ -6439,7 +5453,7 @@ impl Session {
             self.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::RequiresValidation;
         }
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
     }
 
     /// Install transcript history that was produced by a typed path which
@@ -6453,7 +5467,7 @@ impl Session {
         self.history_caches.shared_state.clear();
         self.transcript_history_metadata_validation =
             TranscriptHistoryMetadataValidation::Validated;
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
     }
 
     /// [`Self::set_validated_transcript_history_metadata`] when the caller
@@ -6493,7 +5507,7 @@ impl Session {
                 TranscriptHistoryMetadataValidation::Validated;
         }
         if changed {
-            self.updated_at = SystemTime::now();
+            self.mark_content_mutated(SystemTime::now());
         }
     }
 
@@ -6537,6 +5551,10 @@ impl Session {
             false
         } else {
             self.metadata.insert(key.to_string(), value);
+            // Content mutation that deliberately does not advance
+            // `updated_at`: the checkpoint-digest seal must be cleared
+            // explicitly.
+            self.clear_checkpoint_digest_seal();
             true
         }
     }
@@ -6551,7 +5569,7 @@ impl Session {
             return;
         }
         if self.metadata.remove(key).is_some() {
-            self.updated_at = SystemTime::now();
+            self.mark_content_mutated(SystemTime::now());
         }
     }
 
@@ -7010,6 +6028,35 @@ impl Session {
         Ok(Some(state))
     }
 
+    /// This session's transcript graph together with the proof that it
+    /// validates.
+    ///
+    /// Prefer this over pairing [`Self::validate_transcript_history_state`]
+    /// with a separate parse. That pairing establishes the fact and then drops
+    /// it on the floor: the parsed value carries no evidence, so every guard it
+    /// is handed to re-derives the same whole-graph proof at O(document) cost.
+    /// A session whose in-memory marker already records the validation returns
+    /// the sealed graph without re-verifying; anything else pays exactly one
+    /// full verification here, and no consumer pays again.
+    pub fn validated_transcript_history_state(
+        &self,
+    ) -> Result<Option<ValidatedTranscriptHistory>, TranscriptEditError> {
+        let Some(state) = self
+            .transcript_history_state_shared()
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        if self.transcript_history_metadata_validation
+            == TranscriptHistoryMetadataValidation::Validated
+        {
+            return Ok(Some(ValidatedTranscriptHistory::adopt_session_validated(
+                state,
+            )));
+        }
+        ValidatedTranscriptHistory::seal(state).map(Some)
+    }
+
     /// Return the already-validated transcript graph head without cloning and
     /// deserializing the full history document again.
     ///
@@ -7223,23 +6270,23 @@ impl Session {
                 actual,
             });
         }
-        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
+        self.seal_verified_checkpoint_digest(&actual);
         Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
     }
 
     /// [`Session::try_checkpoint_state`] for steady-state READS of durable
     /// documents, skipping the canonical-content digest recomputation when
-    /// this process already fully verified this exact document shape and
+    /// this exact in-memory document was already fully verified against the
     /// stamp digest.
     ///
-    /// Admission into the memo requires one complete verification (here, in
-    /// `try_checkpoint_state`, or at stamp install time), so the first read
-    /// after boot still hashes once. Content changes re-key the memo and
-    /// re-verify: the key carries the stamp digest plus the document's cheap
-    /// shape (message count, metadata entry count, content timestamps), and
-    /// every content mutation seam advances at least one of those. Write,
+    /// The proof is a per-session seal, not a process-global map: it lives
+    /// on this `Session` instance, so it can never vouch for a different
+    /// document, and every content mutation of this instance clears it.
+    /// Sealing requires one complete verification (here, in
+    /// `try_checkpoint_state`, or at stamp mint/install time), so the first
+    /// read of a freshly deserialized document still hashes once. Write,
     /// adoption, and convergence seams must keep calling
-    /// [`Session::try_checkpoint_state`]: a cached hit is memoized trust,
+    /// [`Session::try_checkpoint_state`]: a sealed hit is memoized trust,
     /// not a fresh proof of current bytes.
     pub fn try_checkpoint_state_cached(
         &self,
@@ -7258,7 +6305,7 @@ impl Session {
                     );
                 }
             };
-        if crate::checkpoint::checkpoint_stamp_verification_is_cached(self, stamp.digest()) {
+        if self.checkpoint_digest_seal_matches(stamp.digest()) {
             return Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp));
         }
         let actual = crate::checkpoint::session_checkpoint_digest(self)?;
@@ -7268,7 +6315,7 @@ impl Session {
                 actual,
             });
         }
-        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
+        self.seal_verified_checkpoint_digest(&actual);
         Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
     }
 
@@ -7290,27 +6337,27 @@ impl Session {
         // just minted from the same unmutated document. The slow path is
         // unchanged: a foreign or stale stamp re-derives the canonical digest
         // and fails closed on mismatch.
-        let actual =
-            if crate::checkpoint::checkpoint_stamp_verification_is_cached(self, stamp.digest()) {
-                stamp.digest().clone()
-            } else {
-                let actual = crate::checkpoint::session_checkpoint_digest(self)?;
-                if stamp.digest() != &actual {
-                    return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
-                        expected: stamp.digest().clone(),
-                        actual,
-                    });
-                }
-                actual
-            };
+        let actual = if self.checkpoint_digest_seal_matches(stamp.digest()) {
+            stamp.digest().clone()
+        } else {
+            let actual = crate::checkpoint::session_checkpoint_digest(self)?;
+            if stamp.digest() != &actual {
+                return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
+                    expected: stamp.digest().clone(),
+                    actual,
+                });
+            }
+            actual
+        };
         let value = serde_json::to_value(&stamp)?;
+        // These two metadata writes touch only keys the canonical digest
+        // excludes, so the seal legitimately survives the install — that is
+        // exactly what preserves the mint-then-install single-pass win.
         self.metadata
             .remove(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
         self.metadata
             .insert(SESSION_CHECKPOINT_STAMP_KEY.to_string(), value);
-        // Recorded after the stamp insertion so the memoized document shape
-        // matches the persisted (and later reloaded) document exactly.
-        crate::checkpoint::record_checkpoint_stamp_verification(self, &actual);
+        self.seal_verified_checkpoint_digest(&actual);
         Ok(())
     }
 
@@ -7426,7 +6473,7 @@ impl Session {
         }
         // SEAM 7 (non-append): the projection adopts a graph head body.
         self.messages.replace(head_body.messages);
-        self.updated_at = updated_at;
+        self.mark_content_mutated(updated_at);
         Ok(())
     }
 
@@ -7586,7 +6633,7 @@ impl Session {
 
         // SEAM 8 (non-append): an audited rewrite replaces a mid-vector span.
         self.messages.replace(rewritten);
-        self.updated_at = SystemTime::now();
+        self.mark_content_mutated(SystemTime::now());
         Ok(commit)
     }
 
@@ -8514,6 +7561,7 @@ mod tests {
         }
         Ok(())
     }
+    use super::transcript_history::heal::legacy_transcript_messages_digest;
     use super::*;
     use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
@@ -9411,6 +8459,56 @@ mod tests {
             "repeat decode of the marker-stamped spelling must not recompute digests"
         );
 
+        // Substitution pin: with the memo hot, a repeat decode must carry a
+        // graph structurally identical to the first fully-verified parse —
+        // the hit substitutes the proven object, it does not bless the
+        // incoming bytes.
+        let substituted: Session = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&substituted).unwrap()["metadata"]
+                [SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
+            serde_json::to_value(&first).unwrap()["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
+            "a memo hit must substitute the exact graph that was proved"
+        );
+
+        // created_at pin: the content-addressed revision strings do not
+        // cover a retained body's `created_at`, so the shape key must.
+        // Mutating only `created_at` must re-key the memo (full re-verify)
+        // and the decoded graph must carry the MUTATED `created_at`, never
+        // the cached object's.
+        let mut retimed = document.clone();
+        let retimed_head = retimed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["head"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let retimed_body = retimed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|body| body["revision"].as_str() == Some(retimed_head.as_str()))
+            .unwrap();
+        retimed_body["created_at"]["secs_since_epoch"] = serde_json::json!(12345);
+        let digests_before_retimed = session_content_digest_computations();
+        let retimed_session: Session = serde_json::from_value(retimed).unwrap();
+        assert!(
+            session_content_digest_computations() > digests_before_retimed,
+            "a created_at-only change must re-verify, not hit the memo"
+        );
+        let retimed_value = serde_json::to_value(&retimed_session).unwrap();
+        let decoded_head_created_at = retimed_value["metadata"]
+            [SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|body| body["revision"].as_str() == Some(retimed_head.as_str()))
+            .unwrap()["created_at"]["secs_since_epoch"]
+            .clone();
+        assert_eq!(
+            decoded_head_created_at,
+            serde_json::json!(12345),
+            "decode must carry the document's created_at, never the cached object's"
+        );
+
         // Changed content re-keys the memo and re-verifies: appending a
         // message to the retained head body (message count changes the
         // shape key) must be caught by full validation, never laundered
@@ -9439,6 +8537,97 @@ mod tests {
             session_content_digest_computations() > digests_before_tampered,
             "a changed graph shape must re-verify, not hit the memo"
         );
+    }
+
+    /// Sealed-capability seam: the snapshot compaction returns the proof of
+    /// exactly the graph value it installed into the metadata map.
+    #[test]
+    fn snapshot_compaction_returns_the_proof_of_the_installed_graph() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seam proof before")));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("seam proof after"))],
+                TranscriptRewriteReason::new("edit"),
+                None,
+                None,
+            )
+            .unwrap();
+        let document = serde_json::to_value(&session).unwrap();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
+            document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
+        );
+
+        let sealed = compact_transcript_history_metadata_for_snapshot(
+            &mut metadata,
+            TranscriptGraphValidationMode::FullVerify,
+        )
+        .expect("valid graph compacts")
+        .expect("graph value present");
+        assert_eq!(
+            serde_json::to_value(sealed.state()).unwrap(),
+            metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
+            "the returned proof must cover exactly the installed graph value"
+        );
+
+        // No graph, no proof: the seam must not manufacture evidence.
+        let mut empty = serde_json::Map::new();
+        assert!(
+            compact_transcript_history_metadata_for_snapshot(
+                &mut empty,
+                TranscriptGraphValidationMode::FullVerify,
+            )
+            .expect("empty metadata compacts")
+            .is_none()
+        );
+    }
+
+    /// Decode threads the proven parse into the per-instance shared cache:
+    /// the first consumer after a decode must not re-parse the metadata value
+    /// that was serialized from that exact state one statement earlier.
+    #[test]
+    fn decode_seeds_shared_transcript_graph_with_the_proven_parse() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seed shared parse")));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("seed shared parse two"))],
+                TranscriptRewriteReason::new("edit"),
+                None,
+                None,
+            )
+            .unwrap();
+        let document = serde_json::to_value(&session).unwrap();
+
+        let decoded: Session = serde_json::from_value(document).unwrap();
+        let seeded = decoded
+            .history_caches
+            .shared_state
+            .get()
+            .expect("decode must seed the shared graph parse");
+        assert_eq!(
+            serde_json::to_value(&*seeded).unwrap(),
+            decoded.metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
+            "the seeded graph must be the value the decode installed"
+        );
+        // The sealed accessor serves the seeded allocation, not a re-parse.
+        let sealed = decoded
+            .validated_transcript_history_state()
+            .expect("validated read")
+            .expect("graph present");
+        assert!(
+            std::sync::Arc::ptr_eq(&seeded, &sealed.shared()),
+            "validated_transcript_history_state must serve the decode-seeded parse"
+        );
+
+        // A graph-free document must not seed anything.
+        let bare: Session =
+            serde_json::from_value(serde_json::to_value(Session::new()).unwrap()).unwrap();
+        assert!(bare.history_caches.shared_state.get().is_none());
     }
 
     fn legacy_rewrite_fixture() -> (TranscriptRewriteCommit, Vec<Message>, Vec<Message>) {
@@ -9592,6 +8781,75 @@ mod tests {
             validate_transcript_history_state(&parsed).is_err(),
             "corrupt graph must keep failing validation"
         );
+    }
+
+    /// A `ValidatedTranscriptHistory` is the evidence its consumers stopped
+    /// re-deriving, so the one place that mints it must never hand one out for
+    /// a graph this process has not actually verified. Metadata written through
+    /// an unchecked seam clears the validation marker; the accessor owes that
+    /// session a full verification, and a digest-inconsistent body must fail it.
+    #[test]
+    fn sealed_transcript_history_refuses_unverified_corrupt_graph() {
+        let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
+        let state = TranscriptHistoryState {
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+            head: bogus.to_string(),
+            commits: Vec::new(),
+            revisions: vec![TranscriptRevisionBody {
+                revision: bogus.to_string(),
+                parent_revision: None,
+                messages: messages.clone(),
+                created_at: SystemTime::now(),
+            }],
+        };
+        let mut session = Session::new();
+        for message in &messages {
+            session.push(message.clone());
+        }
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(&state).expect("serialize corrupt state"),
+        );
+        assert!(
+            session.validated_transcript_history_state().is_err(),
+            "an unverified session must not be able to mint a proof for a \
+             digest-inconsistent transcript graph"
+        );
+    }
+
+    /// The other half of the same contract: verification is what the accessor
+    /// owes, not refusal. A consistent graph installed through the same
+    /// unchecked seam seals, so downstream guards keep working without each
+    /// re-running the whole-graph validator.
+    #[test]
+    fn sealed_transcript_history_verifies_and_seals_consistent_graph() {
+        let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
+        let revision = transcript_messages_digest(&messages).expect("content digest");
+        let state = TranscriptHistoryState {
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+            head: revision.clone(),
+            commits: Vec::new(),
+            revisions: vec![TranscriptRevisionBody {
+                revision: revision.clone(),
+                parent_revision: None,
+                messages: messages.clone(),
+                created_at: SystemTime::now(),
+            }],
+        };
+        let mut session = Session::new();
+        for message in &messages {
+            session.push(message.clone());
+        }
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(&state).expect("serialize consistent state"),
+        );
+        let sealed = session
+            .validated_transcript_history_state()
+            .expect("a consistent graph must seal")
+            .expect("history metadata is present");
+        assert_eq!(sealed.state().head, revision);
     }
 
     /// K4 invariant: synthetic-notice refresh is ONE atomic transcript edit —

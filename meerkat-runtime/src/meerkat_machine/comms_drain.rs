@@ -800,15 +800,27 @@ impl MeerkatMachine {
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
         mob_id: crate::meerkat_machine::dsl::MobId,
     ) -> Result<bool, RuntimeDriverError> {
-        match self
-            .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
-                session_id: session_id.clone(),
-                keep_alive: true,
-                comms_runtime: Some(comms_runtime),
-                expected_attachment: None,
-                mob_id: Some(mob_id),
-            })
-            .await?
+        // Reached from inside the mob actor's spawn-finalize poll chain. The
+        // drain command descends through the machine's DSL staging frames,
+        // which are large at opt-level=0 (no stack-slot coloring); run it on
+        // its own task so those frames do not stack onto the actor's chain
+        // (2 MiB production worker-stack budget).
+        let machine = Arc::clone(self);
+        let session_id = session_id.clone();
+        match crate::stack_relief::relieve_caller_stack(move || async move {
+            machine
+                .execute_meerkat_machine_drain_command(
+                    MeerkatMachineCommand::SetPeerIngressContext {
+                        session_id,
+                        keep_alive: true,
+                        comms_runtime: Some(comms_runtime),
+                        expected_attachment: None,
+                        mob_id: Some(mob_id),
+                    },
+                )
+                .await
+        })
+        .await?
         {
             MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
             other => Err(RuntimeDriverError::Internal(format!(

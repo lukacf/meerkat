@@ -649,6 +649,9 @@ async fn commit_runtime_loop_output_owned(
     input_ids: Vec<InputId>,
     receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
     session_snapshot: Option<Vec<u8>>,
+    // The same session those bytes came from, when the executor had it. Lets
+    // the boundary validator skip re-parsing the document it just serialized.
+    typed_session: Option<std::sync::Arc<meerkat_core::Session>>,
     directed_interaction_ids: Vec<InteractionId>,
     terminal: Option<CoreApplyTerminal>,
     machine_terminal_error: Option<meerkat_core::TurnErrorMetadata>,
@@ -720,6 +723,7 @@ async fn commit_runtime_loop_output_owned(
                 input_ids,
                 receipt,
                 session_snapshot,
+                typed_session.as_deref(),
                 directed_interaction_ids,
                 terminal.as_ref(),
             )
@@ -4714,6 +4718,7 @@ async fn process_queue(
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
                             receipt,
                             session_snapshot,
+                            session: typed_session,
                             terminal,
                         } = output;
                         // A resume against a session that has no pending
@@ -4742,6 +4747,7 @@ async fn process_queue(
                                 input_ids.clone(),
                                 receipt,
                                 session_snapshot,
+                                typed_session.clone(),
                                 directed_interaction_ids.clone(),
                                 terminal.clone(),
                                 machine_terminal_error.clone(),

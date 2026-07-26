@@ -450,6 +450,7 @@ mod tests {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -491,6 +492,7 @@ mod tests {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,

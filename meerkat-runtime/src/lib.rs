@@ -87,11 +87,13 @@ pub mod protocol_supervisor_trust_publish;
 #[path = "generated/protocol_supervisor_trust_revoke.rs"]
 pub mod protocol_supervisor_trust_revoke;
 pub(crate) mod queue;
+pub mod recovery;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
 pub(crate) mod silent_intent;
+pub mod stack_relief;
 pub mod store;
 pub mod terminal_status;
 pub mod traits;

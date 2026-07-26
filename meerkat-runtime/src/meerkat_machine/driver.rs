@@ -23,7 +23,6 @@ use crate::traits::{
 };
 use chrono::Utc;
 use meerkat_machine_kernels::generated::meerkat::command_capabilities as generated_kernel_command_capabilities;
-use sha2::{Digest, Sha256};
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
@@ -3677,10 +3676,12 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             ),
         });
     }
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+    // Accumulator-backed; see validate_completed_run_session_witness for why
+    // this digest is an internal produce-and-check agreement.
+    let terminal_digest = session.transcript_content_digest().map_err(|error| {
         RuntimeDriverError::ValidationFailed {
             reason: format!(
-                "service-turn terminal messages could not be encoded for receipt digest: {error}"
+                "service-turn terminal messages could not be digested for receipt: {error}"
             ),
         }
     })?;
@@ -3704,7 +3705,7 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
         run_id: run_id.clone(),
         boundary,
         contributing_input_ids: Vec::new(),
-        conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
+        conversation_digest: Some(terminal_digest),
         message_count: session.messages().len(),
         sequence: driver.run_boundary_sequence(&run_id),
     };
@@ -5675,20 +5676,32 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     Ok(())
 }
 
+/// Validate the committed boundary witness.
+///
+/// `typed_session` is the same session the snapshot was serialized from, when
+/// the producer had it in hand. Taking it skips deserializing the bytes back
+/// into that identical `Session` — a full pass over the document that this
+/// check otherwise pays on every turn regardless of how small the append was.
+/// When it is absent the bytes remain the source of truth and are parsed as
+/// before, so the validation performed is the same either way.
 fn validate_completed_run_session_witness(
     owner_session_id: &SessionId,
     receipt: &RunBoundaryReceipt,
     session_snapshot: Option<&[u8]>,
+    typed_session: Option<&meerkat_core::Session>,
 ) -> Result<(), RuntimeDriverError> {
-    let Some(session_snapshot) = session_snapshot else {
-        return Ok(());
+    let owned_session;
+    let session = match (typed_session, session_snapshot) {
+        (Some(session), _) => session,
+        (None, Some(session_snapshot)) => {
+            owned_session = serde_json::from_slice::<meerkat_core::Session>(session_snapshot)
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: format!("completed-run session snapshot was not a Session: {error}"),
+                })?;
+            &owned_session
+        }
+        (None, None) => return Ok(()),
     };
-    let session =
-        serde_json::from_slice::<meerkat_core::Session>(session_snapshot).map_err(|error| {
-            RuntimeDriverError::ValidationFailed {
-                reason: format!("completed-run session snapshot was not a Session: {error}"),
-            }
-        })?;
     if session.id() != owner_session_id {
         return Err(RuntimeDriverError::ValidationFailed {
             reason: format!(
@@ -5706,14 +5719,16 @@ fn validate_completed_run_session_witness(
             ),
         });
     }
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+    // Accumulator-backed, matching how the producer minted it: O(delta) on an
+    // ordinary append rather than a full re-serialize plus hash of the whole
+    // transcript on every turn.
+    let expected_digest = session.transcript_content_digest().map_err(|error| {
         RuntimeDriverError::ValidationFailed {
             reason: format!(
-                "completed-run session messages could not be encoded for digest validation: {error}"
+                "completed-run session messages could not be digested for validation: {error}"
             ),
         }
     })?;
-    let expected_digest = format!("{:x}", Sha256::digest(encoded_messages));
     match receipt.conversation_digest.as_deref() {
         Some(actual_digest) if actual_digest == expected_digest => Ok(()),
         Some(actual_digest) => Err(RuntimeDriverError::ValidationFailed {
@@ -5727,12 +5742,16 @@ fn validate_completed_run_session_witness(
     }
 }
 
+// Commit mirrors the run-boundary receipt payload exactly; keeping each
+// carrier explicit prevents partial or reordered commits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn commit_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
     consumed_input_ids: Vec<InputId>,
     receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
     session_snapshot: Option<Vec<u8>>,
+    typed_session: Option<&meerkat_core::Session>,
     directed_interaction_ids: Vec<meerkat_core::interaction::InteractionId>,
     terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
@@ -5752,6 +5771,7 @@ pub(crate) async fn commit_runtime_loop_run(
         commit_authority.owner_session_id(),
         &receipt,
         session_snapshot.as_deref(),
+        typed_session,
     )
     .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let interaction_outboxes = authorized_directed_terminal_outboxes(
@@ -6390,12 +6410,15 @@ fn validate_machine_terminal_applied_commit(
             session.messages().len()
         )));
     }
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+    // Same digest the producers mint (`Session::transcript_content_digest`,
+    // the accumulator's canonical `sha256:<hex>` format). This site was
+    // missed by the format switch and compared a bare serde-JSON hash against
+    // prefixed receipts — identical hex, guaranteed mismatch.
+    let expected_digest = session.transcript_content_digest().map_err(|error| {
         machine_terminal_carrier_validation_failed(format!(
-            "machine-terminal session messages could not be encoded for digest validation: {error}"
+            "machine-terminal session messages could not be digested for validation: {error}"
         ))
     })?;
-    let expected_digest = format!("{:x}", Sha256::digest(encoded_messages));
     match receipt.conversation_digest.as_deref() {
         Some(actual_digest) if actual_digest == expected_digest => {}
         Some(actual_digest) => {

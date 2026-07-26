@@ -400,6 +400,94 @@ fn tool_call_args_projection_error(tool_name: &str, error: ToolCallArgumentsErro
     ))
 }
 
+/// Emits an agent event from a CallingLlm phase helper: shared tap first,
+/// then the run's event stream while it is open. Mirrors run_loop's local
+/// `emit_event!` — a dropped receiver closes the stream for the remainder of
+/// the run instead of failing the loop.
+macro_rules! emit_phase_event {
+    ($self:expr, $ctx:expr, $event:expr) => {{
+        let event = $event;
+        crate::event_tap::tap_try_send(&$self.event_tap, &event);
+        if *$ctx.event_stream_open {
+            if let Some(tx) = $ctx.event_tx.as_ref() {
+                if tx.send(event).await.is_err() {
+                    *$ctx.event_stream_open = false;
+                    tracing::warn!(
+                        "agent event stream receiver dropped; continuing without streaming events"
+                    );
+                }
+            }
+        }
+    }};
+}
+
+/// Loop-carried mutable context for one CallingLlm boundary.
+///
+/// The CallingLlm arm is split into per-phase async helpers so that, at
+/// opt-level=0 (no LLVM stack-slot coloring), each phase's locals live in the
+/// callee's own poll frame: the worker stack carries max(active phase)
+/// instead of sum(all phases). This context threads the loop-owned state
+/// through those helpers without widening their signatures.
+struct CallingLlmTurnCtx<'a> {
+    run_id: &'a RunId,
+    event_tx: &'a Option<mpsc::Sender<AgentEvent>>,
+    event_stream_open: &'a mut bool,
+    run_has_visible_or_actionable_output: &'a mut bool,
+    sticky_fallback_durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
+    turn_count: u32,
+    tool_call_count: u32,
+}
+
+/// Boundary-admission verdict from the notice-refresh phase.
+enum CallingLlmBoundaryGate {
+    /// Notices are committed; proceed to the model boundary.
+    Proceed,
+    /// A completion remained unprojectable; re-enter the loop without
+    /// spending a provider call.
+    Deferred,
+}
+
+/// Mid-boundary phase outcome: continue with the phase product, or the run
+/// reached a terminal result inside the phase.
+enum CallingLlmGate<T> {
+    Continue(T),
+    Done(Result<RunResult, AgentError>),
+}
+
+/// Terminal outcome of one CallingLlm boundary.
+enum CallingLlmStep {
+    /// Re-enter the loop without advancing the turn counter (boundary
+    /// deferral or barrier ops now owned by WaitingForOps).
+    Repoll,
+    /// Boundary continued; advance the turn counter.
+    NextTurn,
+    /// The run completed (successfully or not) inside the boundary.
+    Done(Result<RunResult, AgentError>),
+}
+
+/// Request parameters resolved ahead of the LLM call.
+struct CallingLlmPrepared {
+    in_extraction: bool,
+    effective_max_tokens: u32,
+    effective_temperature: Option<f32>,
+    typed_provider_params: Option<ProviderParamsOverride>,
+}
+
+/// The classified assistant response for one boundary.
+struct CallingLlmAssistantTurn {
+    assistant_msg: BlockAssistantMessage,
+    assistant_text: String,
+    stop_reason: crate::types::StopReason,
+    usage: crate::types::Usage,
+}
+
+/// Accumulated outcome of one dispatched tool batch.
+struct CallingLlmToolBatch {
+    tool_results: Vec<crate::types::ToolResult>,
+    pending_op_refs: Vec<crate::ops::AsyncOpRef>,
+    accumulated_session_effects: Vec<crate::ops::SessionEffect>,
+    callback_pending: Vec<(String, String, Value)>,
+}
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized + 'static,
@@ -3206,1703 +3294,26 @@ where
 
             match self.turn_phase()? {
                 TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
-                    self.system_context_state
-                        .open_next_boundary(&run_id)
-                        .map_err(|error| AgentError::InternalError(error.to_string()))?;
-                    // 0. Auth lease refresh loop (Phase 1.5-rev).
-                    //    The canonical auth-state owner is the MeerkatMachine
-                    //    DSL (see meerkat-machine-schema/src/catalog/dsl/
-                    //    meerkat_machine.rs). The runner's role here is
-                    //    *mechanism*: it drives DSL-legal transitions when
-                    //    the observable state calls for them, and emits a
-                    //    synthetic session notice when the projected DSL
-                    //    state is `reauth_required`. The runner never
-                    //    decides terminal *class* — it only surfaces the
-                    //    state the machine has already committed to.
-                    //    (Plan §1.5r.9: snapshot-poll is the canonical
-                    //    runner-side mechanism; dogma §3 "rebuild
-                    //    projections" permits the read; no redundant DSL
-                    //    effect is declared.)
-                    //
-                    //    Strip prior synthetic AuthReauthRequired notices
-                    //    so the notice always reflects current DSL state.
-                    //    Notice refresh is ONE atomic transcript-authority
-                    //    edit; a strip fault propagates typed instead of
-                    //    leaving a stale notice in prompt truth.
-                    self.session
-                        .replace_synthetic_notices(SystemNoticeKind::AuthReauthRequired, Vec::new())
-                        .map_err(|error| {
-                            AgentError::InternalError(format!(
-                                "auth synthetic notice refresh failed: {error}"
-                            ))
-                        })?;
-
-                    // 1. Poll external updates BEFORE tool capture so newly
-                    //    connected tools are visible in the same LLM call.
-                    let ext = self.tools.poll_external_updates().await;
-
-                    // 2. Emit ToolConfigChanged for completed background connections.
-                    for notice in &ext.notices {
-                        let mut payload = notice.to_tool_config_changed_payload();
-                        if payload.applied_at_turn.is_none() {
-                            payload.applied_at_turn = Some(turn_count);
-                        }
-                        emit_event!(AgentEvent::ToolConfigChanged { payload });
-                    }
-
-                    // 3. Manage [MCP_PENDING] notice lifecycle.
-                    //    The MCP lifecycle handle is the only authoritative
-                    //    read side for pending server notices; the refresh is
-                    //    ONE atomic strip+push transcript edit. A strip fault
-                    //    propagates typed — no push happens on top of a stale
-                    //    notice.
-                    let pending_servers: Vec<String> = self
-                        .mcp_server_lifecycle_handle
-                        .as_deref()
-                        .map(|handle| handle.pending_server_ids().into_iter().collect())
-                        .unwrap_or_default();
-                    let mcp_pending_notices = if pending_servers.is_empty() {
-                        Vec::new()
-                    } else {
-                        let body = format!(
-                            "Servers connecting: {}. Tools will appear when ready.",
-                            pending_servers.join(", ")
-                        );
-                        vec![synthetic_notice_block_message(
-                            SystemNoticeKind::McpPending,
-                            body.clone(),
-                            crate::types::SystemNoticeBlock::Mcp {
-                                server_id: None,
-                                operation: None,
-                                phase: Some(crate::event::ExternalToolDeltaPhase::Pending),
-                                persisted: false,
-                                detail: Some(body),
-                                pending_sources: pending_servers,
-                            },
-                        )]
+                    // Per-phase helpers keep this arm's locals out of
+                    // run_loop's own opt-level=0 poll frame; see
+                    // `CallingLlmTurnCtx` for the stack-budget rationale.
+                    let mut ctx = CallingLlmTurnCtx {
+                        run_id: &run_id,
+                        event_tx: &event_tx,
+                        event_stream_open: &mut event_stream_open,
+                        run_has_visible_or_actionable_output:
+                            &mut run_has_visible_or_actionable_output,
+                        sticky_fallback_durable_visibility_parent:
+                            &mut sticky_fallback_durable_visibility_parent,
+                        turn_count,
+                        tool_call_count,
                     };
-                    self.session
-                        .replace_synthetic_notices(
-                            SystemNoticeKind::McpPending,
-                            mcp_pending_notices,
-                        )
-                        .map_err(|error| {
-                            AgentError::InternalError(format!(
-                                "MCP pending synthetic notice refresh failed: {error}"
-                            ))
-                        })?;
-
-                    // 3b. Background shell job completion notices via CompletionFeed.
-                    //    Collected first, then applied through the ONE atomic
-                    //    notice-refresh transcript edit below.
-                    let mut background_job_notices: Vec<Message> = Vec::new();
-                    let mut background_job_refresh_ready = true;
-                    let mut background_job_delivery_committed = true;
-                    let mut prepared_background_job_events = Vec::new();
-                    let mut background_job_cursor_advance = None;
-                    // Feed path: ops-lifecycle-tracked completions from the runtime.
-                    if let (Some(feed), Some(registry)) =
-                        (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
-                    {
-                        let batch = feed.list_since(self.applied_cursor);
-                        let mut delivery_authority_ok = true;
-                        let mut prepared_entries = Vec::new();
-                        for entry in &batch.entries {
-                            match registry
-                                .classify_operation_completion_wake(&entry.operation_id, entry.kind)
-                            {
-                                Ok(OperationCompletionWakeClass::Wake) => {}
-                                Ok(OperationCompletionWakeClass::Ignore) => continue,
-                                Err(err) => {
-                                    tracing::warn!(
-                                        operation_id = %entry.operation_id,
-                                        kind = ?entry.kind,
-                                        error = %err,
-                                        "generated completion-wake authority rejected agent feed entry"
-                                    );
-                                    delivery_authority_ok = false;
-                                    break;
-                                }
-                            }
-
-                            let enrichment = match self.completion_enrichment.as_ref() {
-                                Some(provider) => match provider.enrich(&entry.operation_id) {
-                                    crate::completion_feed::CompletionEnrichment::Found(data) => {
-                                        Some(data)
-                                    }
-                                    crate::completion_feed::CompletionEnrichment::Missing => None,
-                                    crate::completion_feed::CompletionEnrichment::Busy => {
-                                        tracing::debug!(
-                                            operation_id = %entry.operation_id,
-                                            "completion enrichment is busy; deferring the whole feed batch"
-                                        );
-                                        delivery_authority_ok = false;
-                                        break;
-                                    }
-                                },
-                                None => None,
-                            };
-                            prepared_entries.push((entry, enrichment));
-                        }
-
-                        if delivery_authority_ok {
-                            for (entry, enrichment) in prepared_entries {
-                                let job_id = enrichment
-                                    .as_ref()
-                                    .map(|e| e.job_id.clone())
-                                    .unwrap_or_else(|| entry.operation_id.to_string());
-                                let detail = enrichment
-                                    .as_ref()
-                                    .map(|e| e.detail.clone())
-                                    .unwrap_or_default();
-                                let terminal_status =
-                                    BackgroundJobTerminalStatus::from_terminal_outcome(
-                                        &entry.terminal_outcome,
-                                    );
-                                prepared_background_job_events.push((
-                                    job_id.clone(),
-                                    entry.display_name.clone(),
-                                    terminal_status,
-                                    detail.clone(),
-                                ));
-
-                                let notice = background_job_completion_notice(
-                                    &entry.display_name,
-                                    &job_id,
-                                    terminal_status,
-                                    &detail,
-                                    enrichment.is_some(),
-                                );
-                                background_job_notices.push(synthetic_notice_block_message(
-                                    SystemNoticeKind::BackgroundJob,
-                                    notice,
-                                    crate::types::SystemNoticeBlock::BackgroundJob {
-                                        job_id,
-                                        display_name: Some(entry.display_name.clone()),
-                                        status: terminal_status,
-                                        detail: Some(detail),
-                                    },
-                                ));
-                            }
-
-                            background_job_cursor_advance = Some((registry, batch.watermark));
-                        } else {
-                            background_job_refresh_ready = false;
-                        }
-                    } else if self.completion_feed.is_some() {
-                        tracing::debug!(
-                            "completion feed present without generated ops cursor authority; skipping feed delivery"
-                        );
-                    }
-                    // ONE atomic strip+push refresh for background-job
-                    // notices. A contended enrichment or cursor-authority
-                    // fault leaves the prior notice set untouched for retry;
-                    // otherwise stale notices are cleared even when no feed is
-                    // wired. Strip faults propagate typed.
-                    if background_job_refresh_ready {
-                        self.session
-                            .replace_synthetic_notices(
-                                SystemNoticeKind::BackgroundJob,
-                                background_job_notices,
-                            )
-                            .map_err(|error| {
-                                AgentError::InternalError(format!(
-                                    "background-job synthetic notice refresh failed: {error}"
-                                ))
-                            })?;
-
-                        // Cursor publication follows the fallible transcript
-                        // refresh. If the refresh failed above, the cursor and
-                        // public events remain untouched and the same feed
-                        // entries are retryable. If cursor authority refuses,
-                        // the idempotent notice replacement may be retried but
-                        // no event is emitted early.
-                        let delivery_committed = if let Some((registry, watermark)) =
-                            background_job_cursor_advance
-                        {
-                            match registry.advance_completion_cursor(
-                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
-                                watermark,
-                                self.epoch_cursor_state.as_deref(),
-                            ) {
-                                Ok(cursor) => {
-                                    self.applied_cursor = cursor;
-                                    true
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        cursor = watermark,
-                                        "generated completion cursor authority rejected agent-applied cursor advance"
-                                    );
-                                    background_job_delivery_committed = false;
-                                    false
-                                }
-                            }
-                        } else {
-                            true
-                        };
-                        if delivery_committed {
-                            for (job_id, display_name, terminal_status, detail) in
-                                prepared_background_job_events
-                            {
-                                emit_event!(AgentEvent::background_job_completed(
-                                    job_id,
-                                    display_name,
-                                    terminal_status,
-                                    detail,
-                                ));
-                            }
-                        }
-                    }
-                    if !background_job_refresh_ready || !background_job_delivery_committed {
-                        // A Busy enrichment lookup is a boundary-admission
-                        // deferral. Cursor refusal is the same admission class:
-                        // the completion remains unconsumed until generated
-                        // authority accepts its cursor. Do not let inference
-                        // observe an omitted or externally uncommitted
-                        // completion, and do not spend a provider call while
-                        // it remains unprojectable. The transcript notice
-                        // replacement is idempotent, so a cursor refusal can
-                        // safely retry it without duplicating the user turn.
-                        tokio::task::yield_now().await;
-                        continue;
-                    }
-
-                    // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
-                    let tool_defs = {
-                        let dispatcher_tools = self.tools.tools();
-                        let exact_catalog = self.tools.tool_catalog_capabilities().exact_catalog;
-                        let catalog_mode = select_tool_catalog_mode(self.tools.as_ref());
-                        let current_catalog = exact_catalog.then(|| self.tools.tool_catalog());
-                        let current_pending_catalog_sources = if exact_catalog {
-                            self.tools.pending_catalog_sources()
-                        } else {
-                            Arc::from([])
-                        };
-                        let (control_tool_names, deferred_tool_names) = match (
-                            exact_catalog,
-                            current_catalog.as_ref(),
-                        ) {
-                            (true, Some(catalog)) => {
-                                let control_names = catalog
-                                    .iter()
-                                    .filter(|entry| entry.plane == ToolPlaneClass::Control)
-                                    .map(|entry| entry.tool.name.clone())
-                                    .collect::<std::collections::HashSet<_>>();
-                                let deferred_names = if !control_names.is_empty()
-                                    && matches!(catalog_mode, ToolCatalogMode::Deferred)
-                                {
-                                    catalog
-                                                .iter()
-                                                .filter(|entry| {
-                                                    entry.plane == ToolPlaneClass::Session
-                                                })
-                                                .filter(|entry| {
-                                                    matches!(
-                                                        entry.deferred_eligibility,
-                                                        ToolCatalogDeferredEligibility::DeferredEligible { .. }
-                                                    )
-                                                })
-                                                .map(|entry| entry.tool.name.clone())
-                                                .collect()
-                                } else {
-                                    std::collections::HashSet::new()
-                                };
-                                (control_names, deferred_names)
-                            }
-                            _ => (
-                                std::collections::HashSet::new(),
-                                std::collections::HashSet::new(),
-                            ),
-                        };
-                        let previous_visibility_state = self.tool_scope.visibility_state().ok();
-                        let apply_result = match self.tool_scope.promote_staged_visibility() {
-                            Ok(visibility_state) => {
-                                if let Some(previous_visibility_state) =
-                                    previous_visibility_state.as_ref()
-                                {
-                                    self.tool_scope.apply_staged_projection_with_previous(
-                                        dispatcher_tools.clone(),
-                                        control_tool_names.into_iter().collect(),
-                                        deferred_tool_names.into_iter().collect(),
-                                        previous_visibility_state,
-                                        &visibility_state,
-                                    )
-                                } else {
-                                    self.tool_scope.apply_staged_projection(
-                                        dispatcher_tools.clone(),
-                                        control_tool_names,
-                                        deferred_tool_names,
-                                        &visibility_state,
-                                    )
-                                }
-                            }
-                            Err(err) => Err(err),
-                        };
-                        match apply_result {
-                            Ok(applied) => {
-                                self.publish_committed_visible_set().map_err(|err| {
-                                    AgentError::InternalError(format!(
-                                        "failed to persist canonical tool visibility state after boundary apply: {err}"
-                                    ))
-                                })?;
-                                if applied.changed() {
-                                    let status_info = ToolConfigChangeStatus::boundary_applied(
-                                        applied.base_changed(),
-                                        applied.visible_changed(),
-                                        applied.applied_revision.0,
-                                    );
-                                    let status = status_info.status_text();
-                                    let payload = ToolConfigChangedPayload::new(
-                                        ToolConfigChangeOperation::Reload,
-                                        "tool_scope",
-                                        status_info,
-                                        false,
-                                    )
-                                    .with_applied_at_turn(Some(turn_count))
-                                    .with_domain(Some(ToolConfigChangeDomain::ToolScope));
-                                    emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: payload.clone(),
-                                    });
-                                    // Represent runtime notices as user-scoped synthetic context
-                                    // (same pattern as peer lifecycle updates) so this does not
-                                    // mutate or replace the canonical system prompt.
-                                    self.session.push(synthetic_notice_block_message(
-                                        SystemNoticeKind::ToolScope,
-                                        format!(
-                                            "Tool configuration changed at turn boundary: {status}"
-                                        ),
-                                        crate::types::SystemNoticeBlock::ToolConfig { payload },
-                                    ));
-                                }
-                                let visible_names_set = applied
-                                    .visible_names
-                                    .iter()
-                                    .cloned()
-                                    .collect::<BTreeSet<_>>();
-                                let hidden_deferred_names =
-                                    if matches!(catalog_mode, ToolCatalogMode::Deferred) {
-                                        current_catalog
-                                            .as_ref()
-                                            .map(|catalog| {
-                                                hidden_deferred_catalog_names(
-                                                    catalog.as_ref(),
-                                                    &visible_names_set,
-                                                )
-                                            })
-                                            .unwrap_or_default()
-                                    } else {
-                                        BTreeSet::new()
-                                    };
-                                let pending_catalog_sources =
-                                    if matches!(catalog_mode, ToolCatalogMode::Deferred) {
-                                        current_pending_catalog_sources
-                                            .iter()
-                                            .cloned()
-                                            .collect::<BTreeSet<_>>()
-                                    } else {
-                                        BTreeSet::new()
-                                    };
-                                let added_hidden_names = hidden_deferred_names
-                                    .difference(&self.last_hidden_deferred_catalog_names)
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                let removed_hidden_names = self
-                                    .last_hidden_deferred_catalog_names
-                                    .difference(&hidden_deferred_names)
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                let pending_sources_changed =
-                                    pending_catalog_sources != self.last_pending_catalog_sources;
-                                if !added_hidden_names.is_empty()
-                                    || !removed_hidden_names.is_empty()
-                                    || pending_sources_changed
-                                {
-                                    let pending_sources =
-                                        pending_catalog_sources.iter().cloned().collect::<Vec<_>>();
-                                    let status_info =
-                                        ToolConfigChangeStatus::deferred_catalog_delta(
-                                            added_hidden_names.len(),
-                                            removed_hidden_names.len(),
-                                            pending_sources.len(),
-                                        );
-                                    let payload = ToolConfigChangedPayload::new(
-                                        ToolConfigChangeOperation::Reload,
-                                        "deferred_catalog",
-                                        status_info,
-                                        false,
-                                    )
-                                    .with_applied_at_turn(Some(turn_count))
-                                    .with_domain(Some(ToolConfigChangeDomain::DeferredCatalog))
-                                    .with_deferred_catalog_delta(Some(DeferredCatalogDelta {
-                                        added_hidden_names: added_hidden_names.clone(),
-                                        removed_hidden_names: removed_hidden_names.clone(),
-                                        pending_sources: pending_sources.clone(),
-                                    }));
-                                    emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: payload.clone(),
-                                    });
-                                    let mut notice_parts = Vec::new();
-                                    if !added_hidden_names.is_empty() {
-                                        notice_parts.push(format!(
-                                            "new deferred tools available: {}",
-                                            added_hidden_names.join(", ")
-                                        ));
-                                    }
-                                    if !removed_hidden_names.is_empty() {
-                                        notice_parts.push(format!(
-                                            "deferred tools removed: {}",
-                                            removed_hidden_names.join(", ")
-                                        ));
-                                    }
-                                    if !pending_sources.is_empty() {
-                                        notice_parts.push(format!(
-                                            "sources still connecting: {}",
-                                            pending_sources.join(", ")
-                                        ));
-                                    }
-                                    if !notice_parts.is_empty() {
-                                        self.session.push(synthetic_notice_block_message(
-                                            SystemNoticeKind::ToolScope,
-                                            format!(
-                                                "Deferred catalog changed at turn boundary: {}",
-                                                notice_parts.join("; ")
-                                            ),
-                                            crate::types::SystemNoticeBlock::ToolConfig { payload },
-                                        ));
-                                    }
-                                }
-                                self.last_hidden_deferred_catalog_names = hidden_deferred_names;
-                                self.last_pending_catalog_sources = pending_catalog_sources;
-                                applied.tools
-                            }
-                            Err(err) => {
-                                let status_info =
-                                    ToolConfigChangeStatus::warning_failed_closed(err.to_string());
-                                let payload = ToolConfigChangedPayload::new(
-                                    ToolConfigChangeOperation::Reload,
-                                    "tool_scope",
-                                    status_info,
-                                    false,
-                                )
-                                .with_applied_at_turn(Some(turn_count))
-                                .with_domain(Some(ToolConfigChangeDomain::ToolScope));
-                                tracing::warn!(
-                                    error = %err,
-                                    "tool scope boundary apply failed; closing visible tool set for this boundary"
-                                );
-                                emit_event!(AgentEvent::ToolConfigChanged {
-                                    payload: payload.clone(),
-                                });
-                                self.session.push(synthetic_notice_block_message(
-                                    SystemNoticeKind::ToolScopeWarning,
-                                    format!(
-                                        "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
-                                    ),
-                                    crate::types::SystemNoticeBlock::ToolConfig { payload },
-                                ));
-                                self.tool_scope.fail_closed_projection().unwrap_or_else(
-                                    |close_err| {
-                                        tracing::warn!(
-                                            error = %close_err,
-                                            "failed to persist fail-closed tool-scope projection"
-                                        );
-                                        Vec::<Arc<crate::types::ToolDef>>::new().into()
-                                    },
-                                )
-                            }
-                        }
-                    };
-
-                    let in_extraction = self.turn_in_extraction_flow()?;
-
-                    if !in_extraction {
-                        emit_event!(AgentEvent::TurnStarted {
-                            turn_number: turn_count,
-                        });
-                    }
-
-                    let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
-                    let effective_max_tokens = self
-                        .active_model_profile
-                        .as_ref()
-                        .and_then(crate::ModelProfileWitness::max_output_tokens)
-                        .map(|limit| configured_max_tokens.min(limit))
-                        .unwrap_or(configured_max_tokens);
-                    let mut effective_temperature = self.config.temperature;
-                    // Typed field-wise merge on the carrier: explicit params
-                    // win, build-derived tool defaults fill unset slots. A
-                    // provider-family conflict is a typed config fault.
-                    let mut effective_provider_params = self
-                        .config
-                        .provider_params
-                        .effective_params()
-                        .map_err(|error| AgentError::ConfigError(error.to_string()))?;
-
-                    let pre_llm_invocation = HookInvocation {
-                        point: HookPoint::PreLlmRequest,
-                        session_id: self.session.id().clone(),
-                        turn_number: Some(turn_count),
-                        prompt_input: None,
-                        error_report: None,
-                        error_class: None,
-                        llm_request: Some(HookLlmRequest {
-                            max_tokens: effective_max_tokens,
-                            temperature: effective_temperature,
-                            provider_params: (!effective_provider_params.is_empty())
-                                .then(|| effective_provider_params.clone()),
-                            message_count: self.session.messages().len(),
-                        }),
-                        llm_response: None,
-                        tool_call: None,
-                        tool_result: None,
-                    };
-                    // Pre-LLM hooks may observe or deny the turn.
-                    let pre_llm_report = if in_extraction {
-                        match self
-                            .execute_hooks(pre_llm_invocation, event_tx.as_ref())
-                            .await
-                        {
-                            Ok(report) => report,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        self.execute_turn_hooks(pre_llm_invocation, &run_id, turn_count, &event_tx)
-                            .await?
-                    };
-
-                    if let Some(error) = pre_llm_report.denial_error(HookPoint::PreLlmRequest) {
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                            .await?;
-                        return Err(error);
-                    }
-
-                    // In extraction mode, override tools/temperature/params
-                    if in_extraction {
-                        // Force temperature 0.0 for deterministic output
-                        effective_temperature = Some(0.0_f32);
-                        // Inject structured_output through the typed ProviderTag
-                        // owner; an identity-conflict fault terminalizes the
-                        // extraction instead of being silently dropped. A
-                        // provider with no typed structured-output slot is a
-                        // typed `NoProviderSlot` outcome — extraction proceeds
-                        // prompt-based and the schema is enforced at the
-                        // validation seam below.
-                        if let Some(output_schema) = self.config.output_schema.clone() {
-                            match effective_provider_params
-                                .set_structured_output(self.client.provider(), output_schema)
-                            {
-                                Ok(_injection) => {}
-                                Err(error) => {
-                                    return self
-                                        .complete_extraction_failed(
-                                            &run_id,
-                                            turn_count,
-                                            tool_call_count,
-                                            error.to_string(),
-                                            &event_tx,
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        // Strip the provider-native web-search/grounding body via the typed
-                        // ProviderTag owner — extraction is deterministic and tool-free.
-                        effective_provider_params.clear_web_search();
-                    }
-
-                    // No tools for extraction turn (empty slice)
-                    let empty_tools: Arc<[Arc<crate::types::ToolDef>]> = Arc::from([]);
-                    let call_tool_defs = if in_extraction {
-                        &empty_tools
-                    } else {
-                        &tool_defs
-                    };
-                    let typed_provider_params =
-                        Some(effective_provider_params).filter(|params| !params.is_empty());
-
-                    // Park on the exact boundary first, but keep the canonical
-                    // context pending across fallible/async request hydration.
-                    // Only the final synchronous consume below records that the
-                    // model request has crossed its consumption seam.
-                    let boundary_system_context = self
-                        .prepare_pending_system_context_boundary(&run_id)
-                        .await
-                        .map_err(|e| AgentError::InternalError(e.to_string()))?;
-                    let request_messages = self.llm_messages_with_runtime_system_context(
-                        boundary_system_context.appends(),
-                    );
-                    let request_messages =
-                        self.hydrate_llm_request_messages(request_messages).await?;
-                    // Peer-ingestion observations are emitted while canonical
-                    // context is still pending. If an awaited event send is
-                    // cancelled, dropping the runner witness leaves it
-                    // unapplied. Once the final send returns, consume and the
-                    // LLM call follow synchronously in the same task poll.
-                    for append in boundary_system_context.appends() {
-                        for event in crate::event::peer_content_ingested_events(&append.content) {
-                            let _ = crate::event_tap::tap_emit(
-                                &self.event_tap,
-                                event_tx.as_ref(),
-                                event,
-                            )
-                            .await;
-                        }
-                    }
-                    self.consume_pending_system_context_boundary(boundary_system_context)
-                        .map_err(|e| AgentError::InternalError(e.to_string()))?;
-                    // Steer-delivered peer content commits here (applied as
-                    // runtime system context at the model boundary). There is
-                    // no unrelated await between this consume and entry into
-                    // the exact LLM future.
-                    let result = match self
-                        .call_llm_with_retry(LlmRetryRequest {
-                            run_id: &run_id,
-                            turn_count,
-                            event_tx: &event_tx,
-                            messages: &request_messages,
-                            tools: call_tool_defs,
-                            max_tokens: effective_max_tokens,
-                            temperature: effective_temperature,
-                            provider_params: typed_provider_params.as_ref(),
-                            extraction_output_schema: if in_extraction {
-                                self.config.output_schema.clone()
-                            } else {
-                                None
-                            },
-                            allow_empty_success: run_has_visible_or_actionable_output,
-                            durable_visibility_parent:
-                                &mut sticky_fallback_durable_visibility_parent,
-                        })
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            if e.requires_session_teardown() {
-                                return Err(e);
-                            }
-                            if in_extraction {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        e.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                            if let Some(exceeded) = BudgetExceeded::from_agent_error(&e) {
-                                emit_event!(budget_warning_event(exceeded));
-                                self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
-                                    run_id: run_id.clone(),
-                                    exceeded,
-                                })?;
-                                return self.build_result(turn_count, tool_call_count).await;
-                            }
-                            if matches!(&e, AgentError::Llm { .. }) {
-                                // Recoverable LLM failures reaching this point have
-                                // exhausted retry authority; non-recoverable LLM
-                                // failures keep their typed LLM cause.
-                                let retry_failure =
-                                    crate::retry::LlmRetryFailure::from_agent_error(&e);
-                                let failure = if retry_failure.is_some() {
-                                    TurnFailureSource::llm_retry_exhausted(&e)
-                                } else {
-                                    TurnFailureSource::from_agent_error(&e)
-                                };
-                                self.terminal_error_detail = Some(e.to_string());
-                                // Diagnostic fidelity is safe to retain only
-                                // when the generated cause remains LlmFailure.
-                                // Retry exhaustion is a different generated
-                                // cause and is intentionally reconstructed
-                                // from terminal truth by the runtime witness.
-                                if retry_failure.is_none() {
-                                    self.terminal_error_metadata =
-                                        crate::TurnErrorMetadata::from_agent_error(&e);
-                                }
-                                let transition =
-                                    self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                                        run_id: run_id.clone(),
-                                        failure,
-                                    })?;
-                                self.execute_turn_effects(&transition, turn_count, &event_tx)
-                                    .await?;
-                                return self.build_result(turn_count, tool_call_count).await;
-                            }
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &e)
-                                .await?;
-                            return Err(e);
-                        }
-                    };
-
-                    // Update budget + session usage
-                    self.budget.record_usage(&result.usage);
-                    self.last_input_tokens = result.usage.input_tokens;
-                    self.session.record_usage(result.usage.clone());
-                    if let Some(exceeded) = self.budget.observe().exceeded() {
-                        emit_event!(budget_warning_event(exceeded));
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    format!("extraction budget exceeded: {exceeded:?}"),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
-                            run_id: run_id.clone(),
-                            exceeded,
-                        })?;
-                        return self.build_result(turn_count, tool_call_count).await;
-                    }
-
-                    let (blocks, stop_reason, usage) = result.into_parts();
-                    let assistant_msg = self.stamp_assistant_message_identity(
-                        BlockAssistantMessage::new(blocks, stop_reason),
-                        &run_id,
-                    );
-                    let assistant_text = assistant_msg.to_string();
-
-                    // #128: the shell computes the pure pre-classifier (this
-                    // turn's output OR any prior visible/actionable output in the
-                    // run) and MeerkatMachine owns the empty-output terminal
-                    // verdict. The loop mirrors `empty_response_terminal`.
-                    let turn_has_visible_or_actionable =
-                        assistant_msg.has_visible_or_actionable_output();
-                    let has_visible_or_actionable =
-                        turn_has_visible_or_actionable || run_has_visible_or_actionable_output;
-                    if self.classify_assistant_output_terminal(has_visible_or_actionable)? {
-                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                            .await?;
-                        return Err(error);
-                    } else if turn_has_visible_or_actionable
-                        && assistant_blocks_have_user_visible_output(&assistant_msg.blocks)
-                    {
-                        run_has_visible_or_actionable_output = true;
-                    }
-
-                    let post_llm_invocation = HookInvocation {
-                        point: HookPoint::PostLlmResponse,
-                        session_id: self.session.id().clone(),
-                        turn_number: Some(turn_count),
-                        prompt_input: None,
-                        error_report: None,
-                        error_class: None,
-                        llm_request: None,
-                        llm_response: Some(HookLlmResponse {
-                            assistant_text: assistant_text.clone(),
-                            tool_call_names: assistant_msg
-                                .tool_calls()
-                                .map(|call| call.name.to_string())
-                                .collect(),
-                            stop_reason: Some(stop_reason),
-                            usage: Some(usage.clone()),
-                            // Typed projection of the response's provider-executed
-                            // server-tool evidence blocks, in block order, so a
-                            // foreground PostLlmResponse hook classifies
-                            // provider-native content synchronously.
-                            server_tool_content: assistant_msg
-                                .blocks
-                                .iter()
-                                .filter_map(|block| match block {
-                                    crate::types::AssistantBlock::ServerToolContent {
-                                        kind,
-                                        ..
-                                    } => Some(kind.clone()),
-                                    _ => None,
-                                })
-                                .collect(),
-                        }),
-                        tool_call: None,
-                        tool_result: None,
-                    };
-                    let post_llm_report = if in_extraction {
-                        match self
-                            .execute_hooks(post_llm_invocation, event_tx.as_ref())
-                            .await
-                        {
-                            Ok(report) => report,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        self.execute_turn_hooks(post_llm_invocation, &run_id, turn_count, &event_tx)
-                            .await?
-                    };
-
-                    if let Some(error) = post_llm_report.denial_error(HookPoint::PostLlmResponse) {
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                            .await?;
-                        return Err(error);
-                    }
-
-                    if !in_extraction && !assistant_text.is_empty() {
-                        emit_event!(AgentEvent::TextComplete {
-                            content: assistant_text.clone(),
-                        });
-                    }
-
-                    self.observe_cancel_after_boundary_request(&run_id)?;
-
-                    // Check if we have tool calls
-                    if assistant_msg.has_tool_calls() {
-                        if in_extraction {
-                            let tool_call_names = assistant_msg
-                                .tool_calls()
-                                .map(|tc| tc.name.to_string())
-                                .collect::<Vec<_>>();
-                            let reason = if tool_call_names.is_empty() {
-                                "structured output extraction returned tool calls instead of JSON"
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "structured output extraction returned tool calls instead of JSON: {}",
-                                    tool_call_names.join(", ")
-                                )
-                            };
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    reason,
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-
-                        let tool_calls: Vec<(ToolCallOwned, ToolCallArguments)> =
-                            match assistant_msg
-                                .tool_calls()
-                                .map(|tc| {
-                                    let args = ToolCallArguments::from_raw_json(tc.args).map_err(
-                                        |error| tool_call_args_projection_error(tc.name, error),
-                                    )?;
-                                    Ok((ToolCallOwned::from_view(tc), args))
-                                })
-                                .collect::<Result<_, AgentError>>()
-                            {
-                                Ok(tool_calls) => tool_calls,
-                                Err(error) => {
-                                    self.terminalize_fatal_error(
-                                        &run_id, turn_count, &event_tx, &error,
-                                    )
-                                    .await?;
-                                    return Err(error);
-                                }
-                            };
-
-                        // Emit tool call requests
-                        for (tc, args) in &tool_calls {
-                            emit_event!(AgentEvent::ToolCallRequested {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                args: args.clone(),
-                            });
-                        }
-
-                        // Transition to waiting for ops
-                        let tc_count = tool_calls.len() as u32;
-                        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
-                            run_id: run_id.clone(),
-                            tool_count: tc_count,
-                        })?;
-                        // The generated turn is now committed to a future
-                        // post-tool model boundary. Open its exact actor-local
-                        // generation before any tool/hook await so Steer can
-                        // prepare while tools or barrier ops are still running.
-                        self.system_context_state
-                            .open_next_boundary(&run_id)
-                            .map_err(|error| AgentError::InternalError(error.to_string()))?;
-
-                        // Execute tool calls in parallel
-                        let tools_ref = Arc::clone(&self.tools);
-                        let mut executable_tool_calls = Vec::new();
-                        let mut tool_results = Vec::with_capacity(tool_calls.len());
-                        let visible_tool_names = tool_defs
-                            .iter()
-                            .map(|tool| tool.tool_name())
-                            .collect::<ToolNameSet>();
-
-                        // Typed provenance projection from the active tool
-                        // catalog: hook payloads carry the `ToolDef.provenance`
-                        // owner (matched by tool name), never a source
-                        // re-derived from the name string.
-                        let provenance_for_tool = |tool_name: &str| {
-                            tool_defs
-                                .iter()
-                                .find(|tool| tool.name == tool_name)
-                                .and_then(|tool| tool.provenance.clone())
-                        };
-
-                        let pre_tool_reports =
-                            futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
-                                self.execute_hooks(
-                                    HookInvocation {
-                                        point: HookPoint::PreToolExecution,
-                                        session_id: self.session.id().clone(),
-                                        turn_number: Some(turn_count),
-                                        prompt_input: None,
-                                        error_report: None,
-                                        error_class: None,
-                                        llm_request: None,
-                                        llm_response: None,
-                                        tool_call: Some(HookToolCall {
-                                            tool_use_id: tc.id.clone(),
-                                            name: tc.name.clone(),
-                                            args: args.clone(),
-                                            provenance: provenance_for_tool(tc.name.as_str()),
-                                        }),
-                                        tool_result: None,
-                                    },
-                                    event_tx.as_ref(),
-                                )
-                            }))
-                            .await;
-
-                        for (tool_index, ((tc, _args), pre_tool_report)) in tool_calls
-                            .into_iter()
-                            .zip(pre_tool_reports.into_iter())
-                            .enumerate()
-                        {
-                            let pre_tool_report = match pre_tool_report {
-                                Ok(report) => report,
-                                Err(error) => {
-                                    self.terminalize_fatal_error(
-                                        &run_id, turn_count, &event_tx, &error,
-                                    )
-                                    .await?;
-                                    return Err(error);
-                                }
-                            };
-
-                            if let Some(error) =
-                                pre_tool_report.denial_error(HookPoint::PreToolExecution)
-                            {
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-
-                            if let Err(error) = precheck_visible_tool_call(
-                                tools_ref.as_ref(),
-                                &visible_tool_names,
-                                tc.name.as_str(),
-                            ) {
-                                // Preserve the typed `access_denied` / `not_found`
-                                // cause through terminalization so the distinction
-                                // survives to `error_code()`/wire instead of being
-                                // flattened into an opaque message.
-                                let error = AgentError::tool(error);
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-
-                            emit_event!(AgentEvent::ToolExecutionStarted {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                            });
-                            executable_tool_calls.push((tool_index, tc));
-                        }
-
-                        // Execute all allowed tool calls in parallel, bounding
-                        // concurrency with a semaphore and applying the typed
-                        // per-call timeout policy from `tools_config`. Timeout
-                        // expiry becomes a `ToolError::Timeout` so it flows
-                        // through `terminal_tool_outcome_for_error` exactly like
-                        // any other tool execution failure.
-                        let dispatch_results = dispatch_tool_calls_boxed(
-                            Arc::clone(&tools_ref),
-                            self.tool_dispatch_context.clone(),
-                            self.tools_config.default_timeout,
-                            self.tools_config.tool_timeouts.clone(),
-                            self.tools_config.max_concurrent.max(1),
-                            executable_tool_calls,
-                        )
-                        .await;
-
-                        // Process results and emit events
-                        let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
-                        let mut accumulated_session_effects =
-                            Vec::<crate::ops::SessionEffect>::new();
-                        let mut callback_pending: Vec<(String, String, Value)> = Vec::new();
-                        for (_, tc, dispatch_result, duration_ms) in dispatch_results {
-                            let mut tool_session_effects = Vec::new();
-                            let mut tool_result = match dispatch_result {
-                                Ok(mut outcome) => {
-                                    outcome.clear_terminal_cause();
-                                    all_async_ops.extend(outcome.async_ops);
-                                    tool_session_effects = outcome.session_effects;
-                                    outcome.result
-                                }
-                                Err(crate::error::ToolError::CallbackPending {
-                                    tool_name: callback_tool,
-                                    args: callback_args,
-                                }) => {
-                                    // Defer the successful continuation
-                                    // boundary until every completed sibling
-                                    // has been projected.
-                                    callback_pending.push((
-                                        tc.id.clone(),
-                                        callback_tool,
-                                        callback_args,
-                                    ));
-                                    continue;
-                                }
-                                Err(e) => {
-                                    crate::ops::terminal_tool_outcome_for_error(tc.id.clone(), e)
-                                        .result
-                                }
-                            };
-
-                            if tool_result.tool_use_id.is_empty() {
-                                tool_result.tool_use_id = tc.id.clone();
-                            }
-
-                            // Reject unsupported video tool results BEFORE any
-                            // success-shaped progress events are emitted and
-                            // route the rejection through the turn machine, so
-                            // public event truth never reports completion while
-                            // the terminal truth is an error.
-                            if tool_result.has_video() {
-                                let error = AgentError::ConfigError(
-                                    "video blocks are not supported in tool results".to_string(),
-                                );
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-
-                            let post_tool_report = self
-                                .execute_turn_hooks(
-                                    HookInvocation {
-                                        point: HookPoint::PostToolExecution,
-                                        session_id: self.session.id().clone(),
-                                        turn_number: Some(turn_count),
-                                        prompt_input: None,
-                                        error_report: None,
-                                        error_class: None,
-                                        llm_request: None,
-                                        llm_response: None,
-                                        tool_call: None,
-                                        tool_result: Some(
-                                            HookToolResult::from_tool_result_with_id(
-                                                tc.id.clone(),
-                                                tc.name.clone(),
-                                                &tool_result,
-                                            )
-                                            .with_provenance(provenance_for_tool(tc.name.as_str())),
-                                        ),
-                                    },
-                                    &run_id,
-                                    turn_count,
-                                    &event_tx,
-                                )
-                                .await?;
-
-                            if let Some(error) =
-                                post_tool_report.denial_error(HookPoint::PostToolExecution)
-                            {
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-
-                            // Emit execution complete
-                            emit_event!(AgentEvent::ToolExecutionCompleted {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                content: tool_result.content.clone(),
-                                is_error: tool_result.is_error,
-                                duration_ms,
-                            });
-
-                            // Emit result received
-                            emit_event!(AgentEvent::ToolResultReceived {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                content: tool_result.content.clone(),
-                                is_error: tool_result.is_error,
-                            });
-
-                            tool_results.push(tool_result);
-                            accumulated_session_effects.extend(tool_session_effects);
-
-                            // Track tool call in budget
-                            self.budget.record_tool_call();
-                            tool_call_count += 1;
-                        }
-
-                        let pending_op_refs = all_async_ops;
-                        let barrier_operation_ids = pending_op_refs
-                            .iter()
-                            .filter(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier)
-                            .map(|r| r.operation_id.clone())
-                            .collect::<Vec<_>>();
-                        let has_barrier_ops = pending_op_refs
-                            .iter()
-                            .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
-
-                        // Apply state-mutating effects before ToolResults, but
-                        // defer transcript-producing assistant blocks until
-                        // after ToolResults so provider tool-call adjacency is
-                        // preserved.
-                        let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
-                            accumulated_session_effects.into_iter().partition(|effect| {
-                                matches!(
-                                    effect,
-                                    crate::ops::SessionEffect::AppendAssistantBlocks { .. }
-                                )
-                            });
-                        let callback_batch_pending = !callback_pending.is_empty();
-
-                        // The assistant tool-use message is published only
-                        // after dispatch has proven that the batch has at most
-                        // one externally pending callback. This keeps an
-                        // ambiguous batch from leaving an unresumable tail. A
-                        // mixed callback batch prepares its assistant tail and
-                        // durable staging record on a clone first, so a staging
-                        // refusal cannot partially mutate the live transcript.
-                        if callback_batch_pending {
-                            if callback_pending.is_empty() {
-                                let error = AgentError::InternalError(
-                                    "callback staging lost its pending callback witnesses"
-                                        .to_string(),
-                                );
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-                            let mut effects = pre_tool_effects.clone();
-                            effects.extend(post_tool_effects.clone());
-                            let batch = crate::session::PendingCallbackToolBatch {
-                                run_id: run_id.clone(),
-                                tool_use_order: assistant_msg
-                                    .tool_calls()
-                                    .map(|call| call.id.to_string())
-                                    .collect(),
-                                pending_tool_use_ids: callback_pending
-                                    .iter()
-                                    .map(|(tool_use_id, _, _)| tool_use_id.clone())
-                                    .collect(),
-                                completed_results: tool_results.clone(),
-                                session_effects: effects,
-                                async_ops: pending_op_refs.clone(),
-                            };
-                            let mut staged_session = self.session.clone();
-                            staged_session.push(Message::BlockAssistant(assistant_msg.clone()));
-                            if let Err(error) =
-                                staged_session.stage_pending_callback_tool_batch(batch)
-                            {
-                                let error = AgentError::InternalError(format!(
-                                    "failed to stage mixed callback tool batch: {error}"
-                                ));
-                                self.terminalize_fatal_error(
-                                    &run_id, turn_count, &event_tx, &error,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-                            self.session = staged_session;
-                        } else {
-                            self.session
-                                .push(Message::BlockAssistant(assistant_msg.clone()));
-                        }
-                        for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
-                            emit_event!(AgentEvent::AssistantImageAppended { image });
-                        }
-
-                        if !callback_batch_pending && !pre_tool_effects.is_empty() {
-                            self.apply_session_effects(&pre_tool_effects, Some(&run_id))?;
-                        }
-                        let tool_batch_produced_output =
-                            tool_results.iter().any(|result| !result.is_error)
-                                || post_tool_effects.iter().any(|effect| {
-                                    matches!(
-                                        effect,
-                                        crate::ops::SessionEffect::AppendAssistantBlocks { blocks }
-                                            if crate::types::assistant_blocks_have_visible_or_actionable_output(blocks)
-                                    )
-                                });
-
-                        // Callback-pending has no local tool result. Preserve
-                        // any completed siblings without fabricating an empty
-                        // ToolResults message for a callback-only batch.
-                        if !callback_batch_pending && !tool_results.is_empty() {
-                            self.session
-                                .push(Message::tool_results(tool_results.clone()));
-                        }
-
-                        let assistant_image_events =
-                            assistant_image_events_from_effects(&post_tool_effects);
-                        if !callback_batch_pending && !post_tool_effects.is_empty() {
-                            self.apply_session_effects(&post_tool_effects, Some(&run_id))?;
-                        }
-                        if tool_batch_produced_output {
-                            run_has_visible_or_actionable_output = true;
-                        }
-                        if !callback_batch_pending {
-                            for image in assistant_image_events {
-                                emit_event!(AgentEvent::AssistantImageAppended { image });
-                            }
-                        }
-
-                        self.observe_cancel_after_boundary_request(&run_id)?;
-
-                        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
-                            run_id: run_id.clone(),
-                            op_refs: pending_op_refs.clone(),
-                            barrier_operation_ids,
-                            has_barrier_ops,
-                        })?;
-
-                        if callback_batch_pending {
-                            // Close the generated turn only after completed
-                            // sibling outcomes have either committed normally
-                            // or entered the durable callback staging record.
-                            let transition =
-                                self.apply_turn_input(TurnExecutionInput::CallbackPending {
-                                    run_id: run_id.clone(),
-                                })?;
-                            self.execute_turn_effects(&transition, turn_count, &event_tx)
-                                .await?;
-                            if callback_pending.len() == 1 {
-                                let (tool_use_id, tool_name, args) = callback_pending.remove(0);
-                                return Err(AgentError::CallbackPending {
-                                    tool_use_id,
-                                    tool_name,
-                                    args,
-                                });
-                            }
-                            return Err(AgentError::CallbackBatchPending {
-                                pending_tool_calls: callback_pending
-                                    .into_iter()
-                                    .map(|(tool_use_id, tool_name, args)| {
-                                        crate::error::PendingCallbackToolCall {
-                                            tool_use_id,
-                                            tool_name,
-                                            args,
-                                        }
-                                    })
-                                    .collect(),
-                            });
-                        }
-
-                        if self.turn_has_barrier_ops()? {
-                            // Stay in WaitingForOps — the outer match arm will
-                            // await completion of barrier ops via wait-set.
-                            continue;
-                        }
-
-                        // No pending ops — tool calls resolved, drain boundary, continue
-                        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
-                            run_id: run_id.clone(),
-                        })?;
-                        if let Err(error) = self
-                            .drain_turn_boundary(turn_count, event_tx.as_ref())
-                            .await
-                        {
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                                .await?;
-                            return Err(error);
-                        }
-                        let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
-                            run_id: run_id.clone(),
-                        })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                        turn_count += 1;
-                    } else if self.turn_in_extraction_flow()? {
-                        // Extraction turn response — validate against schema
-                        let assistant_image_events =
-                            assistant_image_events_from_blocks(&assistant_msg.blocks);
-                        self.session.push(Message::BlockAssistant(assistant_msg));
-                        for image in assistant_image_events {
-                            emit_event!(AgentEvent::AssistantImageAppended { image });
-                        }
-
-                        // Drain turn boundary (fires TurnBoundary hooks, drains comms)
-                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                            run_id: run_id.clone(),
-                        })?;
-                        if let Err(error) = self
-                            .drain_turn_boundary(turn_count, event_tx.as_ref())
-                            .await
-                        {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.observe_cancel_after_boundary_request(&run_id)?;
-
-                        // Authority: DrainingBoundary -> Extracting for validation
-                        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
-                            run_id: run_id.clone(),
-                            max_retries: self.config.structured_output_retries,
-                        })?;
-
-                        let Some(output_schema) = self.config.output_schema.as_ref() else {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    "extraction flow without output_schema".to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        };
-                        let compiled = match self.client.compile_schema(output_schema) {
-                            Ok(compiled) => compiled,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        };
-                        let validation = super::extraction::validate_response_text(
-                            &assistant_text,
-                            output_schema,
-                            &compiled.schema,
-                        );
-                        let validation = match validation {
-                            Ok(validation) => validation,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        };
-
-                        match validation {
-                            super::extraction::ExtractionValidation::Failed {
-                                error,
-                                retry_prompt,
-                            } => {
-                                // Validation failed — authority decides retry vs exhaust
-                                let t = self.apply_turn_input(
-                                    TurnExecutionInput::ExtractionValidationFailed {
-                                        run_id: run_id.clone(),
-                                        error: error.clone(),
-                                    },
-                                )?;
-
-                                if !self.turn_terminal()? {
-                                    // Authority decided to retry — push retry prompt
-                                    self.session
-                                        .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                                    turn_count += 1;
-                                    continue;
-                                }
-
-                                // Authority decided retries exhausted. The
-                                // main run already completed; extraction is a
-                                // post-run outcome and must not terminalize the
-                                // run as failed.
-                                self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                                let extraction_error = crate::types::ExtractionError {
-                                    last_output: self
-                                        .extraction_state
-                                        .primary_output()
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    attempts: self.turn_extraction_attempts()?,
-                                    reason: error,
-                                };
-                                let result = RunResult {
-                                    text: extraction_error.last_output.clone(),
-                                    session_id: self.session.id().clone(),
-                                    usage: self.session.total_usage(),
-                                    turns: turn_count + 1,
-                                    tool_calls: tool_call_count,
-                                    terminal_cause_kind: None,
-                                    structured_output: None,
-                                    extraction_error: Some(extraction_error.clone()),
-                                    schema_warnings: self.extraction_state.take_schema_warnings(),
-                                    skill_diagnostics: self
-                                        .resolve_skill_diagnostics_for_result()
-                                        .await,
-                                };
-                                self.save_session_best_effort().await;
-                                self.emit_extraction_failed_event(
-                                    &extraction_error,
-                                    event_tx.as_ref(),
-                                )
-                                .await;
-                                return Ok(result);
-                            }
-                            super::extraction::ExtractionValidation::Passed(normalized) => {
-                                self.extraction_state.record_success(normalized);
-                            }
-                        }
-
-                        let structured_output = self.extraction_state.take_result();
-                        let schema_warnings = self.extraction_state.take_schema_warnings();
-                        let result = RunResult {
-                            text: self
-                                .extraction_state
-                                .primary_output()
-                                .unwrap_or_default()
-                                .to_string(),
-                            session_id: self.session.id().clone(),
-                            usage: self.session.total_usage(),
-                            turns: turn_count + 1,
-                            tool_calls: tool_call_count,
-                            terminal_cause_kind: None,
-                            structured_output,
-                            extraction_error: None,
-                            schema_warnings,
-                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
-                        };
-                        // Validation passed — complete via authority
-                        let t = self.apply_turn_input(
-                            TurnExecutionInput::ExtractionValidationPassed {
-                                run_id: run_id.clone(),
-                            },
-                        )?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                        self.save_session_best_effort().await;
-                        if let Some(structured_output) = result.structured_output.clone() {
-                            self.emit_extraction_succeeded_event(
-                                structured_output,
-                                result.schema_warnings.clone(),
-                                event_tx.as_ref(),
-                            )
-                            .await;
-                        }
-                        return Ok(result);
-                    } else {
-                        // No tool calls - we're done with the agentic loop
-                        let final_text = assistant_text.clone();
-                        let assistant_image_events =
-                            assistant_image_events_from_blocks(&assistant_msg.blocks);
-                        self.session.push(Message::BlockAssistant(assistant_msg));
-                        for image in assistant_image_events {
-                            emit_event!(AgentEvent::AssistantImageAppended { image });
-                        }
-
-                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                            run_id: run_id.clone(),
-                        })?;
-                        if let Err(error) = self
-                            .drain_turn_boundary(turn_count, event_tx.as_ref())
-                            .await
-                        {
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                                .await?;
-                            return Err(error);
-                        }
-                        self.observe_cancel_after_boundary_request(&run_id)?;
-
-                        // Check if we need to perform extraction turn for structured output
-                        if let Some(output_schema) = self.config.output_schema.clone()
-                            && !self.turn_in_extraction_flow()?
-                        {
-                            // Compile schema and capture warnings BEFORE emitting
-                            // any success-shaped boundary event. Schema compile is
-                            // a fallible extraction-setup step; if it fails the run
-                            // must terminalize as an extraction failure, so we must
-                            // not advertise `TurnCompleted`/`RunCompleted(success)`
-                            // ahead of an outcome that can still fail (row #194).
-                            let compiled = match self.client.compile_schema(&output_schema) {
-                                Ok(compiled) => compiled,
-                                Err(error) => {
-                                    return self
-                                        .complete_extraction_failed(
-                                            &run_id,
-                                            turn_count,
-                                            tool_call_count,
-                                            error.to_string(),
-                                            &event_tx,
-                                        )
-                                        .await;
-                                }
-                            };
-
-                            emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
-
-                            // The main agentic turn has committed. Extraction
-                            // is a separate post-run validation phase.
-                            self.extraction_state.reset();
-                            self.extraction_state.set_primary_output(final_text.clone());
-
-                            let mut result = RunResult {
-                                text: final_text.clone(),
-                                session_id: self.session.id().clone(),
-                                usage: self.session.total_usage(),
-                                turns: turn_count + 1,
-                                tool_calls: tool_call_count,
-                                terminal_cause_kind: None,
-                                structured_output: None,
-                                extraction_error: None,
-                                schema_warnings: None,
-                                skill_diagnostics: None,
-                            };
-                            self.run_completed_hooks_before_terminal(
-                                &mut result,
-                                &run_id,
-                                turn_count,
-                                &event_tx,
-                            )
-                            .await?;
-                            self.emit_run_completed_event(&result, true, event_tx.as_ref())
-                                .await;
-                            self.run_completed_event_emitted = true;
-
-                            self.extraction_state
-                                .set_schema_warnings(compiled.warnings.clone());
-
-                            // Push extraction prompt as user message
-                            let prompt =
-                                self.config.extraction_prompt.clone().unwrap_or_else(|| {
-                                    super::extraction::DEFAULT_EXTRACTION_PROMPT.to_string()
-                                });
-                            self.session.push(Message::User(UserMessage::text(prompt)));
-
-                            // Authority: DrainingBoundary -> Extracting -> CallingLlm
-                            self.apply_turn_input(TurnExecutionInput::EnterExtraction {
-                                run_id: run_id.clone(),
-                                max_retries: self.config.structured_output_retries,
-                            })?;
-                            let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
-                                run_id: run_id.clone(),
-                            })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                            turn_count += 1;
-                            continue;
-                        }
-
-                        if self.turn_cancel_after_boundary()? {
-                            let t =
-                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
-                                    run_id: run_id.clone(),
-                                })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-                            self.save_session_best_effort().await;
-                            return self.build_result(turn_count + 1, tool_call_count).await;
-                        }
-
-                        let mut result = RunResult {
-                            text: final_text,
-                            session_id: self.session.id().clone(),
-                            usage: self.session.total_usage(),
-                            turns: turn_count + 1,
-                            tool_calls: tool_call_count,
-                            terminal_cause_kind: None,
-                            structured_output: None,
-                            extraction_error: None,
-                            schema_warnings: None,
-                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
-                        };
-                        self.run_completed_hooks_before_terminal(
-                            &mut result,
-                            &run_id,
-                            turn_count,
-                            &event_tx,
-                        )
-                        .await?;
-
-                        // Emit turn completed only after all terminal hooks accept
-                        // and boundary side effects are committed.
-                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
-
-                        // No extraction needed - complete normally
-                        let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
-                            run_id: run_id.clone(),
-                        })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
-
-                        // Save session
-                        self.save_session_best_effort().await;
-
-                        return Ok(result);
+                    let step = self.drive_calling_llm_boundary(&mut ctx).await;
+                    tool_call_count = ctx.tool_call_count;
+                    match step? {
+                        CallingLlmStep::Repoll => {}
+                        CallingLlmStep::NextTurn => turn_count += 1,
+                        CallingLlmStep::Done(result) => return result,
                     }
                 }
                 TurnPhase::WaitingForOps => {
@@ -5035,6 +3446,1874 @@ where
                 }
             }
         }
+    }
+
+    /// CallingLlm phase driver: notices, tool-scope apply, request
+    /// preparation, the LLM call, response classification, and the
+    /// tool/extraction/terminal turn handling — each in its own poll
+    /// frame (opt-level=0 reserves a slot for every local in every
+    /// branch of a function; splitting turns sum into max).
+    async fn drive_calling_llm_boundary(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+    ) -> Result<CallingLlmStep, AgentError> {
+        match self.refresh_calling_llm_boundary_notices(ctx).await? {
+            CallingLlmBoundaryGate::Deferred => return Ok(CallingLlmStep::Repoll),
+            CallingLlmBoundaryGate::Proceed => {}
+        }
+        let tool_defs = self.apply_calling_llm_tool_scope(ctx).await?;
+        let prepared = match self.prepare_calling_llm_request(ctx).await? {
+            CallingLlmGate::Continue(prepared) => prepared,
+            CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
+        };
+        let result = match self
+            .execute_calling_llm_request(ctx, &tool_defs, &prepared)
+            .await?
+        {
+            CallingLlmGate::Continue(result) => result,
+            CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
+        };
+        let assistant = match self
+            .commit_calling_llm_response(ctx, prepared.in_extraction, result)
+            .await?
+        {
+            CallingLlmGate::Continue(assistant) => assistant,
+            CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
+        };
+        // Check if we have tool calls
+        if assistant.assistant_msg.has_tool_calls() {
+            self.run_calling_llm_tool_phase(ctx, prepared.in_extraction, &tool_defs, assistant)
+                .await
+        } else if self.turn_in_extraction_flow()? {
+            self.run_calling_llm_extraction_phase(ctx, assistant).await
+        } else {
+            self.run_calling_llm_terminal_phase(ctx, assistant).await
+        }
+    }
+    /// Boundary steps 0–3b: auth/MCP/background-job synthetic notice
+    /// refresh and completion-feed delivery admission.
+    async fn refresh_calling_llm_boundary_notices(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+    ) -> Result<CallingLlmBoundaryGate, AgentError> {
+        self.system_context_state
+            .open_next_boundary(ctx.run_id)
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        // 0. Auth lease refresh loop (Phase 1.5-rev).
+        //    The canonical auth-state owner is the MeerkatMachine
+        //    DSL (see meerkat-machine-schema/src/catalog/dsl/
+        //    meerkat_machine.rs). The runner's role here is
+        //    *mechanism*: it drives DSL-legal transitions when
+        //    the observable state calls for them, and emits a
+        //    synthetic session notice when the projected DSL
+        //    state is `reauth_required`. The runner never
+        //    decides terminal *class* — it only surfaces the
+        //    state the machine has already committed to.
+        //    (Plan §1.5r.9: snapshot-poll is the canonical
+        //    runner-side mechanism; dogma §3 "rebuild
+        //    projections" permits the read; no redundant DSL
+        //    effect is declared.)
+        //
+        //    Strip prior synthetic AuthReauthRequired notices
+        //    so the notice always reflects current DSL state.
+        //    Notice refresh is ONE atomic transcript-authority
+        //    edit; a strip fault propagates typed instead of
+        //    leaving a stale notice in prompt truth.
+        self.session
+            .replace_synthetic_notices(SystemNoticeKind::AuthReauthRequired, Vec::new())
+            .map_err(|error| {
+                AgentError::InternalError(format!("auth synthetic notice refresh failed: {error}"))
+            })?;
+
+        // 1. Poll external updates BEFORE tool capture so newly
+        //    connected tools are visible in the same LLM call.
+        let ext = self.tools.poll_external_updates().await;
+
+        // 2. Emit ToolConfigChanged for completed background connections.
+        for notice in &ext.notices {
+            let mut payload = notice.to_tool_config_changed_payload();
+            if payload.applied_at_turn.is_none() {
+                payload.applied_at_turn = Some(ctx.turn_count);
+            }
+            emit_phase_event!(self, ctx, AgentEvent::ToolConfigChanged { payload });
+        }
+
+        // 3. Manage [MCP_PENDING] notice lifecycle.
+        //    The MCP lifecycle handle is the only authoritative
+        //    read side for pending server notices; the refresh is
+        //    ONE atomic strip+push transcript edit. A strip fault
+        //    propagates typed — no push happens on top of a stale
+        //    notice.
+        let pending_servers: Vec<String> = self
+            .mcp_server_lifecycle_handle
+            .as_deref()
+            .map(|handle| handle.pending_server_ids().into_iter().collect())
+            .unwrap_or_default();
+        let mcp_pending_notices = if pending_servers.is_empty() {
+            Vec::new()
+        } else {
+            let body = format!(
+                "Servers connecting: {}. Tools will appear when ready.",
+                pending_servers.join(", ")
+            );
+            vec![synthetic_notice_block_message(
+                SystemNoticeKind::McpPending,
+                body.clone(),
+                crate::types::SystemNoticeBlock::Mcp {
+                    server_id: None,
+                    operation: None,
+                    phase: Some(crate::event::ExternalToolDeltaPhase::Pending),
+                    persisted: false,
+                    detail: Some(body),
+                    pending_sources: pending_servers,
+                },
+            )]
+        };
+        self.session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, mcp_pending_notices)
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "MCP pending synthetic notice refresh failed: {error}"
+                ))
+            })?;
+
+        // 3b. Background shell job completion notices via CompletionFeed.
+        //    Collected first, then applied through the ONE atomic
+        //    notice-refresh transcript edit below.
+        let mut background_job_notices: Vec<Message> = Vec::new();
+        let mut background_job_refresh_ready = true;
+        let mut background_job_delivery_committed = true;
+        let mut prepared_background_job_events = Vec::new();
+        let mut background_job_cursor_advance = None;
+        // Feed path: ops-lifecycle-tracked completions from the runtime.
+        if let (Some(feed), Some(registry)) =
+            (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
+        {
+            let batch = feed.list_since(self.applied_cursor);
+            let mut delivery_authority_ok = true;
+            let mut prepared_entries = Vec::new();
+            for entry in &batch.entries {
+                match registry.classify_operation_completion_wake(&entry.operation_id, entry.kind) {
+                    Ok(OperationCompletionWakeClass::Wake) => {}
+                    Ok(OperationCompletionWakeClass::Ignore) => continue,
+                    Err(err) => {
+                        tracing::warn!(
+                            operation_id = %entry.operation_id,
+                            kind = ?entry.kind,
+                            error = %err,
+                            "generated completion-wake authority rejected agent feed entry"
+                        );
+                        delivery_authority_ok = false;
+                        break;
+                    }
+                }
+
+                let enrichment = match self.completion_enrichment.as_ref() {
+                    Some(provider) => match provider.enrich(&entry.operation_id) {
+                        crate::completion_feed::CompletionEnrichment::Found(data) => Some(data),
+                        crate::completion_feed::CompletionEnrichment::Missing => None,
+                        crate::completion_feed::CompletionEnrichment::Busy => {
+                            tracing::debug!(
+                                operation_id = %entry.operation_id,
+                                "completion enrichment is busy; deferring the whole feed batch"
+                            );
+                            delivery_authority_ok = false;
+                            break;
+                        }
+                    },
+                    None => None,
+                };
+                prepared_entries.push((entry, enrichment));
+            }
+
+            if delivery_authority_ok {
+                for (entry, enrichment) in prepared_entries {
+                    let job_id = enrichment
+                        .as_ref()
+                        .map(|e| e.job_id.clone())
+                        .unwrap_or_else(|| entry.operation_id.to_string());
+                    let detail = enrichment
+                        .as_ref()
+                        .map(|e| e.detail.clone())
+                        .unwrap_or_default();
+                    let terminal_status =
+                        BackgroundJobTerminalStatus::from_terminal_outcome(&entry.terminal_outcome);
+                    prepared_background_job_events.push((
+                        job_id.clone(),
+                        entry.display_name.clone(),
+                        terminal_status,
+                        detail.clone(),
+                    ));
+
+                    let notice = background_job_completion_notice(
+                        &entry.display_name,
+                        &job_id,
+                        terminal_status,
+                        &detail,
+                        enrichment.is_some(),
+                    );
+                    background_job_notices.push(synthetic_notice_block_message(
+                        SystemNoticeKind::BackgroundJob,
+                        notice,
+                        crate::types::SystemNoticeBlock::BackgroundJob {
+                            job_id,
+                            display_name: Some(entry.display_name.clone()),
+                            status: terminal_status,
+                            detail: Some(detail),
+                        },
+                    ));
+                }
+
+                background_job_cursor_advance = Some((registry, batch.watermark));
+            } else {
+                background_job_refresh_ready = false;
+            }
+        } else if self.completion_feed.is_some() {
+            tracing::debug!(
+                "completion feed present without generated ops cursor authority; skipping feed delivery"
+            );
+        }
+        // ONE atomic strip+push refresh for background-job
+        // notices. A contended enrichment or cursor-authority
+        // fault leaves the prior notice set untouched for retry;
+        // otherwise stale notices are cleared even when no feed is
+        // wired. Strip faults propagate typed.
+        if background_job_refresh_ready {
+            self.session
+                .replace_synthetic_notices(SystemNoticeKind::BackgroundJob, background_job_notices)
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "background-job synthetic notice refresh failed: {error}"
+                    ))
+                })?;
+
+            // Cursor publication follows the fallible transcript
+            // refresh. If the refresh failed above, the cursor and
+            // public events remain untouched and the same feed
+            // entries are retryable. If cursor authority refuses,
+            // the idempotent notice replacement may be retried but
+            // no event is emitted early.
+            let delivery_committed = if let Some((registry, watermark)) =
+                background_job_cursor_advance
+            {
+                match registry.advance_completion_cursor(
+                    crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                    watermark,
+                    self.epoch_cursor_state.as_deref(),
+                ) {
+                    Ok(cursor) => {
+                        self.applied_cursor = cursor;
+                        true
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            cursor = watermark,
+                            "generated completion cursor authority rejected agent-applied cursor advance"
+                        );
+                        background_job_delivery_committed = false;
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            if delivery_committed {
+                for (job_id, display_name, terminal_status, detail) in
+                    prepared_background_job_events
+                {
+                    emit_phase_event!(
+                        self,
+                        ctx,
+                        AgentEvent::background_job_completed(
+                            job_id,
+                            display_name,
+                            terminal_status,
+                            detail,
+                        )
+                    );
+                }
+            }
+        }
+        if !background_job_refresh_ready || !background_job_delivery_committed {
+            // A Busy enrichment lookup is a boundary-admission
+            // deferral. Cursor refusal is the same admission class:
+            // the completion remains unconsumed until generated
+            // authority accepts its cursor. Do not let inference
+            // observe an omitted or externally uncommitted
+            // completion, and do not spend a provider call while
+            // it remains unprojectable. The transcript notice
+            // replacement is idempotent, so a cursor refusal can
+            // safely retry it without duplicating the user turn.
+            tokio::task::yield_now().await;
+            return Ok(CallingLlmBoundaryGate::Deferred);
+        }
+        Ok(CallingLlmBoundaryGate::Proceed)
+    }
+    /// Boundary step 4: apply tool scope staged updates atomically at
+    /// the CallingLlm boundary and project the visible tool set.
+    async fn apply_calling_llm_tool_scope(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+    ) -> Result<Arc<[Arc<ToolDef>]>, AgentError> {
+        // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
+        let tool_defs = {
+            let dispatcher_tools = self.tools.tools();
+            let exact_catalog = self.tools.tool_catalog_capabilities().exact_catalog;
+            let catalog_mode = select_tool_catalog_mode(self.tools.as_ref());
+            let current_catalog = exact_catalog.then(|| self.tools.tool_catalog());
+            let current_pending_catalog_sources = if exact_catalog {
+                self.tools.pending_catalog_sources()
+            } else {
+                Arc::from([])
+            };
+            let (control_tool_names, deferred_tool_names) =
+                match (exact_catalog, current_catalog.as_ref()) {
+                    (true, Some(catalog)) => {
+                        let control_names = catalog
+                            .iter()
+                            .filter(|entry| entry.plane == ToolPlaneClass::Control)
+                            .map(|entry| entry.tool.name.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        let deferred_names = if !control_names.is_empty()
+                            && matches!(catalog_mode, ToolCatalogMode::Deferred)
+                        {
+                            catalog
+                                .iter()
+                                .filter(|entry| entry.plane == ToolPlaneClass::Session)
+                                .filter(|entry| {
+                                    matches!(
+                                        entry.deferred_eligibility,
+                                        ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                                    )
+                                })
+                                .map(|entry| entry.tool.name.clone())
+                                .collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+                        (control_names, deferred_names)
+                    }
+                    _ => (
+                        std::collections::HashSet::new(),
+                        std::collections::HashSet::new(),
+                    ),
+                };
+            let previous_visibility_state = self.tool_scope.visibility_state().ok();
+            let apply_result = match self.tool_scope.promote_staged_visibility() {
+                Ok(visibility_state) => {
+                    if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
+                        self.tool_scope.apply_staged_projection_with_previous(
+                            dispatcher_tools.clone(),
+                            control_tool_names.into_iter().collect(),
+                            deferred_tool_names.into_iter().collect(),
+                            previous_visibility_state,
+                            &visibility_state,
+                        )
+                    } else {
+                        self.tool_scope.apply_staged_projection(
+                            dispatcher_tools.clone(),
+                            control_tool_names,
+                            deferred_tool_names,
+                            &visibility_state,
+                        )
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            match apply_result {
+                Ok(applied) => {
+                    self.publish_committed_visible_set().map_err(|err| {
+                        AgentError::InternalError(format!(
+                            "failed to persist canonical tool visibility state after boundary apply: {err}"
+                        ))
+                    })?;
+                    if applied.changed() {
+                        let status_info = ToolConfigChangeStatus::boundary_applied(
+                            applied.base_changed(),
+                            applied.visible_changed(),
+                            applied.applied_revision.0,
+                        );
+                        let status = status_info.status_text();
+                        let payload = ToolConfigChangedPayload::new(
+                            ToolConfigChangeOperation::Reload,
+                            "tool_scope",
+                            status_info,
+                            false,
+                        )
+                        .with_applied_at_turn(Some(ctx.turn_count))
+                        .with_domain(Some(ToolConfigChangeDomain::ToolScope));
+                        emit_phase_event!(
+                            self,
+                            ctx,
+                            AgentEvent::ToolConfigChanged {
+                                payload: payload.clone(),
+                            }
+                        );
+                        // Represent runtime notices as user-scoped synthetic context
+                        // (same pattern as peer lifecycle updates) so this does not
+                        // mutate or replace the canonical system prompt.
+                        self.session.push(synthetic_notice_block_message(
+                            SystemNoticeKind::ToolScope,
+                            format!("Tool configuration changed at turn boundary: {status}"),
+                            crate::types::SystemNoticeBlock::ToolConfig { payload },
+                        ));
+                    }
+                    let visible_names_set = applied
+                        .visible_names
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let hidden_deferred_names = if matches!(catalog_mode, ToolCatalogMode::Deferred)
+                    {
+                        current_catalog
+                            .as_ref()
+                            .map(|catalog| {
+                                hidden_deferred_catalog_names(catalog.as_ref(), &visible_names_set)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        BTreeSet::new()
+                    };
+                    let pending_catalog_sources =
+                        if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                            current_pending_catalog_sources
+                                .iter()
+                                .cloned()
+                                .collect::<BTreeSet<_>>()
+                        } else {
+                            BTreeSet::new()
+                        };
+                    let added_hidden_names = hidden_deferred_names
+                        .difference(&self.last_hidden_deferred_catalog_names)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let removed_hidden_names = self
+                        .last_hidden_deferred_catalog_names
+                        .difference(&hidden_deferred_names)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let pending_sources_changed =
+                        pending_catalog_sources != self.last_pending_catalog_sources;
+                    if !added_hidden_names.is_empty()
+                        || !removed_hidden_names.is_empty()
+                        || pending_sources_changed
+                    {
+                        let pending_sources =
+                            pending_catalog_sources.iter().cloned().collect::<Vec<_>>();
+                        let status_info = ToolConfigChangeStatus::deferred_catalog_delta(
+                            added_hidden_names.len(),
+                            removed_hidden_names.len(),
+                            pending_sources.len(),
+                        );
+                        let payload =
+                            ToolConfigChangedPayload::new(
+                                ToolConfigChangeOperation::Reload,
+                                "deferred_catalog",
+                                status_info,
+                                false,
+                            )
+                            .with_applied_at_turn(Some(ctx.turn_count))
+                            .with_domain(Some(ToolConfigChangeDomain::DeferredCatalog))
+                            .with_deferred_catalog_delta(Some(DeferredCatalogDelta {
+                                added_hidden_names: added_hidden_names.clone(),
+                                removed_hidden_names: removed_hidden_names.clone(),
+                                pending_sources: pending_sources.clone(),
+                            }));
+                        emit_phase_event!(
+                            self,
+                            ctx,
+                            AgentEvent::ToolConfigChanged {
+                                payload: payload.clone(),
+                            }
+                        );
+                        let mut notice_parts = Vec::new();
+                        if !added_hidden_names.is_empty() {
+                            notice_parts.push(format!(
+                                "new deferred tools available: {}",
+                                added_hidden_names.join(", ")
+                            ));
+                        }
+                        if !removed_hidden_names.is_empty() {
+                            notice_parts.push(format!(
+                                "deferred tools removed: {}",
+                                removed_hidden_names.join(", ")
+                            ));
+                        }
+                        if !pending_sources.is_empty() {
+                            notice_parts.push(format!(
+                                "sources still connecting: {}",
+                                pending_sources.join(", ")
+                            ));
+                        }
+                        if !notice_parts.is_empty() {
+                            self.session.push(synthetic_notice_block_message(
+                                SystemNoticeKind::ToolScope,
+                                format!(
+                                    "Deferred catalog changed at turn boundary: {}",
+                                    notice_parts.join("; ")
+                                ),
+                                crate::types::SystemNoticeBlock::ToolConfig { payload },
+                            ));
+                        }
+                    }
+                    self.last_hidden_deferred_catalog_names = hidden_deferred_names;
+                    self.last_pending_catalog_sources = pending_catalog_sources;
+                    applied.tools
+                }
+                Err(err) => {
+                    let status_info =
+                        ToolConfigChangeStatus::warning_failed_closed(err.to_string());
+                    let payload = ToolConfigChangedPayload::new(
+                        ToolConfigChangeOperation::Reload,
+                        "tool_scope",
+                        status_info,
+                        false,
+                    )
+                    .with_applied_at_turn(Some(ctx.turn_count))
+                    .with_domain(Some(ToolConfigChangeDomain::ToolScope));
+                    tracing::warn!(
+                        error = %err,
+                        "tool scope boundary apply failed; closing visible tool set for this boundary"
+                    );
+                    emit_phase_event!(
+                        self,
+                        ctx,
+                        AgentEvent::ToolConfigChanged {
+                            payload: payload.clone(),
+                        }
+                    );
+                    self.session.push(synthetic_notice_block_message(
+                        SystemNoticeKind::ToolScopeWarning,
+                        format!(
+                            "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
+                        ),
+                        crate::types::SystemNoticeBlock::ToolConfig { payload },
+                    ));
+                    self.tool_scope
+                        .fail_closed_projection()
+                        .unwrap_or_else(|close_err| {
+                            tracing::warn!(
+                                error = %close_err,
+                                "failed to persist fail-closed tool-scope projection"
+                            );
+                            Vec::<Arc<crate::types::ToolDef>>::new().into()
+                        })
+                }
+            }
+        };
+        Ok(tool_defs)
+    }
+    /// Resolves per-call request parameters and runs pre-LLM hooks
+    /// (including the extraction-mode overrides).
+    async fn prepare_calling_llm_request(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+    ) -> Result<CallingLlmGate<CallingLlmPrepared>, AgentError> {
+        let in_extraction = self.turn_in_extraction_flow()?;
+
+        if !in_extraction {
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::TurnStarted {
+                    turn_number: ctx.turn_count,
+                }
+            );
+        }
+
+        let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
+        let effective_max_tokens = self
+            .active_model_profile
+            .as_ref()
+            .and_then(crate::ModelProfileWitness::max_output_tokens)
+            .map(|limit| configured_max_tokens.min(limit))
+            .unwrap_or(configured_max_tokens);
+        let mut effective_temperature = self.config.temperature;
+        // Typed field-wise merge on the carrier: explicit params
+        // win, build-derived tool defaults fill unset slots. A
+        // provider-family conflict is a typed config fault.
+        let mut effective_provider_params = self
+            .config
+            .provider_params
+            .effective_params()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+
+        let pre_llm_invocation = HookInvocation {
+            point: HookPoint::PreLlmRequest,
+            session_id: self.session.id().clone(),
+            turn_number: Some(ctx.turn_count),
+            prompt_input: None,
+            error_report: None,
+            error_class: None,
+            llm_request: Some(HookLlmRequest {
+                max_tokens: effective_max_tokens,
+                temperature: effective_temperature,
+                provider_params: (!effective_provider_params.is_empty())
+                    .then(|| effective_provider_params.clone()),
+                message_count: self.session.messages().len(),
+            }),
+            llm_response: None,
+            tool_call: None,
+            tool_result: None,
+        };
+        // Pre-LLM hooks may observe or deny the turn.
+        let pre_llm_report = if in_extraction {
+            match self
+                .execute_hooks(pre_llm_invocation, ctx.event_tx.as_ref())
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(CallingLlmGate::Done(
+                        self.complete_extraction_failed(
+                            ctx.run_id,
+                            ctx.turn_count,
+                            ctx.tool_call_count,
+                            error.to_string(),
+                            ctx.event_tx,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        } else {
+            self.execute_turn_hooks(pre_llm_invocation, ctx.run_id, ctx.turn_count, ctx.event_tx)
+                .await?
+        };
+
+        if let Some(error) = pre_llm_report.denial_error(HookPoint::PreLlmRequest) {
+            if in_extraction {
+                return Ok(CallingLlmGate::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        error.to_string(),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
+
+        // In extraction mode, override tools/temperature/params
+        if in_extraction {
+            // Force temperature 0.0 for deterministic output
+            effective_temperature = Some(0.0_f32);
+            // Inject structured_output through the typed ProviderTag
+            // owner; an identity-conflict fault terminalizes the
+            // extraction instead of being silently dropped. A
+            // provider with no typed structured-output slot is a
+            // typed `NoProviderSlot` outcome — extraction proceeds
+            // prompt-based and the schema is enforced at the
+            // validation seam below.
+            if let Some(output_schema) = self.config.output_schema.clone() {
+                match effective_provider_params
+                    .set_structured_output(self.client.provider(), output_schema)
+                {
+                    Ok(_injection) => {}
+                    Err(error) => {
+                        return Ok(CallingLlmGate::Done(
+                            self.complete_extraction_failed(
+                                ctx.run_id,
+                                ctx.turn_count,
+                                ctx.tool_call_count,
+                                error.to_string(),
+                                ctx.event_tx,
+                            )
+                            .await,
+                        ));
+                    }
+                }
+            }
+            // Strip the provider-native web-search/grounding body via the typed
+            // ProviderTag owner — extraction is deterministic and tool-free.
+            effective_provider_params.clear_web_search();
+        }
+        let typed_provider_params =
+            Some(effective_provider_params).filter(|params| !params.is_empty());
+        Ok(CallingLlmGate::Continue(CallingLlmPrepared {
+            in_extraction,
+            effective_max_tokens,
+            effective_temperature,
+            typed_provider_params,
+        }))
+    }
+    /// Hydrates the request messages, consumes the pending system
+    /// context boundary, and performs the LLM call with retry.
+    async fn execute_calling_llm_request(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        tool_defs: &Arc<[Arc<ToolDef>]>,
+        prepared: &CallingLlmPrepared,
+    ) -> Result<CallingLlmGate<LlmStreamResult>, AgentError> {
+        // No tools for extraction turn (empty slice)
+        let empty_tools: Arc<[Arc<crate::types::ToolDef>]> = Arc::from([]);
+        let call_tool_defs = if prepared.in_extraction {
+            &empty_tools
+        } else {
+            tool_defs
+        };
+        // Park on the exact boundary first, but keep the canonical
+        // context pending across fallible/async request hydration.
+        // Only the final synchronous consume below records that the
+        // model request has crossed its consumption seam.
+        let boundary_system_context = self
+            .prepare_pending_system_context_boundary(ctx.run_id)
+            .await
+            .map_err(|e| AgentError::InternalError(e.to_string()))?;
+        let request_messages =
+            self.llm_messages_with_runtime_system_context(boundary_system_context.appends());
+        let request_messages = self.hydrate_llm_request_messages(request_messages).await?;
+        // Peer-ingestion observations are emitted while canonical
+        // context is still pending. If an awaited event send is
+        // cancelled, dropping the runner witness leaves it
+        // unapplied. Once the final send returns, consume and the
+        // LLM call follow synchronously in the same task poll.
+        for append in boundary_system_context.appends() {
+            for event in crate::event::peer_content_ingested_events(&append.content) {
+                let _ =
+                    crate::event_tap::tap_emit(&self.event_tap, ctx.event_tx.as_ref(), event).await;
+            }
+        }
+        self.consume_pending_system_context_boundary(boundary_system_context)
+            .map_err(|e| AgentError::InternalError(e.to_string()))?;
+        // Steer-delivered peer content commits here (applied as
+        // runtime system context at the model boundary). There is
+        // no unrelated await between this consume and entry into
+        // the exact LLM future.
+        let result = match self
+            .call_llm_with_retry(LlmRetryRequest {
+                run_id: ctx.run_id,
+                turn_count: ctx.turn_count,
+                event_tx: ctx.event_tx,
+                messages: &request_messages,
+                tools: call_tool_defs,
+                max_tokens: prepared.effective_max_tokens,
+                temperature: prepared.effective_temperature,
+                provider_params: prepared.typed_provider_params.as_ref(),
+                extraction_output_schema: if prepared.in_extraction {
+                    self.config.output_schema.clone()
+                } else {
+                    None
+                },
+                allow_empty_success: *ctx.run_has_visible_or_actionable_output,
+                durable_visibility_parent: ctx.sticky_fallback_durable_visibility_parent,
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if e.requires_session_teardown() {
+                    return Err(e);
+                }
+                if prepared.in_extraction {
+                    return Ok(CallingLlmGate::Done(
+                        self.complete_extraction_failed(
+                            ctx.run_id,
+                            ctx.turn_count,
+                            ctx.tool_call_count,
+                            e.to_string(),
+                            ctx.event_tx,
+                        )
+                        .await,
+                    ));
+                }
+                if let Some(exceeded) = BudgetExceeded::from_agent_error(&e) {
+                    emit_phase_event!(self, ctx, budget_warning_event(exceeded));
+                    self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+                        run_id: ctx.run_id.clone(),
+                        exceeded,
+                    })?;
+                    return Ok(CallingLlmGate::Done(
+                        self.build_result(ctx.turn_count, ctx.tool_call_count).await,
+                    ));
+                }
+                if matches!(&e, AgentError::Llm { .. }) {
+                    // Recoverable LLM failures reaching this point have
+                    // exhausted retry authority; non-recoverable LLM
+                    // failures keep their typed LLM cause.
+                    let retry_failure = crate::retry::LlmRetryFailure::from_agent_error(&e);
+                    let failure = if retry_failure.is_some() {
+                        TurnFailureSource::llm_retry_exhausted(&e)
+                    } else {
+                        TurnFailureSource::from_agent_error(&e)
+                    };
+                    self.terminal_error_detail = Some(e.to_string());
+                    // Diagnostic fidelity is safe to retain only
+                    // when the generated cause remains LlmFailure.
+                    // Retry exhaustion is a different generated
+                    // cause and is intentionally reconstructed
+                    // from terminal truth by the runtime witness.
+                    if retry_failure.is_none() {
+                        self.terminal_error_metadata =
+                            crate::TurnErrorMetadata::from_agent_error(&e);
+                    }
+                    let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                        run_id: ctx.run_id.clone(),
+                        failure,
+                    })?;
+                    self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
+                        .await?;
+                    return Ok(CallingLlmGate::Done(
+                        self.build_result(ctx.turn_count, ctx.tool_call_count).await,
+                    ));
+                }
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &e)
+                    .await?;
+                return Err(e);
+            }
+        };
+        Ok(CallingLlmGate::Continue(result))
+    }
+    /// Records usage, classifies empty output, and runs post-LLM hooks
+    /// over the assistant response.
+    async fn commit_calling_llm_response(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        in_extraction: bool,
+        result: LlmStreamResult,
+    ) -> Result<CallingLlmGate<CallingLlmAssistantTurn>, AgentError> {
+        // Update budget + session usage
+        self.budget.record_usage(&result.usage);
+        self.last_input_tokens = result.usage.input_tokens;
+        self.session.record_usage(result.usage.clone());
+        if let Some(exceeded) = self.budget.observe().exceeded() {
+            emit_phase_event!(self, ctx, budget_warning_event(exceeded));
+            if in_extraction {
+                return Ok(CallingLlmGate::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        format!("extraction budget exceeded: {exceeded:?}"),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+            self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+                run_id: ctx.run_id.clone(),
+                exceeded,
+            })?;
+            return Ok(CallingLlmGate::Done(
+                self.build_result(ctx.turn_count, ctx.tool_call_count).await,
+            ));
+        }
+
+        let (blocks, stop_reason, usage) = result.into_parts();
+        let assistant_msg = self.stamp_assistant_message_identity(
+            BlockAssistantMessage::new(blocks, stop_reason),
+            ctx.run_id,
+        );
+        let assistant_text = assistant_msg.to_string();
+
+        // #128: the shell computes the pure pre-classifier (this
+        // turn's output OR any prior visible/actionable output in the
+        // run) and MeerkatMachine owns the empty-output terminal
+        // verdict. The loop mirrors `empty_response_terminal`.
+        let turn_has_visible_or_actionable = assistant_msg.has_visible_or_actionable_output();
+        let has_visible_or_actionable =
+            turn_has_visible_or_actionable || *ctx.run_has_visible_or_actionable_output;
+        if self.classify_assistant_output_terminal(has_visible_or_actionable)? {
+            let error = AgentError::llm_empty_response(self.client.provider().as_str());
+            if in_extraction {
+                return Ok(CallingLlmGate::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        error.to_string(),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        } else if turn_has_visible_or_actionable
+            && assistant_blocks_have_user_visible_output(&assistant_msg.blocks)
+        {
+            *ctx.run_has_visible_or_actionable_output = true;
+        }
+
+        let post_llm_invocation = HookInvocation {
+            point: HookPoint::PostLlmResponse,
+            session_id: self.session.id().clone(),
+            turn_number: Some(ctx.turn_count),
+            prompt_input: None,
+            error_report: None,
+            error_class: None,
+            llm_request: None,
+            llm_response: Some(HookLlmResponse {
+                assistant_text: assistant_text.clone(),
+                tool_call_names: assistant_msg
+                    .tool_calls()
+                    .map(|call| call.name.to_string())
+                    .collect(),
+                stop_reason: Some(stop_reason),
+                usage: Some(usage.clone()),
+                // Typed projection of the response's provider-executed
+                // server-tool evidence blocks, in block order, so a
+                // foreground PostLlmResponse hook classifies
+                // provider-native content synchronously.
+                server_tool_content: assistant_msg
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        crate::types::AssistantBlock::ServerToolContent { kind, .. } => {
+                            Some(kind.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            }),
+            tool_call: None,
+            tool_result: None,
+        };
+        let post_llm_report = if in_extraction {
+            match self
+                .execute_hooks(post_llm_invocation, ctx.event_tx.as_ref())
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(CallingLlmGate::Done(
+                        self.complete_extraction_failed(
+                            ctx.run_id,
+                            ctx.turn_count,
+                            ctx.tool_call_count,
+                            error.to_string(),
+                            ctx.event_tx,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        } else {
+            self.execute_turn_hooks(
+                post_llm_invocation,
+                ctx.run_id,
+                ctx.turn_count,
+                ctx.event_tx,
+            )
+            .await?
+        };
+
+        if let Some(error) = post_llm_report.denial_error(HookPoint::PostLlmResponse) {
+            if in_extraction {
+                return Ok(CallingLlmGate::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        error.to_string(),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
+
+        if !in_extraction && !assistant_text.is_empty() {
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::TextComplete {
+                    content: assistant_text.clone(),
+                }
+            );
+        }
+
+        self.observe_cancel_after_boundary_request(ctx.run_id)?;
+        Ok(CallingLlmGate::Continue(CallingLlmAssistantTurn {
+            assistant_msg,
+            assistant_text,
+            stop_reason,
+            usage,
+        }))
+    }
+    /// Tool-call turn: admission, dispatch, outcome collection, and the
+    /// turn commit. The dispatch await lives here so only this thin
+    /// driver frame (not the admission/commit locals) sits on the stack
+    /// beneath the executing tools.
+    async fn run_calling_llm_tool_phase(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        in_extraction: bool,
+        tool_defs: &Arc<[Arc<ToolDef>]>,
+        assistant: CallingLlmAssistantTurn,
+    ) -> Result<CallingLlmStep, AgentError> {
+        let assistant_msg = assistant.assistant_msg;
+        if in_extraction {
+            let tool_call_names = assistant_msg
+                .tool_calls()
+                .map(|tc| tc.name.to_string())
+                .collect::<Vec<_>>();
+            let reason = if tool_call_names.is_empty() {
+                "structured output extraction returned tool calls instead of JSON".to_string()
+            } else {
+                format!(
+                    "structured output extraction returned tool calls instead of JSON: {}",
+                    tool_call_names.join(", ")
+                )
+            };
+            return Ok(CallingLlmStep::Done(
+                self.complete_extraction_failed(
+                    ctx.run_id,
+                    ctx.turn_count,
+                    ctx.tool_call_count,
+                    reason,
+                    ctx.event_tx,
+                )
+                .await,
+            ));
+        }
+
+        let tool_calls: Vec<(ToolCallOwned, ToolCallArguments)> = match assistant_msg
+            .tool_calls()
+            .map(|tc| {
+                let args = ToolCallArguments::from_raw_json(tc.args)
+                    .map_err(|error| tool_call_args_projection_error(tc.name, error))?;
+                Ok((ToolCallOwned::from_view(tc), args))
+            })
+            .collect::<Result<_, AgentError>>()
+        {
+            Ok(tool_calls) => tool_calls,
+            Err(error) => {
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
+
+        // Emit tool call requests
+        for (tc, args) in &tool_calls {
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::ToolCallRequested {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    args: args.clone(),
+                }
+            );
+        }
+
+        // Transition to waiting for ops
+        let tc_count = tool_calls.len() as u32;
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
+            run_id: ctx.run_id.clone(),
+            tool_count: tc_count,
+        })?;
+        // The generated turn is now committed to a future
+        // post-tool model boundary. Open its exact actor-local
+        // generation before any tool/hook await so Steer can
+        // prepare while tools or barrier ops are still running.
+        self.system_context_state
+            .open_next_boundary(ctx.run_id)
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
+
+        let executable_tool_calls = self
+            .admit_calling_llm_tool_calls(ctx, tool_defs, tool_calls)
+            .await?;
+
+        // Execute all allowed tool calls in parallel, bounding
+        // concurrency with a semaphore and applying the typed
+        // per-call timeout policy from `tools_config`. Timeout
+        // expiry becomes a `ToolError::Timeout` so it flows
+        // through `terminal_tool_outcome_for_error` exactly like
+        // any other tool execution failure.
+        let dispatch_results = dispatch_tool_calls_boxed(
+            Arc::clone(&self.tools),
+            self.tool_dispatch_context.clone(),
+            self.tools_config.default_timeout,
+            self.tools_config.tool_timeouts.clone(),
+            self.tools_config.max_concurrent.max(1),
+            executable_tool_calls,
+        )
+        .await;
+
+        let batch = self
+            .collect_calling_llm_tool_outcomes(ctx, tool_defs, dispatch_results)
+            .await?;
+        self.commit_calling_llm_tool_turn(ctx, assistant_msg, batch)
+            .await
+    }
+    /// Runs pre-tool hooks and visibility prechecks over the requested
+    /// tool calls, admitting the executable subset.
+    async fn admit_calling_llm_tool_calls(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        tool_defs: &Arc<[Arc<ToolDef>]>,
+        tool_calls: Vec<(ToolCallOwned, ToolCallArguments)>,
+    ) -> Result<Vec<(usize, ToolCallOwned)>, AgentError> {
+        // Execute tool calls in parallel
+        let tools_ref = Arc::clone(&self.tools);
+        let mut executable_tool_calls = Vec::new();
+        let visible_tool_names = tool_defs
+            .iter()
+            .map(|tool| tool.tool_name())
+            .collect::<ToolNameSet>();
+
+        // Typed provenance projection from the active tool
+        // catalog: hook payloads carry the `ToolDef.provenance`
+        // owner (matched by tool name), never a source
+        // re-derived from the name string.
+        let provenance_for_tool = |tool_name: &str| {
+            tool_defs
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .and_then(|tool| tool.provenance.clone())
+        };
+
+        let pre_tool_reports = futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
+            self.execute_hooks(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: self.session.id().clone(),
+                    turn_number: Some(ctx.turn_count),
+                    prompt_input: None,
+                    error_report: None,
+                    error_class: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: Some(HookToolCall {
+                        tool_use_id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        args: args.clone(),
+                        provenance: provenance_for_tool(tc.name.as_str()),
+                    }),
+                    tool_result: None,
+                },
+                ctx.event_tx.as_ref(),
+            )
+        }))
+        .await;
+
+        for (tool_index, ((tc, _args), pre_tool_report)) in tool_calls
+            .into_iter()
+            .zip(pre_tool_reports.into_iter())
+            .enumerate()
+        {
+            let pre_tool_report = match pre_tool_report {
+                Ok(report) => report,
+                Err(error) => {
+                    self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                        .await?;
+                    return Err(error);
+                }
+            };
+
+            if let Some(error) = pre_tool_report.denial_error(HookPoint::PreToolExecution) {
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+
+            if let Err(error) = precheck_visible_tool_call(
+                tools_ref.as_ref(),
+                &visible_tool_names,
+                tc.name.as_str(),
+            ) {
+                // Preserve the typed `access_denied` / `not_found`
+                // cause through terminalization so the distinction
+                // survives to `error_code()`/wire instead of being
+                // flattened into an opaque message.
+                let error = AgentError::tool(error);
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::ToolExecutionStarted {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                }
+            );
+            executable_tool_calls.push((tool_index, tc));
+        }
+        Ok(executable_tool_calls)
+    }
+    /// Processes dispatch results: post-tool hooks, events, and the
+    /// accumulated ops/effects/callback partition.
+    async fn collect_calling_llm_tool_outcomes(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        tool_defs: &Arc<[Arc<ToolDef>]>,
+        dispatch_results: Vec<ToolDispatchResult>,
+    ) -> Result<CallingLlmToolBatch, AgentError> {
+        let mut tool_results = Vec::with_capacity(dispatch_results.len());
+        // Typed provenance projection from the active tool
+        // catalog: hook payloads carry the `ToolDef.provenance`
+        // owner (matched by tool name), never a source
+        // re-derived from the name string.
+        let provenance_for_tool = |tool_name: &str| {
+            tool_defs
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .and_then(|tool| tool.provenance.clone())
+        };
+        // Process results and emit events
+        let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
+        let mut accumulated_session_effects = Vec::<crate::ops::SessionEffect>::new();
+        let mut callback_pending: Vec<(String, String, Value)> = Vec::new();
+        for (_, tc, dispatch_result, duration_ms) in dispatch_results {
+            let mut tool_session_effects = Vec::new();
+            let mut tool_result = match dispatch_result {
+                Ok(mut outcome) => {
+                    outcome.clear_terminal_cause();
+                    all_async_ops.extend(outcome.async_ops);
+                    tool_session_effects = outcome.session_effects;
+                    outcome.result
+                }
+                Err(crate::error::ToolError::CallbackPending {
+                    tool_name: callback_tool,
+                    args: callback_args,
+                }) => {
+                    // Defer the successful continuation
+                    // boundary until every completed sibling
+                    // has been projected.
+                    callback_pending.push((tc.id.clone(), callback_tool, callback_args));
+                    continue;
+                }
+                Err(e) => crate::ops::terminal_tool_outcome_for_error(tc.id.clone(), e).result,
+            };
+
+            if tool_result.tool_use_id.is_empty() {
+                tool_result.tool_use_id = tc.id.clone();
+            }
+
+            // Reject unsupported video tool results BEFORE any
+            // success-shaped progress events are emitted and
+            // route the rejection through the turn machine, so
+            // public event truth never reports completion while
+            // the terminal truth is an error.
+            if tool_result.has_video() {
+                let error = AgentError::ConfigError(
+                    "video blocks are not supported in tool results".to_string(),
+                );
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+
+            let post_tool_report = self
+                .execute_turn_hooks(
+                    HookInvocation {
+                        point: HookPoint::PostToolExecution,
+                        session_id: self.session.id().clone(),
+                        turn_number: Some(ctx.turn_count),
+                        prompt_input: None,
+                        error_report: None,
+                        error_class: None,
+                        llm_request: None,
+                        llm_response: None,
+                        tool_call: None,
+                        tool_result: Some(
+                            HookToolResult::from_tool_result_with_id(
+                                tc.id.clone(),
+                                tc.name.clone(),
+                                &tool_result,
+                            )
+                            .with_provenance(provenance_for_tool(tc.name.as_str())),
+                        ),
+                    },
+                    ctx.run_id,
+                    ctx.turn_count,
+                    ctx.event_tx,
+                )
+                .await?;
+
+            if let Some(error) = post_tool_report.denial_error(HookPoint::PostToolExecution) {
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+
+            // Emit execution complete
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::ToolExecutionCompleted {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    content: tool_result.content.clone(),
+                    is_error: tool_result.is_error,
+                    duration_ms,
+                }
+            );
+
+            // Emit result received
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::ToolResultReceived {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    content: tool_result.content.clone(),
+                    is_error: tool_result.is_error,
+                }
+            );
+
+            tool_results.push(tool_result);
+            accumulated_session_effects.extend(tool_session_effects);
+
+            // Track tool call in budget
+            self.budget.record_tool_call();
+            ctx.tool_call_count += 1;
+        }
+        Ok(CallingLlmToolBatch {
+            tool_results,
+            pending_op_refs: all_async_ops,
+            accumulated_session_effects,
+            callback_pending,
+        })
+    }
+    /// Commits the tool turn: transcript publication (incl. callback
+    /// staging), session effects, pending-op registration, and the
+    /// boundary transition.
+    async fn commit_calling_llm_tool_turn(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        assistant_msg: BlockAssistantMessage,
+        batch: CallingLlmToolBatch,
+    ) -> Result<CallingLlmStep, AgentError> {
+        let CallingLlmToolBatch {
+            tool_results,
+            pending_op_refs,
+            accumulated_session_effects,
+            mut callback_pending,
+        } = batch;
+        let barrier_operation_ids = pending_op_refs
+            .iter()
+            .filter(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier)
+            .map(|r| r.operation_id.clone())
+            .collect::<Vec<_>>();
+        let has_barrier_ops = pending_op_refs
+            .iter()
+            .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
+
+        // Apply state-mutating effects before ToolResults, but
+        // defer transcript-producing assistant blocks until
+        // after ToolResults so provider tool-call adjacency is
+        // preserved.
+        let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
+            accumulated_session_effects.into_iter().partition(|effect| {
+                matches!(
+                    effect,
+                    crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+                )
+            });
+        let callback_batch_pending = !callback_pending.is_empty();
+
+        // The assistant tool-use message is published only
+        // after dispatch has proven that the batch has at most
+        // one externally pending callback. This keeps an
+        // ambiguous batch from leaving an unresumable tail. A
+        // mixed callback batch prepares its assistant tail and
+        // durable staging record on a clone first, so a staging
+        // refusal cannot partially mutate the live transcript.
+        if callback_batch_pending {
+            if callback_pending.is_empty() {
+                let error = AgentError::InternalError(
+                    "callback staging lost its pending callback witnesses".to_string(),
+                );
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+            let mut effects = pre_tool_effects.clone();
+            effects.extend(post_tool_effects.clone());
+            let batch = crate::session::PendingCallbackToolBatch {
+                run_id: ctx.run_id.clone(),
+                tool_use_order: assistant_msg
+                    .tool_calls()
+                    .map(|call| call.id.to_string())
+                    .collect(),
+                pending_tool_use_ids: callback_pending
+                    .iter()
+                    .map(|(tool_use_id, _, _)| tool_use_id.clone())
+                    .collect(),
+                completed_results: tool_results.clone(),
+                session_effects: effects,
+                async_ops: pending_op_refs.clone(),
+            };
+            let mut staged_session = self.session.clone();
+            staged_session.push(Message::BlockAssistant(assistant_msg.clone()));
+            if let Err(error) = staged_session.stage_pending_callback_tool_batch(batch) {
+                let error = AgentError::InternalError(format!(
+                    "failed to stage mixed callback tool batch: {error}"
+                ));
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+            self.session = staged_session;
+        } else {
+            self.session
+                .push(Message::BlockAssistant(assistant_msg.clone()));
+        }
+        for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
+            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+        }
+
+        if !callback_batch_pending && !pre_tool_effects.is_empty() {
+            self.apply_session_effects(&pre_tool_effects, Some(ctx.run_id))?;
+        }
+        let tool_batch_produced_output = tool_results.iter().any(|result| !result.is_error)
+            || post_tool_effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    crate::ops::SessionEffect::AppendAssistantBlocks { blocks }
+                        if crate::types::assistant_blocks_have_visible_or_actionable_output(blocks)
+                )
+            });
+
+        // Callback-pending has no local tool result. Preserve
+        // any completed siblings without fabricating an empty
+        // ToolResults message for a callback-only batch.
+        if !callback_batch_pending && !tool_results.is_empty() {
+            self.session
+                .push(Message::tool_results(tool_results.clone()));
+        }
+
+        let assistant_image_events = assistant_image_events_from_effects(&post_tool_effects);
+        if !callback_batch_pending && !post_tool_effects.is_empty() {
+            self.apply_session_effects(&post_tool_effects, Some(ctx.run_id))?;
+        }
+        if tool_batch_produced_output {
+            *ctx.run_has_visible_or_actionable_output = true;
+        }
+        if !callback_batch_pending {
+            for image in assistant_image_events {
+                emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+            }
+        }
+
+        self.observe_cancel_after_boundary_request(ctx.run_id)?;
+
+        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
+            run_id: ctx.run_id.clone(),
+            op_refs: pending_op_refs.clone(),
+            barrier_operation_ids,
+            has_barrier_ops,
+        })?;
+
+        if callback_batch_pending {
+            // Close the generated turn only after completed
+            // sibling outcomes have either committed normally
+            // or entered the durable callback staging record.
+            let transition = self.apply_turn_input(TurnExecutionInput::CallbackPending {
+                run_id: ctx.run_id.clone(),
+            })?;
+            self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
+                .await?;
+            if callback_pending.len() == 1 {
+                let (tool_use_id, tool_name, args) = callback_pending.remove(0);
+                return Err(AgentError::CallbackPending {
+                    tool_use_id,
+                    tool_name,
+                    args,
+                });
+            }
+            return Err(AgentError::CallbackBatchPending {
+                pending_tool_calls: callback_pending
+                    .into_iter()
+                    .map(
+                        |(tool_use_id, tool_name, args)| crate::error::PendingCallbackToolCall {
+                            tool_use_id,
+                            tool_name,
+                            args,
+                        },
+                    )
+                    .collect(),
+            });
+        }
+
+        if self.turn_has_barrier_ops()? {
+            // Stay in WaitingForOps — the outer match arm will
+            // await completion of barrier ops via wait-set.
+            return Ok(CallingLlmStep::Repoll);
+        }
+
+        // No pending ops — tool calls resolved, drain boundary, continue
+        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
+            run_id: ctx.run_id.clone(),
+        })?;
+        if let Err(error) = self
+            .drain_turn_boundary(ctx.turn_count, ctx.event_tx.as_ref())
+            .await
+        {
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
+        let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+            run_id: ctx.run_id.clone(),
+        })?;
+        self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+            .await?;
+        Ok(CallingLlmStep::NextTurn)
+    }
+    /// Extraction turn: schema validation with authority-owned retry.
+    async fn run_calling_llm_extraction_phase(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        assistant: CallingLlmAssistantTurn,
+    ) -> Result<CallingLlmStep, AgentError> {
+        let CallingLlmAssistantTurn {
+            assistant_msg,
+            assistant_text,
+            ..
+        } = assistant;
+        // Extraction turn response — validate against schema
+        let assistant_image_events = assistant_image_events_from_blocks(&assistant_msg.blocks);
+        self.session.push(Message::BlockAssistant(assistant_msg));
+        for image in assistant_image_events {
+            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+        }
+
+        // Drain turn boundary (fires TurnBoundary hooks, drains comms)
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+            run_id: ctx.run_id.clone(),
+        })?;
+        if let Err(error) = self
+            .drain_turn_boundary(ctx.turn_count, ctx.event_tx.as_ref())
+            .await
+        {
+            return Ok(CallingLlmStep::Done(
+                self.complete_extraction_failed(
+                    ctx.run_id,
+                    ctx.turn_count,
+                    ctx.tool_call_count,
+                    error.to_string(),
+                    ctx.event_tx,
+                )
+                .await,
+            ));
+        }
+        self.observe_cancel_after_boundary_request(ctx.run_id)?;
+
+        // Authority: DrainingBoundary -> Extracting for validation
+        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+            run_id: ctx.run_id.clone(),
+            max_retries: self.config.structured_output_retries,
+        })?;
+
+        let Some(output_schema) = self.config.output_schema.as_ref() else {
+            return Ok(CallingLlmStep::Done(
+                self.complete_extraction_failed(
+                    ctx.run_id,
+                    ctx.turn_count,
+                    ctx.tool_call_count,
+                    "extraction flow without output_schema".to_string(),
+                    ctx.event_tx,
+                )
+                .await,
+            ));
+        };
+        let compiled = match self.client.compile_schema(output_schema) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return Ok(CallingLlmStep::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        error.to_string(),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+        };
+        let validation = super::extraction::validate_response_text(
+            &assistant_text,
+            output_schema,
+            &compiled.schema,
+        );
+        let validation = match validation {
+            Ok(validation) => validation,
+            Err(error) => {
+                return Ok(CallingLlmStep::Done(
+                    self.complete_extraction_failed(
+                        ctx.run_id,
+                        ctx.turn_count,
+                        ctx.tool_call_count,
+                        error.to_string(),
+                        ctx.event_tx,
+                    )
+                    .await,
+                ));
+            }
+        };
+
+        match validation {
+            super::extraction::ExtractionValidation::Failed {
+                error,
+                retry_prompt,
+            } => {
+                // Validation failed — authority decides retry vs exhaust
+                let t = self.apply_turn_input(TurnExecutionInput::ExtractionValidationFailed {
+                    run_id: ctx.run_id.clone(),
+                    error: error.clone(),
+                })?;
+
+                if !self.turn_terminal()? {
+                    // Authority decided to retry — push retry prompt
+                    self.session
+                        .push(Message::User(UserMessage::text(retry_prompt)));
+                    self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+                        .await?;
+                    return Ok(CallingLlmStep::NextTurn);
+                }
+
+                // Authority decided retries exhausted. The
+                // main run already completed; extraction is a
+                // post-run outcome and must not terminalize the
+                // run as failed.
+                self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+                    .await?;
+                let extraction_error = crate::types::ExtractionError {
+                    last_output: self
+                        .extraction_state
+                        .primary_output()
+                        .unwrap_or_default()
+                        .to_string(),
+                    attempts: self.turn_extraction_attempts()?,
+                    reason: error,
+                };
+                let result = RunResult {
+                    text: extraction_error.last_output.clone(),
+                    session_id: self.session.id().clone(),
+                    usage: self.session.total_usage(),
+                    turns: ctx.turn_count + 1,
+                    tool_calls: ctx.tool_call_count,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: Some(extraction_error.clone()),
+                    schema_warnings: self.extraction_state.take_schema_warnings(),
+                    skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
+                };
+                self.save_session_best_effort().await;
+                self.emit_extraction_failed_event(&extraction_error, ctx.event_tx.as_ref())
+                    .await;
+                return Ok(CallingLlmStep::Done(Ok(result)));
+            }
+            super::extraction::ExtractionValidation::Passed(normalized) => {
+                self.extraction_state.record_success(normalized);
+            }
+        }
+
+        let structured_output = self.extraction_state.take_result();
+        let schema_warnings = self.extraction_state.take_schema_warnings();
+        let result = RunResult {
+            text: self
+                .extraction_state
+                .primary_output()
+                .unwrap_or_default()
+                .to_string(),
+            session_id: self.session.id().clone(),
+            usage: self.session.total_usage(),
+            turns: ctx.turn_count + 1,
+            tool_calls: ctx.tool_call_count,
+            terminal_cause_kind: None,
+            structured_output,
+            extraction_error: None,
+            schema_warnings,
+            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
+        };
+        // Validation passed — complete via authority
+        let t = self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
+            run_id: ctx.run_id.clone(),
+        })?;
+        self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+            .await?;
+        self.save_session_best_effort().await;
+        if let Some(structured_output) = result.structured_output.clone() {
+            self.emit_extraction_succeeded_event(
+                structured_output,
+                result.schema_warnings.clone(),
+                ctx.event_tx.as_ref(),
+            )
+            .await;
+        }
+        Ok(CallingLlmStep::Done(Ok(result)))
+    }
+    /// Terminal turn (no tool calls): boundary drain, optional
+    /// extraction-turn entry, and run completion.
+    async fn run_calling_llm_terminal_phase(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        assistant: CallingLlmAssistantTurn,
+    ) -> Result<CallingLlmStep, AgentError> {
+        let CallingLlmAssistantTurn {
+            assistant_msg,
+            assistant_text,
+            stop_reason,
+            usage,
+        } = assistant;
+        // No tool calls - we're done with the agentic loop
+        let final_text = assistant_text.clone();
+        let assistant_image_events = assistant_image_events_from_blocks(&assistant_msg.blocks);
+        self.session.push(Message::BlockAssistant(assistant_msg));
+        for image in assistant_image_events {
+            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+        }
+
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+            run_id: ctx.run_id.clone(),
+        })?;
+        if let Err(error) = self
+            .drain_turn_boundary(ctx.turn_count, ctx.event_tx.as_ref())
+            .await
+        {
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
+        self.observe_cancel_after_boundary_request(ctx.run_id)?;
+
+        // Check if we need to perform extraction turn for structured output
+        if let Some(output_schema) = self.config.output_schema.clone()
+            && !self.turn_in_extraction_flow()?
+        {
+            // Compile schema and capture warnings BEFORE emitting
+            // any success-shaped boundary event. Schema compile is
+            // a fallible extraction-setup step; if it fails the run
+            // must terminalize as an extraction failure, so we must
+            // not advertise `TurnCompleted`/`RunCompleted(success)`
+            // ahead of an outcome that can still fail (row #194).
+            let compiled = match self.client.compile_schema(&output_schema) {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    return Ok(CallingLlmStep::Done(
+                        self.complete_extraction_failed(
+                            ctx.run_id,
+                            ctx.turn_count,
+                            ctx.tool_call_count,
+                            error.to_string(),
+                            ctx.event_tx,
+                        )
+                        .await,
+                    ));
+                }
+            };
+
+            emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
+
+            // The main agentic turn has committed. Extraction
+            // is a separate post-run validation phase.
+            self.extraction_state.reset();
+            self.extraction_state.set_primary_output(final_text.clone());
+
+            let mut result = RunResult {
+                text: final_text.clone(),
+                session_id: self.session.id().clone(),
+                usage: self.session.total_usage(),
+                turns: ctx.turn_count + 1,
+                tool_calls: ctx.tool_call_count,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            };
+            self.run_completed_hooks_before_terminal(
+                &mut result,
+                ctx.run_id,
+                ctx.turn_count,
+                ctx.event_tx,
+            )
+            .await?;
+            self.emit_run_completed_event(&result, true, ctx.event_tx.as_ref())
+                .await;
+            self.run_completed_event_emitted = true;
+
+            self.extraction_state
+                .set_schema_warnings(compiled.warnings.clone());
+
+            // Push extraction prompt as user message
+            let prompt = self
+                .config
+                .extraction_prompt
+                .clone()
+                .unwrap_or_else(|| super::extraction::DEFAULT_EXTRACTION_PROMPT.to_string());
+            self.session.push(Message::User(UserMessage::text(prompt)));
+
+            // Authority: DrainingBoundary -> Extracting -> CallingLlm
+            self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                run_id: ctx.run_id.clone(),
+                max_retries: self.config.structured_output_retries,
+            })?;
+            let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
+                run_id: ctx.run_id.clone(),
+            })?;
+            self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+                .await?;
+            return Ok(CallingLlmStep::NextTurn);
+        }
+
+        if self.turn_cancel_after_boundary()? {
+            let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                run_id: ctx.run_id.clone(),
+            })?;
+            self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+                .await?;
+            self.save_session_best_effort().await;
+            return Ok(CallingLlmStep::Done(
+                self.build_result(ctx.turn_count + 1, ctx.tool_call_count)
+                    .await,
+            ));
+        }
+
+        let mut result = RunResult {
+            text: final_text,
+            session_id: self.session.id().clone(),
+            usage: self.session.total_usage(),
+            turns: ctx.turn_count + 1,
+            tool_calls: ctx.tool_call_count,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
+        };
+        self.run_completed_hooks_before_terminal(
+            &mut result,
+            ctx.run_id,
+            ctx.turn_count,
+            ctx.event_tx,
+        )
+        .await?;
+
+        // Emit turn completed only after all terminal hooks accept
+        // and boundary side effects are committed.
+        emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
+
+        // No extraction needed - complete normally
+        let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+            run_id: ctx.run_id.clone(),
+        })?;
+        self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
+            .await?;
+
+        // Save session
+        self.save_session_best_effort().await;
+
+        Ok(CallingLlmStep::Done(Ok(result)))
     }
 
     /// Build a RunResult from current state, using the generated terminal

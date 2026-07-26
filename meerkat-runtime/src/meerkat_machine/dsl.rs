@@ -86,6 +86,28 @@ impl RuntimeEpochId {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RunId(pub String);
 
+/// What kind of recovery a classified durable tail admits. Bridging copy of
+/// the catalog type (the two are structurally identical; canonical semantics
+/// live in the catalog DSL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRecoveryClass {
+    CompletedCandidate,
+    InterruptedRepairableCandidate,
+    #[default]
+    Ambiguous,
+}
+
+/// The machine's recovery verdict. Bridging copy of the catalog type. Nothing
+/// here ever authorizes discarding the durable tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRecoveryDisposition {
+    #[default]
+    RefuseRecovery,
+    CommitCompleted,
+    RepairAndCommitInterrupted,
+    HoldIntact,
+}
+
 impl<T: Into<String>> From<T> for RunId {
     fn from(s: T) -> Self {
         Self(s.into())

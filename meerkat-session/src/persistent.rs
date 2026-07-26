@@ -30832,7 +30832,7 @@ mod tests {
         // verified strict DESCENDANT of a behind authority is retained even
         // when both sides carry stamps (the parent-2 lost-boundary shape).
         let session_id = SessionId::new();
-        let mut base = Session::with_id(session_id.clone());
+        let mut base = Session::with_id(session_id);
         base.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
@@ -30847,7 +30847,7 @@ mod tests {
             &base_stamp,
             meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
         );
-        let mut intra_sibling = base.clone();
+        let mut intra_sibling = base;
         intra_sibling.push(Message::User(UserMessage::text(
             "aborted intermediate the run itself superseded".to_string(),
         )));

@@ -27,7 +27,6 @@ use meerkat_runtime::{
     SessionDelta, SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
-use sha2::{Digest, Sha256};
 
 fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())

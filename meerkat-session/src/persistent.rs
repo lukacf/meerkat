@@ -30988,16 +30988,19 @@ mod tests {
         );
     }
 
-    /// Bug B-2 class pin (field: identity-first gateways, meerkat 0.7.25):
-    /// the WRITE half of the torn-shutdown wedge must clear on CLASSIC
-    /// (non-incremental) stores too. The incremental head-canonical path and
-    /// the audited authoritative-projection path already consult the
-    /// machine-owned rollback; external `SessionStore` implementations route
-    /// plain projection saves through the storage-normalization bridge,
-    /// where a stamped ahead row previously re-threw MonotonicityViolation
-    /// on every resume save — permanently stranding the session.
+    /// REWRITTEN PIN (was: `..._converges_stamped_ahead_row`, meerkat 0.7.25
+    /// Bug B-2 class). The old contract let the authority save REBUILD a
+    /// stamped ahead row, discarding its tail. That tail is real durable
+    /// turn content whose boundary commit lost a shutdown race — observed in
+    /// the field as a COMPLETED turn — so rebuilding is data loss. Under the
+    /// recovery model the write half REFUSES AND RETAINS (the machine's
+    /// RetainForRecovery disposition; no disposition authorizes shrinking a
+    /// verified durable descendant), and the wedge clears at the next cold
+    /// READ through the machine-authorized recovery commit instead (see
+    /// `cold_load_recovers_completed_durable_tail_as_recovered_boundary` for
+    /// the promotion half).
     #[tokio::test]
-    async fn classic_store_projection_bridge_converges_stamped_ahead_row() {
+    async fn classic_store_projection_bridge_retains_stamped_ahead_row() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let blob_store = memory_blob_store();
 
@@ -31023,15 +31026,16 @@ mod tests {
             .await
             .expect("persist stamped ahead row");
 
-        save_session_projection_with_storage_normalization_bridge(
+        let error = save_session_projection_with_storage_normalization_bridge(
             store.as_ref(),
             blob_store.as_ref(),
             &authority,
         )
         .await
-        .expect(
-            "the authority save must converge the stamped ahead row instead of wedging on \
-             MonotonicityViolation",
+        .expect_err("the authority save must REFUSE rather than rebuild over the durable tail");
+        assert!(
+            matches!(error, SessionStoreError::MonotonicityViolation { .. }),
+            "the refusal stays the typed monotonicity guard, got {error:?}"
         );
 
         let persisted = store
@@ -31041,17 +31045,17 @@ mod tests {
             .expect("row should exist");
         assert_eq!(
             persisted.messages().len(),
-            authority.messages().len(),
-            "the row must be rebuilt onto committed truth (unacknowledged tail discarded)"
+            ahead_row.messages().len(),
+            "the durable tail must be RETAINED byte-intact for the recovery commit"
         );
-        assert!(matches!(
-            persisted
-                .try_checkpoint_state()
-                .expect("converged checkpoint state should verify"),
-            meerkat_core::SessionCheckpointState::Verified(stamp)
-                if stamp.provenance()
-                    != meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
-        ));
+        match &persisted.messages()[1] {
+            Message::User(user) => assert_eq!(
+                user.text_content(),
+                "checkpointed but uncommitted",
+                "the retained tail content must survive the refused save"
+            ),
+            other => panic!("retained tail message changed shape: {other:?}"),
+        }
     }
 
     /// Service-level regression for the cold materialization ordering that the

@@ -3354,6 +3354,7 @@ impl MobSessionService for MockSessionService {
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
         <Self as SessionService>::start_turn(self, session_id, req).await?;
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            session: None,
             receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                 run_id,
                 boundary,
@@ -33686,6 +33687,7 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
             self.allow_finish.notified().await;
 
             Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                session: None,
                 receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
@@ -42765,9 +42767,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             boundary,
             contributing_input_ids,
             conversation_digest: inject_checkpoint_failure.then(|| {
-                // SHA-256 of the serialized empty message list (`[]`) in the
-                // valid synthetic Session witness below.
-                "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945".to_string()
+                // Canonical accumulator digest (`sha256:<hex>`) of the
+                // serialized empty message list (`[]`) in the valid synthetic
+                // Session witness below — the committed-boundary witness
+                // validation recomputes this exact format.
+                "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                    .to_string()
             }),
             message_count: 0,
         };
@@ -42801,6 +42806,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             )
         } else {
             Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                session: None,
                 receipt,
                 session_snapshot,
                 terminal: None,

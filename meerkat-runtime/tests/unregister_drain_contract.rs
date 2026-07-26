@@ -518,6 +518,7 @@ impl CoreExecutor for GatedExecutor {
             self.release.notified().await;
         }
         Ok(CoreApplyOutput {
+            session: None,
             receipt: RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,

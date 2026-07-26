@@ -20,15 +20,20 @@
 //! on the turn boundary makes the large member's per-turn cost track its
 //! document size and trips the ratio.
 //!
-//! The primary signal is process CPU time (`cpu_time::ProcessTime`):
-//! thread-agnostic (the boundary work runs on tokio workers and
-//! `spawn_blocking` threads), robust against CI scheduler noise, and the
-//! defect itself is CPU-bound (serialize + digest passes). The per-thread
-//! `session_content_digest_computations` counter would be the ideal
-//! deterministic signal but is `thread_local!` and therefore under-counts
-//! from the test thread under the multi-threaded runtime, so it is not
-//! used. Wall time per turn — the thing users actually feel — is printed
-//! as a diagnostic but never asserted.
+//! The ASSERTED signal is canonical bytes hashed per turn
+//! (`meerkat_core::global_session_content_digest_bytes`, a process-wide
+//! atomic, so tokio workers and `spawn_blocking` threads are all counted):
+//! deterministic, content-driven, and immune to the false-green modes a
+//! time ratio permits — scheduler contention inflating the small side
+//! "improves" a wall/CPU ratio with zero real gain (observed live:
+//! 58.1x -> 17.2x from contention alone). Bytes are asserted BOTH
+//! absolutely (a small-side band pins the denominator against inflation)
+//! and relatively (the large side must stay within a small factor of the
+//! small side). Process CPU time and wall time per turn — the thing users
+//! actually feel — are printed as diagnostics but never asserted. The
+//! per-thread `session_content_digest_computations` counter is NOT used:
+//! it is `thread_local!` and under-counts from the test thread under the
+//! multi-threaded runtime.
 //!
 //! This test must stay ALONE in its test binary so no sibling test's CPU
 //! pollutes the measurement. No live provider is involved: members run
@@ -79,20 +84,27 @@ const LARGE_SESSION_TURNS: usize = 4;
 /// nothing).
 const MIN_LARGE_GROWTH_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Flatness tolerance: per-turn CPU at ~10 MB must stay within K× the
-/// per-turn CPU at ~256 KB. With turn cost truly independent of document
-/// size the ratio is ~1 (same fixed path, delta-only content), so K = 3
-/// leaves real headroom for CI noise and O(delta) variance — while any
+/// Flatness tolerance: canonical bytes hashed per turn at ~10 MB must stay
+/// within K× the bytes per turn at ~256 KB. With turn cost truly independent
+/// of document size the ratio is ~1 (same fixed path, delta-only content),
+/// so K = 3 leaves headroom for legitimate O(delta) variance — while any
 /// O(document) boundary pass at a ~40× size ratio measures far above it.
-const MAX_LARGE_TO_SMALL_CPU_RATIO: u32 = 3;
+/// Bytes are deterministic, so unlike the retired CPU-ratio form this needs
+/// no scheduler-noise allowance.
+const MAX_LARGE_TO_SMALL_BYTES_RATIO: u64 = 3;
 
-/// Ratio floor for the small side: if the large member's per-turn CPU is
-/// within `K × max(small, floor)`, turns are cheap in absolute terms and
-/// flat in the only sense that matters. This keeps a post-fix run where
-/// both sides cost mere tens of milliseconds from failing on ratio noise,
-/// without masking the defect (a size-proportional turn at 10 MB costs
-/// seconds of CPU, far above 300 ms).
-const SMALL_COST_FLOOR: Duration = Duration::from_millis(100);
+/// Sanity band for the small-side baseline, in bytes hashed per turn.
+///
+/// The band is what makes the ratio assertion honest: a ratio alone can be
+/// "improved" by inflating the denominator (extra digest work, contention,
+/// a bloated small fixture), and a broken instrument reads zero on both
+/// sides. Below the floor the counter is not observing the boundary work at
+/// all; above the ceiling the small baseline itself regressed (or was
+/// gamed) and no ratio conclusion is meaningful. Calibration pin, measured
+/// 2026-07-26 at ~6 MB/turn: recalibrate DELIBERATELY with a comment when
+/// the boundary-work contract changes, never silently.
+const SMALL_BYTES_PER_TURN_MIN: u64 = 1024 * 1024;
+const SMALL_BYTES_PER_TURN_MAX: u64 = 32 * 1024 * 1024;
 
 const MEMBER_IDS: [&str; 3] = ["lead-1", "w-small", "w-large"];
 const SMALL_MEMBER_ID: &str = "w-small";
@@ -265,6 +277,9 @@ async fn quiesce(what: &str) {
 struct TurnCost {
     cpu_per_turn: Duration,
     wall_per_turn: Duration,
+    /// Canonical bytes hashed per turn (process-wide counter delta). The
+    /// asserted signal; CPU and wall are diagnostics.
+    digest_bytes_per_turn: u64,
 }
 
 /// Drive `MEASURED_TURNS` identical tiny turns at one member and return the
@@ -283,6 +298,8 @@ async fn measure_member_turns(
         .expect("measured member handle");
 
     let cpu_start = process_cpu_time();
+    let digest_bytes_start = meerkat_core::global_session_content_digest_bytes();
+    let digest_sites_start = meerkat_core::digest_site_bytes();
     let wall_start = Instant::now();
     for turn in 0..MEASURED_TURNS {
         let expected = capture.count() + 1;
@@ -300,10 +317,27 @@ async fn measure_member_turns(
     quiesce(&format!("after measuring {member_id}")).await;
     let cpu = process_cpu_time().saturating_sub(cpu_start);
     let wall = wall_start.elapsed();
+    let digest_bytes = meerkat_core::global_session_content_digest_bytes()
+        .saturating_sub(digest_bytes_start)
+        / MEASURED_TURNS as u64;
+    eprintln!(
+        "[turn-latency gate] {member_id}: {} MB canonicalized-and-hashed per turn",
+        digest_bytes / (1024 * 1024)
+    );
+    let digest_sites_end = meerkat_core::digest_site_bytes();
+    for (index, label) in meerkat_core::DIGEST_SITE_LABELS.iter().enumerate() {
+        let site_bytes = digest_sites_end[index].saturating_sub(digest_sites_start[index])
+            / MEASURED_TURNS as u64;
+        eprintln!(
+            "[turn-latency gate]   {member_id} site {label}: {} MB per turn",
+            site_bytes / (1024 * 1024)
+        );
+    }
 
     TurnCost {
         cpu_per_turn: cpu / MEASURED_TURNS as u32,
         wall_per_turn: wall / MEASURED_TURNS as u32,
+        digest_bytes_per_turn: digest_bytes,
     }
 }
 
@@ -479,28 +513,49 @@ async fn e2e_smoke_mob_turn_latency_gate() {
         large.wall_per_turn,
     );
 
-    let small_effective = small.cpu_per_turn.max(SMALL_COST_FLOOR);
-    let cpu_ratio = large.cpu_per_turn.as_secs_f64() / small_effective.as_secs_f64();
+    let cpu_ratio = large.cpu_per_turn.as_secs_f64() / small.cpu_per_turn.as_secs_f64().max(1e-9);
     let wall_ratio =
-        large.wall_per_turn.as_secs_f64() / small.wall_per_turn.max(SMALL_COST_FLOOR).as_secs_f64();
+        large.wall_per_turn.as_secs_f64() / small.wall_per_turn.as_secs_f64().max(1e-9);
+    let bytes_ratio =
+        large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
     eprintln!(
-        "[turn-latency gate] per-turn cost ratio large/small: {cpu_ratio:.1}x CPU \
-         (floored small = {small_effective:?}), {wall_ratio:.1}x wall (diagnostic only)",
+        "[turn-latency gate] per-turn large/small: {bytes_ratio:.1}x bytes (ASSERTED), \
+         {cpu_ratio:.1}x CPU (diagnostic), {wall_ratio:.1}x wall (diagnostic)",
     );
 
-    // The measured contract: an identical tiny turn must cost the same
-    // whether the accumulated document is ~256 KB or ~10 MB. Any
+    // Denominator honesty: the small-side baseline must sit inside its
+    // calibrated band. Below the floor the byte counter is not observing the
+    // boundary work (broken instrument, hollow fixture); above the ceiling
+    // the baseline itself regressed or was inflated, and any ratio computed
+    // against it is meaningless.
+    assert!(
+        (SMALL_BYTES_PER_TURN_MIN..=SMALL_BYTES_PER_TURN_MAX)
+            .contains(&small.digest_bytes_per_turn),
+        "small-side baseline outside its calibrated band: {} bytes hashed per \
+         turn at the ~256 KB member (band {SMALL_BYTES_PER_TURN_MIN}..={SMALL_BYTES_PER_TURN_MAX}; \
+         large side measured {} bytes per turn). A ratio against this \
+         baseline proves nothing — fix the baseline first, or recalibrate \
+         the band deliberately with a comment",
+        small.digest_bytes_per_turn,
+        large.digest_bytes_per_turn,
+    );
+
+    // The measured contract: an identical tiny turn must hash the same
+    // bytes whether the accumulated document is ~256 KB or ~10 MB. Any
     // O(document) pass left on the turn boundary (whole-document canonical
     // serialize, whole-document digest, full-snapshot decode, whole-blob
-    // rewrite) makes this ratio track the ~40x size ratio.
+    // rewrite) makes the large side track its document size.
     assert!(
-        large.cpu_per_turn <= small_effective * MAX_LARGE_TO_SMALL_CPU_RATIO,
-        "turn cost scales with document size: {:?} CPU per turn at the ~10 MB \
-         member vs {:?} at the ~256 KB member ({cpu_ratio:.1}x, limit \
-         {MAX_LARGE_TO_SMALL_CPU_RATIO}x; wall {:?} vs {:?}). Turn-boundary \
+        large.digest_bytes_per_turn <= small.digest_bytes_per_turn * MAX_LARGE_TO_SMALL_BYTES_RATIO,
+        "turn-boundary hashing scales with document size: {} bytes hashed \
+         per turn at the ~10 MB member vs {} bytes at the ~256 KB member \
+         ({bytes_ratio:.1}x, limit {MAX_LARGE_TO_SMALL_BYTES_RATIO}x; \
+         diagnostics: CPU {:?} vs {:?}, wall {:?} vs {:?}). Turn-boundary \
          work must be O(delta), not O(document): a one-word reply on a large \
          session may not re-serialize, re-digest, or re-persist the whole \
          accumulated document",
+        large.digest_bytes_per_turn,
+        small.digest_bytes_per_turn,
         large.cpu_per_turn,
         small.cpu_per_turn,
         large.wall_per_turn,

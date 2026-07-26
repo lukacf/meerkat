@@ -741,6 +741,7 @@ impl CoreExecutor for NoopExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         Ok(CoreApplyOutput {
+            session: None,
             receipt: meerkat_core::RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,

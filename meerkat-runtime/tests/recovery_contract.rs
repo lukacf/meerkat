@@ -798,3 +798,197 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         );
     }
 }
+
+/// Level 3 — the durable-tail recovery boundary is all-or-nothing.
+///
+/// A recovered durable tail commits through the SAME `atomic_apply` boundary
+/// as an ordinary completed run: the recovered session snapshot (revision N+1
+/// content over the committed revision N head), the recovered run's boundary
+/// receipt, and the input-state terminalization records become visible
+/// TOGETHER — and a stale pre-recovery replay makes NOTHING visible.
+#[tokio::test]
+async fn atomic_apply_recovery_boundary_is_all_or_nothing() {
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+    };
+
+    for harness in supported_store_harnesses() {
+        let name = harness.name;
+        let runtime_id = make_runtime_id(name);
+
+        // Committed authority head at revision N: the last boundary that
+        // actually committed before shutdown.
+        let mut committed = meerkat_core::Session::new();
+        committed.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let committed_snapshot = serde_json::to_vec(&committed).unwrap();
+        harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: committed_snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), vec![], 0),
+                vec![],
+                Some(committed.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        // The durable tail: revision N+1 content — a completed turn whose
+        // boundary commit lost the race with shutdown.
+        let mut recovered = committed.clone();
+        recovered.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "durable tail reply".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        }));
+        let recovered_snapshot = serde_json::to_vec(&recovered).unwrap();
+
+        let recovered_run = RunId::new();
+        let recovered_input = InputId::new();
+        let recovered_receipt = RunBoundaryReceipt {
+            run_id: recovered_run.clone(),
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![recovered_input.clone()],
+            conversation_digest: Some(format!("{name}-recovered-boundary-digest")),
+            message_count: recovered.messages().len(),
+            sequence: 1,
+        };
+        // Input-state terminalization: the recovered run's input closes
+        // Consumed. Recovery TERMINALIZES the original input; it never
+        // requeues it.
+        let terminalized = StoredInputState {
+            state: InputState::new_accepted(recovered_input.clone()),
+            seed: InputStateSeed {
+                phase: InputLifecycleState::Consumed,
+                last_run_id: Some(recovered_run.clone()),
+                last_boundary_sequence: Some(1),
+                terminal_outcome: Some(InputTerminalOutcome::Consumed),
+                attempt_count: 1,
+                admission_sequence: None,
+                recovery_lane: None,
+            },
+        };
+
+        harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: recovered_snapshot.clone(),
+                }),
+                recovered_receipt.clone(),
+                vec![persistable(terminalized)],
+                Some(recovered.id().clone()),
+            )
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{name}: the recovered boundary must commit atomically: {err}")
+            });
+
+        // ALL visible together: snapshot, receipt, terminalized input.
+        assert_eq!(
+            harness
+                .store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap(),
+            Some(recovered_snapshot.clone()),
+            "{name}: recovered snapshot must be the durable head"
+        );
+        assert_eq!(
+            harness
+                .store
+                .load_boundary_receipt(&runtime_id, &recovered_run, 1)
+                .await
+                .unwrap(),
+            Some(recovered_receipt),
+            "{name}: the recovered run's boundary receipt must be durable"
+        );
+        let rows = harness
+            .store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{name}: exactly the terminalized input row");
+        assert_eq!(rows[0].state.input_id, recovered_input);
+        assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(
+            rows[0].seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed),
+            "{name}: recovery must terminalize, not requeue"
+        );
+        assert_eq!(rows[0].seed.last_run_id, Some(recovered_run));
+
+        // Failure case: a stale writer replays the PRE-recovery snapshot
+        // (revision N) with a fresh receipt and input record. The store's
+        // supersession check must reject the WHOLE boundary — snapshot,
+        // receipt, AND input row stay invisible.
+        let stale_run = RunId::new();
+        let stale_prompt = make_prompt("stale replay input");
+        let stale_input = stale_prompt.id().clone();
+        let error = match harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: committed_snapshot.clone(),
+                }),
+                make_receipt(stale_run.clone(), vec![stale_input.clone()], 2),
+                vec![persistable(applied_pending_state(
+                    &stale_prompt,
+                    &stale_run,
+                    2,
+                ))],
+                Some(recovered.id().clone()),
+            )
+            .await
+        {
+            Ok(()) => panic!("{name}: a stale pre-recovery replay must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                error,
+                meerkat_runtime::store::RuntimeStoreError::SessionSnapshotSuperseded { .. }
+            ),
+            "{name}: expected SessionSnapshotSuperseded, got {error:?}"
+        );
+        assert_eq!(
+            harness
+                .store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap(),
+            Some(recovered_snapshot),
+            "{name}: the recovered head must be retained"
+        );
+        assert_eq!(
+            harness
+                .store
+                .load_boundary_receipt(&runtime_id, &stale_run, 2)
+                .await
+                .unwrap(),
+            None,
+            "{name}: the rejected boundary's receipt must not be visible"
+        );
+        let rows = harness
+            .store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "{name}: the rejected boundary's input row must not be visible"
+        );
+        assert_eq!(rows[0].state.input_id, recovered_input);
+    }
+}

@@ -142,6 +142,7 @@ impl CoreExecutor for RecordingExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CoreApplyOutput {
+            session: None,
             receipt: RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,

@@ -863,10 +863,14 @@ async fn failed_service_turn_atomically_commits_snapshot_receipt_and_lifecycle()
     assert_eq!(receipt.boundary, RunApplyBoundary::Immediate);
     assert!(receipt.contributing_input_ids.is_empty());
     assert_eq!(receipt.message_count, session.messages().len());
-    let encoded_messages = serde_json::to_vec(session.messages()).unwrap();
     assert_eq!(
         receipt.conversation_digest,
-        Some(format!("{:x}", Sha256::digest(encoded_messages)))
+        Some(
+            session
+                .transcript_content_digest()
+                .expect("digest session messages")
+        ),
+        "receipt must carry the canonical accumulator digest of the committed session"
     );
     assert!(
         store
@@ -1483,6 +1487,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -1568,6 +1573,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -1739,6 +1745,7 @@ async fn accept_with_executor_triggers_loop() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.called.store(true, Ordering::SeqCst);
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -1865,6 +1872,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
             };
 
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary,
@@ -2397,6 +2405,7 @@ async fn failed_executor_continues_processing_backlog() {
                 ));
             }
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -2503,6 +2512,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.called.store(true, Ordering::SeqCst);
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -2602,6 +2612,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.called.store(true, Ordering::SeqCst);
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -2700,6 +2711,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -2744,6 +2756,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.called.store(true, Ordering::SeqCst);
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -2898,6 +2911,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -3015,6 +3029,7 @@ async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -3096,6 +3111,7 @@ async fn completed_boundary_commit_failure_terminates_runtime_loop_completion_wa
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -3175,6 +3191,7 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -3509,6 +3526,7 @@ async fn completion_handle_resolves_without_result() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -4049,6 +4067,7 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -4120,6 +4139,7 @@ async fn successful_execution_fires_boundary_applied() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
@@ -4211,6 +4231,7 @@ async fn executor_attached_session_is_executor_ready() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             Ok(CoreApplyOutput {
+                session: None,
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,

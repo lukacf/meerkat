@@ -59,10 +59,12 @@ use meerkat_core::service::{
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
-    LegacyCheckpointMigrationDisposition, LegacyCheckpointTranscriptRelation,
-    LiveSessionAuthorityKind, LiveSessionAuthorityReason, RuntimeCheckpointProjectionDisposition,
-    SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
-    SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
+    CheckpointProvenanceClass, DurableHeadRelation, DurableTailRecoveryClass,
+    DurableTailStopReason, LegacyCheckpointMigrationDisposition,
+    LegacyCheckpointTranscriptRelation, LiveSessionAuthorityKind, LiveSessionAuthorityReason,
+    RunIdCardinality, RuntimeCheckpointProjectionDisposition, RuntimeProjectionConflictDisposition,
+    RuntimeSnapshotReadDisposition, SessionArchiveDisposition, SessionArchiveRuntimeObservation,
+    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::session_store::{
     IncrementalSessionStore, SaveGuardWitness, SessionHead, SessionHeadCas, TranscriptStrandId,
@@ -1172,14 +1174,15 @@ fn session_materialized_at_transcript_revision(
 
 async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization<'a>(
     blob_store: &dyn BlobStore,
-    state: &'a meerkat_core::TranscriptHistoryState,
+    sealed: &'a meerkat_core::ValidatedTranscriptHistory,
     previous: &Session,
     incoming_revision: &str,
     incoming_messages: &[meerkat_core::Message],
 ) -> Result<Option<Vec<&'a meerkat_core::TranscriptRewriteCommit>>, SessionStoreError> {
+    let state = sealed.state();
     if let Some(commits) =
         meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session(
-            state,
+            sealed,
             previous,
             incoming_revision,
         )?
@@ -1190,7 +1193,7 @@ async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_nor
     for commit in state.commits.iter().rev() {
         let Some(commits) =
             meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session(
-                state,
+                sealed,
                 previous,
                 &commit.revision,
             )?
@@ -1582,9 +1585,22 @@ async fn verify_incremental_projection_continuity(
             &previous_slim,
             stored_commits,
             SaveGuardWitness::none().with_previous_revision(&head.head_revision),
-        ) && !runtime_projection_rollback_authorized(session, &previous_slim)?
-        {
-            return Err(guard_error);
+        ) {
+            // The machine owns the conflict. ConvergeSupersededProjection
+            // authorizes THIS save to proceed (the row is its own run's
+            // superseded intermediate); RetainForRecovery and RejectDivergent
+            // both refuse — a verified descendant is preserved for the
+            // recovery commit, a fork stays failed closed.
+            let disposition = runtime_projection_conflict_disposition(session, &previous_slim)?;
+            if disposition != RuntimeProjectionConflictDisposition::ConvergeSupersededProjection {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    ?disposition,
+                    "durable row conflicts with committed authority; refusing the save and \
+                     retaining the durable tail"
+                );
+                return Err(guard_error);
+            }
         }
         return Ok(());
     }
@@ -1859,10 +1875,18 @@ async fn save_session_projection_incremental(
             &previous_slim,
             stored_commits,
             SaveGuardWitness::none().with_previous_revision(&head.head_revision),
-        ) && !runtime_projection_rollback_authorized(session, &previous_slim)
-            .map_err(incremental_store_error)?
-        {
-            return Err(incremental_store_error(guard_error));
+        ) {
+            let disposition = runtime_projection_conflict_disposition(session, &previous_slim)
+                .map_err(incremental_store_error)?;
+            if disposition != RuntimeProjectionConflictDisposition::ConvergeSupersededProjection {
+                tracing::warn!(
+                    session_id = %id,
+                    ?disposition,
+                    "durable row conflicts with committed authority; refusing the save and \
+                     retaining the durable tail"
+                );
+                return Err(incremental_store_error(guard_error));
+            }
         }
         let live_digest = session.transcript_content_digest().map_err(|err| {
             incremental_internal_error(format!(
@@ -1920,11 +1944,13 @@ async fn save_session_projection_allowing_internal_rewrite(
             "failed to digest incoming transcript for projection save: {err}"
         )))
     })?;
-    let Some(state) = session.transcript_history_state().map_err(|err| {
-        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-            "failed to read transcript history for projection save: {err}"
-        )))
-    })?
+    let Some(sealed) = session
+        .validated_transcript_history_state()
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to read transcript history for projection save: {err}"
+            )))
+        })?
     else {
         return save_session_projection_with_storage_normalization_bridge(
             store, blob_store, session,
@@ -1932,11 +1958,12 @@ async fn save_session_projection_allowing_internal_rewrite(
         .await
         .map_err(|err| SessionError::Store(Box::new(err)));
     };
+    let state = sealed.state();
     let mut normalized_previous_for_chain = None;
     let mut commits =
         find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
             blob_store,
-            &state,
+            &sealed,
             &previous,
             &incoming_revision,
             session.messages(),
@@ -1965,7 +1992,7 @@ async fn save_session_projection_allowing_internal_rewrite(
             commits =
                 find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                     blob_store,
-                    &state,
+                    &sealed,
                     &normalized_previous,
                     &incoming_revision,
                     session.messages(),
@@ -2162,30 +2189,45 @@ async fn save_session_projection_with_storage_normalization_bridge(
         // stores (field, meerkat 0.7.25 / identity-first gateways): the
         // intra-turn checkpointer left a stamped row AHEAD of the committed
         // authority, and this authority save trips the store's append-only
-        // guard. The incremental head-canonical path and the audited
-        // authoritative-projection path already consult the machine-owned
-        // rollback here; without this arm, external `SessionStore`
-        // implementations wedge permanently on resume (every retry re-throws
-        // MonotonicityViolation). The `SessionDocumentMachine` — not this
-        // shell — owns the disposition; `RebuildToAuthority` requires the
-        // row to be a faithful continuation of the authority AND to carry
-        // the checkpointer's own provenance stamp, so genuine forks and
-        // out-of-band divergence keep failing closed.
+        // guard. The `SessionDocumentMachine` — not this shell — owns the
+        // conflict disposition, and since the RetainForRecovery redesign NO
+        // disposition authorizes rebuilding the row over its durable tail:
+        // the conflict is classified (a verified strict descendant is
+        // retained for the machine-owned recovery commit; anything else is a
+        // genuine fork) and this save refuses either way. The durable-tail
+        // recovery path — not a projection rebuild — is what converges the
+        // row back onto committed truth.
         Err(error @ SessionStoreError::MonotonicityViolation { .. }) => {
             let Some(previous) = store.load(session.id()).await? else {
                 return Err(error);
             };
             let previous_projection_token =
                 meerkat_core::session_store::session_projection_cas_token(&previous)?;
-            if runtime_projection_rollback_authorized(session, &previous)? {
-                return store
-                    .save_authoritative_projection_if_current_revision(
-                        session,
-                        Some(previous_projection_token),
-                    )
-                    .await;
+            match runtime_projection_conflict_disposition(session, &previous)? {
+                // The committed authority already passed the row: the row is
+                // its own run's superseded intermediate projection, so the
+                // CAS write converges it without discarding anything the
+                // execution did not itself supersede. A verified descendant
+                // (lost boundary) never reaches this arm and is retained for
+                // the recovery commit.
+                RuntimeProjectionConflictDisposition::ConvergeSupersededProjection => {
+                    return store
+                        .save_authoritative_projection_if_current_revision(
+                            session,
+                            Some(previous_projection_token),
+                        )
+                        .await;
+                }
+                disposition => {
+                    tracing::warn!(
+                        session_id = %session.id(),
+                        ?disposition,
+                        "durable row ran ahead of committed authority; refusing to rebuild \
+                         and retaining the durable tail"
+                    );
+                    Err(error)
+                }
             }
-            Err(error)
         }
         Err(
             error @ (SessionStoreError::TranscriptContinuityViolation { .. }
@@ -2424,88 +2466,237 @@ async fn verify_authoritative_projection_persisted_continuity(
             {
                 return Ok(Some(previous_projection_token));
             }
-            if runtime_projection_rollback_authorized(session, &previous)? {
-                return Ok(Some(previous_projection_token));
+            match runtime_projection_conflict_disposition(session, &previous)? {
+                RuntimeProjectionConflictDisposition::ConvergeSupersededProjection => {
+                    Ok(Some(previous_projection_token))
+                }
+                disposition => {
+                    tracing::warn!(
+                        session_id = %session.id(),
+                        ?disposition,
+                        "durable row ran ahead of committed authority; refusing the \
+                         projection rebuild and retaining the durable tail"
+                    );
+                    Err(raw_error)
+                }
             }
-            Err(raw_error)
         }
     }
 }
 
-/// Decide whether a runtime-authoritative projection save may rebuild a
-/// durable row that ran AHEAD of the authority transcript.
+/// Classify how a durable row relates to the committed authority transcript
+/// and let the canonical `SessionDocumentMachine` own the disposition.
 ///
 /// The intra-turn best-effort checkpointer writes the durable row while the
-/// machine boundary commit writes the runtime authority; the two commit
-/// points are non-atomic. A host kill between them (or an in-process
-/// lifecycle-commit failure that evicted the uncommitted live turn) leaves
-/// the row carrying turn content the machine never acknowledged — and that
-/// tail would otherwise poison every subsequent save with a
-/// `MonotonicityViolation`, permanently stranding the session on resume.
+/// machine boundary commit writes the runtime authority; the two commit points
+/// are non-atomic. A host kill between them leaves the row carrying turn
+/// content the machine never acknowledged.
 ///
-/// The shell extracts two pure observations — the row judged as a faithful
-/// continuation of the authority transcript by the same run-boundary proof
-/// the save guard uses, and the row's typed intra-turn checkpoint provenance
-/// fact — and drives the canonical `SessionDocumentMachine`
-/// (`ResolveRuntimeProjectionRollback`); the machine — not this shell — owns
-/// the disposition. `RebuildToAuthority` lets the CAS projection write
-/// converge the row back onto committed truth (the unacknowledged tail is
-/// discarded, matching the in-process eviction contract) and requires BOTH
-/// observations: a row without the checkpointer's own provenance stamp is
-/// out-of-band divergence and keeps failing closed (`RejectDivergent`), as
-/// does any genuine content fork.
-fn runtime_projection_rollback_authorized(
+/// The former contract let that tail be DISCARDED (`RebuildToAuthority`), on
+/// the premise that an ahead row could only be never-durable in-process
+/// residue. That premise is false: the row is in the store, so its content IS
+/// durable — and it can be a COMPLETED turn whose boundary commit merely lost
+/// a race with shutdown (observed: a row two messages ahead whose last message
+/// carries stop_reason=EndTurn and a concrete run_id). Discarding it is data
+/// loss, and in an agentic harness the tail also records tool calls that
+/// already executed, so dropping the record desynchronizes the agent from a
+/// world it already changed.
+///
+/// So no disposition authorizes shrinking any more. The shell extracts ONE
+/// mechanical observation — the digest-verified relation between row and
+/// authority — and the machine assigns meaning. `RetainForRecovery` means the
+/// bytes are kept for a machine-owned recovery commit to promote or repair;
+/// it is NOT permission to serve them as committed authority.
+fn runtime_projection_conflict_disposition(
     session: &Session,
     previous: &Session,
-) -> Result<bool, SessionStoreError> {
-    let authority_stamp = verified_checkpoint_stamp_for_recovery(
-        session,
-        session.id(),
-        "runtime projection authority",
-    )
-    .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
-    let previous_stamp =
-        verified_checkpoint_stamp_for_recovery(previous, session.id(), "runtime projection row")
-            .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
-    let row_continues_authority =
-        meerkat_core::session_store::run_boundary_snapshot_save_guard(previous, Some(session))
-            .is_ok();
-    let row_is_runtime_checkpoint = previous_stamp.provenance()
-        == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
-        && checkpoint_stamp_names_exact_authority(&previous_stamp, &authority_stamp);
+) -> Result<RuntimeProjectionConflictDisposition, SessionStoreError> {
+    let relation = durable_head_relation(session, previous)?;
+    // Supersession is a STAMP fact: the committed authority's checkpoint
+    // chain is at or past the row's stamped revision (Exact/newer, or the
+    // same-revision sibling conflict). A lost tail can never satisfy it —
+    // an uncommitted tail ahead of authority fails every later boundary
+    // preflight, so authority only passes the row when the row's own run
+    // superseded it. Unverifiable stamps yield `false` and fail closed.
+    let authority_supersedes_row = match (
+        verified_checkpoint_stamp_for_recovery(
+            session,
+            session.id(),
+            "runtime projection authority",
+        ),
+        verified_checkpoint_stamp_for_recovery(previous, session.id(), "runtime projection row"),
+    ) {
+        (Ok(authority_stamp), Ok(row_stamp)) => matches!(
+            meerkat_core::verified_checkpoint_stamp_relation(&authority_stamp, &row_stamp),
+            meerkat_core::SessionCheckpointRelation::Exact
+                | meerkat_core::SessionCheckpointRelation::LeftRevisionNewer
+                | meerkat_core::SessionCheckpointRelation::RevisionConflict
+        ),
+        _ => false,
+    };
     let mut authority = SessionDocumentMachineAuthority::new();
     let effects = authority
-        .resolve_runtime_projection_rollback(
+        .resolve_runtime_projection_conflict(
             SessionDocumentKey::new(session.id().to_string()),
-            row_continues_authority,
-            row_is_runtime_checkpoint,
+            relation,
+            authority_supersedes_row,
         )
         .map_err(|err| {
             SessionStoreError::Internal(format!(
-                "generated session document authority rejected runtime-projection rollback \
+                "generated session document authority rejected runtime-projection conflict \
                  resolution for session {}: {err}",
                 session.id()
             ))
         })?;
-    let disposition = effects
+    effects
         .iter()
         .find_map(|effect| match effect {
-            SessionDocumentEffect::RuntimeProjectionRollbackResolved { disposition } => {
+            SessionDocumentEffect::RuntimeProjectionConflictResolved { disposition } => {
                 Some(*disposition)
             }
             _ => None,
         })
         .ok_or_else(|| {
             SessionStoreError::Internal(format!(
-                "generated session document authority returned no runtime-projection rollback \
+                "generated session document authority returned no runtime-projection conflict \
                  disposition for session {}",
                 session.id()
             ))
-        })?;
-    Ok(matches!(
-        disposition,
-        meerkat_core::generated::session_document::RuntimeProjectionRollbackDisposition::RebuildToAuthority
-    ))
+        })
+}
+
+/// Mechanical, digest-verified relation between a durable row and the
+/// committed authority transcript. Assigns no meaning — that is the machine's
+/// job.
+fn durable_head_relation(
+    session: &Session,
+    previous: &Session,
+) -> Result<DurableHeadRelation, SessionStoreError> {
+    let authority_len = session.messages().len();
+    let row_len = previous.messages().len();
+    if row_len < authority_len {
+        return Ok(DurableHeadRelation::RuntimeSnapshotAhead);
+    }
+    let row_prefix = previous
+        .transcript_prefix_digest(authority_len)
+        .map_err(SessionStoreError::from)?;
+    let authority_prefix = session
+        .transcript_prefix_digest(authority_len)
+        .map_err(SessionStoreError::from)?;
+    if row_prefix != authority_prefix {
+        return Ok(DurableHeadRelation::Diverged);
+    }
+    if row_len == authority_len {
+        Ok(DurableHeadRelation::AbsentOrExact)
+    } else {
+        Ok(DurableHeadRelation::VerifiedStrictDescendant)
+    }
+}
+
+/// Mechanical observation of a durable tail (the store head's messages beyond
+/// the committed authority). Encodes structure only; the machines assign
+/// meaning.
+struct DurableTailObservation {
+    tail_run_id: Option<meerkat_core::RunId>,
+    run_id_cardinality: RunIdCardinality,
+    terminal_stop_reason: DurableTailStopReason,
+    dangling_tool_use_ids: Vec<String>,
+    orphan_tool_result_count: u64,
+    messages_after_terminal: bool,
+}
+
+fn observe_durable_tail(authority_len: usize, head: &Session) -> DurableTailObservation {
+    use meerkat_core::Message;
+    let tail = &head.messages()[authority_len.min(head.messages().len())..];
+    let mut run_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut tail_run_id = None;
+    let mut tool_use_ids: Vec<String> = Vec::new();
+    let mut tool_result_ids: Vec<String> = Vec::new();
+    let mut last_assistant: Option<(usize, meerkat_core::StopReason)> = None;
+    for (index, message) in tail.iter().enumerate() {
+        match message {
+            Message::BlockAssistant(assistant) => {
+                if let Some(run_id) = assistant.identity.run_id.as_ref() {
+                    run_ids.insert(run_id.to_string());
+                    tail_run_id = Some(run_id.clone());
+                }
+                for call in assistant.tool_calls() {
+                    tool_use_ids.push(call.id.to_string());
+                }
+                last_assistant = Some((index, assistant.stop_reason));
+            }
+            Message::ToolResults { results, .. } => {
+                for result in results {
+                    tool_result_ids.push(result.tool_use_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let dangling_tool_use_ids: Vec<String> = tool_use_ids
+        .iter()
+        .filter(|id| !tool_result_ids.iter().any(|r| r == *id))
+        .cloned()
+        .collect();
+    let orphan_tool_result_count = tool_result_ids
+        .iter()
+        .filter(|id| !tool_use_ids.iter().any(|u| u == *id))
+        .count() as u64;
+    let terminal_stop_reason = match last_assistant {
+        None => DurableTailStopReason::Absent,
+        Some((_, meerkat_core::StopReason::EndTurn)) => DurableTailStopReason::EndTurn,
+        Some((_, meerkat_core::StopReason::ToolUse)) => DurableTailStopReason::ToolUse,
+        Some((_, _)) => DurableTailStopReason::Other,
+    };
+    // Content after an EndTurn terminal makes the completed shape ambiguous.
+    // A ToolUse terminal is legitimately FOLLOWED by its tool results, so the
+    // flag is only meaningful for EndTurn.
+    let messages_after_terminal = matches!(
+        (terminal_stop_reason, last_assistant),
+        (DurableTailStopReason::EndTurn, Some((index, _))) if index + 1 < tail.len()
+    );
+    let run_id_cardinality = match run_ids.len() {
+        0 => RunIdCardinality::NoRunId,
+        1 => RunIdCardinality::SingleRunId,
+        _ => RunIdCardinality::MultipleRunIds,
+    };
+    DurableTailObservation {
+        tail_run_id,
+        run_id_cardinality,
+        terminal_stop_reason,
+        dangling_tool_use_ids,
+        orphan_tool_result_count,
+        messages_after_terminal,
+    }
+}
+
+/// Close an interrupted tail without discarding anything: synthetic
+/// interrupted results for dangling tool calls (outcome unknown, never
+/// auto-retried) plus a typed recovery notice.
+fn repair_interrupted_tail(recovered: &mut Session, dangling_tool_use_ids: &[String]) {
+    use meerkat_core::{Message, SystemNoticeKind, SystemNoticeMessage, ToolResult};
+    if !dangling_tool_use_ids.is_empty() {
+        let results = dangling_tool_use_ids
+            .iter()
+            .map(|id| {
+                ToolResult::new(
+                    id.clone(),
+                    "Execution was interrupted during recovery. The external side-effect \
+                     outcome is unknown. This call must not be retried without \
+                     reconciliation or an idempotency witness."
+                        .to_string(),
+                    true,
+                )
+            })
+            .collect();
+        recovered.push(Message::tool_results(results));
+    }
+    recovered.push(Message::SystemNotice(SystemNoticeMessage::new(
+        SystemNoticeKind::Generic,
+        "A previous run was interrupted before its boundary committed. Recovery preserved \
+         every durable message, closed the run as InterruptedByRecovery, and did not requeue \
+         its input. Continue from a new turn.",
+    )));
 }
 
 /// Decode and fully verify one checkpoint stamp before it can influence a
@@ -3441,12 +3632,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         other => other,
                     };
                     let session_is_live = self.inner.has_live_session(id).await?;
-                    Some(self.resolve_runtime_snapshot_read_source(
-                        id,
-                        snapshot,
-                        store_head,
-                        session_is_live,
-                    )?)
+                    Some(
+                        self.resolve_runtime_snapshot_read_source(
+                            id,
+                            snapshot,
+                            store_head,
+                            session_is_live,
+                        )
+                        .await?,
+                    )
                 }
                 None => {
                     let store_projection = self
@@ -4098,7 +4292,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// document. Both documents are still fully deserialized because
     /// `RuntimeStore`/`SessionStore` expose no stamp-only probe; adding one
     /// is a store-API extension, not a read-path change.
-    fn resolve_runtime_snapshot_read_source(
+    async fn resolve_runtime_snapshot_read_source(
         &self,
         id: &SessionId,
         snapshot: Session,
@@ -4117,10 +4311,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )));
         }
 
-        let (store_head_is_runtime_checkpoint, store_head_extends_snapshot) = match store_head
-            .as_ref()
-        {
-            None => (false, false),
+        let (store_head_is_runtime_checkpoint, relation) = match store_head.as_ref() {
+            None => (false, DurableHeadRelation::AbsentOrExact),
             Some(head) => {
                 let head_stamp = verified_checkpoint_stamp_for_read(head, id, "session store head")
                     .map_err(session_checkpoint_read_error)?;
@@ -4143,11 +4335,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         // The intra-turn checkpointer and the committed runtime
                         // boundary may race after both read the same exact
                         // predecessor. The two children then share a revision
-                        // but differ in content. Only the committed runtime
-                        // child is authority; the intra-turn sibling remains a
-                        // rebuildable projection. Arbitrary or committed
-                        // sibling conflicts continue to fail closed below.
-                        (true, false)
+                        // but differ in content: a genuine content fork whose
+                        // committed side is the runtime child. The machine
+                        // serves the committed child and RETAINS the sibling
+                        // row (saves over it stay fail-closed); arbitrary or
+                        // committed sibling conflicts continue to fail closed
+                        // below.
+                        (true, DurableHeadRelation::Diverged)
                     }
                     meerkat_core::SessionCheckpointRelation::RevisionConflict
                     | meerkat_core::SessionCheckpointRelation::LeftGenerationOlder
@@ -4162,10 +4356,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                  {id} is conflicting: {relation:?}"
                         )));
                     }
-                    meerkat_core::SessionCheckpointRelation::Exact
-                    | meerkat_core::SessionCheckpointRelation::LeftRevisionNewer => {
-                        (head_is_runtime_checkpoint, false)
-                    }
+                    meerkat_core::SessionCheckpointRelation::Exact => (
+                        head_is_runtime_checkpoint,
+                        DurableHeadRelation::AbsentOrExact,
+                    ),
+                    meerkat_core::SessionCheckpointRelation::LeftRevisionNewer => (
+                        head_is_runtime_checkpoint,
+                        DurableHeadRelation::RuntimeSnapshotAhead,
+                    ),
                     meerkat_core::SessionCheckpointRelation::LeftRevisionOlder => {
                         let store_head_names_snapshot =
                             checkpoint_stamp_names_exact_authority(&head_stamp, &snapshot_stamp);
@@ -4199,25 +4397,53 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                          typed ancestry from the runtime snapshot"
                             )));
                         }
-                        (
-                            head_is_runtime_checkpoint,
-                            // A committed direct successor supersedes the
-                            // runtime snapshot even when the transcript is
-                            // unchanged (for example, an Archived lifecycle
-                            // projection). The checkpoint chain, not message
-                            // growth, establishes that authority.
-                            store_head_names_snapshot,
-                        )
+                        let relation = if store_head_names_snapshot {
+                            if transcript_strictly_extends || !head_is_runtime_checkpoint {
+                                // A committed direct successor supersedes the
+                                // runtime snapshot even when the transcript is
+                                // unchanged (for example, an Archived
+                                // lifecycle projection). The checkpoint
+                                // chain, not message growth, establishes that
+                                // authority. An intra-turn descendant with
+                                // real tail content is the recovery shape.
+                                DurableHeadRelation::VerifiedStrictDescendant
+                            } else {
+                                // An intra-turn projection anchored to the
+                                // snapshot with an unchanged transcript is a
+                                // redundant projection: no tail exists to
+                                // recover, and the snapshot carries the same
+                                // content.
+                                DurableHeadRelation::RuntimeSnapshotAhead
+                            }
+                        } else {
+                            // Older-stamped row without descent proof and
+                            // without extending content: the snapshot leads.
+                            DurableHeadRelation::RuntimeSnapshotAhead
+                        };
+                        (head_is_runtime_checkpoint, relation)
                     }
                 }
             }
+        };
+        // The relation is derived from the verified STAMP arbitration above -
+        // content digests are computed only in the LeftRevisionOlder branch
+        // that actually needs a descent proof, so steady-state loads of
+        // unchanged documents hash nothing. The provenance class is a coarse
+        // projection of the row's stamp. The machine assigns meaning to the
+        // pair; the shell decides nothing.
+        let store_provenance = if store_head.is_none() {
+            CheckpointProvenanceClass::Unstamped
+        } else if store_head_is_runtime_checkpoint {
+            CheckpointProvenanceClass::IntraTurn
+        } else {
+            CheckpointProvenanceClass::Committed
         };
         let mut authority = SessionDocumentMachineAuthority::new();
         let effects = authority
             .resolve_runtime_snapshot_read_source(
                 SessionDocumentKey::new(id.to_string()),
-                store_head_extends_snapshot,
-                store_head_is_runtime_checkpoint,
+                relation,
+                store_provenance,
                 session_is_live,
             )
             .map_err(|err| {
@@ -4226,12 +4452,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                      resolution for session {id}: {err}"
                 )))
             })?;
-        let read_from_store_head = effects
+        let disposition = effects
             .iter()
             .find_map(|effect| match effect {
-                SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                    read_from_store_head,
-                } => Some(*read_from_store_head),
+                SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition } => {
+                    Some(*disposition)
+                }
                 _ => None,
             })
             .ok_or_else(|| {
@@ -4240,23 +4466,282 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                      read-source verdict for session {id}"
                 )))
             })?;
-        if read_from_store_head {
-            let head = store_head.ok_or_else(|| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "runtime-snapshot read-source verdict selected an absent store head for \
-                     session {id}"
-                )))
-            })?;
+        match disposition {
+            RuntimeSnapshotReadDisposition::UseCommittedStoreHead => {
+                let head = store_head.ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "runtime-snapshot read-source verdict selected an absent store head for \
+                         session {id}"
+                    )))
+                })?;
+                tracing::info!(
+                    session_id = %id,
+                    snapshot_messages = snapshot.messages().len(),
+                    store_messages = head.messages().len(),
+                    "durable store head is a committed descendant of the runtime snapshot; \
+                     loading the store head"
+                );
+                Ok(head)
+            }
+            // The durable tail is real content whose boundary commit never
+            // landed. Serving it as ordinary authority would assert runtime
+            // facts (receipt, input lifecycle, terminal outcome, outbox) that
+            // never committed; discarding it would destroy durable turn
+            // content. Refuse, loudly, and leave the bytes for the recovery
+            // commit to promote or repair.
+            RuntimeSnapshotReadDisposition::RecoveryRequired => {
+                let head = store_head.ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "runtime-snapshot read-source verdict demanded recovery for an absent \
+                         store head on session {id}"
+                    )))
+                })?;
+                tracing::warn!(
+                    session_id = %id,
+                    snapshot_messages = snapshot.messages().len(),
+                    store_messages = head.messages().len(),
+                    "durable store head holds an uncommitted verified descendant; attempting \
+                     machine-authorized recovery"
+                );
+                match self
+                    .attempt_durable_tail_recovery(id, &snapshot, head)
+                    .await?
+                {
+                    Some(recovered) => Ok(recovered),
+                    None => Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {id} has a durable transcript tail that was never committed as \
+                         a runtime boundary; it is preserved (held for recovery) and cannot be \
+                         resumed yet"
+                    )))),
+                }
+            }
+            RuntimeSnapshotReadDisposition::Quarantine => {
+                tracing::error!(
+                    session_id = %id,
+                    ?relation,
+                    "durable store head evidence is forked or unverifiable; retaining intact and \
+                     refusing to serve"
+                );
+                Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "session {id} durable evidence is forked or unverifiable; retained intact and \
+                     quarantined from resume"
+                ))))
+            }
+            RuntimeSnapshotReadDisposition::UseRuntimeSnapshot => Ok(snapshot),
+        }
+    }
+
+    /// Attempt a machine-owned recovery of an uncommitted verified durable
+    /// descendant. Returns the recovered document when the recovery boundary
+    /// committed; `None` when the machines held or refused. The durable tail
+    /// is retained intact on every path — nothing here discards content.
+    ///
+    /// Ownership: SessionDocumentMachine classifies the tail; MeerkatMachine
+    /// authorizes; `RuntimeStore::atomic_apply` realizes snapshot + receipt +
+    /// input terminalization atomically (in `meerkat_runtime::recovery`).
+    /// This shell only extracts mechanical observations and mirrors verdicts.
+    async fn attempt_durable_tail_recovery(
+        &self,
+        id: &SessionId,
+        snapshot: &Session,
+        head: Session,
+    ) -> Result<Option<Session>, SessionError> {
+        let recovery_error = |detail: String| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "durable-tail recovery for session {id}: {detail}"
+            )))
+        };
+        let authority_stamp =
+            verified_checkpoint_stamp_for_recovery(snapshot, id, "durable-tail recovery authority")
+                .map_err(|error| recovery_error(error.to_string()))?;
+        let head_stamp =
+            verified_checkpoint_stamp_for_recovery(&head, id, "durable-tail recovery candidate")
+                .map_err(|error| recovery_error(error.to_string()))?;
+        let projection_token = meerkat_core::session_store::session_projection_cas_token(&head)
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let observation = observe_durable_tail(snapshot.messages().len(), &head);
+        let Some(candidate_run_id) = observation.tail_run_id.clone() else {
             tracing::warn!(
                 session_id = %id,
-                snapshot_messages = snapshot.messages().len(),
-                store_messages = head.messages().len(),
-                "runtime session snapshot is a stale strict prefix of the durable store head; \
-                 loading the store head"
+                "durable tail carries no run identity; holding intact for reconciliation"
             );
-            Ok(head)
-        } else {
-            Ok(snapshot)
+            return Ok(None);
+        };
+        // The candidate id binds the EXACT evidence: session, committed
+        // authority stamp, store-head stamp, CAS token, and run identity —
+        // so classifying this head can never authorize mutating a later one.
+        let mut hasher = Sha256::new();
+        for part in [
+            id.to_string(),
+            authority_stamp.digest().as_str().to_string(),
+            authority_stamp.checkpoint_revision().get().to_string(),
+            head_stamp.digest().as_str().to_string(),
+            head.messages().len().to_string(),
+            candidate_run_id.to_string(),
+            format!("{projection_token:?}"),
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update([0u8]);
+        }
+        let candidate_id = format!("sha256:{:x}", hasher.finalize());
+
+        let mut classifier = SessionDocumentMachineAuthority::new();
+        let effects = classifier
+            .classify_durable_tail(
+                SessionDocumentKey::new(id.to_string()),
+                candidate_id.clone(),
+                DurableHeadRelation::VerifiedStrictDescendant,
+                observation.run_id_cardinality,
+                observation.terminal_stop_reason,
+                observation.dangling_tool_use_ids.len() as u64,
+                observation.orphan_tool_result_count,
+                observation.messages_after_terminal,
+            )
+            .map_err(|error| recovery_error(format!("classification rejected: {error}")))?;
+        let class = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::DurableTailClassified {
+                    candidate_id: classified,
+                    class,
+                } if classified == &candidate_id => Some(*class),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                recovery_error("classifier returned no verdict for the exact candidate".into())
+            })?;
+
+        // The recovered document is built from the COMMITTED SNAPSHOT plus the
+        // durable tail, not from the store-head materialization: the runtime
+        // snapshot convention carries the transcript-history graph INLINE,
+        // and a slim head materialization carries only the witness digest.
+        // Pushing the tail through the session's own mutation seam evolves
+        // the inline graph exactly as a live append would, so the recovered
+        // snapshot satisfies the same history-preservation guards as any
+        // boundary commit. The digest-verified prefix relation already proved
+        // the tail messages are byte-exact continuations.
+        let build_recovered = || -> Session {
+            let mut recovered = snapshot.clone();
+            for message in &head.messages()[snapshot.messages().len()..] {
+                recovered.push(message.clone());
+            }
+            recovered
+        };
+        let (mut recovered, provenance, runtime_class) = match class {
+            DurableTailRecoveryClass::CompletedCandidate => (
+                build_recovered(),
+                meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+                meerkat_runtime::recovery::DurableTailRecoveryClass::CompletedCandidate,
+            ),
+            DurableTailRecoveryClass::InterruptedRepairableCandidate => {
+                let mut repaired = build_recovered();
+                repair_interrupted_tail(&mut repaired, &observation.dangling_tool_use_ids);
+                (
+                    repaired,
+                    meerkat_core::SessionCheckpointProvenance::RecoveredInterruptedBoundary,
+                    meerkat_runtime::recovery::DurableTailRecoveryClass::
+                        InterruptedRepairableCandidate,
+                )
+            }
+            DurableTailRecoveryClass::Ambiguous => {
+                tracing::warn!(
+                    session_id = %id,
+                    dangling = observation.dangling_tool_use_ids.len(),
+                    orphans = observation.orphan_tool_result_count,
+                    "durable tail classified ambiguous; holding intact for reconciliation"
+                );
+                return Ok(None);
+            }
+        };
+        if recovered.messages().len() < head.messages().len() {
+            return Err(recovery_error(format!(
+                "recovered document lost content: {} < {} durable messages",
+                recovered.messages().len(),
+                head.messages().len()
+            )));
+        }
+
+        // The recovered stamp is a direct typed successor of the LAST
+        // COMMITTED authority — never of the intra-turn projection, which
+        // stays forbidden as an authority base.
+        let recovered_stamp = meerkat_core::SessionCheckpointStamp::successor(
+            &recovered,
+            &authority_stamp,
+            provenance,
+        )
+        .map_err(|error| recovery_error(format!("recovered stamp mint failed: {error}")))?;
+        recovered
+            .install_checkpoint_stamp(recovered_stamp)
+            .map_err(|error| recovery_error(format!("recovered stamp install failed: {error}")))?;
+        let recovered_snapshot = serde_json::to_vec(&recovered)
+            .map_err(|error| recovery_error(format!("recovered document serialize: {error}")))?;
+        // Canonical accumulator format, same as every boundary producer and
+        // the committed-boundary witness validation.
+        let conversation_digest = recovered
+            .transcript_content_digest()
+            .map_err(|error| recovery_error(format!("receipt digest: {error}")))?;
+        let persisted_lifecycle =
+            Self::load_runtime_state_for_session(&self.runtime_store, id).await?;
+        // Consumption evidence for input terminalization: the USER messages
+        // inside the digest-verified tail. Without this the delivery layer
+        // redelivers the recovered turn's input and it executes twice.
+        let tail_user_texts: Vec<String> = head.messages()[snapshot.messages().len()..]
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect();
+
+        let outcome = meerkat_runtime::recovery::authorize_and_commit_durable_tail_recovery(
+            self.runtime_store.as_ref(),
+            persisted_lifecycle,
+            meerkat_runtime::recovery::DurableTailRecoveryRequest {
+                session_id: id.clone(),
+                candidate_id,
+                candidate_run_id,
+                class: runtime_class,
+                recovered_snapshot,
+                conversation_digest,
+                message_count: recovered.messages().len(),
+                tail_user_texts,
+            },
+        )
+        .await
+        .map_err(|error| recovery_error(error.to_string()))?;
+
+        match outcome {
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed(disposition) => {
+                // Best-effort projection restamp under the candidate's CAS
+                // token. The committed runtime snapshot already leads; if this
+                // write loses a race the next read converges from the runtime
+                // authority (equal-or-behind head content), so failure here is
+                // loud but not fatal.
+                if let Err(error) = self
+                    .store
+                    .save_authoritative_projection_if_current_revision(
+                        &recovered,
+                        Some(projection_token),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        %error,
+                        "recovered boundary committed but the store projection restamp failed; \
+                         reads converge from the committed runtime snapshot"
+                    );
+                }
+                tracing::info!(
+                    session_id = %id,
+                    ?disposition,
+                    recovered_messages = recovered.messages().len(),
+                    "durable-tail recovery served the recovered document"
+                );
+                Ok(Some(recovered))
+            }
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held
+            | meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => Ok(None),
         }
     }
 
@@ -7973,13 +8458,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
         }
 
-        let Some(state) = incoming_state else {
+        if incoming_state.is_none() {
+            return Ok(Vec::new());
+        }
+        drop(incoming_state);
+        // Seal only on the walk path: the early return above is the plain
+        // append case and must keep costing exactly what it did.
+        let Some(sealed) = session
+            .validated_transcript_history_state()
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to read transcript history for persistence: {err}"
+                )))
+            })?
+        else {
             return Ok(Vec::new());
         };
         let mut commits =
             find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                 self.blob_store.as_ref(),
-                &state,
+                &sealed,
                 &previous,
                 &incoming_revision,
                 session.messages(),
@@ -8007,7 +8505,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             if normalized_revision != previous_revision {
                 commits = find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                     self.blob_store.as_ref(),
-                    &state,
+                    &sealed,
                     &normalized_previous,
                     &incoming_revision,
                     session.messages(),
@@ -8710,12 +9208,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         contributing_input_ids: Vec<InputId>,
         session: &Session,
     ) -> Result<RunBoundaryReceiptDraft, SessionError> {
-        let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
+        // Accumulator-backed: O(delta) on an ordinary append instead of a full
+        // re-serialize plus hash of every message on every turn. Minted and
+        // checked inside one commit, so the format is internal.
+        let digest = session.transcript_content_digest().map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize session for runtime receipt digest: {err}"
+                "failed to digest session transcript for runtime receipt: {err}"
             )))
         })?;
-        let digest = format!("{:x}", Sha256::digest(encoded_messages));
 
         // Dogma K10: the boundary sequence is machine-owned; the session
         // service returns an UNSEQUENCED draft and the runtime driver mints
@@ -8894,9 +9394,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             &prepared.session,
         )?;
 
+        // Hand the boundary the prepared session itself, so the validator and
+        // the store do not deserialize these bytes back into it.
+        let typed_session = std::sync::Arc::new(prepared.session.clone());
         let output = match terminal {
             Some(CoreApplyTerminal::RunResult(run_result)) => {
                 CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), *run_result)
+                    .with_session(std::sync::Arc::clone(&typed_session))
             }
             Some(CoreApplyTerminal::CallbackPending {
                 tool_use_id,
@@ -8908,25 +9412,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 tool_use_id,
                 tool_name,
                 args,
-            ),
+            )
+            .with_session(std::sync::Arc::clone(&typed_session)),
             Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
                 CoreApplyOutput::with_callback_batch_pending(
                     receipt,
                     Some(session_snapshot),
                     pending_tool_calls,
                 )
+                .with_session(std::sync::Arc::clone(&typed_session))
             }
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
+                session: Some(std::sync::Arc::clone(&typed_session)),
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             Some(terminal @ CoreApplyTerminal::MachineTerminalFailure { .. }) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
+                session: Some(std::sync::Arc::clone(&typed_session)),
                 terminal: Some(terminal),
             },
-            None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
+            None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot))
+                .with_session(std::sync::Arc::clone(&typed_session)),
         };
 
         let output_snapshot = output.session_snapshot.as_deref().ok_or_else(|| {
@@ -14018,8 +14527,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn conflicting_checkpoint_relation_remains_typed_authority_conflict() {
+    #[tokio::test]
+    async fn conflicting_checkpoint_relation_remains_typed_authority_conflict() {
         let id = SessionId::new();
         let mut snapshot = Session::with_id(id.clone());
         snapshot.push(Message::User(UserMessage::text(
@@ -14039,6 +14548,7 @@ mod tests {
 
         let error = service
             .resolve_runtime_snapshot_read_source(&id, snapshot, Some(store_head), false)
+            .await
             .expect_err("conflicting checkpoint branches must fail read arbitration");
         match error {
             SessionError::Store(source) => assert!(
@@ -14054,8 +14564,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn committed_runtime_child_wins_over_intra_turn_sibling_from_same_typed_base() {
+    #[tokio::test]
+    async fn committed_runtime_child_wins_over_intra_turn_sibling_from_same_typed_base() {
         let id = SessionId::new();
         let mut base = Session::with_id(id.clone());
         base.push(Message::User(UserMessage::text(
@@ -14102,6 +14612,7 @@ mod tests {
                 Some(store_projection),
                 false,
             )
+            .await
             .expect("committed runtime authority must beat its intra-turn sibling");
         assert_eq!(selected.messages(), runtime.messages());
         assert_eq!(
@@ -14110,8 +14621,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn steady_state_read_arbitration_recomputes_zero_digests_for_unchanged_documents() {
+    #[tokio::test]
+    async fn steady_state_read_arbitration_recomputes_zero_digests_for_unchanged_documents() {
         let id = SessionId::new();
         let mut base = Session::with_id(id.clone());
         base.push(Message::User(UserMessage::text(
@@ -14139,6 +14650,7 @@ mod tests {
                     Some(store_head.clone()),
                     false,
                 )
+                .await
                 .expect("steady-state arbitration must keep resolving");
             assert_eq!(selected.messages(), snapshot.messages());
         }
@@ -14150,8 +14662,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn committed_siblings_from_same_typed_base_remain_authority_conflict() {
+    #[tokio::test]
+    async fn committed_siblings_from_same_typed_base_remain_authority_conflict() {
         let id = SessionId::new();
         let mut base = Session::with_id(id.clone());
         base.push(Message::User(UserMessage::text(
@@ -14185,6 +14697,7 @@ mod tests {
         );
         let error = service
             .resolve_runtime_snapshot_read_source(&id, runtime, Some(store_head), false)
+            .await
             .expect_err("committed sibling branches must remain blocked");
         assert!(matches!(
             error,
@@ -30226,112 +30739,252 @@ mod tests {
             "expected live session to be discarded after persist failure, got {live:?}"
         );
     }
-
-    /// Pin BOTH conjuncts of the machine-owned runtime-projection rollback:
-    /// a row is rebuilt onto committed truth ONLY when it (a) faithfully
-    /// continues the authority transcript AND (b) carries the intra-turn
-    /// checkpointer's typed provenance stamp. Dropping either observation
-    /// must keep the save fail-closed.
+    /// Pins the post-recovery contract: NO disposition authorizes shrinking a
+    /// durable row. The former `RebuildToAuthority` discarded an ahead row's
+    /// tail on the premise it could only be never-durable in-process residue.
+    /// The row lives in the store, so its content IS durable, and it can be a
+    /// completed turn whose boundary commit lost a race with shutdown.
+    ///
+    /// The disposition is now driven purely by the digest-verified relation;
+    /// checkpoint stamps no longer gate it, because there is no longer a
+    /// destructive branch for them to guard.
     #[test]
-    #[allow(deprecated)]
-    fn runtime_projection_rollback_requires_both_continuity_and_provenance() {
+    fn runtime_projection_conflict_never_authorizes_shrinking_a_durable_descendant() {
         let mut authority = Session::new();
         authority.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
-        let (authority, authority_stamp) = with_checkpoint_root(authority);
 
-        // (1) A verified intra-turn checkpoint that names this exact
-        // committed authority may be rolled back.
+        // (1) A verified strict descendant is RETAINED, never rebuilt away.
         let mut ahead_row = authority.clone();
         ahead_row.push(Message::User(UserMessage::text(
-            "checkpointed but uncommitted".to_string(),
+            "durable tail whose boundary commit never landed".to_string(),
         )));
-        let (ahead_row, _) = with_checkpoint_successor(
-            ahead_row,
-            &authority_stamp,
-            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
-        );
-        assert!(
-            runtime_projection_rollback_authorized(&authority, &ahead_row)
-                .expect("rollback resolution should succeed"),
-            "an exactly anchored intra-turn row must be rebuilt onto authority"
-        );
-
-        // (2) Verified non-checkpoint provenance remains non-destructive even
-        // if a stale compatibility boolean says true.
-        let mut committed_row = authority.clone();
-        committed_row.push(Message::User(UserMessage::text(
-            "committed store-only append".to_string(),
-        )));
-        let (mut committed_row, _) = with_checkpoint_successor(
-            committed_row,
-            &authority_stamp,
-            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
-        );
-        let _ = committed_row.set_runtime_checkpoint_provenance();
-        assert!(
-            !runtime_projection_rollback_authorized(&authority, &committed_row)
-                .expect("rollback resolution should succeed"),
-            "legacy true must not override verified non-checkpoint provenance"
-        );
-
-        // (3) A checkpoint anchored to a predecessor of the incoming
-        // authority is verified evidence, but it is not authority for this
-        // rollback.
-        let mut newer_authority = authority.clone();
-        newer_authority.push(Message::User(UserMessage::text(
-            "new committed boundary".to_string(),
-        )));
-        let (newer_authority, newer_authority_stamp) = with_checkpoint_successor(
-            newer_authority,
-            &authority_stamp,
-            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
-        );
-        let mut stale_anchor_row = newer_authority.clone();
-        stale_anchor_row.push(Message::User(UserMessage::text(
-            "uncommitted content after the newer boundary".to_string(),
-        )));
-        let (stale_anchor_row, _) = with_checkpoint_successor(
-            stale_anchor_row,
-            &authority_stamp,
-            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
-        );
-        assert!(
-            !runtime_projection_rollback_authorized(&newer_authority, &stale_anchor_row)
-                .expect("rollback resolution should succeed"),
-            "a checkpoint must name the exact incoming authority stamp"
-        );
-
-        // (4) The old boolean, whether absent or true, is never typed
-        // authority and must fail before the generated decision is invoked.
-        let mut legacy_row = without_checkpoint_stamp(&authority);
-        legacy_row.push(Message::User(UserMessage::text(
-            "legacy checkpoint tail".to_string(),
-        )));
-        assert!(runtime_projection_rollback_authorized(&authority, &legacy_row).is_err());
-        let _ = legacy_row.set_runtime_checkpoint_provenance();
-        assert!(runtime_projection_rollback_authorized(&authority, &legacy_row).is_err());
-
-        let mut malformed = with_malformed_checkpoint_stamp(&ahead_row);
-        let _ = malformed.set_runtime_checkpoint_provenance();
-        assert!(runtime_projection_rollback_authorized(&authority, &malformed).is_err());
-
-        // (5) A digest-stale typed stamp cannot be rescued by legacy true.
-        let mut digest_stale = ahead_row;
-        digest_stale.push(Message::User(UserMessage::text(
-            "mutation after the typed stamp".to_string(),
-        )));
-        let _ = digest_stale.set_runtime_checkpoint_provenance();
-        assert!(runtime_projection_rollback_authorized(&authority, &digest_stale).is_err());
-
-        // Keep the exact newer stamp used above live in this assertion so the
-        // test also pins that the incoming authority itself is fully verified.
         assert_eq!(
-            newer_authority
-                .try_checkpoint_state()
-                .expect("newer authority should verify"),
-            meerkat_core::SessionCheckpointState::Verified(newer_authority_stamp)
+            durable_head_relation(&authority, &ahead_row).expect("relation should resolve"),
+            DurableHeadRelation::VerifiedStrictDescendant
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&authority, &ahead_row)
+                .expect("conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::RetainForRecovery,
+            "a verified durable descendant must be retained for recovery"
+        );
+
+        // (2) An exact row is not a conflict to retain.
+        assert_eq!(
+            durable_head_relation(&authority, &authority).expect("relation"),
+            DurableHeadRelation::AbsentOrExact
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&authority, &authority)
+                .expect("conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::RejectDivergent
+        );
+
+        // (3) A genuine content fork stays fail-closed.
+        let mut forked = Session::new();
+        forked.push(Message::User(UserMessage::text(
+            "a different first turn".to_string(),
+        )));
+        forked.push(Message::User(UserMessage::text("fork tail".to_string())));
+        assert_eq!(
+            durable_head_relation(&authority, &forked).expect("relation"),
+            DurableHeadRelation::Diverged
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&authority, &forked)
+                .expect("conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::RejectDivergent
+        );
+
+        // (4) Ordinary forward progress: the authority leads the row.
+        let mut longer_authority = authority.clone();
+        longer_authority.push(Message::User(UserMessage::text("newer".to_string())));
+        assert_eq!(
+            durable_head_relation(&longer_authority, &authority).expect("relation"),
+            DurableHeadRelation::RuntimeSnapshotAhead
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&longer_authority, &authority)
+                .expect("conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::RejectDivergent
+        );
+
+        // (5) The invariant itself: no disposition shrinks a verified durable
+        // DESCENDANT. Stampless documents can never prove supersession, so
+        // every arm here stays retain-or-reject.
+        for row in [&ahead_row, &authority, &forked] {
+            let disposition = runtime_projection_conflict_disposition(&authority, row)
+                .expect("conflict resolution should succeed");
+            assert!(
+                matches!(
+                    disposition,
+                    RuntimeProjectionConflictDisposition::RetainForRecovery
+                        | RuntimeProjectionConflictDisposition::RejectDivergent
+                ),
+                "no disposition may authorize discarding durable content"
+            );
+        }
+
+        // (6) Supersession: a committed authority AT the sibling row's stamped
+        // revision converges the row (its own run superseded it) — while a
+        // verified strict DESCENDANT of a behind authority is retained even
+        // when both sides carry stamps (the parent-2 lost-boundary shape).
+        let session_id = SessionId::new();
+        let mut base = Session::with_id(session_id.clone());
+        base.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (base, base_stamp) = with_checkpoint_root(base);
+
+        let mut committed_child = base.clone();
+        committed_child.push(Message::User(UserMessage::text(
+            "committed outcome".to_string(),
+        )));
+        let (committed_child, _) = with_checkpoint_successor(
+            committed_child,
+            &base_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let mut intra_sibling = base.clone();
+        intra_sibling.push(Message::User(UserMessage::text(
+            "aborted intermediate the run itself superseded".to_string(),
+        )));
+        let (intra_sibling, _) = with_checkpoint_successor(
+            intra_sibling,
+            &base_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&committed_child, &intra_sibling)
+                .expect("sibling conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::ConvergeSupersededProjection,
+            "a committed authority at the sibling's revision must converge the \
+             run's own superseded projection"
+        );
+
+        let committed_stamp = verified_checkpoint_stamp(&committed_child);
+        let mut lost_tail = committed_child.clone();
+        lost_tail.push(Message::User(UserMessage::text(
+            "completed turn whose boundary never landed".to_string(),
+        )));
+        let (lost_tail, _) = with_checkpoint_successor(
+            lost_tail,
+            &committed_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        assert_eq!(
+            runtime_projection_conflict_disposition(&committed_child, &lost_tail)
+                .expect("lost-tail conflict resolution should succeed"),
+            RuntimeProjectionConflictDisposition::RetainForRecovery,
+            "a verified strict descendant (lost boundary) must be retained, never converged"
+        );
+    }
+
+    /// Level-4 pin: the exact parent-2 field shape recovers end to end through
+    /// `load_authoritative_session` — committed runtime snapshot at rev N, a
+    /// store head one COMPLETED turn ahead stamped intra-turn, no boundary
+    /// receipt for the tail's run. The load must classify, authorize, commit
+    /// the recovered boundary, and serve the full transcript; a second load
+    /// must be idempotent (no duplicate recovery commit).
+    #[tokio::test]
+    async fn cold_load_recovers_completed_durable_tail_as_recovered_boundary() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // Committed runtime authority at rev N (SessionCreated root).
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        // Store head: one COMPLETED turn ahead (user + EndTurn assistant with
+        // a concrete run identity), stamped INTRA-TURN — the boundary that
+        // would have committed it lost the shutdown race.
+        let tail_run = meerkat_core::RunId::new();
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run.clone());
+        head.push(Message::BlockAssistant(assistant));
+        let (head, _) = with_checkpoint_successor(
+            head,
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&head).await.expect("seed durable store head");
+
+        // Cold load: recovery must serve the FULL transcript, restamped as a
+        // recovered boundary anchored to the committed authority.
+        let recovered = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("cold load with a completed durable tail must recover, not wedge")
+            .expect("session exists");
+        assert_eq!(
+            recovered.messages().len(),
+            head.messages().len(),
+            "recovery must preserve every durable message"
+        );
+        let recovered_stamp = verified_checkpoint_stamp(&recovered);
+        assert_eq!(
+            recovered_stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+            "the recovered document must carry recovered-boundary provenance"
+        );
+        let receipt = runtime_store
+            .load_boundary_receipt(&runtime_id, &tail_run, 1)
+            .await
+            .expect("receipt read succeeds")
+            .expect("the recovered boundary must commit a durable receipt for the tail run");
+        assert_eq!(receipt.message_count, head.messages().len());
+
+        // Idempotence: the next cold load serves the recovered authority
+        // without attempting (or committing) a second recovery.
+        let again = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("post-recovery load succeeds")
+            .expect("session exists");
+        assert_eq!(again.messages().len(), head.messages().len());
+        assert!(
+            runtime_store
+                .load_boundary_receipt(&runtime_id, &tail_run, 2)
+                .await
+                .expect("receipt read succeeds")
+                .is_none(),
+            "a repeated load must not mint a second recovery receipt"
         );
     }
 

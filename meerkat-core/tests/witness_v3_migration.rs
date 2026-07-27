@@ -738,3 +738,63 @@ fn v3_witness_bytes_are_independent_of_retained_body_bytes() {
          independent of retained body bytes (small bodies => {small}, 20x bodies => {large})"
     );
 }
+
+/// Codex-review P2: a transitional FULL document can retain a stale carried
+/// v2 witness beside its graph (typed graph writes remove the carried key,
+/// but hand-assembled or older-writer documents can carry both). The stamp
+/// is the verification target, so its schema must outrank the stale carrier
+/// at BOTH seams — the install slow path (the stamp being installed is not
+/// yet in metadata) and document-evidence resolution afterwards — while the
+/// carrier keeps being cross-checked under its own format. Before this pin,
+/// the carrier won: a valid freshly minted schema-3 stamp was recomputed
+/// under v2 and refused as a digest mismatch.
+#[test]
+fn schema3_stamp_installs_and_verifies_over_a_stale_carried_v2_witness() {
+    let session = graph_session("carrier coexistence body");
+    let state = session
+        .transcript_history_state()
+        .expect("graph decodes")
+        .expect("graph present");
+    let v2 = meerkat_core::checkpoint::transcript_history_checkpoint_digest(&state)
+        .expect("v2 witness computes");
+    let mut document = document_of(&session);
+    document
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("metadata object")
+        .insert(
+            SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY.to_string(),
+            serde_json::Value::String(v2.as_str().to_string()),
+        );
+
+    let minted_on = decode(document.clone()).expect("coexistence document decodes");
+    let stamp =
+        SessionCheckpointStamp::root(&minted_on, SessionCheckpointProvenance::SessionCreated)
+            .expect("mint over the coexistence document");
+    assert_eq!(
+        stamp.schema_version(),
+        SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3,
+        "a graph-bearing mint stays v3 regardless of the stale carrier"
+    );
+
+    // A separate, identical instance: no mint-time digest seal, so the
+    // install takes the slow path and must verify under the stamp's schema,
+    // not the carrier's.
+    let mut installed_on = decode(document).expect("second instance decodes");
+    installed_on
+        .install_checkpoint_stamp(stamp)
+        .expect("schema-3 stamp must install despite the stale v2 carrier");
+
+    // Document evidence afterwards resolves the same way: the stamped
+    // coexistence document verifies (and the carrier is still checked under
+    // its own format — corrupt it and this fails closed).
+    assert!(
+        matches!(
+            installed_on
+                .try_checkpoint_state()
+                .expect("checkpoint state readable"),
+            SessionCheckpointState::Verified(_)
+        ),
+        "the stamped coexistence document must verify under the stamp's format"
+    );
+}

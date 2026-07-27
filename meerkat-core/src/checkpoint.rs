@@ -1563,13 +1563,24 @@ fn resolve_transcript_history_witness(
         WitnessSelection::MintCurrent => {
             crate::generated::session_persistence_version_authority::TRANSCRIPT_HISTORY_WITNESS_FORMAT
         }
-        WitnessSelection::DeclaredBySchema(schema) => match &carried {
-            Some(carrier) => carrier.witness_format,
-            None => witness_format_for_stamp_schema(schema),
-        },
-        WitnessSelection::Evidence => match &carried {
-            Some(carrier) => carrier.witness_format,
-            None => stamped_witness_format(session),
+        // The stamp being installed declares the format its digest was
+        // minted under; a stale carried witness (a slim-to-full transitional
+        // document can retain one) must not override it, or a valid
+        // freshly minted schema-3 stamp would be recomputed under v2 and
+        // refused as a mismatch. The carried witness is still independently
+        // cross-checked under ITS OWN format below.
+        WitnessSelection::DeclaredBySchema(schema) => witness_format_for_stamp_schema(schema),
+        // Same precedence for document evidence on a GRAPH-BEARING document:
+        // the stamp is the verification target, so its schema outranks a
+        // transitional carried witness (which a graph-bearing document only
+        // retains on hand-assembled or older-writer shapes); the carrier
+        // decides only when no stamp is readable. Slim rows never reach
+        // here — their carrier is returned before format selection.
+        WitnessSelection::Evidence => match stamped_witness_format(session) {
+            Some(format) => format,
+            None => carried
+                .as_ref()
+                .map_or(2, TranscriptHistoryWitness::witness_format),
         },
     };
     let computed = computed_transcript_history_witness(session, history, format)?;
@@ -1593,20 +1604,20 @@ fn resolve_transcript_history_witness(
     }))
 }
 
-/// The witness format a FULL document's stamp evidence implies: schema-v3
-/// stamps were minted over the v3 witness, everything older (including
-/// unstamped legacy rows) over v2. Malformed stamp values resolve to v2 —
-/// the stamp parse itself refuses them typed before any digest comparison
-/// is trusted, so this default can only make a broken document fail closed
-/// with a digest mismatch instead of a panic.
-fn stamped_witness_format(session: &Session) -> u32 {
+/// The witness format a FULL document's stamp evidence implies, when a
+/// stamp schema is readable at all: schema-v3 stamps were minted over the
+/// v3 witness, everything older over v2. `None` means no stamp (or a
+/// malformed one — the stamp parse itself refuses those typed before any
+/// digest comparison is trusted, so falling back to weaker evidence can
+/// only make a broken document fail closed with a digest mismatch).
+fn stamped_witness_format(session: &Session) -> Option<u32> {
     session
         .metadata()
         .get(SESSION_CHECKPOINT_STAMP_KEY)
         .and_then(|stamp| stamp.get("schema_version"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|schema| u32::try_from(schema).ok())
-        .map_or(2, witness_format_for_stamp_schema)
+        .map(witness_format_for_stamp_schema)
 }
 
 fn witness_format_for_stamp_schema(schema: u32) -> u32 {

@@ -7090,7 +7090,23 @@ impl Session {
         // the fast path being taken — and producer memo seeding below stays
         // sound because every installed graph is either FullVerify-proven or
         // construction-plus-content proven, which is full validity.
+        // Live-transcript binding: `parent_revision` came from `state.head`
+        // in the graph branch, so "parent == prior head" alone is
+        // tautological there, and DECODE never checks head/live coherence
+        // (that is a save-guard invariant) — a divergent row loads with the
+        // Validated marker. The rewritten vector is built from the LIVE
+        // messages, so without this fact the constructed commit's span
+        // digests reference live content while the parent body carries head
+        // content, and the graph fails the full validator. Proving
+        // d(live) == commit parent makes those relations hold by
+        // construction: digest equality is canonical-content equality, so
+        // the parent body's canonical messages ARE the live vector's.
+        // O(delta) on a warm session; a cold graph-bearing session pays one
+        // seeding pass here or takes the FullVerify fall-through.
+        let live_transcript_is_parent = self.transcript_content_digest().ok().as_deref()
+            == Some(commit.parent_revision.as_str());
         let rewrite_construction_proved = prior_head_is_parent
+            && live_transcript_is_parent
             && chain_content_proved
             && if graph_preexisted {
                 // A Validated prior graph proves its retained bodies. The
@@ -8946,6 +8962,68 @@ mod tests {
         let decoded: Session = serde_json::from_slice(&bytes)
             .expect("the failed rewrite must leave a graph every cold reader accepts");
         assert_eq!(decoded.messages().len(), session.messages().len());
+    }
+
+    /// Codex-review P1 regression: DECODE never checks head/live coherence
+    /// (that is a save-guard invariant), so a row whose TOP-LEVEL messages
+    /// diverged from its internally valid graph loads with the Validated
+    /// marker. A rewrite on such a session builds its commit from the LIVE
+    /// vector while the parent body carries the HEAD content, so the
+    /// constructed graph fails the full validator — the fast path's
+    /// live-transcript binding (`d(live) == commit parent`) must refuse the
+    /// shape and the FullVerify fall-through must fail CLOSED. Without the
+    /// binding, a release build past its verification samples would install
+    /// and memoize the invalid graph, converting a save-guard-recoverable
+    /// inconsistent row into a restart-time load failure.
+    #[test]
+    fn rewrite_on_a_head_divergent_decoded_row_fails_closed() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("m-0")));
+        session.push(Message::User(UserMessage::text("m-1")));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("m-0-rewritten"))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite commits");
+        session.push(Message::User(UserMessage::text("m-2")));
+
+        // Tamper the TOP-LEVEL messages only; the graph value is untouched
+        // and still internally valid, so the decode accepts the document and
+        // marks it Validated — with live != head.
+        let mut document = serde_json::to_value(&session).expect("session serializes");
+        let divergent_message =
+            serde_json::to_value(Message::User(UserMessage::text("divergent-live-tail")))
+                .expect("message serializes");
+        document
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("messages array")
+            .push(divergent_message);
+        let mut divergent: Session =
+            serde_json::from_value(document).expect("divergent row still decodes");
+
+        let error = divergent
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("m-0-rewritten-again"))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect_err("a rewrite on a head-divergent row must fail closed");
+        assert!(
+            matches!(error, TranscriptEditError::HistoryStateMalformed(_)),
+            "expected the whole-graph validator's refusal, got: {error:?}"
+        );
+        // Untouched and still loadable by a cold reader.
+        let bytes = serde_json::to_vec(&divergent).expect("row serializes");
+        let decoded: Session = serde_json::from_slice(&bytes)
+            .expect("the failed rewrite must leave the row decodable");
+        assert_eq!(decoded.messages().len(), divergent.messages().len());
     }
 
     #[test]

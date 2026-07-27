@@ -1,0 +1,55 @@
+{
+  "created_at": {
+    "nanos_since_epoch": 602934000,
+    "secs_since_epoch": 1785172588
+  },
+  "id": "019fa493-f83b-76f1-86d1-aecfe08b515d",
+  "messages": [
+    {
+      "content": "fixture preamble: witness-v3 migration corpus",
+      "created_at": "2026-07-27T17:16:28.603127Z",
+      "role": "user"
+    },
+    {
+      "content": "rewritten span",
+      "created_at": "2026-07-27T17:16:28.603232Z",
+      "role": "user"
+    },
+    {
+      "content": "third fixture message",
+      "created_at": "2026-07-27T17:16:28.603232Z",
+      "role": "user"
+    },
+    {
+      "content": "post-rewrite live head message",
+      "created_at": "2026-07-27T17:16:28.604063Z",
+      "role": "user"
+    }
+  ],
+  "metadata": {
+    "session_checkpoint_stamp_v1": {
+      "authority_base": {
+        "kind": "absent"
+      },
+      "checkpoint_revision": 0,
+      "digest": "sha256:06b611911344728e5882673ac75f31eca35e33ce7d91e9ced7b88e92da5f9502",
+      "generation": 0,
+      "lineage_id": "session:019fa493-f83b-76f1-86d1-aecfe08b515d",
+      "provenance": "session_created",
+      "schema_version": 1,
+      "session_id": "019fa493-f83b-76f1-86d1-aecfe08b515d"
+    },
+    "session_transcript_history_checkpoint_digest_v1": "sha256:cad5d87b67284a4e7ccf80f8c9dbade10899fd00b5808b2a2aae9275546b1894"
+  },
+  "updated_at": {
+    "nanos_since_epoch": 604799000,
+    "secs_since_epoch": 1785172588
+  },
+  "usage": {
+    "cache_creation_tokens": null,
+    "cache_read_tokens": null,
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "version": 2
+}

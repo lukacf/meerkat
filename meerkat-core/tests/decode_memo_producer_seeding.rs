@@ -31,7 +31,7 @@
 
 use meerkat_core::service::{TranscriptRewriteReason, TranscriptRewriteSelection};
 use meerkat_core::types::{
-    AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult, UserMessage,
 };
 use meerkat_core::{
     DIGEST_SITE_LABELS, SESSION_TRANSCRIPT_HISTORY_STATE_KEY, Session, digest_site_bytes,
@@ -118,7 +118,36 @@ fn session_with_producer_seeded_graph() -> Session {
         session.push(user(&format!("post-rewrite question {index}")));
         session.push(assistant(&format!("post-rewrite answer {index}")));
     }
+    // A tool exchange whose args are pass-through `RawValue` in the
+    // NORMALIZED spelling `deserialize_tool_use_args` emits (sorted keys,
+    // compact) — the shape every decoded document and every wire-ingested
+    // tool call carries. Riding this through the retained head body means
+    // the kill-switch full-cost decode below re-hashes producer-serialized
+    // RawValue bytes against their revision strings, pinning the round trip
+    // a byte-identity review flagged as untested.
+    session.push(tool_exchange_with_args(
+        "toolu_rawvalue_pin",
+        r#"{"alpha":{"nested":[1,2,3]},"zeta":1}"#,
+    ));
+    session.push(Message::tool_results(vec![ToolResult::new(
+        "toolu_rawvalue_pin".to_string(),
+        "raw probe complete".to_string(),
+        false,
+    )]));
     session
+}
+
+fn tool_exchange_with_args(id: &str, raw_args: &str) -> Message {
+    Message::BlockAssistant(BlockAssistantMessage::new(
+        vec![AssistantBlock::ToolUse {
+            id: id.to_string(),
+            name: "raw_probe".to_string(),
+            args: serde_json::value::RawValue::from_string(raw_args.to_string())
+                .expect("valid raw tool args"),
+            meta: None,
+        }],
+        StopReason::ToolUse,
+    ))
 }
 
 fn proven_graph_value(session: &Session) -> serde_json::Value {
@@ -301,5 +330,65 @@ fn kill_switch_disables_producer_seeding() {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// PRE-EXISTING (0.8.8-parity) sharp edge, pinned as a typed FAIL-CLOSED
+/// refusal rather than fixed here: a retained graph body whose `ToolUse`
+/// args carry a NON-normalized `RawValue` spelling (unsorted keys, interior
+/// whitespace) cannot survive an encode/decode cycle under full validation.
+/// The transcript digest content-addresses the VERBATIM raw bytes, while
+/// `deserialize_tool_use_args` must tolerate Message-level serde buffering
+/// by round-tripping through `Value` — which re-spells the args (sorted
+/// keys, compact) — so the decoded body re-hashes to a different digest
+/// than its recorded revision string and the document refuses typed.
+///
+/// Neither seam changed in 0.8.9 (the digest canonicalizer and the args
+/// deserializer are byte-identical to 0.8.8); wire-ingested and once-decoded
+/// sessions always carry the normalized spelling and round trip cleanly
+/// (pinned by the suite above). Making the two seams agree is tracked as a
+/// follow-up — it requires a digest-semantics decision that must not ride a
+/// release whose safety story is "digest values unchanged". If this test
+/// starts PASSING the decode, that decision has been made: move the
+/// construction into `session_with_producer_seeded_graph` and delete this.
+#[test]
+fn non_normalized_raw_args_in_a_retained_body_fail_closed_on_cold_decode() {
+    let _serial = serial_guard();
+    let mut session = session_with_producer_seeded_graph();
+    session.push(tool_exchange_with_args(
+        "toolu_rawvalue_sharp_edge",
+        "{\"zeta\": 1,  \"alpha\":\t{\"nested\" :[1, 2,3]}}",
+    ));
+    session.push(Message::tool_results(vec![ToolResult::new(
+        "toolu_rawvalue_sharp_edge".to_string(),
+        "raw probe complete".to_string(),
+        false,
+    )]));
+    let bytes = serde_json::to_vec(&session).expect("encode session");
+    // Force the cold-reader path: strip the producer-seeded memo entry's
+    // effect by corrupting nothing and instead decoding in a fresh shape —
+    // the appended exchange changed the head, and the producer seeded THAT
+    // shape too, so a warm decode would substitute and mask the edge. Use
+    // the serialized bytes but flip one digest-erased field (a message
+    // `created_at`) to re-key the memo without touching content.
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse document");
+    let history = value
+        .get_mut("metadata")
+        .and_then(|metadata| metadata.get_mut(SESSION_TRANSCRIPT_HISTORY_STATE_KEY))
+        .expect("history graph present");
+    let body_created_at = history
+        .get_mut("revisions")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|revisions| revisions.first_mut())
+        .and_then(|body| body.get_mut("created_at"))
+        .and_then(|created| created.get_mut("secs_since_epoch"))
+        .expect("first retained body timestamp");
+    *body_created_at = serde_json::json!(1_000_000_000u64);
+    let rekeyed = serde_json::to_vec(&value).expect("re-encode document");
+    let error = serde_json::from_slice::<Session>(&rekeyed)
+        .expect_err("non-normalized raw args must fail closed on a cold decode");
+    assert!(
+        error.to_string().contains("has digest"),
+        "expected the typed revision-body digest refusal, got: {error}"
     );
 }

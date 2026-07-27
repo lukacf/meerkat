@@ -3013,7 +3013,7 @@ mod tests {
         // Splice: A's record followed by B's record. B's parent is neither
         // A's revision nor an extension of it; every body is present and
         // digest-consistent, so each record validates in isolation.
-        let mut spliced = state_a.clone();
+        let mut spliced = state_a;
         spliced.commits.extend(state_b.commits.iter().cloned());
         for body in &state_b.revisions {
             if !spliced

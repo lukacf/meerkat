@@ -5677,8 +5677,10 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     // mid-run must leave identity evidence a later recovery can terminalize
     // against instead of holding the tail. Fail-closed — a persist failure
     // rolls the staged batch and the run back and the turn never starts.
-    if let DriverEntry::Persistent(persistent) = &*driver {
-        if let Err(err) = persistent.persist_staged_input_bindings(&staged_ids).await {
+    if let DriverEntry::Persistent(persistent) = &*driver
+        && let Err(err) = persistent.persist_staged_input_bindings(&staged_ids).await
+    {
+        {
             let _ = driver.rollback_staged(&staged_ids);
             if let Err(rollback_err) = machine_apply_run_return_projection(
                 &mut driver,

@@ -194,12 +194,6 @@ fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
         )
 }
 
-/// Deserialize a persisted session-snapshot blob through typed serde, matching
-/// the SQLite runtime store read path. `Session::deserialize` validates the
-/// mandatory envelope version against the generated persistence version
-/// authority, so a missing or non-current (v0/v1) row fails closed instead of
-/// silently defaulting or upgrading on read.
-
 /// Exact target-local compare token for one stored input bundle. The memory
 /// store's canonical row bytes are the bundle's serialized form (the same
 /// encoding the SQLite backend persists), so both backends report and
@@ -234,6 +228,11 @@ fn precheck_fenced_input_updates(
     Ok(())
 }
 
+/// Deserialize a persisted session-snapshot blob through typed serde, matching
+/// the SQLite runtime store read path. `Session::deserialize` validates the
+/// mandatory envelope version against the generated persistence version
+/// authority, so a missing or non-current (v0/v1) row fails closed instead of
+/// silently defaulting or upgrading on read.
 fn deserialize_persisted_session(bytes: &[u8]) -> Result<meerkat_core::Session, RuntimeStoreError> {
     serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
 }

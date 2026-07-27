@@ -797,4 +797,14 @@ fn schema3_stamp_installs_and_verifies_over_a_stale_carried_v2_witness() {
         ),
         "the stamped coexistence document must verify under the stamp's format"
     );
+    // Promotion retires the transitional carrier outright: a graph-bearing
+    // document's authoritative witness source is the graph, so the stale
+    // projection witness must not survive the install to keep contradicting
+    // newer-format stamps.
+    assert!(
+        !installed_on
+            .metadata()
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
+        "installing a stamp on a graph-bearing document must retire the carried witness"
+    );
 }

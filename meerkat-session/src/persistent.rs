@@ -809,12 +809,13 @@ impl VerifiedCheckpointAuthority {
         expected_session_id: &SessionId,
         role: &str,
     ) -> Result<Self, SessionError> {
-        let serialized = serde_json::to_vec(&session).map_err(|error| {
+        // Encode + midstate admission are one core-owned operation, so the
+        // recorded midstates provably describe these exact bytes.
+        let serialized = session.to_persisted_bytes().map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to serialize {role} for session {expected_session_id}: {error}"
             )))
         })?;
-        session.record_digest_midstates_for_bytes(&serialized);
         Self::from_session_with_serialized(session, serialized, expected_session_id, role)
     }
 
@@ -925,14 +926,15 @@ impl PreparedCheckpointDocument {
         session
             .install_checkpoint_stamp(stamp.clone())
             .map_err(|error| checkpoint_prepare_error(session.id(), role, error))?;
-        let serialized = serde_json::to_vec(&session).map_err(|error| {
+        // Encode + midstate admission are one core-owned operation, so the
+        // recorded midstates provably describe these exact bytes.
+        let serialized = session.to_persisted_bytes().map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to serialize stamped {role} for session {}: {error}",
                 session.id()
             )))
         })?;
         meerkat_core::checkpoint::record_session_encode_bytes(serialized.len() as u64);
-        session.record_digest_midstates_for_bytes(&serialized);
         Ok(Self {
             session,
             stamp,

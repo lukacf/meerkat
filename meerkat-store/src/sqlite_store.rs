@@ -217,10 +217,10 @@ pub fn write_session_snapshot_in_txn(
 ) -> Result<(), StoreError> {
     let session_id = session.id().to_string();
     let metadata_json = serde_json::to_string(session.metadata())?;
-    let session_json = serde_json::to_vec(session)?;
-    // In-process reads of these exact bytes adopt the warm digest midstates
-    // instead of reseeding them with O(document) canonical passes.
-    session.record_digest_midstates_for_bytes(&session_json);
+    // Encode + midstate admission are one core-owned operation: in-process
+    // reads of these exact bytes adopt the warm digest midstates instead of
+    // reseeding them with O(document) canonical passes.
+    let session_json = session.to_persisted_bytes()?;
     // Derived projection counters must round-trip through the durable i64
     // columns without loss. A count that exceeds i64::MAX is itself an
     // impossible state, so fail closed rather than silently clamping to a

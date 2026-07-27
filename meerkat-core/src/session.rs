@@ -1168,27 +1168,47 @@ impl Session {
         self.messages.framed_document_hasher(prefix)
     }
 
+    /// Serialize this session to its persisted JSON bytes and record its
+    /// retained digest midstates under the SHA-256 of those exact bytes, so
+    /// an in-process [`Self::from_persisted_bytes`] of the same bytes adopts
+    /// them instead of reseeding each midstate with an O(document)
+    /// canonicalize-and-hash pass.
+    ///
+    /// Serialization and admission are ONE operation deliberately: the memo
+    /// key binds exact bytes, and binding is only evidence when the bytes
+    /// provably serialize the session whose midstates are recorded — which
+    /// this method establishes by producing them itself. A raw
+    /// record-under-caller-supplied-bytes seam would be caller-attested
+    /// (record session A's midstates under session B's bytes and B later
+    /// serves A's digests), so the raw seams are crate-private and every
+    /// public path goes through the paired operations.
+    pub fn to_persisted_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let serialized = serde_json::to_vec(self)?;
+        self.record_digest_midstates_for_bytes(&serialized);
+        Ok(serialized)
+    }
+
     /// Record this session's retained digest midstates under the SHA-256 of
-    /// the EXACT bytes it was just serialized to, so an in-process decode of
-    /// those bytes adopts them instead of reseeding each midstate with an
-    /// O(document) canonicalize-and-hash pass. The key binds the exact
-    /// bytes (collision-resistant hash of the whole document), which is the
-    /// byte-binding discipline process-global verification memos require;
-    /// every adopted witness serve remains covered by the sampled
-    /// full-recompute cross-checks.
-    pub fn record_digest_midstates_for_bytes(&self, serialized: &[u8]) {
+    /// the EXACT bytes it was just serialized to. Crate-private on purpose:
+    /// the caller must be a seam that produced `serialized` from `self` in
+    /// the same operation (see [`Self::to_persisted_bytes`]).
+    pub(crate) fn record_digest_midstates_for_bytes(&self, serialized: &[u8]) {
         self.messages.record_state_for_serialized_bytes(serialized);
     }
 
     /// Adopt digest midstates previously recorded for these EXACT serialized
-    /// bytes. Call immediately after decoding a session from `serialized`.
-    pub fn adopt_digest_midstates_for_bytes(&mut self, serialized: &[u8]) {
+    /// bytes. Crate-private on purpose: the caller must have decoded `self`
+    /// from `serialized` in the same operation (see
+    /// [`Self::from_persisted_bytes`]).
+    pub(crate) fn adopt_digest_midstates_for_bytes(&mut self, serialized: &[u8]) {
         self.messages.adopt_state_for_serialized_bytes(serialized);
     }
 
     /// Decode a session from persisted JSON bytes, adopting any digest
     /// midstates recorded for these exact bytes by the producer that wrote
-    /// them (see [`Self::record_digest_midstates_for_bytes`]).
+    /// them (see [`Self::to_persisted_bytes`]). Decode and adoption are one
+    /// operation, so the adopted midstates provably describe the message
+    /// vector these bytes decode to.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
         let mut session: Session = serde_json::from_slice(serialized)?;
         session.adopt_digest_midstates_for_bytes(serialized);
@@ -6720,11 +6740,25 @@ impl Session {
             actual
         };
         let value = serde_json::to_value(&stamp)?;
-        // These two metadata writes touch only keys the canonical digest
+        // These metadata writes touch only keys the canonical digest
         // excludes, so the seal legitimately survives the install — that is
         // exactly what preserves the mint-then-install single-pass win.
         self.metadata
             .remove(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
+        // A full graph is the authoritative witness source; a carried
+        // projection witness beside it is transitional bookkeeping
+        // (slim-to-full reconstructions, older writers) whose stale format
+        // would keep contradicting the just-installed stamp's evidence on
+        // every later verification. Promoting a graph-bearing document
+        // retires it. Slim rows are untouched — their carrier is the only
+        // witness evidence they have.
+        if self
+            .metadata
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        {
+            self.metadata
+                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
+        }
         self.metadata
             .insert(SESSION_CHECKPOINT_STAMP_KEY.to_string(), value);
         self.seal_verified_checkpoint_digest(&actual);

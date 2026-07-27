@@ -15,6 +15,77 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
+- **Checkpoint stamp schema v3 — the witness-v3 one-way door.** A session
+  document that retains a transcript-history graph now mints its checkpoint
+  stamp with `schema_version` 3
+  (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3`), because its
+  canonical digest folds the new FORMAT-3 transcript-history witness (a
+  domain-separated digest over the head revision, the canonical commit log,
+  and the sorted retained revision-identity set — O(retained revisions),
+  never O(retained body bytes)). Pre-v3 binaries refuse such stamps through
+  their existing typed future-schema path; upgrading is one-way PER SESSION
+  on its first post-upgrade boundary save. Sessions without a transcript
+  graph keep minting the lowest schema their provenance allows and stay
+  readable by older binaries. v2 witness evidence (every existing durable
+  row) keeps verifying under the v2 computation indefinitely — mixed
+  v2/v3 stores, no migration, no flag day; slim head-canonical rows carry a
+  typed `TranscriptHistoryWitness` (`witness_format`,
+  `revision_digest_format`, `digest`; pre-v3 bare digest strings normalize
+  to format 2 and are re-persisted bare) and can never relabel themselves
+  v3. Unknown witness formats refuse typed at document ingress, before any
+  normalization or healing. The graph's `digest_format` (revision-STRING
+  format) is untouched at 2. `session_transcript_history_checkpoint_digest`
+  keeps its signature; `session_transcript_history_witness` exposes the
+  typed carrier; the accepted witness-format set lives in the generated
+  `SessionPersistenceVersionAuthority`
+  (`restore_transcript_history_witness_format`, accepted `[2, 3]`).
+
+### Performance
+
+- **Flat turn curve: turn-boundary digest work is size-independent.** An
+  identical one-word turn used to hash the whole accumulated session
+  document many times over (measured 435 MB hashed per turn at a ~10 MB
+  fixture; 60 s at 14 MB and 180 s at 94 MB per turn on a live 0.8.6
+  fleet). The four attributed O(document) drivers are removed without
+  deleting a single check:
+  - **History witness (was ~109 MB/turn):** format-3 witness derives from
+    revision identities instead of re-absorbing every retained body's bytes
+    on every derivation (see Breaking above); body-byte integrity is owned
+    by seal-at-ingress, where it was already proven.
+  - **Per-decode graph validation (was ~55 MB/turn):** every typed producer
+    seam now admits the graph it just proved (or extended under its typed
+    inductive proof) into the validated decode memo, so a warm process's
+    next decode of those exact bytes substitutes the proven graph instead
+    of re-hashing every retained body. First sight after a cold start still
+    verifies fully; `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` still restores the
+    full per-decode cost end to end.
+  - **Compaction-path revalidations (was ~59 MB/turn on compacting turns,
+    a ~6x multiplier on every real compaction):** the compaction authority
+    is minted from the session accumulator's O(delta) digest plus ONE hash
+    of the rebuilt transcript, the no-op precheck answers from the
+    authority's own digests, whole-span commit digests reuse the one
+    required hash (partial spans keep paying O(span)), the rewrite commit
+    proves its successor graph by construction (mirroring the append fast
+    path; debug builds still run the full validator with digest accounting
+    suppressed), and the store guards demand the sealed
+    `ValidatedTranscriptHistory` instead of re-running the whole-graph
+    validator once per retained commit — the adoption arm now also checks
+    chain coherence, which the per-commit loop never did.
+  - **Checkpoint canonical passes (was ~36 MB/turn):** the canonical
+    checkpoint digest is served from a retained SHA-256 midstate over the
+    document's transcript span (`created_at`/`id` sort before `messages`
+    and are immutable, so the prefix is constant), spliced with the
+    O(metadata) suffix — byte-identical digests, pinned against a committed
+    v0.8.8 fixture, with a sampled full-path cross-check and fail-open
+    fallback to the full canonical pass on any surprise.
+  Flatness is asserted in-lane by the re-armed
+  `e2e_smoke_mob_turn_latency_gate` (large/small hashed-bytes ratio, plus
+  the small-side honesty band); whole-document boundary SERIALIZATION is
+  still one pass per boundary by design (the per-fixture encode envelope
+  keeps pinning the repeated-reserialize class) and is the next tracked
+  axis, not part of this claim. Cold starts pay one full validation per
+  session document, once.
+
 - `meerkat_mob::MobSessionService` gains a REQUIRED `load_session_for_resume`
   returning the new `ResumeSessionLoad` enum (no default: a composition over
   the legacy optional reads can never produce `ArchivedNotRevivable`, so

@@ -85,26 +85,36 @@ const LARGE_SESSION_TURNS: usize = 4;
 const MIN_LARGE_GROWTH_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Flatness tolerance: canonical bytes hashed per turn at ~10 MB must stay
-/// within K× the bytes per turn at ~256 KB. With turn cost truly independent
-/// of document size the ratio is ~1 (same fixed path, delta-only content),
-/// so K = 3 leaves headroom for legitimate O(delta) variance — while any
-/// O(document) boundary pass at a ~40× size ratio measures far above it.
-/// Bytes are deterministic, so unlike the retired CPU-ratio form this needs
-/// no scheduler-noise allowance.
+/// within K× the bytes per turn at ~256 KB, plus a fixed allowance. With
+/// turn cost truly independent of document size the ratio is ~1 (same fixed
+/// path, delta-only content), so K = 3 leaves headroom for legitimate
+/// O(delta) variance — while any O(document) boundary pass at a ~40× size
+/// ratio measures far above it. The fixed allowance exists because the
+/// flat-curve work drove the small-side denominator to ~0 hashed bytes per
+/// ordinary turn (recalibrated 2026-07-27, was ~6 MB/turn at calibration
+/// 2026-07-26): a pure ratio over a zero denominator rejects even one stray
+/// kilobyte, while the defect class this gate pins is whole-document passes
+/// — the allowance is far below one ~9 MB document pass, so a single
+/// O(document) regression still trips it. Bytes are deterministic, so
+/// unlike the retired CPU-ratio form this needs no scheduler-noise
+/// allowance.
 const MAX_LARGE_TO_SMALL_BYTES_RATIO: u64 = 3;
+const LARGE_DIGEST_FIXED_ALLOWANCE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Sanity band for the small-side baseline, in bytes hashed per turn.
+/// Sanity bounds that keep the flatness assertion honest (recalibrated
+/// 2026-07-27 for the flat-curve work; the former 1 MiB digest FLOOR is
+/// deliberately retired — ordinary turns now hash ~0 canonical bytes, which
+/// is the contract, not a broken instrument).
 ///
-/// The band is what makes the ratio assertion honest: a ratio alone can be
-/// "improved" by inflating the denominator (extra digest work, contention,
-/// a bloated small fixture), and a broken instrument reads zero on both
-/// sides. Below the floor the counter is not observing the boundary work at
-/// all; above the ceiling the small baseline itself regressed (or was
-/// gamed) and no ratio conclusion is meaningful. Calibration pin, measured
-/// 2026-07-26 at ~6 MB/turn: recalibrate DELIBERATELY with a comment when
-/// the boundary-work contract changes, never silently.
-const SMALL_BYTES_PER_TURN_MIN: u64 = 1024 * 1024;
-const SMALL_BYTES_PER_TURN_MAX: u64 = 32 * 1024 * 1024;
+/// Instrument honesty moves to the ENCODE counter: the boundary contract
+/// still serializes the whole document once per boundary commit, so a
+/// fixture whose measured turns produced fewer serialized bytes than one
+/// small document per turn is not driving real boundary commits (hollow
+/// fixture / dead counters), and no digest conclusion drawn from it means
+/// anything. The digest CEILING still catches a small-side baseline that
+/// regressed or was inflated to launder the ratio.
+const SMALL_DIGEST_BYTES_PER_TURN_MAX: u64 = 4 * 1024 * 1024;
+const SMALL_ENCODE_BYTES_PER_TURN_MIN: u64 = 64 * 1024;
 
 const MEMBER_IDS: [&str; 3] = ["lead-1", "w-small", "w-large"];
 const SMALL_MEMBER_ID: &str = "w-small";
@@ -380,7 +390,21 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         .context_root(context_root)
         .builtins(true)
         .comms(true);
-    let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+    let mut config = Config::default();
+    // Fixture comparability (deliberate, 2026-07-27): at the default
+    // 100k-token threshold the ~10 MB member auto-compacts on EVERY measured
+    // turn while the ~256 KB member never does, so the two windows measure
+    // different operations. A compaction turn is inherently O(document) at
+    // least once — the rebuilt transcript must be hashed and persisted — so
+    // "flat compaction" is not a coherent contract; the flatness contract is
+    // the ORDINARY turn (exactly the production defect shape: the live
+    // 60 s/180 s one-word turns were not compacting). Raising the threshold
+    // far above both fixtures makes both windows measure the identical
+    // append-boundary operation. The compaction path's own ~6x redundancy
+    // multiplier is pinned separately by the meerkat-core digest-budget and
+    // rewrite-commit tests.
+    config.compaction.auto_compact_threshold = 50_000_000;
+    let mut builder = FactoryAgentBuilder::new(factory, config);
     // Production shape: an INCREMENTAL SQLite session store (so boundary
     // saves take the O(delta)-rows projection branch — the path the fix
     // must make flat) and a SQLite runtime store (whole-blob snapshot
@@ -538,32 +562,41 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
          {cpu_ratio:.1}x CPU (diagnostic), {wall_ratio:.1}x wall (diagnostic)",
     );
 
-    // Denominator honesty: the small-side baseline must sit inside its
-    // calibrated band. Below the floor the byte counter is not observing the
-    // boundary work (broken instrument, hollow fixture); above the ceiling
-    // the baseline itself regressed or was inflated, and any ratio computed
-    // against it is meaningless.
+    // Denominator honesty (recalibrated 2026-07-27): the small-side digest
+    // baseline may be ~0 (that IS the flat contract) but must stay under its
+    // ceiling — a regressed or deliberately inflated baseline launders the
+    // ratio. Instrument honesty rides the encode counter: each measured turn
+    // must have produced at least one small document's worth of boundary
+    // serialization, or the fixture drove no real boundary commits and no
+    // digest conclusion means anything.
     assert!(
-        (SMALL_BYTES_PER_TURN_MIN..=SMALL_BYTES_PER_TURN_MAX)
-            .contains(&small.digest_bytes_per_turn),
-        "small-side baseline outside its calibrated band: {} bytes hashed per \
-         turn at the ~256 KB member (band {SMALL_BYTES_PER_TURN_MIN}..={SMALL_BYTES_PER_TURN_MAX}; \
-         large side measured {} bytes per turn). A ratio against this \
-         baseline proves nothing — fix the baseline first, or recalibrate \
-         the band deliberately with a comment",
+        small.digest_bytes_per_turn <= SMALL_DIGEST_BYTES_PER_TURN_MAX,
+        "small-side digest baseline regressed: {} bytes hashed per turn at \
+         the ~256 KB member (ceiling {SMALL_DIGEST_BYTES_PER_TURN_MAX}; large side \
+         measured {} bytes per turn). Fix the baseline first, or recalibrate \
+         deliberately with a comment",
         small.digest_bytes_per_turn,
         large.digest_bytes_per_turn,
     );
+    assert!(
+        small.encode_bytes_per_turn >= SMALL_ENCODE_BYTES_PER_TURN_MIN,
+        "instrument honesty: the small member serialized only {} bytes per \
+         measured turn (floor {SMALL_ENCODE_BYTES_PER_TURN_MIN}). The boundary \
+         contract serializes the whole document once per commit, so this \
+         fixture is not driving real boundary work and the flatness ratio \
+         proves nothing",
+        small.encode_bytes_per_turn,
+    );
 
     // Boundary-serialization envelope backstop (per fixture, NOT a flatness
-    // claim): the current boundary contract legitimately serializes the
-    // whole document once per boundary commit, so encode bytes per turn are
-    // O(document) by design today. The envelope catches the pathological
-    // class on top of that — per-message reserialize loops, repeated
-    // whole-document persists — without pretending flatness that has not
-    // landed. Flatness for BOTH counters is asserted by
-    // `mob_turn_flatness_red_by_design` below and arms when the witness-v3
-    // size-independence work lands.
+    // claim): the boundary contract still legitimately serializes the whole
+    // document once per boundary commit, so encode bytes per turn are
+    // O(document) by design — the one deliberately retained O(document)
+    // axis (SessionDelta-style incremental persistence is tracked
+    // separately). The envelope catches the pathological class on top of
+    // that — per-message reserialize loops, repeated whole-document
+    // persists. DIGEST flatness is asserted by the ratio gate in
+    // `e2e_smoke_mob_turn_latency_gate`.
     let small_doc_bytes = SMALL_SEED_INPUT_BYTES as u64;
     let large_doc_bytes = (LARGE_TURN_INPUT_BYTES * LARGE_SESSION_TURNS) as u64;
     for (label, cost, doc_bytes) in [
@@ -591,48 +624,32 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
 }
 
 /// Smoke-lane gate: fixture validity, instrument honesty (small-side band),
-/// and the repeated-reserialize envelope are ASSERTED; the large/small
-/// flatness ratio is RECORDED as a measurement only. Size-independent
-/// turn-boundary work has not landed (witness-v3 design is under review at
-/// docs-internal/witness-v3-migration.md), and presenting a known-red
-/// flatness assertion as a green release lane would be dishonest in both
-/// directions.
+/// the repeated-reserialize envelope, AND the flatness contract itself — an
+/// identical tiny turn must hash the same bytes whether the accumulated
+/// document is ~256 KB or ~10 MB. Any O(document) pass left on the ordinary
+/// turn boundary (whole-document canonical serialize, whole-document digest,
+/// full-snapshot decode, whole-blob rewrite) makes the large side track its
+/// document size and trips the ratio. Armed in-lane with the 0.8.9
+/// flat-curve work (witness-v3 revision-identity witness, producer-seeded
+/// decode memo, seal-retyped save guards, framed checkpoint midstate,
+/// compaction-commit digest reuse); the former `mob_turn_flatness_red_by_design`
+/// out-of-lane split is retired.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_smoke_mob_turn_latency_gate() {
     let (small, large) = run_turn_latency_harness().await;
     let bytes_ratio =
         large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
-    eprintln!(
-        "[turn-latency gate] MEASUREMENT ONLY: large/small hashed-bytes ratio {bytes_ratio:.1}x \
-         (flatness target {MAX_LARGE_TO_SMALL_BYTES_RATIO}x is asserted by \
-         mob_turn_flatness_red_by_design, red by design until witness-v3 lands)",
-    );
-}
-
-/// The flatness contract itself: an identical tiny turn must hash the same
-/// bytes whether the accumulated document is ~256 KB or ~10 MB. Any
-/// O(document) pass left on the turn boundary (whole-document canonical
-/// serialize, whole-document digest, full-snapshot decode, whole-blob
-/// rewrite) makes the large side track its document size.
-///
-/// RED BY DESIGN on this tree: the remaining O(document) drivers are fully
-/// attributed (history witness, restore-seam revalidation, compaction-path
-/// revalidations, checkpoint canonical passes) and their removal is gated on
-/// the witness-v3 digest-format migration, whose design awaits review. This
-/// test is deliberately NOT in any lane; arm it (move it into e2e-smoke) in
-/// the change that lands witness-v3.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "red-by-design: turn-boundary flatness lands with witness-v3 (docs-internal/witness-v3-migration.md)"]
-async fn mob_turn_flatness_red_by_design() {
-    let (small, large) = run_turn_latency_harness().await;
-    let bytes_ratio =
-        large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
+    let flatness_budget = small
+        .digest_bytes_per_turn
+        .saturating_mul(MAX_LARGE_TO_SMALL_BYTES_RATIO)
+        .saturating_add(LARGE_DIGEST_FIXED_ALLOWANCE_BYTES);
     assert!(
-        large.digest_bytes_per_turn <= small.digest_bytes_per_turn * MAX_LARGE_TO_SMALL_BYTES_RATIO,
+        large.digest_bytes_per_turn <= flatness_budget,
         "turn-boundary hashing scales with document size: {} bytes hashed \
          per turn at the ~10 MB member vs {} bytes at the ~256 KB member \
-         ({bytes_ratio:.1}x, limit {MAX_LARGE_TO_SMALL_BYTES_RATIO}x; \
+         ({bytes_ratio:.1}x; budget {MAX_LARGE_TO_SMALL_BYTES_RATIO}x + \
+         {LARGE_DIGEST_FIXED_ALLOWANCE_BYTES} = {flatness_budget}; \
          diagnostics: CPU {:?} vs {:?}, wall {:?} vs {:?}). Turn-boundary \
          work must be O(delta), not O(document): a one-word reply on a large \
          session may not re-serialize, re-digest, or re-persist the whole \

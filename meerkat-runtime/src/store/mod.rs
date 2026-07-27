@@ -2415,15 +2415,6 @@ impl MachineLifecycleCommit {
     pub(crate) fn into_snapshot(self) -> MachineLifecycleSnapshot {
         self.snapshot
     }
-
-    pub(crate) fn into_snapshot_and_expected(
-        self,
-    ) -> (
-        MachineLifecycleSnapshot,
-        Option<MachineLifecycleExpectedVersion>,
-    ) {
-        (self.snapshot, self.expected_version)
-    }
 }
 
 /// Machine-authorized final-unregister persistence token.

@@ -2066,8 +2066,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let (lifecycle_snapshot, lifecycle_expected) =
-                machine_lifecycle.into_snapshot_and_expected();
+            let lifecycle_expected = machine_lifecycle.expected_version().cloned();
+            let lifecycle_snapshot = machine_lifecycle.into_snapshot();
             let input_updates = input_updates
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)

@@ -66,24 +66,25 @@ impl ResumeSessionLoad {
         }
     }
 
-    /// The single place resume failures are worded. Keeps "archived" from
-    /// being reported as "missing" across the three resume call sites.
+    /// The single place resume failures are typed. Keeps "archived" from
+    /// being reported as "missing" across the resume call sites, and keeps
+    /// both out of `MobError::Internal` so `failure_class()` and surface
+    /// renderings see the distinction instead of prose.
     pub fn into_session_or_error(self, resume_id: &SessionId) -> Result<Session, MobError> {
         match self {
             Self::Active(session) | Self::Revivable(session) => Ok(*session),
             Self::ArchivedNotRevivable { runtime_state } => {
-                let state = runtime_state.map_or_else(
-                    || "<no runtime record>".to_string(),
-                    |state| state.to_string(),
-                );
-                Err(MobError::Internal(format!(
-                    "durable session '{resume_id}' is archived and not revivable from runtime \
-                     state {state}; the transcript is intact and preserved"
-                )))
+                Err(MobError::SessionUnavailableForResume {
+                    session_id: resume_id.clone(),
+                    reason: crate::error::SessionResumeUnavailableReason::ArchivedNotRevivable,
+                    runtime_state: runtime_state.map(|state| state.to_string()),
+                })
             }
-            Self::Absent => Err(MobError::Internal(format!(
-                "missing durable session snapshot for '{resume_id}'"
-            ))),
+            Self::Absent => Err(MobError::SessionUnavailableForResume {
+                session_id: resume_id.clone(),
+                reason: crate::error::SessionResumeUnavailableReason::Absent,
+                runtime_state: None,
+            }),
         }
     }
 }
@@ -484,21 +485,18 @@ pub trait MobSessionService:
     /// Typed resume-seam read: never collapses "archived", "absent", and
     /// "archived but not revivable" into one `None`.
     ///
-    /// The default composes the two legacy reads so existing implementations
-    /// keep their current behavior; `PersistentSessionService` overrides it to
-    /// report the archived-but-refused case with its blocking runtime state.
+    /// REQUIRED, deliberately without a default: a composed fallback over the
+    /// two legacy optional reads can never produce
+    /// [`ResumeSessionLoad::ArchivedNotRevivable`], so a persistent
+    /// implementation compiling against such a default would silently
+    /// misreport archived-but-intact documents as absent. Implementations
+    /// whose storage genuinely cannot hold an archived-but-intact document
+    /// (in-memory services, test doubles) implement the two-read composition
+    /// explicitly, as a statement of that fact.
     async fn load_session_for_resume(
         &self,
         session_id: &SessionId,
-    ) -> Result<ResumeSessionLoad, SessionError> {
-        if let Some(session) = self.load_persisted_session(session_id).await? {
-            return Ok(ResumeSessionLoad::Active(Box::new(session)));
-        }
-        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
-            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
-        }
-        Ok(ResumeSessionLoad::Absent)
-    }
+    ) -> Result<ResumeSessionLoad, SessionError>;
 
     /// Load the persisted session METADATA view when available.
     ///
@@ -776,6 +774,21 @@ where
         req: meerkat_core::service::CreateSessionRequest,
     ) -> Result<meerkat_core::RunResult, SessionError> {
         <Self as meerkat_core::service::SessionService>::create_session(self, req).await
+    }
+
+    /// In-memory service: nothing durable survives archive, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
     }
 
     async fn create_session_with_actor_witness_under_runtime_turn_boundary(

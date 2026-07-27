@@ -1621,7 +1621,7 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         output.receipt.contributing_input_ids,
         contributing_input_ids
     );
-    assert!(output.session_snapshot.is_some());
+    assert!(output.snapshot_bytes().is_some());
     let Some(CoreApplyTerminal::CallbackPending {
         tool_use_id,
         tool_name,
@@ -1710,7 +1710,7 @@ async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() 
         output.receipt.contributing_input_ids,
         contributing_input_ids
     );
-    assert!(output.session_snapshot.is_some());
+    assert!(output.snapshot_bytes().is_some());
     assert!(matches!(
         output.terminal,
         Some(CoreApplyTerminal::NoPendingBoundary)

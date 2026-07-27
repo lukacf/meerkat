@@ -270,9 +270,9 @@ mod tests {
             .await
             .expect("runtime turn should complete");
         let snapshot = output
-            .session_snapshot
-            .clone()
-            .expect("runtime turn should produce a session snapshot");
+            .snapshot_bytes()
+            .expect("runtime turn should produce a session snapshot")
+            .to_vec();
         runtime_store
             .atomic_apply(
                 &meerkat_runtime::LogicalRuntimeId::for_session(session_id),

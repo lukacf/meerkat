@@ -877,6 +877,8 @@ impl LiveProjectionError {
             // silently folding into a catch-all.
             SessionError::Store(_)
             | SessionError::Agent(_)
+            | SessionError::DurableTailHeldForRecovery { .. }
+            | SessionError::DurableEvidenceQuarantined { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
@@ -1533,6 +1535,8 @@ impl LiveToolDispatchError {
             // folding into a catch-all.
             SessionError::Store(_)
             | SessionError::Agent(_)
+            | SessionError::DurableTailHeldForRecovery { .. }
+            | SessionError::DurableEvidenceQuarantined { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }

@@ -749,6 +749,21 @@ fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
         meerkat_core::SessionError::Unsupported(message) => {
             serde_json::json!({ "code": "SESSION_UNSUPPORTED", "message": message })
         }
+        meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
+        | meerkat_core::SessionError::DurableEvidenceQuarantined { .. } => {
+            let mut envelope = e.structured_data().unwrap_or_else(|| serde_json::json!({}));
+            if let serde_json::Value::Object(map) = &mut envelope {
+                map.insert(
+                    "code".to_string(),
+                    serde_json::Value::String(e.code().to_string()),
+                );
+                map.insert(
+                    "message".to_string(),
+                    serde_json::Value::String(e.to_string()),
+                );
+            }
+            envelope
+        }
         meerkat_core::SessionError::FailedWithData { message, data } => {
             let mut data = data;
             if let serde_json::Value::Object(map) = &mut data {

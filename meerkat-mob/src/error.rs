@@ -60,6 +60,11 @@ impl std::fmt::Display for RuntimeEffectKind {
 pub enum MobFailureClass {
     /// The addressed mob/profile/member/flow/run/work does not exist.
     TargetMissing,
+    /// The addressed durable session EXISTS and is intact, but is archived
+    /// and its lifecycle refuses revival. Deliberately distinct from
+    /// `TargetMissing`: reporting an intact archived transcript as absent
+    /// sent operators hunting for data that was on disk all along.
+    TargetArchived,
     /// The target exists but cannot accept the operation right now
     /// (e.g. a member id collision).
     TargetBusy,
@@ -84,6 +89,28 @@ impl std::fmt::Display for MobMemberCapability {
     }
 }
 
+/// Why a durable session cannot serve a resume. Typed companion of
+/// [`MobError::SessionUnavailableForResume`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionResumeUnavailableReason {
+    /// The document exists and is intact, but is archived and its runtime
+    /// lifecycle refuses revival.
+    ArchivedNotRevivable,
+    /// No durable session exists for this id.
+    Absent,
+}
+
+impl std::fmt::Display for SessionResumeUnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ArchivedNotRevivable => {
+                f.write_str("archived and not revivable; the transcript is intact and preserved")
+            }
+            Self::Absent => f.write_str("missing durable session snapshot"),
+        }
+    }
+}
+
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MobError {
@@ -98,6 +125,20 @@ pub enum MobError {
     /// The requested mob member does not exist in the roster.
     #[error("mob member not found: {0}")]
     MemberNotFound(AgentIdentity),
+
+    /// A durable session could not serve a resume — typed so surfaces can
+    /// distinguish archived-but-intact from genuinely absent instead of
+    /// parsing prose out of an internal error.
+    #[error(
+        "session '{session_id}' unavailable for resume: {reason} (runtime state {})",
+        runtime_state.as_deref().unwrap_or("<no runtime record>")
+    )]
+    SessionUnavailableForResume {
+        session_id: meerkat_core::SessionId,
+        reason: SessionResumeUnavailableReason,
+        /// Blocking runtime lifecycle, when one was recorded.
+        runtime_state: Option<String>,
+    },
 
     /// A mob member with the given ID already exists.
     #[error("mob member already exists: {0}")]
@@ -693,6 +734,12 @@ impl MobError {
             | Self::FlowNotFound(_)
             | Self::RunNotFound(_)
             | Self::WorkNotFound(_) => MobFailureClass::TargetMissing,
+            Self::SessionUnavailableForResume { reason, .. } => match reason {
+                SessionResumeUnavailableReason::Absent => MobFailureClass::TargetMissing,
+                SessionResumeUnavailableReason::ArchivedNotRevivable => {
+                    MobFailureClass::TargetArchived
+                }
+            },
             Self::MemberAlreadyExists(_) => MobFailureClass::TargetBusy,
             Self::StorageError(_)
             | Self::SessionError(_)

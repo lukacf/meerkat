@@ -215,6 +215,18 @@ profiles; the in-repo stores run the same suite in
 | `SessionTranscriptRevisionListQuery` / `SessionServiceHistoryExt::list_transcript_revisions` | Revision-list read (RPC `session/transcript_revisions`); head reads remain `read_transcript_revision` + `RevisionSelector::Current` |
 | `HookToolCall.provenance` / `HookLlmResponse.server_tool_content` | Synchronous dispatch-time projections of `ToolProvenance` / `ServerToolKind` for foreground hook classification |
 
+### 0.8.9 additions (PR #917, durable-tail recovery)
+
+| Type | Purpose |
+|------|---------|
+| `BoundSessionCommit` | Sealed snapshot+typed-session pair on `CoreApplyOutput` (one private `committed` field; `with_session` is the only typed mint) — meerkat-core/src/lifecycle/core_executor.rs |
+| `DurableTailRecoveryRequest` | Sealed recovery request; only constructor `from_classification` requires the classifier's `DurableTailClassified` effect — meerkat-runtime/src/recovery.rs |
+| `SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined` + `DurableResumeHold` | Typed durable resume holds (`SESSION_DURABLE_*` codes, `durable_resume_hold` structured payload) — meerkat-core/src/service/mod.rs |
+| `ResumeSessionLoad` / `SessionResumeUnavailableReason` / `MobFailureClass::TargetArchived` | Typed mob resume seam (`MobSessionService::load_session_for_resume` is required, no default) — meerkat-mob |
+| `RuntimeStore::{load_committed_boundary_receipts, load_input_states_with_versions}` + `InputRowVersionConflict` / `MachineLifecycleVersionConflict` | Recovery reads + fenced-record conflicts; `expected_row_digest` is enforced inside the writing transaction — meerkat-runtime/src/store/mod.rs |
+| `SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED` | Per-record stamp schema v2 for recovered provenances (ordinary stamps stay v1) — meerkat-core/src/checkpoint.rs |
+| `meerkat_runtime::stack_relief` | Fresh-task child-agent construction (never nested in a parent's poll stack) |
+
 ## Agent Loop State Machine
 
 `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed`

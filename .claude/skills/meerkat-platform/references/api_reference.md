@@ -403,6 +403,20 @@ writes are strict-owner (land only in the realm that defines the binding).
 - `schedule/occurrences` — occurrences within the planning horizon
 - `schedule/tools`, `schedule/call` — agent-facing schedule tool surface
 
+### Durable jobs and monitors
+
+Realm-scoped detached jobs (`shell(background: true)` runs as one; requires a
+durable realm):
+
+- `jobs/get`, `jobs/list`, `jobs/progress`, `jobs/result`, `jobs/artifacts`, `jobs/health` — read projections
+- `jobs/cancel`, `jobs/retry` — machine-authorized mutations
+- `jobs/subscribe`, `jobs/unsubscribe` — durable delivery subscriptions
+- `monitors/start` — high-trust durable script monitor with explicit restart/output contracts
+- `mobkit/jobs/{heartbeat,progress,checkpoint,complete,fail,cancel_ack}` — host-worker lease surface (exact attempt/fence authority)
+
+Wire types live in `meerkat_contracts::wire::jobs`; the generated method
+catalog in `docs/api/rpc.mdx` is authoritative.
+
 ### Skills, models, capabilities, runtime, approvals
 
 - `help/ask`

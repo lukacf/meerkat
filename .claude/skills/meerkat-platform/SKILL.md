@@ -102,8 +102,8 @@ sqlite/jsonl/memory realms. `realm_manifest.json` format 2 adds `provider` and
 realms pinned to an external provider refuse built-in disk opens typed. Every
 store slot carries a machine-readable `DurabilityDeclaration`
 (`durable` / `rebuildable_cache` / `scratch`, plus how the slot actually
-resolved) over six required domains — sessions, runtime, schedule, workgraph,
-blobs, artifacts. Completeness is enforced (exactly one declaration per
+resolved) over seven required domains — sessions, runtime, schedule,
+workgraph, jobs, blobs, artifacts. Completeness is enforced (exactly one declaration per
 domain), and a durable slot resolving non-persistent without the manifest
 declaring that domain ephemeral is a startup error — never a silent in-memory
 fallback. Downstream backends validate against the published
@@ -236,7 +236,7 @@ surface, not the old live-adapter/docs-refresh snapshot:
 
 - Default hosted text selections are OpenAI `gpt-5.6-sol` (limited preview;
   requires access for the relevant API organization or Codex workspace),
-  Anthropic `claude-opus-4-8`, and Gemini `gemini-3.5-flash`.
+  Anthropic `claude-opus-5`, and Gemini `gemini-3.5-flash`.
 - WorkGraph is available through agent `workgraph_*` tools plus host
   observability (`workgraph/list`, `ready`, `snapshot`, `events`,
   `goal/status`, `attention/list`, REST and SDK equivalents). CLI and trusted
@@ -282,6 +282,14 @@ surface, not the old live-adapter/docs-refresh snapshot:
 - The stream-inactivity watchdog (`[retry] stream_inactivity_timeout`) is ON
   by default at 300s; `"disabled"` opts out. Stalls surface as the retryable
   `StreamStalled` failure.
+- Durable-tail recovery (0.8.9): a persistent session whose last turn was
+  durably checkpointed but lost its runtime boundary commit to a crash or
+  shutdown race is recovered on the next cold read — the durable content is
+  never discarded. While recovery is pending or evidence is unverifiable,
+  resume fails typed with `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` or
+  `SESSION_DURABLE_EVIDENCE_QUARANTINED` (JSON-RPC -32003, HTTP 409, typed
+  `durable_resume_hold` payload with `content_retained: true`) — treat these
+  as "session intact, not runnable yet", not as service faults.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
 - Image generation uses `generate_image` with OpenAI `gpt-image-2` and Gemini
   `gemini-3.1-flash-image-preview` as provider defaults.
@@ -916,7 +924,9 @@ Real-time events include `text_delta`, tool lifecycle events, hook events, and t
 
 ### Background work and recovery
 
-Background shell jobs (shell tool with `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. A shell `&` metacharacter only backgrounds work inside the foreground shell invocation; it does not create a typed Meerkat background job or return a job ID. Each typed completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands. Current shell background jobs are process-local and volatile: they do not survive a Meerkat process restart, even though already-persisted terminal completion notices can be recovered.
+Background shell jobs (shell tool with `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. A shell `&` metacharacter only backgrounds work inside the foreground shell invocation; it does not create a typed Meerkat background job or return a job ID. Each typed completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands.
+
+`shell(background: true)` runs as a realm-scoped durable detached job (the `meerkat-jobs` crate; sqlite realms carry a per-realm `jobs.sqlite3`): progress and the terminal deliver durably back into the origin session, output is blob-spooled, and restart recovery reconciles still-running jobs instead of forgetting them. Host tooling supervises jobs over the `jobs/*` JSON-RPC family (`jobs/get`, `jobs/list`, `jobs/cancel`, `jobs/progress`, `jobs/result`, ...) and `monitors/start`. Detached execution REQUIRES a durable realm — a persistent job store, a persistent blob store, and a realm delivery projector. Where those are absent (memory-backend realms, ephemeral services, WASM, most examples) the call fails closed with a typed tool error; there is no volatile in-process fallback.
 
 If the runtime is backed by persistent storage, completion state and cursors survive process restarts (bounded-loss; you may see one duplicate notice on the seam). Without persistence, conversation history resumes but pending background work doesn't.
 

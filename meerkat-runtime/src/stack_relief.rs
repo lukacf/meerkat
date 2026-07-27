@@ -25,9 +25,20 @@ use std::future::Future;
 ///
 /// Semantics relative to an inline `make_future().await`:
 /// - completion and output are identical;
-/// - dropping the caller aborts the spawned task at its next await point
-///   (inline: the future is dropped at the same point);
-/// - a panic inside the future is resumed on the caller.
+/// - a panic inside the future is resumed on the caller;
+/// - cancellation is WEAKER than inline drop. Dropping an inline future
+///   destroys it synchronously — it can never execute again. `AbortHandle`
+///   is cooperative: the spawned task stops at its next await point, so a
+///   synchronous section already past its last await (sending on channels,
+///   committing to a store handle) can still complete AFTER the caller
+///   observed cancellation, concurrently with whatever the caller does next.
+///
+/// Because of that weaker cancellation contract, wrap only work whose late
+/// completion is harmless: pure construction that hands its result to nobody
+/// (the receiver is gone with the caller), or effects that are themselves
+/// fenced/idempotent at the machine boundary they target. Do not wrap a
+/// chain whose synchronous tail publishes state the caller assumes is
+/// unpublished after cancellation.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn relieve_caller_stack<T, F, Fut>(make_future: F) -> T
 where

@@ -245,6 +245,14 @@ pub enum DurableTailStopReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailExecutionEvidence {
+    NoExecutionContent,
+    BoundExecution,
+    #[default]
+    UnboundExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
@@ -526,6 +534,7 @@ pub enum SessionDocumentInput {
     ResolveRuntimeProjectionConflict {
         session_id: SessionDocumentKey,
         relation: DurableHeadRelation,
+        row_provenance: CheckpointProvenanceClass,
         authority_supersedes_row: bool,
     },
     ResolveRuntimeCheckpointProjection {
@@ -544,6 +553,7 @@ pub enum SessionDocumentInput {
         relation: DurableHeadRelation,
         store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
+        tail_execution: DurableTailExecutionEvidence,
     },
     ClassifyDurableTail {
         session_id: SessionDocumentKey,
@@ -3303,6 +3313,7 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ResolveRuntimeProjectionConflict {
                 session_id,
                 relation,
+                row_provenance,
                 authority_supersedes_row,
             } => {
                 let mut matches = Vec::new();
@@ -3313,6 +3324,7 @@ impl SessionDocumentMachineAuthority {
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                        && (row_provenance == CheckpointProvenanceClass::IntraTurn)
                         && (authority_supersedes_row == true))
                 {
                     matches
@@ -3320,7 +3332,8 @@ impl SessionDocumentMachineAuthority {
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                        && (authority_supersedes_row == false))
+                        && ((authority_supersedes_row == false)
+                            || (row_provenance != CheckpointProvenanceClass::IntraTurn)))
                 {
                     matches.push(SessionDocumentTransition::ResolveRuntimeProjectionConflictReject);
                 }
@@ -3604,12 +3617,12 @@ impl SessionDocumentMachineAuthority {
                 relation,
                 store_provenance,
                 session_is_live,
+                tail_execution,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                        && (store_provenance == CheckpointProvenanceClass::Committed)
-                        && (session_is_live == false))
+                        && (store_provenance == CheckpointProvenanceClass::Committed))
                 {
                     matches.push(
                         SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead,
@@ -3618,7 +3631,8 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
                         && (store_provenance != CheckpointProvenanceClass::Committed)
-                        && (session_is_live == false))
+                        && (session_is_live == false)
+                        && (tail_execution == DurableTailExecutionEvidence::BoundExecution))
                 {
                     matches.push(
                         SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired,
@@ -3627,7 +3641,11 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (((relation == DurableHeadRelation::Diverged)
                         && (store_provenance != CheckpointProvenanceClass::IntraTurn))
-                        || (relation == DurableHeadRelation::Unverifiable))
+                        || (relation == DurableHeadRelation::Unverifiable)
+                        || ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                            && (store_provenance != CheckpointProvenanceClass::Committed)
+                            && (session_is_live == false)
+                            && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)))
                 {
                     matches.push(
                         SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine,
@@ -3638,7 +3656,10 @@ impl SessionDocumentMachineAuthority {
                         && ((relation != DurableHeadRelation::Diverged)
                             || (store_provenance == CheckpointProvenanceClass::IntraTurn))
                         && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                            || (session_is_live == true)))
+                            || ((store_provenance != CheckpointProvenanceClass::Committed)
+                                && ((session_is_live == true)
+                                    || (tail_execution
+                                        == DurableTailExecutionEvidence::NoExecutionContent)))))
                 {
                     matches
                         .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot);
@@ -3708,6 +3729,7 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
                         && (run_id_cardinality == RunIdCardinality::SingleRunId)
+                        && (dangling_tool_use_count == 0)
                         && (orphan_tool_result_count == 0)
                         && (messages_after_terminal == false)
                         && ((terminal_stop_reason == DurableTailStopReason::ToolUse)
@@ -3721,8 +3743,7 @@ impl SessionDocumentMachineAuthority {
                         || (orphan_tool_result_count != 0)
                         || (messages_after_terminal == true)
                         || (terminal_stop_reason == DurableTailStopReason::Other)
-                        || ((terminal_stop_reason == DurableTailStopReason::EndTurn)
-                            && (dangling_tool_use_count != 0)))
+                        || (dangling_tool_use_count != 0))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailAmbiguous);
                 }
@@ -4448,11 +4469,13 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         session_id: SessionDocumentKey,
         relation: DurableHeadRelation,
+        row_provenance: CheckpointProvenanceClass,
         authority_supersedes_row: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRuntimeProjectionConflict {
             session_id,
             relation,
+            row_provenance,
             authority_supersedes_row,
         })
     }
@@ -4489,12 +4512,14 @@ impl SessionDocumentMachineAuthority {
         relation: DurableHeadRelation,
         store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
+        tail_execution: DurableTailExecutionEvidence,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
             session_id,
             relation,
             store_provenance,
             session_is_live,
+            tail_execution,
         })
     }
 

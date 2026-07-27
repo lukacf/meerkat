@@ -199,6 +199,41 @@ fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
 /// mandatory envelope version against the generated persistence version
 /// authority, so a missing or non-current (v0/v1) row fails closed instead of
 /// silently defaulting or upgrading on read.
+
+/// Exact target-local compare token for one stored input bundle. The memory
+/// store's canonical row bytes are the bundle's serialized form (the same
+/// encoding the SQLite backend persists), so both backends report and
+/// enforce the same digests.
+fn memory_input_row_version_digest(bundle: &StoredInputState) -> Result<String, RuntimeStoreError> {
+    use sha2::Digest as _;
+    let bytes = serde_json::to_vec(bundle)
+        .map_err(|err| RuntimeStoreError::Internal(format!("input row encode failed: {err}")))?;
+    Ok(format!("sha256:{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// Pre-validate every fenced input update against the current rows. Must run
+/// BEFORE any mutation so a stale fence leaves the whole boundary untouched
+/// (the SQLite backend gets this from its transaction).
+fn precheck_fenced_input_updates(
+    states: Option<&IndexMap<meerkat_core::lifecycle::InputId, StoredInputState>>,
+    input_updates: &[(StoredInputState, Option<String>)],
+) -> Result<(), RuntimeStoreError> {
+    for (bundle, expected) in input_updates {
+        let Some(expected) = expected else { continue };
+        let current = states.and_then(|map| map.get(&bundle.state.input_id));
+        let matches = match current {
+            Some(current) => memory_input_row_version_digest(current)? == *expected,
+            None => false,
+        };
+        if !matches {
+            return Err(RuntimeStoreError::InputRowVersionConflict {
+                input_id: bundle.state.input_id.0.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn deserialize_persisted_session(bytes: &[u8]) -> Result<meerkat_core::Session, RuntimeStoreError> {
     serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
 }
@@ -601,6 +636,12 @@ impl RuntimeStore for InMemoryRuntimeStore {
             )));
         }
 
+        let input_updates = input_updates
+            .into_iter()
+            .map(InputStatePersistenceRecord::into_stored_and_expected)
+            .collect::<Vec<_>>();
+        precheck_fenced_input_updates(inner.input_states.get(&rid), &input_updates)?;
+
         let outbox = inner
             .compaction_projection_outbox
             .entry(rid.clone())
@@ -620,10 +661,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
         }
         inner.receipts.insert(key, receipt);
 
-        // Input states
+        // Input states (fences already validated above, pre-mutation)
         let states = inner.input_states.entry(rid).or_default();
-        for record in input_updates {
-            let bundle = record.into_stored();
+        for (bundle, _expected) in input_updates {
             states.insert(bundle.state.input_id.clone(), bundle);
         }
 
@@ -718,6 +758,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         session_store_key: meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeStoreError> {
         let machine_lifecycle_record = machine_lifecycle.store_record().encode()?;
+        let lifecycle_expected = machine_lifecycle.expected_version().cloned();
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
         let incoming_session =
@@ -788,6 +829,33 @@ impl RuntimeStore for InMemoryRuntimeStore {
             )));
         }
 
+        let input_updates = input_updates
+            .into_iter()
+            .map(InputStatePersistenceRecord::into_stored_and_expected)
+            .collect::<Vec<_>>();
+        precheck_fenced_input_updates(inner.input_states.get(&rid), &input_updates)?;
+        // Enforce the lifecycle fence BEFORE any mutation: `Missing` demands
+        // the row still be absent; a concrete version demands the stored
+        // bytes still hash to it. The SQLite backend enforces the same rule
+        // inside its writing transaction.
+        if let Some(expected) = &lifecycle_expected {
+            let existing = inner.runtime_lifecycle.get(&rid);
+            let matches = match expected {
+                MachineLifecycleExpectedVersion::Missing => existing.is_none(),
+                MachineLifecycleExpectedVersion::Version(version) => {
+                    existing.is_some_and(|bytes| {
+                        super::MachineLifecycleObservationVersion::from_raw_record(bytes)
+                            == *version
+                    })
+                }
+            };
+            if !matches {
+                return Err(RuntimeStoreError::MachineLifecycleVersionConflict {
+                    runtime_id: rid.clone(),
+                });
+            }
+        }
+
         let outbox = inner
             .compaction_projection_outbox
             .entry(rid.clone())
@@ -809,8 +877,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .insert(rid.clone(), machine_lifecycle_record);
         inner.receipts.insert(key, receipt);
         let states = inner.input_states.entry(rid).or_default();
-        for record in input_updates {
-            let bundle = record.into_stored();
+        for (bundle, _expected) in input_updates {
             states.insert(bundle.state.input_id.clone(), bundle);
         }
         Ok(())
@@ -847,6 +914,40 @@ impl RuntimeStore for InMemoryRuntimeStore {
             sequence,
         };
         Ok(inner.receipts.get(&key).cloned())
+    }
+
+    async fn load_committed_boundary_receipts(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+    ) -> Result<Vec<RunBoundaryReceipt>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let mut receipts = inner
+            .receipts
+            .iter()
+            .filter(|(key, _)| key.runtime_id == runtime_id.0 && key.run_id == *run_id)
+            .map(|(_, receipt)| receipt.clone())
+            .collect::<Vec<_>>();
+        receipts.sort_by_key(|receipt| receipt.sequence);
+        Ok(receipts)
+    }
+
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<(StoredInputState, String)>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let Some(states) = inner.input_states.get(&runtime_id.0) else {
+            return Ok(Vec::new());
+        };
+        let mut rows = states.values().cloned().collect::<Vec<_>>();
+        rows.sort_by_key(|bundle| bundle.state.input_id.0.to_string());
+        rows.into_iter()
+            .map(|bundle| {
+                let digest = memory_input_row_version_digest(&bundle)?;
+                Ok((bundle, digest))
+            })
+            .collect()
     }
 
     async fn load_session_snapshot(
@@ -921,8 +1022,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
-        let bundle = state.as_stored();
-        states.insert(bundle.state.input_id.clone(), bundle.clone());
+        let update = (
+            state.clone_stored(),
+            state.expected_row_digest().map(str::to_owned),
+        );
+        precheck_fenced_input_updates(Some(states), std::slice::from_ref(&update))?;
+        let (bundle, _expected) = update;
+        states.insert(bundle.state.input_id.clone(), bundle);
         Ok(())
     }
 
@@ -933,9 +1039,18 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
-        for record in records {
-            let bundle = record.as_stored();
-            states.insert(bundle.state.input_id.clone(), bundle.clone());
+        let updates = records
+            .iter()
+            .map(|record| {
+                (
+                    record.clone_stored(),
+                    record.expected_row_digest().map(str::to_owned),
+                )
+            })
+            .collect::<Vec<_>>();
+        precheck_fenced_input_updates(Some(states), &updates)?;
+        for (bundle, _expected) in updates {
+            states.insert(bundle.state.input_id.clone(), bundle);
         }
         Ok(())
     }

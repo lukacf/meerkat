@@ -143,6 +143,62 @@ impl std::fmt::Display for DurableHeadRelation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DurableTailExecutionEvidence {
+    #[default]
+    #[serde(rename = "NoExecutionContent")]
+    NoExecutionContent,
+    #[serde(rename = "BoundExecution")]
+    BoundExecution,
+    #[serde(rename = "UnboundExecution")]
+    UnboundExecution,
+}
+impl DurableTailExecutionEvidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoExecutionContent => "NoExecutionContent",
+            Self::BoundExecution => "BoundExecution",
+            Self::UnboundExecution => "UnboundExecution",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailExecutionEvidence {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoExecutionContent" => Ok(Self::NoExecutionContent),
+            "BoundExecution" => Ok(Self::BoundExecution),
+            "UnboundExecution" => Ok(Self::UnboundExecution),
+            other => Err(format!(
+                "invalid DurableTailExecutionEvidence value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailExecutionEvidence {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailExecutionEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DurableTailRecoveryClass {
     #[default]
     #[serde(rename = "CompletedCandidate")]
@@ -2349,6 +2405,7 @@ pub mod inputs {
     pub struct ResolveRuntimeProjectionConflict {
         pub session_id: SessionId,
         pub relation: DurableHeadRelation,
+        pub row_provenance: CheckpointProvenanceClass,
         pub authority_supersedes_row: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2370,6 +2427,7 @@ pub mod inputs {
         pub relation: DurableHeadRelation,
         pub store_provenance: CheckpointProvenanceClass,
         pub session_is_live: bool,
+        pub tail_execution: DurableTailExecutionEvidence,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyDurableTail {

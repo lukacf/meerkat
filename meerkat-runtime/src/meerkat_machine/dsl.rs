@@ -108,6 +108,54 @@ pub enum DurableTailRecoveryDisposition {
     HoldIntact,
 }
 
+/// Typed projection of the PERSISTED machine-lifecycle row observed at
+/// recovery authorization time. Bridging copy of the catalog type; the shell
+/// observes, the machine judges. Fail-closed default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryObservedLifecycle {
+    MissingRow,
+    Idle,
+    Retired,
+    NonQuiescent,
+    #[default]
+    Undecodable,
+}
+
+/// Typed projection of the persisted lifecycle row's current-run fact
+/// relative to the recovery candidate. Bridging copy of the catalog type.
+/// Fail-closed default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryObservedRun {
+    NoRun,
+    CandidateRun,
+    #[default]
+    OtherRun,
+}
+
+/// Comparison of the highest durably committed boundary receipt for the
+/// candidate run against the candidate transcript. Bridging copy of the
+/// catalog type; canonical semantics live in the catalog DSL. Fail-closed
+/// default: an unattributable relationship refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryPriorCommit {
+    #[default]
+    DivergesFromCandidate,
+    NoPriorCommit,
+    PrecedesCandidate,
+    MatchesCandidate,
+}
+
+/// Attribution and fenceability of the input-lifecycle rows the recovered
+/// boundary would terminalize. Bridging copy of the catalog type. Fail-closed
+/// default: unfenceable evidence holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryInputEvidence {
+    #[default]
+    Unfenceable,
+    UnboundContentInput,
+    AllBoundOrInert,
+}
+
 impl<T: Into<String>> From<T> for RunId {
     fn from(s: T) -> Self {
         Self(s.into())

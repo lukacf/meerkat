@@ -283,6 +283,10 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
+            meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
+            | meerkat_core::SessionError::DurableEvidenceQuarantined { .. } => {
+                ErrorCode::SessionNotRunning
+            }
             meerkat_core::SessionError::Store(_)
             | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
         };

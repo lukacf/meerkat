@@ -451,7 +451,6 @@ pub enum CheckpointProvenanceClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeSnapshotReadDisposition {
     /// Serve the committed runtime snapshot.
-    #[default]
     UseRuntimeSnapshot,
     /// Serve the durable store head; it is a committed descendant.
     UseCommittedStoreHead,
@@ -461,7 +460,37 @@ pub enum RuntimeSnapshotReadDisposition {
     /// commit promotes or repairs it first.
     RecoveryRequired,
     /// Evidence is forked or unverifiable. Retain intact; refuse to serve.
+    /// Fail-closed default: an uninitialized verdict must never serve a
+    /// document, matching every sibling classifier in this region.
+    #[default]
     Quarantine,
+}
+
+/// What execution an uncommitted durable tail records, as observed
+/// mechanically by the shell.
+///
+/// The distinction matters because it selects between three different safe
+/// answers, and collapsing it to a boolean maps one of them to the wrong
+/// meaning:
+/// - `NoExecutionContent`: the tail holds no assistant turn output at all
+///   (for example a queued user message the checkpointer projected). The
+///   input lifecycle still owns that work and will redeliver it, so there is
+///   nothing for recovery to commit, close, or protect. Committed authority
+///   is served and the row is RETAINED by the conflict machinery — holding
+///   the session here would be an availability loss with no integrity gain.
+/// - `BoundExecution`: the tail's assistant content carries run identity, so
+///   a recovery commit can be bound to an exact run.
+/// - `UnboundExecution`: the tail records assistant output that carries NO
+///   run identity. This is real execution the input lifecycle will NOT
+///   redeliver, and no run exists to anchor a recovery boundary to. Neither
+///   serving past it (which invites a later projection rebuild to discard
+///   it) nor committing it is safe: quarantine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailExecutionEvidence {
+    NoExecutionContent,
+    BoundExecution,
+    #[default]
+    UnboundExecution,
 }
 
 /// How many distinct run identities the durable tail carries.
@@ -1023,6 +1052,7 @@ machine! {
             ResolveRuntimeProjectionConflict {
                 session_id: SessionId,
                 relation: Enum<DurableHeadRelation>,
+                row_provenance: Enum<CheckpointProvenanceClass>,
                 authority_supersedes_row: bool,
             },
 
@@ -1084,6 +1114,8 @@ machine! {
                 relation: Enum<DurableHeadRelation>,
                 store_provenance: Enum<CheckpointProvenanceClass>,
                 session_is_live: bool,
+                // What execution, if any, does the uncommitted tail record?
+                tail_execution: Enum<DurableTailExecutionEvidence>,
             },
 
             // -----------------------------------------------------------
@@ -4010,19 +4042,25 @@ machine! {
         // runtime recommits past it.
         // ===============================================================
 
-        // A COMMITTED descendant on a cold session is ordinary authority.
+        // A COMMITTED descendant is ordinary authority — independently of
+        // local actor liveness. A live actor observing a committed strict
+        // descendant is a superseded writer (another boundary, or an archive
+        // commit whose retirement failed, advanced past its snapshot); its
+        // stale snapshot must not mask committed truth, and its own next
+        // boundary preflight fails closed against the newer base. The live
+        // exception below is valid only for UNCOMMITTED intra-turn rows.
         transition ResolveRuntimeSnapshotReadSourceCommittedHead {
             on input ResolveRuntimeSnapshotReadSource {
                 session_id,
                 relation,
                 store_provenance,
-                session_is_live
+                session_is_live,
+                tail_execution
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && relation == DurableHeadRelation::VerifiedStrictDescendant
                 && store_provenance == CheckpointProvenanceClass::Committed
-                && session_is_live == false
             }
             update {}
             to Ready
@@ -4039,13 +4077,15 @@ machine! {
                 session_id,
                 relation,
                 store_provenance,
-                session_is_live
+                session_is_live,
+                tail_execution
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && relation == DurableHeadRelation::VerifiedStrictDescendant
                 && store_provenance != CheckpointProvenanceClass::Committed
                 && session_is_live == false
+                && tail_execution == DurableTailExecutionEvidence::BoundExecution
             }
             update {}
             to Ready
@@ -4061,13 +4101,24 @@ machine! {
                 session_id,
                 relation,
                 store_provenance,
-                session_is_live
+                session_is_live,
+                tail_execution
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && ((relation == DurableHeadRelation::Diverged
                         && store_provenance != CheckpointProvenanceClass::IntraTurn)
-                    || relation == DurableHeadRelation::Unverifiable)
+                    || relation == DurableHeadRelation::Unverifiable
+                    // A COLD uncommitted descendant whose assistant content
+                    // carries no run identity records execution that no
+                    // recovery boundary can be anchored to and that the input
+                    // lifecycle will not redeliver. Serving past it would
+                    // invite a later projection rebuild to discard it.
+                    || (relation == DurableHeadRelation::VerifiedStrictDescendant
+                        && store_provenance != CheckpointProvenanceClass::Committed
+                        && session_is_live == false
+                        && tail_execution
+                            == DurableTailExecutionEvidence::UnboundExecution))
             }
             update {}
             to Ready
@@ -4077,8 +4128,9 @@ machine! {
         }
 
         // Everything else serves the committed runtime snapshot: an exact or
-        // behind row, ANY live session (a live runtime's snapshot lag is
-        // transient and it recommits past the row), or an INTRA-TURN sibling
+        // behind row, a live session whose ahead-row is UNCOMMITTED (the live
+        // runtime's own intra-turn residue; its snapshot lag is transient and
+        // it recommits past the row), or an INTRA-TURN sibling
         // that diverges from committed authority — the checkpointer's
         // projection of a turn the boundary resolved differently (e.g. an
         // evicted/cancelled live turn). The committed child is the verified
@@ -4090,7 +4142,8 @@ machine! {
                 session_id,
                 relation,
                 store_provenance,
-                session_is_live
+                session_is_live,
+                tail_execution
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4098,7 +4151,10 @@ machine! {
                 && (relation != DurableHeadRelation::Diverged
                     || store_provenance == CheckpointProvenanceClass::IntraTurn)
                 && (relation != DurableHeadRelation::VerifiedStrictDescendant
-                    || session_is_live == true)
+                    || (store_provenance != CheckpointProvenanceClass::Committed
+                        && (session_is_live == true
+                            || tail_execution
+                                == DurableTailExecutionEvidence::NoExecutionContent)))
             }
             update {}
             to Ready
@@ -4114,13 +4170,20 @@ machine! {
         //               dangling calls, no orphan results, nothing after
         //               the terminal.
         //   Repairable: verified descendant, single run, coherent (no
-        //               orphans, nothing after the terminal), stopped at
-        //               ToolUse or with no recorded terminal.
+        //               orphans, nothing after the terminal), NO dangling
+        //               calls, stopped at ToolUse or with no recorded
+        //               terminal. A dangling tool_use proves intent, not
+        //               execution: its external side effect may have fired
+        //               before the crash, so no tail carrying one may be
+        //               auto-closed and resumed.
         //   Ambiguous:  everything else (explicit negation of the above —
         //               non-descendant relations, zero or multiple runs,
         //               orphan results, content after the terminal, Other
-        //               stop shapes, EndTurn with dangling calls).
-        // No class authorizes discarding; Ambiguous is held intact.
+        //               stop shapes, ANY dangling tool_use call).
+        // No class authorizes discarding; Ambiguous is held intact. For a
+        // dangling call that means held for reconciliation: readable, never
+        // executed against, until an idempotency/reconciliation witness or
+        // an operator verb clears it.
         // ===============================================================
 
         transition ClassifyDurableTailCompleted {
@@ -4166,6 +4229,7 @@ machine! {
                 self.lifecycle_phase == Phase::Ready
                 && relation == DurableHeadRelation::VerifiedStrictDescendant
                 && run_id_cardinality == RunIdCardinality::SingleRunId
+                && dangling_tool_use_count == 0
                 && orphan_tool_result_count == 0
                 && messages_after_terminal == false
                 && (terminal_stop_reason == DurableTailStopReason::ToolUse
@@ -4197,8 +4261,7 @@ machine! {
                     || orphan_tool_result_count != 0
                     || messages_after_terminal == true
                     || terminal_stop_reason == DurableTailStopReason::Other
-                    || (terminal_stop_reason == DurableTailStopReason::EndTurn
-                        && dangling_tool_use_count != 0))
+                    || dangling_tool_use_count != 0)
             }
             update {}
             to Ready
@@ -4209,20 +4272,23 @@ machine! {
         }
 
         // ===============================================================
-        // Runtime-projection-rollback region. Both transitions read the pure
-        // continuation observation and resolve the disposition of a
+        // Runtime-projection-rollback region. These transitions read the
+        // pure continuation observation and resolve the disposition of a
         // runtime-authoritative projection save whose durable row ran ahead
         // of the authority transcript. Total over the observation: a row
         // that faithfully continues the authority (its tail is turn content
-        // whose boundary commit never landed) is rebuilt onto committed
-        // truth; anything else keeps the fail-closed rejection. The shell
-        // mirrors the disposition.
+        // whose boundary commit never landed) is retained for recovery; an
+        // INTRA-TURN row the authority provably superseded is rebuilt onto
+        // committed truth; anything else — including every COMMITTED row —
+        // keeps the fail-closed rejection. The shell mirrors the
+        // disposition.
         // ===============================================================
 
         transition ResolveRuntimeProjectionConflictRetain {
             on input ResolveRuntimeProjectionConflict {
                 session_id,
                 relation,
+                row_provenance,
                 authority_supersedes_row
             }
             guard {
@@ -4236,21 +4302,27 @@ machine! {
             }
         }
 
-        // The committed authority already passed the row's revision: the
-        // row is its own run's superseded intermediate projection, and the
-        // wedge invariant (a lost tail fails every later boundary preflight)
-        // proves no lost content can reach this arm. A verified strict
-        // descendant NEVER reaches here — authority behind the row excludes
-        // supersession by construction.
+        // The committed authority already passed the row's revision AND the
+        // row carries the checkpointer's own INTRA-TURN provenance stamp:
+        // the row is its own run's superseded intermediate projection, and
+        // the wedge invariant (a lost tail fails every later boundary
+        // preflight) proves no lost content can reach this arm. A verified
+        // strict descendant NEVER reaches here — authority behind the row
+        // excludes supersession by construction. A COMMITTED row never
+        // converges: revision ordering does not prove ancestry between two
+        // committed run boundaries, so committed siblings stay divergent
+        // and fail closed on the Reject arm below.
         transition ResolveRuntimeProjectionConflictConverge {
             on input ResolveRuntimeProjectionConflict {
                 session_id,
                 relation,
+                row_provenance,
                 authority_supersedes_row
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && relation != DurableHeadRelation::VerifiedStrictDescendant
+                && row_provenance == CheckpointProvenanceClass::IntraTurn
                 && authority_supersedes_row == true
             }
             update {}
@@ -4264,12 +4336,14 @@ machine! {
             on input ResolveRuntimeProjectionConflict {
                 session_id,
                 relation,
+                row_provenance,
                 authority_supersedes_row
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && relation != DurableHeadRelation::VerifiedStrictDescendant
-                && authority_supersedes_row == false
+                && (authority_supersedes_row == false
+                    || row_provenance != CheckpointProvenanceClass::IntraTurn)
             }
             update {}
             to Ready

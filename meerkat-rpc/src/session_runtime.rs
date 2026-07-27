@@ -43,9 +43,9 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
-    SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
-    SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
+    DeferredPromptPolicy, DurableResumeHold, InitialTurnPolicy, MobToolAuthorityContext,
+    SessionControlError, SessionError, SessionForkAtRequest, SessionForkReplaceRequest,
+    SessionForkResult, SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
     SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
@@ -10404,6 +10404,13 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
         SessionError::NotRunning { .. } => error::INTERNAL_ERROR,
+        // A durable resume hold is not a service fault: the session exists,
+        // its content is retained intact, and no runnable authority may be
+        // handed out until reconciliation promotes or repairs it. Classify it
+        // as "durably present, not runnable" and let the typed
+        // `durable_resume_hold` payload carry which hold applies.
+        SessionError::DurableTailHeldForRecovery { .. }
+        | SessionError::DurableEvidenceQuarantined { .. } => error::SESSION_NOT_RUNNING,
         SessionError::Agent(agent_err) => match agent_err {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
@@ -10465,6 +10472,24 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
 }
 
 fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionError {
+    // A resume hold survives the wire round-trip as its typed variant: the
+    // structured payload, not the prose, is the authority for "intact but
+    // withheld", so a caller across the transport classifies identically to a
+    // caller in-process.
+    if let Some(hold) = err
+        .data
+        .as_ref()
+        .and_then(SessionError::durable_resume_hold_from_data)
+    {
+        return match hold {
+            DurableResumeHold::TailHeldForRecovery => SessionError::DurableTailHeldForRecovery {
+                id: session_id.clone(),
+            },
+            DurableResumeHold::EvidenceQuarantined => SessionError::DurableEvidenceQuarantined {
+                id: session_id.clone(),
+            },
+        };
+    }
     match err.code {
         error::SESSION_NOT_FOUND => SessionError::NotFound {
             id: session_id.clone(),
@@ -10667,6 +10692,28 @@ mod tests {
 
     fn mark_archived_test_session_with_checkpoint(session: &mut Session) {
         mutate_test_session_with_checkpoint_successor(session, mark_archived_store_projection);
+    }
+
+    /// A committed archived successor refuses ingress as `SESSION_NOT_FOUND`.
+    /// The wire code is the contract; the two prose forms ("session not
+    /// found" and "requires canonical runtime teardown") are the same typed
+    /// refusal and must never be what a test (or a caller) classifies on.
+    fn refuses_as_session_absent(err: &RpcError) -> bool {
+        err.code == error::SESSION_NOT_FOUND
+    }
+
+    /// The canonical archived-teardown demand, read from the typed
+    /// `core_executor_teardown_reason` payload rather than message text.
+    fn demands_archived_teardown(err: &RpcError) -> bool {
+        use meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason;
+        refuses_as_session_absent(err)
+            && err
+                .data
+                .as_ref()
+                .and_then(|data| data.get("core_executor_teardown_reason"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(CoreExecutorTeardownReason::from_wire_str)
+                == Some(CoreExecutorTeardownReason::ArchivedSession)
     }
 
     fn set_test_metadata_with_checkpoint_successor(
@@ -13034,16 +13081,35 @@ mod tests {
                 None,
             )
             .await;
+        // A committed archived successor is canonical durable truth even
+        // while a runtime actor is still registered (archive commits the
+        // Archived document BEFORE runtime retirement, and retirement is
+        // permitted to fail). The apply is therefore refused — either as
+        // capacity refusal or as the archived not-found projection — and in
+        // NO case is it admitted as ordinary live work. Classification reads
+        // the typed wire facts (code, teardown payload), never prose;
+        // "Max sessions" survives as a substring only because the
+        // staged-registry capacity refusal is still an untyped
+        // `AgentError::InternalError` upstream.
+        let rejected_error = rejected.as_ref().err();
+        let capacity_refused =
+            rejected_error.is_some_and(|err| err.message.contains("Max sessions"));
         assert!(
-            rejected
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.message.contains("Max sessions")),
-            "archived store projection must not bypass capacity admission: {rejected:?}"
+            capacity_refused || rejected_error.is_some_and(refuses_as_session_absent),
+            "archived store projection must not be admitted as live work: {rejected:?}"
         );
+        // Convergence, not masking: the archived committed successor is
+        // observed as durable truth and the refusal is TYPED — either the
+        // capacity refusal that preceded it, or the canonical archived
+        // teardown demand. (Under the previous rule a live actor masked the
+        // archived document indefinitely, so a session whose archive
+        // committed but whose retirement failed read as active forever.)
         assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "archived store projection must not unregister runtime bindings"
+            capacity_refused
+                || rejected_error.is_some_and(demands_archived_teardown)
+                || !runtime.runtime_adapter.contains_session(&session_id).await,
+            "an observed archived committed successor must converge the runtime or demand \
+             canonical teardown, not be silently masked: {rejected:?}"
         );
 
         release.notify_waiters();
@@ -13101,13 +13167,22 @@ mod tests {
                 None,
             )
             .await;
+        // The archived committed successor is canonical: external ingress is
+        // refused with the archived not-found projection rather than
+        // silently appended to a session the durable record says is closed.
+        let refusal = accepted.as_ref().err();
         assert!(
-            accepted.is_ok(),
-            "archived store projection is inert for live runtime state: {accepted:?}"
+            refusal.is_some_and(refuses_as_session_absent),
+            "archived committed successor must refuse external ingress: {accepted:?}"
         );
+        // ...and the runtime either converges (stale registration cleared) or
+        // demands canonical teardown. What it must NOT do is silently accept
+        // the input onto a session the durable record says is closed.
         assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "archived store projection must not unregister runtime state"
+            refusal.is_some_and(demands_archived_teardown)
+                || !runtime.runtime_adapter.contains_session(&session_id).await,
+            "observing the archived committed successor must retire the stale runtime state \
+             or demand canonical teardown: {accepted:?}"
         );
 
         let peer_accepted = runtime
@@ -13120,13 +13195,14 @@ mod tests {
                 serde_json::json!({"archived": true}),
             )
             .await;
+        // Peer terminal ingress observes the same canonical archived truth:
+        // refused, never appended to a closed session.
         assert!(
-            peer_accepted.is_ok(),
-            "archived store projection is inert for peer terminal input: {peer_accepted:?}"
-        );
-        assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "archived store projection must not unregister runtime state"
+            peer_accepted
+                .as_ref()
+                .err()
+                .is_some_and(refuses_as_session_absent),
+            "archived committed successor must refuse peer terminal ingress: {peer_accepted:?}"
         );
     }
 
@@ -14794,8 +14870,9 @@ mod tests {
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
                 meerkat_runtime::SessionDelta {
                     session_snapshot: output
-                        .session_snapshot
-                        .expect("runtime context output should carry a machine commit snapshot"),
+                        .into_committed()
+                        .expect("runtime context output should carry a machine commit snapshot")
+                        .into_snapshot_bytes(),
                 },
             )
             .await
@@ -15135,8 +15212,9 @@ mod tests {
                 &meerkat_runtime::LogicalRuntimeId::for_session(session_id),
                 meerkat_runtime::SessionDelta {
                     session_snapshot: output
-                        .session_snapshot
-                        .expect("runtime output should carry a machine commit snapshot"),
+                        .into_committed()
+                        .expect("runtime output should carry a machine commit snapshot")
+                        .into_snapshot_bytes(),
                 },
             )
             .await
@@ -16416,7 +16494,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn.clone(), blob_store),
             crate::router::NotificationSink::noop(),
         ));
 
@@ -16473,16 +16551,67 @@ mod tests {
                 .expect("live status after failed commit"),
             "failed machine receipt must evict the uncommitted live turn"
         );
+        // The "fails closed" claim is about RUNTIME AUTHORITY, not about the
+        // durable transcript: the machine receipt failed, so the committed
+        // runtime snapshot must NOT have advanced past the previous turn.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let authority_after = runtime_store_dyn
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load runtime snapshot after failed commit")
+            .expect("runtime snapshot must exist");
+        let authority_session: meerkat_core::Session =
+            serde_json::from_slice(&authority_after).expect("decode runtime snapshot");
+        assert_eq!(
+            authority_session.messages().len(),
+            durable_message_count,
+            "failed machine receipt must not advance committed runtime authority"
+        );
+
+        // The durable SessionStore row, however, legitimately carries the
+        // turn's content: the direct-turn path saves it before the authority
+        // commit, and that content is real, digest-verified turn output. It
+        // must never be rolled back. The next authoritative read therefore
+        // reaches machine-owned durable-tail recovery, which — for a
+        // COMPLETED tail with no ambiguous input identity — commits it as a
+        // recovered run boundary rather than discarding it or reporting the
+        // session as stuck.
         let durable_after = runtime
             .service
             .load_authoritative_session(&session_id)
             .await
             .expect("load durable session after failure")
-            .expect("durable session should remain at previous snapshot");
+            .expect("durable session must remain readable");
+        assert!(
+            durable_after.messages().len() > durable_message_count,
+            "the durable turn content must be preserved, not rolled back: {} messages",
+            durable_after.messages().len()
+        );
+        match durable_after
+            .try_checkpoint_state()
+            .expect("recovered document must carry a typed checkpoint")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => assert_eq!(
+                stamp.provenance(),
+                meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+                "the promoted tail must be stamped as a machine-authorized recovery commit, \
+                 never served as an ordinary boundary"
+            ),
+            other => panic!("recovered document lacks typed authority: {other:?}"),
+        }
+        // ...and the recovery is durable: the runtime authority now carries
+        // the recovered content under its own committed receipt.
+        let recovered_authority = runtime_store_dyn
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load runtime snapshot after recovery")
+            .expect("runtime snapshot must exist after recovery");
+        let recovered_session: meerkat_core::Session =
+            serde_json::from_slice(&recovered_authority).expect("decode recovered snapshot");
         assert_eq!(
+            recovered_session.messages().len(),
             durable_after.messages().len(),
-            durable_message_count,
-            "failed machine receipt must not persist the completed service turn snapshot"
+            "recovery must commit the recovered document as runtime authority"
         );
     }
 
@@ -19438,14 +19567,19 @@ mod tests {
                 service_start_turn_request("stale direct deferred turn"),
             )
             .await;
+        // The archived row is a COMMITTED successor of this session's own
+        // checkpoint chain — canonical durable truth, not an ignorable
+        // compatibility projection. The service turn is refused with the
+        // typed archived-teardown demand, and the reserved admission is
+        // released either way.
         assert!(
-            completed.is_ok(),
-            "compatibility archive projection must not retire a runtime-backed direct session: {completed:?}"
+            completed.is_err(),
+            "an archived committed successor must refuse the direct service turn: {completed:?}"
         );
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
-            .expect("completed direct turn should release RPC admission");
+            .expect("archive convergence should release RPC admission");
     }
 
     #[cfg(feature = "mob")]
@@ -19489,15 +19623,30 @@ mod tests {
                 None,
             )
             .await;
+        // The archived row is a COMMITTED successor of the deferred
+        // session's own checkpoint chain, so it is canonical durable truth,
+        // not an ignorable compatibility projection: start_turn is refused
+        // and the reserved admission is released by the convergence cleanup.
         assert!(
-            completed.is_ok(),
-            "runtime start_turn must ignore compatibility archive projection without machine retirement: {completed:?}"
+            completed
+                .as_ref()
+                .err()
+                .is_some_and(refuses_as_session_absent),
+            "an archived committed successor must refuse the direct turn: {completed:?}"
         );
 
+        // The refusal is the canonical archived-teardown demand, so the
+        // reserved admission is released by that teardown rather than by a
+        // completed turn. Drive the ingress gate (which runs the archive
+        // runtime cleanup) and then confirm capacity actually converges —
+        // an archived session must not hold an admission slot forever.
+        let _ = runtime
+            .reject_archived_persisted_session_without_live(&direct.session_id)
+            .await;
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
-            .expect("completed runtime start_turn should release direct deferred admission");
+            .expect("archive convergence should release the direct deferred admission");
     }
 
     #[cfg(feature = "mob")]
@@ -19542,15 +19691,29 @@ mod tests {
                 None,
             )
             .await;
+        // Same rule on the apply path: a committed archived successor is
+        // durable truth, so the apply is refused and the convergence cleanup
+        // releases the reserved admission.
         assert!(
-            completed.is_ok(),
-            "runtime apply must ignore compatibility archive projection without machine retirement: {completed:?}"
+            completed
+                .as_ref()
+                .err()
+                .is_some_and(refuses_as_session_absent),
+            "an archived committed successor must refuse the direct apply: {completed:?}"
         );
 
+        // The refusal is the canonical archived-teardown demand, so the
+        // reserved admission is released by that teardown rather than by a
+        // completed turn. Drive the ingress gate (which runs the archive
+        // runtime cleanup) and then confirm capacity actually converges —
+        // an archived session must not hold an admission slot forever.
+        let _ = runtime
+            .reject_archived_persisted_session_without_live(&direct.session_id)
+            .await;
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
-            .expect("completed runtime apply should release direct deferred admission");
+            .expect("archive convergence should release the direct deferred admission");
     }
 
     #[cfg(feature = "mob")]
@@ -25932,6 +26095,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A durable resume hold must never reach a caller as an internal fault:
+    /// the session is intact and withheld. The hold class survives as typed
+    /// structured data in both directions, so a caller across the transport
+    /// classifies identically to one in-process — no prose parsing anywhere.
+    #[test]
+    fn session_error_to_rpc_surfaces_durable_resume_holds_as_typed_holds() {
+        let id = SessionId::new();
+        for (session_err, hold) in [
+            (
+                SessionError::DurableTailHeldForRecovery { id: id.clone() },
+                DurableResumeHold::TailHeldForRecovery,
+            ),
+            (
+                SessionError::DurableEvidenceQuarantined { id: id.clone() },
+                DurableResumeHold::EvidenceQuarantined,
+            ),
+        ] {
+            let expected_code = session_err.code();
+            let rpc_err = session_error_to_rpc(session_err);
+            assert_eq!(rpc_err.code, error::SESSION_NOT_RUNNING);
+            let data = rpc_err.data.clone().expect("hold must carry typed data");
+            assert_eq!(
+                SessionError::durable_resume_hold_from_data(&data),
+                Some(hold)
+            );
+            assert_eq!(
+                data.get("session_error_code")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_code)
+            );
+            assert_eq!(
+                data.get("content_retained")
+                    .and_then(serde_json::Value::as_bool),
+                Some(true),
+                "a hold retains durable content; it never reports loss"
+            );
+            let round_tripped = rpc_error_to_session_error(rpc_err, &id);
+            assert_eq!(round_tripped.durable_resume_hold(), Some(hold));
+            assert_eq!(round_tripped.code(), expected_code);
+        }
     }
 
     #[test]

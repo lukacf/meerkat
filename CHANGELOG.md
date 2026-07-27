@@ -15,16 +15,49 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
-- `meerkat_mob::MobSessionService` gains `load_session_for_resume` returning
-  the new `ResumeSessionLoad` enum; `RuntimeProjectionRollbackDisposition` /
+- `meerkat_mob::MobSessionService` gains a REQUIRED `load_session_for_resume`
+  returning the new `ResumeSessionLoad` enum (no default: a composition over
+  the legacy optional reads can never produce `ArchivedNotRevivable`, so
+  implementers must state their own truth); `MobError` gains
+  `SessionUnavailableForResume` with a typed
+  `SessionResumeUnavailableReason`, and `MobFailureClass` gains
+  `TargetArchived`; `RuntimeProjectionRollbackDisposition` /
   `ResolveRuntimeProjectionRollback` are replaced by
   `RuntimeProjectionConflictDisposition` / `ResolveRuntimeProjectionConflict`
-  (and `RebuildToAuthority` no longer exists);
-  `SessionCheckpointProvenance` gains `RecoveredRunBoundaryCommit` and
-  `RecoveredInterruptedBoundary` (older binaries cannot deserialize sessions
-  stamped with them); `CoreApplyOutput` gains a `session` field;
-  `commit_runtime_loop_run` takes the typed session witness;
-  `ResolveRuntimeSnapshotReadSource` input/effect shapes changed.
+  (and `RebuildToAuthority` no longer exists), whose input gains
+  `row_provenance`; `SessionCheckpointProvenance` gains
+  `RecoveredRunBoundaryCommit` and `RecoveredInterruptedBoundary` under a new
+  per-record stamp schema v2 (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED`
+  — ordinary stamps still write v1, so only recovered records refuse on older
+  binaries, and they refuse typed rather than as unknown-enum corruption);
+  `CoreApplyOutput`'s public `session_snapshot`/`session` fields collapse
+  into one private sealed `BoundSessionCommit` field (constructors
+  `CoreApplyOutput::new` / `with_untyped_snapshot` replace struct literals;
+  accessors `committed()` / `snapshot_bytes()` / `session()` /
+  `into_parts()`), and `with_session` returns `Result` because it mints the
+  sealed pair by serializing the session itself, so the certified typed
+  session and the persisted bytes cannot diverge or be re-paired;
+  `commit_runtime_loop_run` takes the sealed commit; `SessionError` gains
+  two typed variants, `DurableTailHeldForRecovery` and
+  `DurableEvidenceQuarantined` (stable codes
+  `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` /
+  `SESSION_DURABLE_EVIDENCE_QUARANTINED`, typed `durable_resume_hold`
+  structured payload), so exhaustive matches over `SessionError` need two
+  new arms; `ResolveRuntimeSnapshotReadSource` input/effect shapes changed;
+  `AuthorizeDurableTailRecovery` gains persisted-fact inputs
+  (`observed_lifecycle`, `observed_current_run`, `last_committed_sequence`)
+  plus the `prior_commit` / `input_evidence` evidence enums
+  (`DurableRecoveryPriorCommit`, `DurableRecoveryInputEvidence`), and commit
+  verdicts arrive as the `DurableTailRecoveryCommitAuthorized` effect
+  carrying the machine-minted boundary sequence;
+  `DurableTailRecoveryRequest`'s fields are private and its only
+  constructor, `from_classification`, requires the classifier's own
+  `DurableTailClassified` verdict effect; `RuntimeStore` gains
+  `load_committed_boundary_receipts` and `load_input_states_with_versions`
+  (both defaulted) and two fencing error variants
+  (`InputRowVersionConflict` / `MachineLifecycleVersionConflict`) — stores
+  applying fenced records must enforce `expected_row_digest` inside the
+  writing transaction.
 
 ### Fixed
 
@@ -38,13 +71,52 @@ via cargo-semver-checks against the published baselines).
   snapshot + receipt + input terminalization) under new recovered-boundary
   provenances anchored to the last committed authority. The recovery rule:
   every verified durable descendant is preserved — committed as completed,
-  closed as interrupted (synthetic `outcome_unknown` tool results, typed
-  recovery notice, input terminalized not requeued), or held intact. Nothing
+  closed as interrupted (typed recovery notice, input terminalized not
+  requeued), or held intact. Nothing
   rolls back; `RebuildToAuthority` is deleted, with
   `ConvergeSupersededProjection` covering the abort-replay projection case
   its wedge invariant proves safe. Exactly-once holds across recovery: the
   commit terminalizes the consumed input so the delivery layer does not
   re-run a recovered turn.
+- **Recovery hardening (external review of the recovery pipeline).** A
+  dangling `tool_use` in a durable tail now HOLDS the tail for reconciliation
+  instead of being auto-closed with synthetic results: the call proves
+  intent, not execution, and its external side effect may already have fired.
+  Recovery authorization judges the PERSISTED machine-lifecycle row and the
+  durably committed receipts (typed machine inputs) instead of a freshly
+  registered, vacuously quiescent authority; the machine MINTS the recovery
+  boundary sequence one past the last committed receipt for the run (a
+  hard-coded sequence 1 could collide with an interrupted tool loop's
+  `BoundaryContinue` receipt) and records the run terminal, and the shell
+  realizes it through the lifecycle-aware atomic seam fenced on the exact
+  observed row version. The machine also owns the already-recovered refusal:
+  a candidate the highest committed receipt already covers refuses instead
+  of minting a phantom duplicate boundary (receipt-key uniqueness fences
+  only same-sequence races, not a second recovery that observes the first
+  one's receipt), and a prior commit the candidate neither extends nor
+  equals refuses as divergent. Input terminalization now uses durable
+  identity only (persisted run bindings, receipt `contributing_input_ids`)
+  with fenced row-version CAS; text matching is gone, and an unbound
+  non-terminal content input holds the recovery instead of guessing — both
+  hold verdicts are machine-minted, the shell observes input evidence before
+  the drive and never downgrades a commit authorization on its own. A held
+  or quarantined session surfaces typed
+  (`SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` /
+  `SESSION_DURABLE_EVIDENCE_QUARANTINED` with the `durable_resume_hold`
+  payload) instead of as internal-error prose. Run→input bindings are
+  persisted at staging, BEFORE execution, so a crash mid-run leaves identity
+  evidence to recover against. Recovery promotes the whole durable document
+  (usage, timestamps, every non-transcript metadata key — including
+  compaction projection intents) rather than messages alone. A committed
+  strict descendant now wins over a stale live snapshot regardless of local
+  actor liveness (an archived head whose runtime retirement failed was
+  masked), and projection convergence requires intra-turn row provenance so
+  two committed siblings can never overwrite each other. Read-triggered
+  recovery takes an exclusive per-session fence, re-observes the head under
+  it, and converges idempotently when a competing process wins the commit.
+  The advisory's own "Am I affected?" command no longer uses
+  `sqlite3 ?immutable=1`, which ignores the WAL and can report a false
+  "unaffected".
 - **P0: process-global verification memos no longer bless bytes nobody
   validated.** The transcript-graph decode memo stores the proven graph
   object (a hit substitutes proven content) with `digest_format` and
@@ -71,10 +143,18 @@ via cargo-semver-checks against the published baselines).
 
 ### Changed
 
-- The turn-latency gate asserts BYTES hashed per turn on both fixtures with
-  a calibrated small-side band; wall-clock and CPU are diagnostics. A
-  deliberately inflated baseline that turned the old CPU-ratio gate green is
-  refused with absolute numbers.
+- The turn-latency smoke gate asserts what is actually true today: fixture
+  validity, a calibrated small-side band on bytes hashed per turn
+  (instrument honesty — a broken counter reads zero, an inflated baseline
+  reads high), and a per-fixture boundary-serialization envelope
+  (repeated-reserialize backstop, using a new
+  `global_session_encode_bytes` counter, because a digest-flat turn can
+  still hide an O(document) reserialize that hashes nothing). The
+  large/small FLATNESS ratio is recorded as a measurement, not asserted:
+  size-independent turn-boundary work has not landed, and its assertion
+  lives in `mob_turn_flatness_red_by_design`, deliberately outside every
+  lane until the witness-v3 migration arms it. Shipping a known-red
+  assertion inside a required lane would have been a false green.
 - Large-fixture turn cost 479 → 435 MB hashed per turn (sealed
   transcript-history threading; the 8 per-turn document decodes reuse the
   sealed parse; transcript-history extracted from `session.rs` into

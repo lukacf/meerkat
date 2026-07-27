@@ -1160,6 +1160,59 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
     ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::RuntimeStoreError> {
         self.inner.load_input_states(runtime_id).await
     }
+    /// The lifecycle-aware atomic seam is what machine-authorized recovery
+    /// commits through. The cut applies to it exactly as it does to
+    /// `atomic_apply` — it always carries a session delta — so a recovery
+    /// attempted DURING the cut fails, and one attempted after restart
+    /// (when the cut is lifted) commits.
+    async fn atomic_apply_with_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        session_delta: meerkat_runtime::SessionDelta,
+        receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+        machine_lifecycle: meerkat_runtime::store::MachineLifecycleCommit,
+        input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        if self.is_cut() {
+            self.record_boundary_commit_rejection();
+            return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                "power cut (atomic_apply_with_machine_lifecycle): durable runtime-store write lost"
+                    .to_string(),
+            ));
+        }
+        self.inner
+            .atomic_apply_with_machine_lifecycle(
+                runtime_id,
+                session_delta,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            )
+            .await
+    }
+
+    async fn load_committed_boundary_receipts(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .load_committed_boundary_receipts(runtime_id, run_id)
+            .await
+    }
+
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Vec<(meerkat_runtime::input_state::StoredInputState, String)>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.load_input_states_with_versions(runtime_id).await
+    }
 
     async fn load_boundary_receipt(
         &self,

@@ -320,11 +320,16 @@ fn identity_session_load_error_class(
             )
             | None => IdentitySessionLoadErrorClass::Unavailable,
         },
+        // Forked/unverifiable durable evidence is a permanent corruption
+        // verdict; a tail held for reconciliation is a temporary hold the
+        // identity machine may retry after the hold clears.
+        SessionError::DurableEvidenceQuarantined { .. } => IdentitySessionLoadErrorClass::Malformed,
         SessionError::NotFound { .. }
         | SessionError::Busy { .. }
         | SessionError::CompactionDisabled
         | SessionError::NotRunning { .. }
         | SessionError::Agent(_)
+        | SessionError::DurableTailHeldForRecovery { .. }
         | SessionError::FailedWithData { .. } => IdentitySessionLoadErrorClass::Unavailable,
     }
 }
@@ -9786,13 +9791,35 @@ impl MobActor {
                         view.billing.total_tokens,
                     ),
                     Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                        let _ = self
-                            .record_missing_member_bridge_session(
-                                agent_identity,
-                                bridge_session_id,
-                                "member_status",
-                            )
-                            .await;
+                        // An ordinary read hides archived documents, so its
+                        // NotFound is NOT proof of absence. Only the typed
+                        // resume seam's explicit Absent may record the
+                        // permanent missing-session fact; an intact archived
+                        // document (revivable or held) simply reports no
+                        // local details.
+                        let genuinely_absent = matches!(
+                            self.session_service
+                                .load_session_for_resume(bridge_session_id)
+                                .await,
+                            Ok(super::session_service::ResumeSessionLoad::Absent)
+                        );
+                        if genuinely_absent {
+                            let _ = self
+                                .record_missing_member_bridge_session(
+                                    agent_identity,
+                                    bridge_session_id,
+                                    "member_status",
+                                )
+                                .await;
+                        } else {
+                            tracing::debug!(
+                                %agent_identity,
+                                %bridge_session_id,
+                                "member status read NotFound but the durable document is not \
+                                 absent (archived or transiently unreadable); not recording a \
+                                 missing bridge session"
+                            );
+                        }
                         (None, 0)
                     }
                     Err(_) => (None, 0),
@@ -10089,15 +10116,21 @@ impl MobActor {
 
         // Raw observation only: the live runtime is gone; is the durable
         // snapshot still materializable? The verdict belongs to MobMachine.
-        // Presence is probed over the metadata-only read seam — the full
-        // document is loaded later, and only on the machine-authorized
-        // revival path.
+        // Presence is probed over the TYPED resume seam, not the
+        // archive-filtered metadata read: an intact Archived+Idle document
+        // would probe as absent there and be recorded as a terminal restore
+        // failure. Active, Revivable, AND ArchivedNotRevivable all mean the
+        // durable snapshot exists; only an explicit Absent means missing.
+        // The full document is loaded later, and only on the
+        // machine-authorized revival path.
         let stored_session_present = if self.session_service.supports_persistent_sessions() {
-            self.session_service
-                .load_persisted_session_metadata(bridge_session_id)
-                .await
-                .map_err(MobError::SessionError)?
-                .is_some()
+            !matches!(
+                self.session_service
+                    .load_session_for_resume(bridge_session_id)
+                    .await
+                    .map_err(MobError::SessionError)?,
+                super::session_service::ResumeSessionLoad::Absent
+            )
         } else {
             false
         };
@@ -16806,10 +16839,37 @@ impl MobActor {
         #[cfg(test)]
         IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let loaded = self
+        // Typed resume-seam read: `load_persisted_session` deliberately
+        // hides archived documents, and mapping that hidden state to
+        // authoritative Missing let identity reconciliation mark an intact
+        // Archived+Idle member Broken before explicit resume could revive
+        // it. Archived-but-not-revivable observes as UNAVAILABLE (a holding
+        // state), never as absence.
+        let loaded = match self
             .session_service
-            .load_persisted_session(&desired.session_id)
-            .await;
+            .load_session_for_resume(&desired.session_id)
+            .await
+        {
+            Ok(
+                super::session_service::ResumeSessionLoad::Active(session)
+                | super::session_service::ResumeSessionLoad::Revivable(session),
+            ) => Ok(Some(*session)),
+            Ok(super::session_service::ResumeSessionLoad::Absent) => Ok(None),
+            Ok(super::session_service::ResumeSessionLoad::ArchivedNotRevivable {
+                runtime_state,
+            }) => {
+                let state = runtime_state.map_or_else(
+                    || "<no runtime record>".to_string(),
+                    |state| state.to_string(),
+                );
+                return crate::identity::IdentitySessionObservation::unavailable(format!(
+                    "session '{}' is archived and not revivable from runtime state {state}; \
+                     the transcript is intact and preserved — refusing to observe it as missing",
+                    desired.session_id
+                ));
+            }
+            Err(error) => Err(error),
+        };
         match identity_session_observation_from_persisted_load(desired, loaded) {
             Ok(observation) => observation,
             Err(error) => crate::identity::IdentitySessionObservation::unavailable(format!(

@@ -970,6 +970,7 @@ meerkat_machine_runtime_internal_inputs!(
         SurfaceStageRemove,
     ],
     FailureRecoveryLifecycle => [
+        AuthorizeDurableTailRecovery,
         AuthorizeInteractionTerminalOutboxAdoption,
         ClassifyLlmFailureRecovery,
         ClassifyRuntimeAuthorityReconciliation,

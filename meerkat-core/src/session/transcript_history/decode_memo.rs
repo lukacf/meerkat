@@ -28,19 +28,28 @@ pub(super) const TRANSCRIPT_GRAPH_FACT_VALIDATED: u8 = 2;
 /// Cheap structural identity of a transcript revision graph for the
 /// process-lifetime decode memos.
 ///
-/// The key pins everything a cached decode outcome may depend on EXCEPT
-/// retained message content: the digest-format generation, the head revision
-/// string, every retained body's content-addressed revision string, parent
-/// pointer, `created_at`, and message count, and the full serialized commit
-/// log (span digests, selection bounds, counts). Message content is
-/// deliberately unpinned because the validated memo's VALUE is a graph whose
-/// bodies were proved against those same revision strings — a hit
-/// substitutes proven content rather than trusting incoming content, so the
-/// key needs totality over the fields the digests do not pin, not
-/// collision-resistance. The `fact` tag namespaces the two memos so one can
-/// never satisfy a consult for the other. Hashing here is O(graph
-/// structure), never O(message content), and deliberately does not count as
-/// a content-digest computation.
+/// The key pins everything a substituted graph value may DIFFER in even when
+/// every content digest matches: the digest-format generation, the head
+/// revision string, every retained body's content-addressed revision string,
+/// parent pointer, `created_at`, and message count, the full serialized
+/// commit log (span digests, selection bounds, counts), and — critically —
+/// the per-message fields transcript-digest canonicalization deliberately
+/// ERASES before hashing (`erase_message_construction_bookkeeping` /
+/// `canonicalize_digest_image_blocks` in `session.rs`): each message's
+/// [`TranscriptMessageIdentity`] (run/interaction/objective ids), its
+/// `created_at`, and each image block's inline-vs-blob representation form.
+/// Without those, two documents proving the same revision strings could
+/// still differ in run provenance or storage form, and a memo hit would
+/// substitute one document's provenance onto another invisibly to every
+/// later digest/witness check (they canonicalize the same way).
+///
+/// Canonicalized message CONTENT stays unpinned: the revision strings are
+/// content addresses over it, and inline image bytes are bound transitively
+/// through their content-addressed blob ids. Hashing here is O(graph
+/// structure + erased bookkeeping), never O(message content), and
+/// deliberately does not count as a content-digest computation. The `fact`
+/// tag namespaces the two memos so one can never satisfy a consult for the
+/// other.
 pub(super) fn transcript_graph_shape_key(
     fact: u8,
     digest_format: u32,
@@ -69,6 +78,9 @@ pub(super) fn transcript_graph_shape_key(
         hasher.update((created_at.len() as u64).to_le_bytes());
         hasher.update(&created_at);
         hasher.update((body.messages.len() as u64).to_le_bytes());
+        for message in &body.messages {
+            hash_digest_erased_message_fields(&mut hasher, message)?;
+        }
     }
     hasher.update((commits.len() as u64).to_le_bytes());
     for commit in commits {
@@ -86,6 +98,83 @@ pub(super) fn transcript_graph_shape_key(
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     Some(out)
+}
+
+/// Pin the per-message fields the transcript digest deliberately erases, so
+/// a memo key can never collide across documents that differ ONLY in those
+/// fields. Must stay the exact complement of
+/// `erase_message_construction_bookkeeping` +
+/// `canonicalize_digest_image_blocks` in `session.rs`; the coupling is
+/// pinned by `shape_key_pins_digest_erased_fields` in the decode-memo tests.
+fn hash_digest_erased_message_fields(hasher: &mut Sha256, message: &crate::Message) -> Option<()> {
+    use crate::Message;
+    fn hash_time(hasher: &mut Sha256, at: &crate::types::MessageTimestamp) -> Option<()> {
+        let bytes = serde_json::to_vec(at).ok()?;
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+        Some(())
+    }
+    fn hash_identity(
+        hasher: &mut Sha256,
+        identity: &crate::types::TranscriptMessageIdentity,
+    ) -> Option<()> {
+        let bytes = serde_json::to_vec(identity).ok()?;
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+        Some(())
+    }
+    fn hash_image_forms(hasher: &mut Sha256, blocks: &[crate::types::ContentBlock]) {
+        for block in blocks {
+            if let crate::types::ContentBlock::Image { data, .. } = block {
+                match data {
+                    crate::types::ImageData::Inline { .. } => hasher.update([b'i']),
+                    crate::types::ImageData::Blob { .. } => hasher.update([b'b']),
+                }
+            }
+        }
+    }
+    match message {
+        Message::System(system) => {
+            hasher.update([1]);
+            hash_time(hasher, &system.created_at)?;
+        }
+        Message::SystemNotice(notice) => {
+            hasher.update([2]);
+            hash_time(hasher, &notice.created_at)?;
+            for block in &notice.blocks {
+                match block {
+                    crate::types::SystemNoticeBlock::Comms { content, .. }
+                    | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
+                        hash_image_forms(hasher, content);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Message::User(user) => {
+            hasher.update([3]);
+            hash_identity(hasher, &user.identity)?;
+            hash_time(hasher, &user.created_at)?;
+            hash_image_forms(hasher, &user.content);
+        }
+        Message::BlockAssistant(assistant) => {
+            hasher.update([4]);
+            hash_identity(hasher, &assistant.identity)?;
+            hash_time(hasher, &assistant.created_at)?;
+        }
+        Message::ToolResults {
+            created_at,
+            results,
+            ..
+        } => {
+            hasher.update([5]);
+            hash_time(hasher, created_at)?;
+            for result in results {
+                hash_image_forms(hasher, &result.content);
+            }
+        }
+    }
+    Some(())
 }
 
 /// Process-lifetime bounded FIFO memo keyed by transcript-graph shape.
@@ -149,20 +238,81 @@ fn transcript_graph_heal_probe_memo() -> &'static Mutex<BoundedTranscriptGraphMe
     })
 }
 
-/// Deliberately small: entries retain whole transcript graphs by `Arc`, not
-/// 66-byte key strings, and production documents on record reach 14-94 MB.
-/// Eviction only costs a re-validation.
-const TRANSCRIPT_GRAPH_VALIDATED_MEMO_CAPACITY: usize = 32;
+/// Byte budget for the validated-graph memo. Entries retain whole transcript
+/// graphs by `Arc`, and production documents on record reach 14-94 MB — an
+/// entry-COUNT bound of 32 would nominally retain 448 MB-3 GB and convert a
+/// CPU optimization into deterministic OOM pressure. Bounding by retained
+/// bytes keeps ~18 typical (14 MB) graphs or ~2 pathological (94 MB) ones;
+/// eviction only costs a re-validation.
+const TRANSCRIPT_GRAPH_VALIDATED_MEMO_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+/// An entry larger than half the budget would monopolize the memo for
+/// marginal hit value; skip it (the graph simply re-validates each decode).
+const TRANSCRIPT_GRAPH_VALIDATED_MEMO_ENTRY_CAP: usize =
+    TRANSCRIPT_GRAPH_VALIDATED_MEMO_BYTE_BUDGET / 2;
 
-static TRANSCRIPT_GRAPH_VALIDATED_MEMO: OnceLock<
-    Mutex<BoundedTranscriptGraphMemo<Arc<TranscriptHistoryState>>>,
-> = OnceLock::new();
+/// Byte-budgeted LRU over `Arc`-retained validated graphs.
+///
+/// `get` promotes; `record` measures the entry by its serialized size (paid
+/// once, on the same decode that just paid a full validation), evicts
+/// least-recently-used entries until the budget holds, and skips oversized
+/// graphs entirely.
+struct ByteBudgetedTranscriptGraphMemo {
+    budget_bytes: usize,
+    entry_cap_bytes: usize,
+    retained_bytes: usize,
+    entries: HashMap<String, (Arc<TranscriptHistoryState>, usize)>,
+    order: VecDeque<String>,
+}
 
-fn transcript_graph_validated_memo()
--> &'static Mutex<BoundedTranscriptGraphMemo<Arc<TranscriptHistoryState>>> {
+impl ByteBudgetedTranscriptGraphMemo {
+    fn new(budget_bytes: usize, entry_cap_bytes: usize) -> Self {
+        Self {
+            budget_bytes,
+            entry_cap_bytes,
+            retained_bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Arc<TranscriptHistoryState>> {
+        let (state, _) = self.entries.get(key)?;
+        let state = Arc::clone(state);
+        if let Some(position) = self.order.iter().position(|entry| entry == key) {
+            let entry = self.order.remove(position);
+            if let Some(entry) = entry {
+                self.order.push_back(entry);
+            }
+        }
+        Some(state)
+    }
+
+    fn record(&mut self, key: String, value: Arc<TranscriptHistoryState>, bytes: usize) {
+        if bytes > self.entry_cap_bytes || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.retained_bytes + bytes > self.budget_bytes {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, evicted_bytes)) = self.entries.remove(&evicted) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(evicted_bytes);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.retained_bytes += bytes;
+        self.entries.insert(key, (value, bytes));
+    }
+}
+
+static TRANSCRIPT_GRAPH_VALIDATED_MEMO: OnceLock<Mutex<ByteBudgetedTranscriptGraphMemo>> =
+    OnceLock::new();
+
+fn transcript_graph_validated_memo() -> &'static Mutex<ByteBudgetedTranscriptGraphMemo> {
     TRANSCRIPT_GRAPH_VALIDATED_MEMO.get_or_init(|| {
-        Mutex::new(BoundedTranscriptGraphMemo::new(
-            TRANSCRIPT_GRAPH_VALIDATED_MEMO_CAPACITY,
+        Mutex::new(ByteBudgetedTranscriptGraphMemo::new(
+            TRANSCRIPT_GRAPH_VALIDATED_MEMO_BYTE_BUDGET,
+            TRANSCRIPT_GRAPH_VALIDATED_MEMO_ENTRY_CAP,
         ))
     })
 }
@@ -210,14 +360,19 @@ pub(super) fn memoized_validated_transcript_graph(
     transcript_graph_validated_memo()
         .lock()
         .ok()
-        .and_then(|memo| memo.get(key).map(Arc::clone))
+        .and_then(|mut memo| memo.get(key))
 }
 
 /// Record the post-prune graph one completed full validation proved for
-/// this exact graph shape.
+/// this exact graph shape. The entry is measured by its serialized size —
+/// paid once, on the decode that just paid a full validation — so the memo's
+/// byte budget bounds real retention, not entry counts.
 pub(super) fn record_validated_transcript_graph(key: String, state: Arc<TranscriptHistoryState>) {
+    let Ok(bytes) = serde_json::to_vec(state.as_ref()) else {
+        return;
+    };
     if let Ok(mut memo) = transcript_graph_validated_memo().lock() {
-        memo.record(key, state);
+        memo.record(key, state, bytes.len());
     }
 }
 

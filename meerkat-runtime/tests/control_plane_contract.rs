@@ -141,18 +141,17 @@ impl CoreExecutor for RecordingExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: self.terminal.clone(),
-        })
+            None,
+            self.terminal.clone(),
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

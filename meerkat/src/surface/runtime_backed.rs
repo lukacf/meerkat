@@ -1711,8 +1711,7 @@ mod tests {
     fn runtime_output_session_snapshot(output: &CoreApplyOutput) -> Session {
         serde_json::from_slice(
             output
-                .session_snapshot
-                .as_deref()
+                .snapshot_bytes()
                 .expect("runtime output should carry a machine-owned session snapshot"),
         )
         .expect("runtime session snapshot should deserialize")
@@ -2827,7 +2826,7 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunStart);
         assert!(
-            output.session_snapshot.is_some(),
+            output.snapshot_bytes().is_some(),
             "failed-but-applied carrier must preserve the mutated session snapshot"
         );
         match output.terminal {
@@ -3028,8 +3027,7 @@ mod tests {
             "context lifecycle events must remain hidden until the exact runtime snapshot commits"
         );
         let session_snapshot = output
-            .session_snapshot
-            .as_deref()
+            .snapshot_bytes()
             .expect("context-only output should carry a session snapshot");
         service
             .runtime_store()
@@ -3090,8 +3088,7 @@ mod tests {
             .await
             .expect("checkpoint must clear the prior pending context-event commit");
         let second_snapshot = second_output
-            .session_snapshot
-            .as_deref()
+            .snapshot_bytes()
             .expect("second context-only output should carry a session snapshot");
         service
             .runtime_store()

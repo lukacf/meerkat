@@ -5673,34 +5673,60 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
         )));
     }
 
+    // Make the input→run bindings durable BEFORE any execution: a crash
+    // mid-run must leave identity evidence a later recovery can terminalize
+    // against instead of holding the tail. Fail-closed — a persist failure
+    // rolls the staged batch and the run back and the turn never starts.
+    if let DriverEntry::Persistent(persistent) = &*driver {
+        if let Err(err) = persistent.persist_staged_input_bindings(&staged_ids).await {
+            let _ = driver.rollback_staged(&staged_ids);
+            if let Err(rollback_err) = machine_apply_run_return_projection(
+                &mut driver,
+                &run_id,
+                RunReturnDisposition::Rollback,
+            ) {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to roll back runtime run after staged-binding persist failure: \
+                     {rollback_err}; persist failure: {err}"
+                )));
+            }
+            return Err(err);
+        }
+    }
+
     Ok(())
 }
 
 /// Validate the committed boundary witness.
 ///
-/// `typed_session` is the same session the snapshot was serialized from, when
-/// the producer had it in hand. Taking it skips deserializing the bytes back
-/// into that identical `Session` — a full pass over the document that this
-/// check otherwise pays on every turn regardless of how small the append was.
-/// When it is absent the bytes remain the source of truth and are parsed as
-/// before, so the validation performed is the same either way.
+/// The certified session inside `committed` is the same document its bytes
+/// were serialized from — the pair is sealed at the mint, so validating the
+/// typed half validates exactly what gets persisted. Using it skips
+/// deserializing the bytes back into that identical `Session`, a full pass
+/// over the document this check otherwise pays on every turn regardless of how
+/// small the append was. An uncertified commit carries bytes only; they remain
+/// the source of truth and are parsed as before.
 fn validate_completed_run_session_witness(
     owner_session_id: &SessionId,
     receipt: &RunBoundaryReceipt,
-    session_snapshot: Option<&[u8]>,
-    typed_session: Option<&meerkat_core::Session>,
+    committed: Option<&meerkat_core::lifecycle::core_executor::BoundSessionCommit>,
 ) -> Result<(), RuntimeDriverError> {
+    let Some(committed) = committed else {
+        return Ok(());
+    };
     let owned_session;
-    let session = match (typed_session, session_snapshot) {
-        (Some(session), _) => session,
-        (None, Some(session_snapshot)) => {
-            owned_session = serde_json::from_slice::<meerkat_core::Session>(session_snapshot)
-                .map_err(|error| RuntimeDriverError::ValidationFailed {
-                    reason: format!("completed-run session snapshot was not a Session: {error}"),
-                })?;
+    let session = match committed.session() {
+        Some(session) => session,
+        None => {
+            owned_session =
+                serde_json::from_slice::<meerkat_core::Session>(committed.snapshot_bytes())
+                    .map_err(|error| RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "completed-run session snapshot was not a Session: {error}"
+                        ),
+                    })?;
             &owned_session
         }
-        (None, None) => return Ok(()),
     };
     if session.id() != owner_session_id {
         return Err(RuntimeDriverError::ValidationFailed {
@@ -5750,8 +5776,7 @@ pub(crate) async fn commit_runtime_loop_run(
     run_id: RunId,
     consumed_input_ids: Vec<InputId>,
     receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
-    session_snapshot: Option<Vec<u8>>,
-    typed_session: Option<&meerkat_core::Session>,
+    committed: Option<meerkat_core::lifecycle::core_executor::BoundSessionCommit>,
     directed_interaction_ids: Vec<meerkat_core::interaction::InteractionId>,
     terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
@@ -5770,8 +5795,7 @@ pub(crate) async fn commit_runtime_loop_run(
     validate_completed_run_session_witness(
         commit_authority.owner_session_id(),
         &receipt,
-        session_snapshot.as_deref(),
-        typed_session,
+        committed.as_ref(),
     )
     .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let interaction_outboxes = authorized_directed_terminal_outboxes(
@@ -5879,7 +5903,7 @@ pub(crate) async fn commit_runtime_loop_run(
     if let Err(err) = driver
         .machine_commit_completed_boundary_snapshot(
             &receipt,
-            session_snapshot,
+            committed.map(|commit| commit.into_snapshot_bytes()),
             commit_authority.owner_session_id(),
         )
         .await

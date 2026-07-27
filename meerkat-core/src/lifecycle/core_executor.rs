@@ -405,6 +405,80 @@ pub enum CoreApplyTerminal {
     },
 }
 
+/// The session document a boundary commits: snapshot bytes, optionally sealed
+/// to the typed session they were serialized from.
+///
+/// The two halves are one value with private fields and are only ever
+/// installed together. [`BoundSessionCommit::sealed`] performs the
+/// serialization itself, so a certified pair cannot be disassembled and
+/// re-paired with foreign bytes; a producer holding only bytes must say so by
+/// name via [`BoundSessionCommit::untyped`], which certifies nothing and
+/// leaves the bytes as the sole source of truth for consumers. Certifying one
+/// transcript to the witness validator while different bytes get committed is
+/// therefore unrepresentable rather than merely discouraged — including for
+/// out-of-crate `CoreExecutor` implementations.
+#[derive(Debug, Clone)]
+pub struct BoundSessionCommit {
+    snapshot: Vec<u8>,
+    session: Option<std::sync::Arc<crate::Session>>,
+}
+
+impl BoundSessionCommit {
+    /// Seal a typed session to the bytes it serializes into.
+    ///
+    /// This is the only mint that pairs a typed session with bytes, and the
+    /// single serialization happens here, so the halves cannot diverge.
+    pub fn sealed(session: std::sync::Arc<crate::Session>) -> Result<Self, serde_json::Error> {
+        let snapshot = serde_json::to_vec(session.as_ref())?;
+        crate::checkpoint::record_session_encode_bytes(snapshot.len() as u64);
+        Ok(Self {
+            snapshot,
+            session: Some(session),
+        })
+    }
+
+    /// Bytes carrying no typed certification: a consumer that needs a
+    /// `Session` must deserialize and validate these bytes itself.
+    #[must_use]
+    pub fn untyped(snapshot: Vec<u8>) -> Self {
+        Self {
+            snapshot,
+            session: None,
+        }
+    }
+
+    /// The bytes to durably commit.
+    #[must_use]
+    pub fn snapshot_bytes(&self) -> &[u8] {
+        &self.snapshot
+    }
+
+    /// Consume the pair into the bytes to durably commit.
+    #[must_use]
+    pub fn into_snapshot_bytes(self) -> Vec<u8> {
+        self.snapshot
+    }
+
+    /// The typed session, when the producer certified one; identical by
+    /// construction to the document encoded in [`Self::snapshot_bytes`].
+    #[must_use]
+    pub fn session(&self) -> Option<&crate::Session> {
+        self.session.as_deref()
+    }
+
+    /// Borrow the certified session as a shared handle.
+    #[must_use]
+    pub fn session_arc(&self) -> Option<&std::sync::Arc<crate::Session>> {
+        self.session.as_ref()
+    }
+
+    /// Consume the pair into the certified session handle, if any.
+    #[must_use]
+    pub fn into_session_arc(self) -> Option<std::sync::Arc<crate::Session>> {
+        self.session
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreApplyOutput {
     /// Unsequenced receipt proving boundary application. The runtime driver
@@ -412,17 +486,19 @@ pub struct CoreApplyOutput {
     /// from the generated machine's per-run boundary counter at commit time
     /// (dogma K10 — executors cannot produce the boundary sequence).
     pub receipt: RunBoundaryReceiptDraft,
-    /// Optional serialized session snapshot to durably commit atomically with
-    /// the receipt and input-state updates.
-    pub session_snapshot: Option<Vec<u8>>,
-    /// The same session, typed, when the producer had it in hand.
+    /// The session document to durably commit atomically with the receipt and
+    /// input-state updates, held as ONE sealed value.
     ///
-    /// `session_snapshot` is the durable form and stays authoritative. This
-    /// is a fast path, not a second source of truth: every consumer that
-    /// takes it must produce the identical answer it would have produced by
-    /// deserializing the bytes.
+    /// Private, and readable only through [`Self::committed`] /
+    /// [`Self::snapshot_bytes`] / [`Self::session`]: as two assignable `pub`
+    /// halves the seal was a convention a producer could break by overwriting
+    /// the bytes after attaching the typed session, or by moving a typed
+    /// session into a struct literal beside foreign bytes. One private field
+    /// makes re-pairing unrepresentable — a consumer that validates the typed
+    /// half and persists the bytes is validating and persisting the same
+    /// document by construction.
     ///
-    /// It exists because the boundary path otherwise pays O(document) three
+    /// The typed half exists because the boundary path otherwise pays O(document) three
     /// more times per turn on top of the one serialization it genuinely
     /// needs: the witness validator deserializes the bytes back into a
     /// `Session`, re-serializes its messages, and SHA-256s them. On a 94 MB
@@ -435,7 +511,7 @@ pub struct CoreApplyOutput {
     /// accumulator, so its first digest is a full pass no matter how small
     /// the append was — which is why round-tripping through bytes silently
     /// discards the incremental digest work.
-    pub session: Option<std::sync::Arc<crate::Session>>,
+    committed: Option<BoundSessionCommit>,
     /// Terminal payload observation produced by runtime-backed execution.
     ///
     /// `None` means the primitive committed successfully but did not produce
@@ -615,75 +691,140 @@ impl std::fmt::Debug for CoreBoundaryStageOutput {
 }
 
 impl CoreApplyOutput {
-    pub fn with_run_result(
+    /// An output that commits no session document.
+    pub fn new(receipt: RunBoundaryReceiptDraft, terminal: Option<CoreApplyTerminal>) -> Self {
+        Self {
+            receipt,
+            committed: None,
+            terminal,
+        }
+    }
+
+    /// An output whose committed session document is UNCERTIFIED: the bytes
+    /// carry no typed half, so a consumer that needs a `Session` deserializes
+    /// and validates them itself.
+    ///
+    /// Producers that hold the typed session use [`Self::with_session`]
+    /// instead; it seals the pair and is the only way a typed session ever
+    /// accompanies bytes.
+    pub fn with_untyped_snapshot(
         receipt: RunBoundaryReceiptDraft,
-        session_snapshot: Option<Vec<u8>>,
-        run_result: RunResult,
+        untyped_snapshot: Option<Vec<u8>>,
+        terminal: Option<CoreApplyTerminal>,
     ) -> Self {
         Self {
-            session: None,
             receipt,
-            session_snapshot,
-            terminal: Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+            committed: untyped_snapshot.map(BoundSessionCommit::untyped),
+            terminal,
         }
+    }
+
+    pub fn with_run_result(
+        receipt: RunBoundaryReceiptDraft,
+        untyped_snapshot: Option<Vec<u8>>,
+        run_result: RunResult,
+    ) -> Self {
+        Self::with_untyped_snapshot(
+            receipt,
+            untyped_snapshot,
+            Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+        )
     }
 
     pub fn with_callback_pending(
         receipt: RunBoundaryReceiptDraft,
-        session_snapshot: Option<Vec<u8>>,
+        untyped_snapshot: Option<Vec<u8>>,
         tool_use_id: impl Into<String>,
         tool_name: impl Into<String>,
         args: Value,
     ) -> Self {
-        Self {
-            session: None,
+        Self::with_untyped_snapshot(
             receipt,
-            session_snapshot,
-            terminal: Some(CoreApplyTerminal::CallbackPending {
+            untyped_snapshot,
+            Some(CoreApplyTerminal::CallbackPending {
                 tool_use_id: tool_use_id.into(),
                 tool_name: tool_name.into(),
                 args,
             }),
-        }
+        )
     }
 
     pub fn with_callback_batch_pending(
         receipt: RunBoundaryReceiptDraft,
-        session_snapshot: Option<Vec<u8>>,
+        untyped_snapshot: Option<Vec<u8>>,
         pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
     ) -> Self {
-        Self {
-            session: None,
+        Self::with_untyped_snapshot(
             receipt,
-            session_snapshot,
-            terminal: Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }),
-        }
-    }
-
-    /// Attach the typed session that produced `session_snapshot`.
-    ///
-    /// The bytes stay authoritative; this only lets downstream consumers skip
-    /// deserializing them back into the very `Session` the producer already
-    /// held, and keeps that session's retained digest midstate alive across
-    /// the boundary. Pass the SAME session the snapshot was serialized from —
-    /// a mismatched pair would let the fast path and the durable form
-    /// disagree.
-    #[must_use]
-    pub fn with_session(mut self, session: std::sync::Arc<crate::Session>) -> Self {
-        self.session = Some(session);
-        self
+            untyped_snapshot,
+            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }),
+        )
     }
 
     pub fn without_terminal(
         receipt: RunBoundaryReceiptDraft,
-        session_snapshot: Option<Vec<u8>>,
+        untyped_snapshot: Option<Vec<u8>>,
     ) -> Self {
-        Self {
-            receipt,
-            session_snapshot,
-            session: None,
-            terminal: None,
-        }
+        Self::with_untyped_snapshot(receipt, untyped_snapshot, None)
+    }
+
+    /// Commit the typed session and the bytes derived from it as one sealed
+    /// pair.
+    ///
+    /// The serialization happens HERE, inside the mint, so the typed half and
+    /// the byte half can never diverge. Any uncertified bytes a constructor
+    /// installed earlier are replaced wholesale — the halves are never
+    /// assignable apart, so no producer can certify one transcript while a
+    /// different one is committed.
+    pub fn with_session(
+        mut self,
+        session: std::sync::Arc<crate::Session>,
+    ) -> Result<Self, serde_json::Error> {
+        self.committed = Some(BoundSessionCommit::sealed(session)?);
+        Ok(self)
+    }
+
+    /// The sealed session document this boundary commits, if any.
+    #[must_use]
+    pub fn committed(&self) -> Option<&BoundSessionCommit> {
+        self.committed.as_ref()
+    }
+
+    /// The exact bytes this boundary commits.
+    #[must_use]
+    pub fn snapshot_bytes(&self) -> Option<&[u8]> {
+        self.committed
+            .as_ref()
+            .map(BoundSessionCommit::snapshot_bytes)
+    }
+
+    /// The typed session sealed to [`Self::snapshot_bytes`], when the producer
+    /// certified one.
+    #[must_use]
+    pub fn session(&self) -> Option<&crate::Session> {
+        self.committed
+            .as_ref()
+            .and_then(BoundSessionCommit::session)
+    }
+
+    /// Consume the sealed session document, leaving the receipt and terminal
+    /// behind.
+    #[must_use]
+    pub fn into_committed(self) -> Option<BoundSessionCommit> {
+        self.committed
+    }
+
+    /// Consume into the receipt, the sealed session document, and the terminal
+    /// observation. The document stays sealed across the handoff.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        RunBoundaryReceiptDraft,
+        Option<BoundSessionCommit>,
+        Option<CoreApplyTerminal>,
+    ) {
+        (self.receipt, self.committed, self.terminal)
     }
 }
 

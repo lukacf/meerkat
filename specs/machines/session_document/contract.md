@@ -48,10 +48,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, self_hosted_server_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
-- `ResolveRuntimeProjectionConflict`(session_id: SessionId, relation: DurableHeadRelation, authority_supersedes_row: Bool)
+- `ResolveRuntimeProjectionConflict`(session_id: SessionId, relation: DurableHeadRelation, row_provenance: CheckpointProvenanceClass, authority_supersedes_row: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
 - `ResolveLegacyCheckpointMigration`(session_id: SessionId, runtime_snapshot_present: Bool, runtime_snapshot_legacy: Bool, store_row_present: Bool, store_row_legacy: Bool, transcript_relation: LegacyCheckpointTranscriptRelation)
-- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, relation: DurableHeadRelation, store_provenance: CheckpointProvenanceClass, session_is_live: Bool)
+- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, relation: DurableHeadRelation, store_provenance: CheckpointProvenanceClass, session_is_live: Bool, tail_execution: DurableTailExecutionEvidence)
 - `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
@@ -885,7 +885,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeSnapshotReadSourceCommittedHead`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
@@ -893,7 +893,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeSnapshotReadSourceRecoveryRequired`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
@@ -901,7 +901,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeSnapshotReadSourceQuarantine`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
@@ -909,7 +909,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeSnapshotReadSourceSnapshot`
 - From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live)
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution)
 - Guards:
   - ``
 - Emits: `RuntimeSnapshotReadSourceResolved`
@@ -941,7 +941,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeProjectionConflictRetain`
 - From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
 - Guards:
   - ``
 - Emits: `RuntimeProjectionConflictResolved`
@@ -949,7 +949,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeProjectionConflictConverge`
 - From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
 - Guards:
   - ``
 - Emits: `RuntimeProjectionConflictResolved`
@@ -957,7 +957,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRuntimeProjectionConflictReject`
 - From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, authority_supersedes_row)
+- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
 - Guards:
   - ``
 - Emits: `RuntimeProjectionConflictResolved`

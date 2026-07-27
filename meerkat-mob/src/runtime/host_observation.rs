@@ -3317,6 +3317,25 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        /// Test double: nothing durable survives archive here, so the two-read
+        /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+        async fn load_session_for_resume(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<
+            crate::runtime::session_service::ResumeSessionLoad,
+            meerkat_core::service::SessionError,
+        > {
+            use crate::runtime::session_service::ResumeSessionLoad;
+            if let Some(session) = self.load_persisted_session(session_id).await? {
+                return Ok(ResumeSessionLoad::Active(Box::new(session)));
+            }
+            if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+                return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+            }
+            Ok(ResumeSessionLoad::Absent)
+        }
+
         async fn create_session_under_runtime_turn_boundary(
             &self,
             req: meerkat_core::service::CreateSessionRequest,

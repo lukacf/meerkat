@@ -212,6 +212,20 @@ pub enum RuntimeStoreError {
     /// under offline maintenance.
     #[error("maintenance fence is held for '{path}'; storage is under offline maintenance")]
     MaintenanceFenceHeld { path: String },
+    /// An input-state update carried an expected prior row version that no
+    /// longer matches the stored row. The whole atomic boundary fails stale;
+    /// nothing is written.
+    #[error(
+        "Input row version conflict for input '{input_id}': the stored row changed since it was observed"
+    )]
+    InputRowVersionConflict { input_id: String },
+    /// A machine-lifecycle commit carried an expected prior row version that
+    /// no longer matches the stored row. The whole atomic boundary fails
+    /// stale; nothing is written.
+    #[error(
+        "Machine lifecycle version conflict for runtime '{runtime_id}': the stored row changed since it was observed"
+    )]
+    MachineLifecycleVersionConflict { runtime_id: String },
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -2305,6 +2319,14 @@ impl MachineLifecycleStoreRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineLifecycleCommit {
     snapshot: MachineLifecycleSnapshot,
+    /// When set, the store must verify the CURRENT persisted lifecycle row
+    /// still matches this exact version inside the same transaction that
+    /// writes the commit, and fail the whole boundary with
+    /// [`RuntimeStoreError::MachineLifecycleVersionConflict`] otherwise.
+    /// `None` preserves the historical last-writer semantics of the live
+    /// driver commit path, whose exclusive in-process authority already
+    /// serializes writers.
+    expected_version: Option<MachineLifecycleExpectedVersion>,
 }
 
 impl MachineLifecycleCommit {
@@ -2352,7 +2374,20 @@ impl MachineLifecycleCommit {
                 supervisor_authority,
                 unregister_progress,
             ),
+            expected_version: None,
         }
+    }
+
+    /// Fence this commit on the exact lifecycle row version it was derived
+    /// from. Used by cold recovery: between observing the persisted row and
+    /// committing the recovered boundary another process may register or
+    /// advance the runtime, and a blind upsert would stomp its truth.
+    pub(crate) fn with_expected_version(
+        mut self,
+        expected: MachineLifecycleExpectedVersion,
+    ) -> Self {
+        self.expected_version = Some(expected);
+        self
     }
 
     /// Runtime state selected by the owning MeerkatMachine transition.
@@ -2370,8 +2405,24 @@ impl MachineLifecycleCommit {
         MachineLifecycleStoreRecord::from_snapshot(&self.snapshot)
     }
 
+    /// Exact prior row version this commit is fenced on, when the producer
+    /// demanded compare-and-swap semantics. Store implementations MUST
+    /// enforce it inside the same transaction that writes the commit.
+    pub fn expected_version(&self) -> Option<&MachineLifecycleExpectedVersion> {
+        self.expected_version.as_ref()
+    }
+
     pub(crate) fn into_snapshot(self) -> MachineLifecycleSnapshot {
         self.snapshot
+    }
+
+    pub(crate) fn into_snapshot_and_expected(
+        self,
+    ) -> (
+        MachineLifecycleSnapshot,
+        Option<MachineLifecycleExpectedVersion>,
+    ) {
+        (self.snapshot, self.expected_version)
     }
 }
 
@@ -2750,6 +2801,80 @@ pub trait RuntimeStore: Send + Sync {
         run_id: &RunId,
         sequence: u64,
     ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError>;
+
+    /// Load every durably committed boundary receipt for one run, in
+    /// ascending sequence order.
+    ///
+    /// Recovery reads these to (a) derive the next boundary sequence for a
+    /// recovered commit (an interrupted tool loop can already have committed
+    /// `BoundaryContinue` receipts before losing only its final boundary)
+    /// and (b) recover the exact contributing input identities the run
+    /// already bound durably. The default probes ascending sequences through
+    /// [`RuntimeStore::load_boundary_receipt`]; backends with range reads
+    /// should override it.
+    async fn load_committed_boundary_receipts(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+    ) -> Result<Vec<RunBoundaryReceipt>, RuntimeStoreError> {
+        // Receipt sequences are minted densely from 1 by the generated
+        // machine; a gap therefore terminates the probe. The cap is a
+        // corruption backstop, far above any real per-run boundary count.
+        const PROBE_CAP: u64 = 100_000;
+        let mut receipts = Vec::new();
+        for sequence in 1..=PROBE_CAP {
+            match self
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await?
+            {
+                Some(receipt) => receipts.push(receipt),
+                None => return Ok(receipts),
+            }
+        }
+        Err(RuntimeStoreError::ReadFailed(format!(
+            "run {run_id} has more than {PROBE_CAP} boundary receipts; refusing to probe further"
+        )))
+    }
+
+    /// Load all decodable input-state rows together with the exact
+    /// domain-prefixed SHA-256 digest of each row's stored bytes.
+    ///
+    /// The digest is a target-local compare token: recovery carries it back
+    /// on fenced [`InputStatePersistenceRecord`]s so the atomic commit can
+    /// fail stale instead of blindly overwriting a row another process
+    /// advanced in the meantime.
+    ///
+    /// Implementations that apply fenced records MUST enforce
+    /// [`InputStatePersistenceRecord::expected_row_digest`] inside the same
+    /// transaction that writes them, failing the whole boundary with
+    /// [`RuntimeStoreError::InputRowVersionConflict`] on mismatch.
+    ///
+    /// The default derives each token from the canonical serialization of
+    /// the strictly-loaded bundle, which is exactly what the built-in
+    /// backends persist. Deriving rather than refusing matters: a wrapping
+    /// store that forwards the rest of the trait would otherwise opt itself
+    /// out of fenced reads and turn every durable-tail recovery into a
+    /// permanent hold.
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<(StoredInputState, String)>, RuntimeStoreError> {
+        use sha2::Digest as _;
+        self.load_input_states_strict(runtime_id)
+            .await?
+            .into_iter()
+            .map(|bundle| {
+                let bytes = serde_json::to_vec(&bundle).map_err(|error| {
+                    RuntimeStoreError::ReadFailed(format!(
+                        "input state row `{}` could not be canonicalized for versioning: {error}",
+                        bundle.state.input_id
+                    ))
+                })?;
+                let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+                Ok((bundle, digest))
+            })
+            .collect()
+    }
 
     /// Load the latest committed session snapshot for a runtime, if any.
     async fn load_session_snapshot(

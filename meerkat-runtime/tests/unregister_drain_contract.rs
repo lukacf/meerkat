@@ -517,18 +517,17 @@ impl CoreExecutor for GatedExecutor {
         if !self.entered.swap(true, Ordering::SeqCst) {
             self.release.notified().await;
         }
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

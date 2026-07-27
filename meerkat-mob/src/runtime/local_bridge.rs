@@ -451,18 +451,17 @@ mod tests {
                 self.apply_started.notify_waiters();
                 self.allow_finish.notified().await;
                 self.apply_finished.notify_waiters();
-                Ok(CoreApplyOutput {
-                    session: None,
-                    receipt: RunBoundaryReceiptDraft {
+                Ok(CoreApplyOutput::with_untyped_snapshot(
+                    RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,
                         contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                         conversation_digest: None,
                         message_count: 0,
                     },
-                    session_snapshot: None,
-                    terminal: None,
-                })
+                    None,
+                    None,
+                ))
             }
 
             async fn cancel_after_boundary(
@@ -609,18 +608,17 @@ mod tests {
             ) -> Result<CoreApplyOutput, CoreExecutorError> {
                 self.apply_started.notify_waiters();
                 self.allow_finish.notified().await;
-                Ok(CoreApplyOutput {
-                    session: None,
-                    receipt: RunBoundaryReceiptDraft {
+                Ok(CoreApplyOutput::with_untyped_snapshot(
+                    RunBoundaryReceiptDraft {
                         run_id,
                         boundary: RunApplyBoundary::RunStart,
                         contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                         conversation_digest: None,
                         message_count: 0,
                     },
-                    session_snapshot: None,
-                    terminal: None,
-                })
+                    None,
+                    None,
+                ))
             }
 
             async fn cancel_after_boundary(

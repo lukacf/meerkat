@@ -245,8 +245,8 @@ Since 0.8.4 (PR #912, the storage unification arc):
   manifest v2 adds `provider` / `ephemeral_domains`; future formats and
   provider-pin mismatches refuse typed. Fail-closed durability: exactly one
   `DurabilityDeclaration` per required domain (sessions, runtime, schedule,
-  workgraph, blobs, artifacts); an undeclared non-persistent `Durable` slot
-  is a startup `DurabilityViolation`, never a silent in-memory fallback.
+  workgraph, jobs, blobs, artifacts); an undeclared non-persistent `Durable`
+  slot is a startup `DurabilityViolation`, never a silent in-memory fallback.
 - **`meerkat-store-conformance`** — published per-trait conformance
   chapters any backend runs by supplying store factories; the in-repo
   stores run the same suite (meerkat-store/tests/conformance.rs).
@@ -285,6 +285,65 @@ Since 0.8.4 (PR #912, the storage unification arc):
   of silently skipping it, so the terminal-recovery drain re-projects the
   committed RuntimeStore snapshot on restart and the two checkpoint
   authorities reconverge (the authority-conflict error names both stamps).
+
+Since 0.8.8 (PR #917, the 0.8.9 durable-tail recovery release):
+
+- **Machine-owned durable-tail recovery** — the intra-turn checkpointer can
+  leave a durable session-store tail (up to a fully completed turn) whose
+  runtime boundary commit lost a shutdown race. Recovery is never-discard
+  and splits three ways: `SessionDocumentMachine` CLASSIFIES (typed cold-read
+  source via `ResolveRuntimeSnapshotReadSource`; `ClassifyDurableTail` →
+  `CompletedCandidate` / `InterruptedRepairableCandidate` / `Ambiguous`;
+  `ResolveRuntimeProjectionConflict` resolves a verified strict descendant to
+  `RetainForRecovery` — `RebuildToAuthority` is deleted), `MeerkatMachine`
+  AUTHORIZES (`AuthorizeDurableTailRecovery` judges the PERSISTED lifecycle
+  row + current-run fact, the prior-commit receipt comparison
+  (`DurableRecoveryPriorCommit` — an already-landed recovery refuses instead
+  of minting a phantom duplicate boundary), and input-row attributability
+  (`DurableRecoveryInputEvidence`); BOTH hold paths are machine-minted;
+  commit verdicts are the `DurableTailRecoveryCommitAuthorized` effect
+  carrying the machine-minted boundary sequence), and `RuntimeStore`
+  REALIZES one fenced `atomic_apply` boundary. A dangling `tool_use`
+  classifies Ambiguous and holds — repair never synthesizes tool results
+  (fail-closed even in release). See `docs/reference/machine-authority.mdx`.
+- **Sealed commit and request seams** — `CoreApplyOutput`'s snapshot/typed
+  session pair is ONE private `BoundSessionCommit` field (constructors
+  `new`/`with_untyped_snapshot`; `with_session` mints the sealed pair by
+  serializing the session itself, so bytes and typed session cannot be
+  re-paired); `DurableTailRecoveryRequest` has private fields and its only
+  constructor, `from_classification`, requires the classifier's own
+  `DurableTailClassified` effect.
+- **Typed durable resume holds** — `SessionError::DurableTailHeldForRecovery`
+  / `DurableEvidenceQuarantined` (codes `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY`
+  / `SESSION_DURABLE_EVIDENCE_QUARANTINED`, `durable_resume_hold` structured
+  payload, `DurableResumeHold` companion enum). Exhaustive matches over
+  `SessionError` gained two arms.
+- **Typed mob resume seam** — `MobSessionService::load_session_for_resume`
+  is REQUIRED (no default) returning `ResumeSessionLoad` (Active / Revivable
+  / ArchivedNotRevivable / Absent); `MobError::SessionUnavailableForResume`
+  + `SessionResumeUnavailableReason` and `MobFailureClass::TargetArchived`
+  replace treating archive-filtered NotFound as absence.
+- **RuntimeStore fencing** — new read verbs `load_committed_boundary_receipts`
+  and `load_input_states_with_versions` (both defaulted); implementors
+  applying fenced records MUST enforce `expected_row_digest` inside the
+  writing transaction; typed conflicts `InputRowVersionConflict` /
+  `MachineLifecycleVersionConflict`. Run→input bindings persist at staging,
+  BEFORE execution, so a mid-run crash leaves durable identity evidence.
+- **Checkpoint stamp schema v2** — per-record version selection from
+  provenance: ordinary stamps write v1, recovered stamps
+  (`RecoveredRunBoundaryCommit` / `RecoveredInterruptedBoundary`) write v2
+  (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED`); refusal is typed in
+  both directions (future version, mis-advertised provenance).
+- **Verification memos bind exact bytes** — the transcript-graph decode memo
+  stores the proven graph object with `digest_format` and per-body
+  `created_at` pinned into its key; the process-global stamp-verification
+  cache is a per-`Session` seal cleared by every content mutation.
+  Transcript-history mechanics extracted from `session.rs` into
+  `meerkat-core/src/session/transcript_history/`.
+- **`meerkat_runtime::stack_relief`** — child-agent construction runs on a
+  fresh task, never nested in the parent's poll stack; the agent loop's
+  polling arm is split per-phase; the mob stack-budget gate is un-ignored at
+  2 MiB / opt-level 0.
 
 ## Runtime Dogma (first review lens)
 

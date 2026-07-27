@@ -49,6 +49,103 @@ pub enum DurableTailRecoveryClass {
     Ambiguous,
 }
 
+/// Typed projection of the PERSISTED machine-lifecycle row observed at the
+/// moment recovery is authorized. The shell observes the durable row and
+/// mirrors it into this vocabulary; the machine — not the shell — decides
+/// which shapes admit recovery. Fail-closed: anything the observation cannot
+/// prove quiescent refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryObservedLifecycle {
+    /// No lifecycle row exists for this runtime (never registered, or the
+    /// row was reclaimed). Quiescent by absence.
+    MissingRow,
+    /// Persisted row decodes to a quiescent Idle lifecycle.
+    Idle,
+    /// Persisted row decodes to a quiescent Retired lifecycle.
+    Retired,
+    /// Persisted row decodes to any non-quiescent phase (Initializing,
+    /// Attached, Running, Stopped, Destroyed). Refuses recovery.
+    NonQuiescent,
+    /// Persisted row exists but cannot be decoded under this binary's
+    /// contract (malformed or unsupported). Refuses recovery.
+    #[default]
+    Undecodable,
+}
+
+/// Typed projection of the persisted lifecycle row's current-run fact,
+/// compared against the recovery candidate's run identity by the shell and
+/// judged by the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryObservedRun {
+    /// The persisted row records no current run.
+    NoRun,
+    /// The persisted row's current run IS the recovery candidate's run.
+    /// Fail-closed refusal: a still-current run contradicts quiescence even
+    /// when it names the candidate.
+    CandidateRun,
+    /// The persisted row's current run is a different run. Refuses recovery.
+    #[default]
+    OtherRun,
+}
+
+/// Typed projection of the input-lifecycle rows the recovered boundary would
+/// have to terminalize. The shell OBSERVES the rows (persisted run bindings,
+/// receipt-bound ids, content kind, whether the store can fence row versions)
+/// and reports one class; the machine — not the shell — decides whether that
+/// class admits a commit. Fail-closed: the variant order puts the least
+/// attributable evidence first so every derived default (generated kernel,
+/// bridging copies) lands on a hold-producing value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryInputEvidence {
+    /// The store cannot supply input row versions AND non-terminal rows that
+    /// would block redelivery exist: the terminalization could not be fenced
+    /// against a concurrent writer.
+    #[default]
+    Unfenceable,
+    /// A non-terminal input carrying redeliverable content exists that durable
+    /// identity cannot attribute to the candidate run. It may be the recovered
+    /// turn's own input whose binding never became durable — content equality
+    /// is not identity — so committing risks a duplicated turn and blind
+    /// terminalization risks a dropped one.
+    UnboundContentInput,
+    /// Every non-terminal input is either bound to the candidate run (persisted
+    /// machine facts or a durably committed receipt names it) or carries no
+    /// redeliverable content. Nothing the delivery layer could re-run is
+    /// unattributed.
+    AllBoundOrInert,
+}
+
+/// Typed comparison of the HIGHEST durably committed boundary receipt for the
+/// candidate run against the candidate transcript itself (message count, and
+/// the receipt digest when one was recorded). This is the only observation
+/// that can see a PRIOR SUCCESS of this same recovery: `turn_terminal_run_id`
+/// is vacuous on cold recovery (the shell drives a freshly registered
+/// authority) and receipt-key uniqueness only fences same-sequence races, not
+/// a second recovery that OBSERVES the first one's receipt and mints N+1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryPriorCommit {
+    /// A committed boundary for this run exists whose content is neither a
+    /// strictly shorter ancestor of the candidate nor the candidate itself
+    /// (equal-or-longer content that is not the candidate, or a shorter
+    /// boundary claiming the candidate's digest). The relationship cannot be
+    /// attributed, so recovery refuses.
+    #[default]
+    DivergesFromCandidate,
+    /// No boundary receipt is durably committed for the candidate run.
+    NoPriorCommit,
+    /// The highest committed boundary records strictly fewer messages than the
+    /// candidate (and a different digest when one was recorded): a mid-run
+    /// BoundaryContinue the recovered tail strictly extends. It cannot be a
+    /// completed recovery of this candidate, which would carry the candidate's
+    /// own message count.
+    PrecedesCandidate,
+    /// The highest committed boundary already carries the candidate's content
+    /// (same message count, and the same digest when one was recorded): this
+    /// recovery ALREADY LANDED durably. Committing again would mint a second
+    /// recovered boundary for one lost boundary — a phantom.
+    MatchesCandidate,
+}
+
 /// The machine's recovery verdict. Nothing here ever authorizes discarding
 /// the durable tail; refusal and hold both retain it intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2661,6 +2758,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // runtime_completion_result_run_id it is written by core turn
             // terminalization rather than later runtime publication.
             turn_terminal_run_id: Option<RunId>,
+            // Sequence the machine minted for the most recent authorized
+            // durable-tail recovery boundary: one past the last receipt the
+            // shell observed durably committed for the candidate run. The
+            // machine — not the shell — derives it, so a recovery commit can
+            // never collide with (or falsely reorder against) receipts an
+            // interrupted tool loop already committed.
+            recovered_boundary_sequence: u64,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
             last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
@@ -3181,6 +3285,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_cancel_dispatch_pending = false,
             boundary_cancel_dispatch_generation = 0,
             turn_terminal_run_id = None,
+            recovered_boundary_sequence = 0,
             terminal_outcome = None,
             terminal_cause_kind = None,
             last_runtime_apply_failure_cause = None,
@@ -3496,6 +3601,33 @@ macro_rules! meerkat_catalog_machine_dsl {
                 candidate_id: String,
                 candidate_run_id: RunId,
                 class: Enum<DurableTailRecoveryClass>,
+                // Typed projections of the PERSISTED machine-lifecycle row
+                // and of the durably committed receipts for the candidate
+                // run, observed by the shell at authorization time. The
+                // guards judge the persisted facts — a freshly registered
+                // in-process authority has no run history of its own, so
+                // without these the machine would be authorizing against a
+                // vacuously quiescent instance instead of durable truth.
+                observed_lifecycle: Enum<DurableRecoveryObservedLifecycle>,
+                observed_current_run: Enum<DurableRecoveryObservedRun>,
+                // Highest receipt sequence durably committed for the
+                // candidate run (0 = none). An interrupted tool loop can
+                // have committed BoundaryContinue receipts before losing
+                // only its final boundary; the machine mints the recovery
+                // boundary one past this.
+                last_committed_sequence: u64,
+                // What the highest committed receipt says about the
+                // candidate's own content. The machine owns the
+                // already-recovered refusal: nothing else in the model can
+                // see a prior success of this same recovery.
+                prior_commit: Enum<DurableRecoveryPriorCommit>,
+                // Whether durable identity can attribute every non-terminal
+                // input row the recovered boundary would terminalize, and
+                // whether those rows can be fenced. The shell observes the
+                // rows BEFORE driving the machine and realizes the
+                // terminalization only on a commit verdict; it never
+                // downgrades a commit to a hold on its own.
+                input_evidence: Enum<DurableRecoveryInputEvidence>,
             },
             PrepareTerminalSupervisorCleanupBindings { session_id: SessionId },
             // Two-phase unregister (D1): BeginUnregisterSession opens the
@@ -4675,13 +4807,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 boundary_sequence: u64,
             },
             TurnRunCompleted { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
-            // Recovery verdict for a classified durable tail. Total over the
-            // input domain (emitted on every branch). Only this effect may
-            // drive the recovery commit; no disposition authorizes discarding
-            // the tail.
+            // Recovery verdict for a classified durable tail on the
+            // non-commit branches (refuse / hold). No disposition authorizes
+            // discarding the tail.
             DurableTailRecoveryAuthorized {
                 candidate_id: String,
                 disposition: Enum<DurableTailRecoveryDisposition>,
+            },
+            // Recovery COMMIT authorization: only this effect may drive the
+            // atomic recovered-boundary commit, and only with the sequence
+            // the machine minted from the durably observed receipt facts
+            // (one past the last committed receipt for the candidate run).
+            DurableTailRecoveryCommitAuthorized {
+                candidate_id: String,
+                disposition: Enum<DurableTailRecoveryDisposition>,
+                boundary_sequence: u64,
             },
             // `error` is a display message projection. The terminal cause is
             // carried by `terminal_cause_kind`, not inferred from this string.
@@ -5347,6 +5487,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBoundaryContextReceiptResolved => local seam NoOwnerRealization,
         disposition TurnRunCompleted => local seam NoOwnerRealization,
         disposition DurableTailRecoveryAuthorized => local seam NoOwnerRealization,
+        disposition DurableTailRecoveryCommitAuthorized => local seam NoOwnerRealization,
         disposition TurnRunFailed => local seam NoOwnerRealization,
         disposition TurnRunCancelled => local seam NoOwnerRealization,
         disposition TurnCheckCompaction => local seam NoOwnerRealization,
@@ -6282,18 +6423,51 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // Durable-tail recovery authorization. Decision self-loops: no
-        // transition here mutates lifecycle or run state — the machine
-        // ANSWERS whether its current facts admit a recovery commit, and the
-        // shell realizes the commit through RuntimeStore::atomic_apply only
-        // on an authorizing disposition.
+        // Durable-tail recovery authorization. The machine judges BOTH its
+        // own in-process facts AND the typed projections of the persisted
+        // lifecycle row and committed receipts the shell observed — a cold
+        // recovery drives a freshly registered authority whose own facts are
+        // vacuously quiescent, so the persisted observations are the real
+        // evidence. On the two commit arms the machine mints the recovery
+        // boundary sequence (one past the last durably committed receipt for
+        // the candidate run) and records the candidate run as the turn
+        // terminal; the shell realizes the commit through the lifecycle-aware
+        // atomic seam only on a commit-authorizing effect.
         //
         // Admissible only when quiescent (Idle or Retired), with no current
-        // run, and no recorded terminal for the candidate's run (a recorded
-        // terminal for that run contradicts "its boundary never landed" —
-        // atomic_apply cannot half-commit — so the evidence is contradictory
-        // and recovery refuses). Every other phase refuses. Refusal and hold
-        // both retain the durable tail intact.
+        // run in-process, no recorded terminal for the candidate's run, a
+        // persisted row that is missing or decodes to a quiescent phase, and
+        // no persisted current-run fact (a persisted current run refuses even
+        // when it names the candidate). Every other shape refuses. Refusal
+        // and hold both retain the durable tail intact.
+        //
+        // GUARD PARTITION (total and disjoint over the quiescent phases). Let
+        //   A := no_current_run && !terminalized(candidate)
+        //        && persisted_quiescent && persisted_no_current_run
+        // be the admissible core. Its complement is still covered exactly
+        // twice-over-nothing: `RefuseRunFacts` takes !(no_current_run &&
+        // !terminalized), and `RefusePersistedFacts` takes the rest of the
+        // complement — its guard pair is the exact negation of
+        // (persisted_quiescent && persisted_no_current_run) under
+        // in-process quiescence.
+        // A itself is cut by the two durable observation dimensions:
+        //   1. class == Ambiguous -> `...Hold` (evidence-blind: an ambiguous
+        //      tail holds whatever the receipts and input rows say, so it
+        //      absorbs the whole Ambiguous slice).
+        //   2. class != Ambiguous && prior_commit in
+        //      {MatchesCandidate, DivergesFromCandidate}
+        //      -> `...RefusePriorCommit`.
+        //   3. class != Ambiguous && prior_commit in
+        //      {NoPriorCommit, PrecedesCandidate} && input_evidence in
+        //      {UnboundContentInput, Unfenceable}
+        //      -> `...HoldInputEvidence`.
+        //   4. the same as 3 with input_evidence == AllBoundOrInert
+        //      -> `...Commit` (CompletedCandidate) xor `...Repair`
+        //      (InterruptedRepairableCandidate).
+        // Each dimension is split into complementary variant sets of a closed
+        // enum, so cuts 2/3/4 cover A minus the Ambiguous slice exactly once.
+        // Both hold-producing dispositions are minted HERE: no shell may
+        // downgrade a commit authorization to a hold.
 
         transition AuthorizeDurableTailRecoveryCommit {
             per_phase [Idle, Retired]
@@ -6301,20 +6475,48 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id,
                 candidate_id,
                 candidate_run_id,
-                class
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
                 self.turn_terminal_run_id != Some(candidate_run_id)
             }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            // The durable receipts must not already cover this candidate: a
+            // recovery that landed in another process is re-committable as a
+            // phantom boundary at sequence N+1 otherwise, and receipt-key
+            // uniqueness cannot fence it (different sequence).
+            guard "prior_commit_admits_recovery" {
+                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
+                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
+            }
+            guard "inputs_attributable" {
+                input_evidence == DurableRecoveryInputEvidence::AllBoundOrInert
+            }
             guard "completed_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
             }
-            update {}
+            update {
+                self.recovered_boundary_sequence = last_committed_sequence + 1;
+                self.turn_terminal_run_id = Some(candidate_run_id);
+            }
             to Idle
-            emit DurableTailRecoveryAuthorized {
+            emit DurableTailRecoveryCommitAuthorized {
                 candidate_id: candidate_id,
-                disposition: DurableTailRecoveryDisposition::CommitCompleted
+                disposition: DurableTailRecoveryDisposition::CommitCompleted,
+                boundary_sequence: self.recovered_boundary_sequence
             }
         }
 
@@ -6324,20 +6526,44 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id,
                 candidate_id,
                 candidate_run_id,
-                class
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
                 self.turn_terminal_run_id != Some(candidate_run_id)
             }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            guard "prior_commit_admits_recovery" {
+                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
+                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
+            }
+            guard "inputs_attributable" {
+                input_evidence == DurableRecoveryInputEvidence::AllBoundOrInert
+            }
             guard "repairable_class" {
                 class == DurableTailRecoveryClass::InterruptedRepairableCandidate
             }
-            update {}
+            update {
+                self.recovered_boundary_sequence = last_committed_sequence + 1;
+                self.turn_terminal_run_id = Some(candidate_run_id);
+            }
             to Idle
-            emit DurableTailRecoveryAuthorized {
+            emit DurableTailRecoveryCommitAuthorized {
                 candidate_id: candidate_id,
-                disposition: DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+                disposition: DurableTailRecoveryDisposition::RepairAndCommitInterrupted,
+                boundary_sequence: self.recovered_boundary_sequence
             }
         }
 
@@ -6347,14 +6573,135 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id,
                 candidate_id,
                 candidate_run_id,
-                class
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
                 self.turn_terminal_run_id != Some(candidate_run_id)
             }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            // Evidence-blind by construction: an ambiguous classification
+            // holds whatever the receipts and input rows say, so this arm
+            // absorbs the whole Ambiguous slice of the admissible core and
+            // the evidence cuts below are stated over the other two classes.
             guard "ambiguous_class" {
                 class == DurableTailRecoveryClass::Ambiguous
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::HoldIntact
+            }
+        }
+
+        // Already-recovered refusal. `turn_terminal_run_id` cannot carry this
+        // fact: cold recovery drives a freshly registered authority whose run
+        // facts are vacuous, and the commit re-asserts default run facts into
+        // the durable row. The receipts are the only durable witness of a
+        // prior success, and receipt-key uniqueness alone fences only a
+        // SAME-sequence race — a second process that OBSERVES the first
+        // recovery's receipt would mint N+1 and commit a phantom recovered
+        // boundary for one lost boundary. `DivergesFromCandidate` refuses for
+        // the same reason in the other direction: a committed boundary this
+        // candidate neither extends nor equals means the run's durable history
+        // and the candidate disagree, and no evidence here can say which is
+        // the truthful continuation.
+        transition AuthorizeDurableTailRecoveryRefusePriorCommit {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            guard "commit_seeking_class" {
+                class == DurableTailRecoveryClass::CompletedCandidate
+                || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+            }
+            guard "prior_commit_conflict" {
+                prior_commit == DurableRecoveryPriorCommit::MatchesCandidate
+                || prior_commit == DurableRecoveryPriorCommit::DivergesFromCandidate
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::RefuseRecovery
+            }
+        }
+
+        // Input-evidence hold. An unattributable redeliverable input, or an
+        // unfenceable set of blocking rows, means the commit cannot terminalize
+        // the recovered turn's own inputs on durable identity: committing risks
+        // redelivering the recovered turn, and terminalizing blindly risks
+        // dropping a genuinely new one. The MACHINE owns this hold — the shell
+        // observes the rows and mirrors this verdict.
+        transition AuthorizeDurableTailRecoveryHoldInputEvidence {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            guard "commit_seeking_class" {
+                class == DurableTailRecoveryClass::CompletedCandidate
+                || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+            }
+            guard "prior_commit_admits_recovery" {
+                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
+                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
+            }
+            guard "inputs_not_attributable" {
+                input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
+                || input_evidence == DurableRecoveryInputEvidence::Unfenceable
             }
             update {}
             to Idle
@@ -6370,11 +6717,51 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id,
                 candidate_id,
                 candidate_run_id,
-                class
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
             }
             guard "conflicting_run_facts" {
                 self.current_run_id != None
                     || self.turn_terminal_run_id == Some(candidate_run_id)
+            }
+            update {}
+            to Idle
+            emit DurableTailRecoveryAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::RefuseRecovery
+            }
+        }
+
+        // Persisted-fact refusal: the in-process facts look quiescent but the
+        // DURABLE row does not — a non-quiescent or undecodable lifecycle, or
+        // any persisted current-run fact (even one naming the candidate).
+        // Fail closed; the tail is retained for a later attempt or
+        // reconciliation.
+        transition AuthorizeDurableTailRecoveryRefusePersistedFacts {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
+            }
+            guard "in_process_quiescent" {
+                self.current_run_id == None
+                    && self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "persisted_facts_conflict" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::NonQuiescent
+                    || observed_lifecycle == DurableRecoveryObservedLifecycle::Undecodable
+                    || observed_current_run != DurableRecoveryObservedRun::NoRun
             }
             update {}
             to Idle
@@ -6390,7 +6777,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id,
                 candidate_id,
                 candidate_run_id,
-                class
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence
             }
             update {}
             to Idle

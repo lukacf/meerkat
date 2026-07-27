@@ -8707,12 +8707,35 @@ impl MobBuilder {
             if matches!(entry.member_ref, MemberRef::Session { .. })
                 && session_service.supports_persistent_sessions()
             {
+                // Typed observation FIRST: Active and Revivable both flow
+                // into the resumed provisioning/revival transaction below;
+                // only a genuinely ABSENT session may trigger the
+                // replacement search; archived-but-not-revivable is a typed
+                // refusal (the transcript is intact on disk — rotating to a
+                // replacement session would silently abandon it).
                 let stored_session = match session_service
-                    .load_persisted_session(&bridge_session_id)
+                    .load_session_for_resume(&bridge_session_id)
                     .await?
                 {
-                    Some(stored_session) => stored_session,
-                    None => {
+                    ResumeSessionLoad::Active(stored_session)
+                    | ResumeSessionLoad::Revivable(stored_session) => *stored_session,
+                    ResumeSessionLoad::ArchivedNotRevivable { runtime_state } => {
+                        let state = runtime_state.map_or_else(
+                            || "<no runtime record>".to_string(),
+                            |state| state.to_string(),
+                        );
+                        record_restore_failure(
+                            bridge_session_id.clone(),
+                            format!(
+                                "durable session '{bridge_session_id}' is archived and not \
+                                 revivable from runtime state {state}; the transcript is intact \
+                                 and preserved — not searching for a replacement session"
+                            ),
+                        )
+                        .await;
+                        continue;
+                    }
+                    ResumeSessionLoad::Absent => {
                         if let Some((replacement_session_id, replacement_session)) =
                             latest_persisted_session_for_member(
                                 session_service.as_ref(),
@@ -8777,23 +8800,18 @@ impl MobBuilder {
                             }
                             replacement_session
                         } else {
-                            // Report WHY, truthfully: an archived-but-refused
-                            // document is intact on disk, and calling it
-                            // "missing" sends operators hunting for lost data.
-                            // Control flow is unchanged — the replacement
-                            // search above still owns the rotation case.
-                            let reason = session_service
-                                .load_session_for_resume(&bridge_session_id)
-                                .await
-                                .ok()
-                                .and_then(|load| load.unavailable_reason(&bridge_session_id))
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "missing durable session snapshot for \
-                                         '{bridge_session_id}'"
-                                    )
-                                });
-                            record_restore_failure(bridge_session_id.clone(), reason).await;
+                            // Typed-observation contract: this arm is only
+                            // reachable for a genuinely ABSENT session (the
+                            // archived-but-refused case took its typed
+                            // refusal above and never searches for a
+                            // replacement).
+                            record_restore_failure(
+                                bridge_session_id.clone(),
+                                format!(
+                                    "missing durable session snapshot for '{bridge_session_id}'"
+                                ),
+                            )
+                            .await;
                             continue;
                         }
                     }

@@ -541,6 +541,10 @@ fn mob_probe_error_outcome(error: MobError) -> Result<TargetProbeOutcome, Schedu
 fn delivery_failure_reason_for(error: &MobError) -> DeliveryFailureReason {
     match error.failure_class() {
         MobFailureClass::TargetMissing => DeliveryFailureReason::TargetMissing,
+        // Archived-but-intact: the target exists but refuses work in its
+        // current lifecycle — the schedule vocabulary's closest honest class
+        // is busy, NOT missing (the transcript is on disk).
+        MobFailureClass::TargetArchived => DeliveryFailureReason::TargetBusy,
         MobFailureClass::TargetBusy => DeliveryFailureReason::TargetBusy,
         MobFailureClass::Transport => DeliveryFailureReason::TransportError,
         MobFailureClass::RuntimeRejected => DeliveryFailureReason::RuntimeRejected,

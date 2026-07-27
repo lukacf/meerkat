@@ -698,6 +698,21 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    /// Test double: the two-read composition is the exact truth here.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::runtime::ResumeSessionLoad, meerkat_core::service::SessionError> {
+        use meerkat_mob::runtime::ResumeSessionLoad;
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,

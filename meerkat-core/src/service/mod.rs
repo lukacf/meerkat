@@ -76,6 +76,26 @@ pub enum SessionError {
     #[error("no turn running on session: {id}")]
     NotRunning { id: SessionId },
 
+    /// The durable transcript tail was never committed as a runtime boundary
+    /// and machine-authorized recovery has not promoted it yet. The content
+    /// is intact and retained; only resume is withheld. Typed so surfaces can
+    /// tell "your session is held pending reconciliation" from "the service
+    /// has a bug" without reading `Display` text.
+    #[error(
+        "session {id} has a durable transcript tail that was never committed as a runtime \
+         boundary; it is preserved (held for recovery) and cannot be resumed yet"
+    )]
+    DurableTailHeldForRecovery { id: SessionId },
+
+    /// The durable evidence for this session is forked or unverifiable, so no
+    /// head can be served as authority. The bytes are retained intact; resume
+    /// is refused rather than guessed.
+    #[error(
+        "session {id} durable evidence is forked or unverifiable; retained intact and \
+         quarantined from resume"
+    )]
+    DurableEvidenceQuarantined { id: SessionId },
+
     /// A session store operation failed.
     #[error("store error: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -94,6 +114,48 @@ pub enum SessionError {
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
+}
+
+/// Why a durable session refuses to serve a resume while its content stays
+/// intact on disk. Typed companion of
+/// [`SessionError::DurableTailHeldForRecovery`] and
+/// [`SessionError::DurableEvidenceQuarantined`] so surfaces route "held,
+/// nothing lost" separately from "the service faulted" without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DurableResumeHold {
+    /// A verified durable tail sits past the last committed runtime boundary.
+    /// Only the recovery commit may promote or repair it; serving past it
+    /// would assert runtime facts that never committed.
+    TailHeldForRecovery,
+    /// Durable evidence is forked or unverifiable, so no head is trustworthy
+    /// enough to serve as authority.
+    EvidenceQuarantined,
+}
+
+impl DurableResumeHold {
+    /// Stable wire token; part of the `durable_resume_hold` structured data.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TailHeldForRecovery => "tail_held_for_recovery",
+            Self::EvidenceQuarantined => "evidence_quarantined",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`] over the one token table. An unknown token
+    /// fails closed as `None` rather than guessing a hold class.
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        [Self::TailHeldForRecovery, Self::EvidenceQuarantined]
+            .into_iter()
+            .find(|hold| hold.as_str() == value)
+    }
+}
+
+impl std::fmt::Display for DurableResumeHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Stable structured cause carried when provider authentication prevents
@@ -152,6 +214,8 @@ impl SessionError {
     const LLM_IDENTITY_UNRESOLVABLE_CAUSE: &'static str = "LlmIdentityUnresolvable";
     const PROVIDER_AUTH_CAUSE_KEY: &'static str = "cause";
     const PROVIDER_AUTH_CAUSE: &'static str = "provider_auth";
+    /// Structured-data key carrying [`DurableResumeHold`] across every surface.
+    pub const DURABLE_RESUME_HOLD_KEY: &'static str = "durable_resume_hold";
 
     /// Preserve the typed class of an LLM identity/client construction
     /// failure across the generic session-builder boundary. Remote member
@@ -234,6 +298,8 @@ impl SessionError {
             Self::PersistenceDisabled => "SESSION_PERSISTENCE_DISABLED",
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
+            Self::DurableTailHeldForRecovery { .. } => "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
+            Self::DurableEvidenceQuarantined { .. } => "SESSION_DURABLE_EVIDENCE_QUARANTINED",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::Agent(_) => "AGENT_ERROR",
@@ -244,8 +310,51 @@ impl SessionError {
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
             Self::FailedWithData { data, .. } => Some(data.clone()),
+            Self::DurableTailHeldForRecovery { id } => {
+                Some(self.durable_resume_hold_data(DurableResumeHold::TailHeldForRecovery, id))
+            }
+            Self::DurableEvidenceQuarantined { id } => {
+                Some(self.durable_resume_hold_data(DurableResumeHold::EvidenceQuarantined, id))
+            }
             _ => None,
         }
+    }
+
+    /// Typed resume-hold class carried by this error, if any. A hold means
+    /// the durable session is intact and withheld — not that the service
+    /// faulted — so surfaces classify on this instead of `Display` text.
+    pub fn durable_resume_hold(&self) -> Option<DurableResumeHold> {
+        match self {
+            Self::DurableTailHeldForRecovery { .. } => Some(DurableResumeHold::TailHeldForRecovery),
+            Self::DurableEvidenceQuarantined { .. } => Some(DurableResumeHold::EvidenceQuarantined),
+            _ => None,
+        }
+    }
+
+    /// Read a resume-hold projection back off the wire. Unknown or malformed
+    /// structured data fails closed as `None`.
+    pub fn durable_resume_hold_from_data(data: &serde_json::Value) -> Option<DurableResumeHold> {
+        data.get(Self::DURABLE_RESUME_HOLD_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(DurableResumeHold::from_wire_str)
+    }
+
+    /// Secret-free projection of a resume hold: the hold class, the session it
+    /// applies to, and the invariant every hold path upholds — durable content
+    /// is retained intact, never discarded, so a later reconciliation can
+    /// promote or repair it.
+    fn durable_resume_hold_data(
+        &self,
+        hold: DurableResumeHold,
+        id: &SessionId,
+    ) -> serde_json::Value {
+        let hold_key = Self::DURABLE_RESUME_HOLD_KEY;
+        serde_json::json!({
+            hold_key: hold.as_str(),
+            "session_error_code": self.code(),
+            "session_id": id.to_string(),
+            "content_retained": true,
+        })
     }
 }
 
@@ -2478,6 +2587,51 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    /// Held-for-recovery and quarantine are distinct, stable, and never
+    /// classify as a service fault. A caller must reach both facts through
+    /// the typed surface — `code()`, `durable_resume_hold()`, structured
+    /// data — with `Display` text carrying explanation only.
+    #[test]
+    fn durable_resume_holds_are_typed_distinct_and_content_preserving() {
+        let id = SessionId::new();
+        let cases = [
+            (
+                SessionError::DurableTailHeldForRecovery { id: id.clone() },
+                DurableResumeHold::TailHeldForRecovery,
+                "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
+            ),
+            (
+                SessionError::DurableEvidenceQuarantined { id: id.clone() },
+                DurableResumeHold::EvidenceQuarantined,
+                "SESSION_DURABLE_EVIDENCE_QUARANTINED",
+            ),
+        ];
+        for (error, hold, code) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.durable_resume_hold(), Some(hold));
+            let data = error.structured_data().unwrap();
+            assert_eq!(
+                SessionError::durable_resume_hold_from_data(&data),
+                Some(hold)
+            );
+            assert_eq!(data["session_error_code"], code);
+            assert_eq!(data["session_id"], id.to_string());
+            assert_eq!(data["content_retained"], true);
+            assert!(
+                error.to_string().contains(&id.to_string()),
+                "the hold message must name the session it holds"
+            );
+        }
+        assert_ne!(
+            DurableResumeHold::TailHeldForRecovery.as_str(),
+            DurableResumeHold::EvidenceQuarantined.as_str()
+        );
+        assert_eq!(
+            SessionError::durable_resume_hold_from_data(&serde_json::json!({})),
+            None
+        );
+    }
 
     #[test]
     fn provider_auth_failure_projects_every_kind_without_secret_fields() {

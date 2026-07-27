@@ -3136,6 +3136,21 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    /// Test double: nothing durable survives archive here, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -3353,18 +3368,19 @@ impl MobSessionService for MockSessionService {
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
         <Self as SessionService>::start_turn(self, session_id, req).await?;
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            session: None,
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
-                run_id,
-                boundary,
-                contributing_input_ids,
-                conversation_digest: None,
-                message_count: 0,
-            },
-            session_snapshot: None,
-            terminal: None,
-        })
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ),
+        )
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -10487,6 +10503,21 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    /// Test double: nothing durable survives archive here, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -10769,6 +10800,21 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    /// Test double: nothing durable survives archive here, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -33686,18 +33732,20 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
             self.apply_started.notify_waiters();
             self.allow_finish.notified().await;
 
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                session: None,
-                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-            })
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                        run_id,
+                        boundary:
+                            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                    },
+                    None,
+                    None,
+                ),
+            )
         }
 
         async fn cancel_after_boundary(
@@ -41410,6 +41458,21 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    /// Test double: nothing durable survives archive here, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -42463,6 +42526,21 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    /// Test double: nothing durable survives archive here, so the two-read
+    /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        if let Some(session) = self.load_persisted_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Active(Box::new(session)));
+        }
+        if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+            return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+        }
+        Ok(ResumeSessionLoad::Absent)
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -42805,12 +42883,13 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 ),
             )
         } else {
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                session: None,
-                receipt,
-                session_snapshot,
-                terminal: None,
-            })
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                    receipt,
+                    session_snapshot,
+                    None,
+                ),
+            )
         }
     }
 
@@ -57167,6 +57246,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::MobNotFound(_) => "mob_not_found".to_string(),
         MobError::ProfileNotFound(_) => "profile_not_found".to_string(),
         MobError::MemberNotFound(_) => "meerkat_not_found".to_string(),
+        MobError::SessionUnavailableForResume { reason, .. } => {
+            format!("session_unavailable_for_resume:{reason:?}")
+        }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::NotExternallyAddressable(_) => "not_externally_addressable".to_string(),
         MobError::InvalidTransition { from, to } => {

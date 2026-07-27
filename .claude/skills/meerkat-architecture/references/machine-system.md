@@ -208,14 +208,13 @@ MobMachine in-crate access: `MobActor.dsl_authority: MobMachineAuthority` is dir
 
 ## Compositions
 
-Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`. Six canonical ones are exposed by `canonical_composition_schemas()`:
-
-- `meerkat_mob_seam_composition` — MeerkatMachine ↔ MobMachine handoff
-- `schedule_bundle_composition` — schedule + occurrence + delivery
-- `schedule_runtime_bundle_composition` — schedule + runtime boundary
-- `schedule_mob_bundle_composition` — schedule + mob boundary
-- `auth_lease_bundle_composition` — AuthMachine ↔ runtime/provider auth lease publication
-- `workgraph_attention_bundle` — WorkGraph item lifecycle ↔ goal attention binding coordination
+Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs` and
+are exposed by `canonical_composition_schemas()` in `catalog/mod.rs`. Do not
+maintain a hand-written composition list or count here — read the registry
+(a previous six-item copy of the list in this file drifted stale; the public
+mirror table is `docs/reference/machine-authority.mdx`). Entries follow the
+`<name>_composition` function naming (e.g. `meerkat_mob_seam_composition` for
+the MeerkatMachine ↔ MobMachine handoff).
 
 Compositions express effect-disposition rules: which effects emitted by one machine are consumed as inputs by another, which obligations must be realized before a terminal, and which protocol helpers get codegen'd.
 

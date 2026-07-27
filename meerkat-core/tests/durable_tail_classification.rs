@@ -7,9 +7,17 @@
 //!
 //! - Completed: VerifiedStrictDescendant + SingleRunId + EndTurn + 0 dangling
 //!   + 0 orphans + nothing-after-terminal -> `CompletedCandidate`.
-//! - Repairable: descendant + SingleRunId + coherent + (ToolUse | Absent) ->
-//!   `InterruptedRepairableCandidate` (dangling tool_use count irrelevant).
-//! - Everything else -> `Ambiguous` (fail-closed: hold, never discard).
+//! - Repairable: descendant + SingleRunId + coherent + 0 dangling +
+//!   (ToolUse | Absent) -> `InterruptedRepairableCandidate`.
+//! - Everything else — INCLUDING any tail carrying a dangling tool_use ->
+//!   `Ambiguous` (fail-closed: hold, never discard, never auto-close).
+//!
+//! A dangling tool_use proves INTENT, not execution: the call may have fired
+//! its external side effect (a payment, an email, a file write) before the
+//! crash, and nothing in the transcript can distinguish that from
+//! never-dispatched. Auto-closing such a tail with synthetic results and
+//! resuming normal autonomy would let the agent repeat an executed action, so
+//! the machine holds it for reconciliation instead.
 //!
 //! The classification transitions are guaranteed total and disjoint: for every
 //! input combination exactly one transition matches (the generated authority
@@ -109,12 +117,25 @@ fn completed_row_classifies_completed_candidate() {
 // Repairable rows
 // ---------------------------------------------------------------------------
 
-/// Repairable: descendant + single run + coherent + ToolUse terminal, with
-/// dangling tool_use count 0 AND 3 (the count shapes the repair action, not
-/// the class).
+/// Repairable ONLY with zero dangling calls: a ToolUse terminal whose issued
+/// calls all carry durable results is a turn that lost its follow-up, and
+/// closing it invents no execution truth. With ANY dangling call the tail
+/// holds instead — the call's external effect may already have happened.
 #[test]
-fn tool_use_terminal_classifies_repairable_at_zero_and_three_dangling() {
-    for dangling in [0, 3] {
+fn tool_use_terminal_is_repairable_only_without_dangling_calls() {
+    assert_eq!(
+        classify(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::ToolUse,
+            0,
+            0,
+            false,
+        ),
+        DurableTailRecoveryClass::InterruptedRepairableCandidate,
+        "ToolUse terminal with every result landed must be repairable"
+    );
+    for dangling in [1, 3] {
         assert_eq!(
             classify(
                 DurableHeadRelation::VerifiedStrictDescendant,
@@ -124,17 +145,30 @@ fn tool_use_terminal_classifies_repairable_at_zero_and_three_dangling() {
                 0,
                 false,
             ),
-            DurableTailRecoveryClass::InterruptedRepairableCandidate,
-            "ToolUse terminal with {dangling} dangling tool_use must be repairable"
+            DurableTailRecoveryClass::Ambiguous,
+            "ToolUse terminal with {dangling} dangling tool_use must hold for \
+             reconciliation, never auto-close"
         );
     }
 }
 
-/// Repairable: descendant + single run + coherent + Absent terminal (turn cut
-/// mid-stream before any stop reason), with dangling 0 AND 3.
+/// Same rule at an Absent terminal (turn cut mid-stream before any stop
+/// reason): repairable with zero dangling calls, held with any.
 #[test]
-fn absent_terminal_classifies_repairable_at_zero_and_three_dangling() {
-    for dangling in [0, 3] {
+fn absent_terminal_is_repairable_only_without_dangling_calls() {
+    assert_eq!(
+        classify(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::Absent,
+            0,
+            0,
+            false,
+        ),
+        DurableTailRecoveryClass::InterruptedRepairableCandidate,
+        "Absent terminal with no dangling calls must be repairable"
+    );
+    for dangling in [1, 3] {
         assert_eq!(
             classify(
                 DurableHeadRelation::VerifiedStrictDescendant,
@@ -144,8 +178,34 @@ fn absent_terminal_classifies_repairable_at_zero_and_three_dangling() {
                 0,
                 false,
             ),
-            DurableTailRecoveryClass::InterruptedRepairableCandidate,
-            "Absent terminal with {dangling} dangling tool_use must be repairable"
+            DurableTailRecoveryClass::Ambiguous,
+            "Absent terminal with {dangling} dangling tool_use must hold for \
+             reconciliation, never auto-close"
+        );
+    }
+}
+
+/// The unknown-external-effect rule stated directly: for EVERY otherwise
+/// coherent shape, one dangling tool_use is enough to hold the tail.
+#[test]
+fn any_dangling_tool_use_holds_the_tail_for_reconciliation() {
+    for stop in [
+        DurableTailStopReason::EndTurn,
+        DurableTailStopReason::ToolUse,
+        DurableTailStopReason::Absent,
+        DurableTailStopReason::Other,
+    ] {
+        assert_eq!(
+            classify(
+                DurableHeadRelation::VerifiedStrictDescendant,
+                RunIdCardinality::SingleRunId,
+                stop,
+                1,
+                0,
+                false,
+            ),
+            DurableTailRecoveryClass::Ambiguous,
+            "a dangling tool_use at stop {stop:?} proves intent, not execution: hold"
         );
     }
 }
@@ -369,16 +429,21 @@ fn classification_is_total_disjoint_and_matches_the_truth_table() {
                                 && cardinality == RunIdCardinality::SingleRunId
                                 && orphans == 0
                                 && !after_terminal;
-                            let expected = if coherent
-                                && stop == DurableTailStopReason::EndTurn
-                                && dangling == 0
-                            {
-                                DurableTailRecoveryClass::CompletedCandidate
-                            } else if coherent
-                                && (stop == DurableTailStopReason::ToolUse
-                                    || stop == DurableTailStopReason::Absent)
-                            {
-                                DurableTailRecoveryClass::InterruptedRepairableCandidate
+                            // A dangling tool_use disqualifies BOTH commit
+                            // classes: unknown external effects are held.
+                            let expected = if coherent && dangling == 0 {
+                                match stop {
+                                    DurableTailStopReason::EndTurn => {
+                                        DurableTailRecoveryClass::CompletedCandidate
+                                    }
+                                    DurableTailStopReason::ToolUse
+                                    | DurableTailStopReason::Absent => {
+                                        DurableTailRecoveryClass::InterruptedRepairableCandidate
+                                    }
+                                    DurableTailStopReason::Other => {
+                                        DurableTailRecoveryClass::Ambiguous
+                                    }
+                                }
                             } else {
                                 DurableTailRecoveryClass::Ambiguous
                             };

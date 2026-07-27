@@ -9,6 +9,7 @@ use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use chrono::Utc;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::handles::TurnStateHandle;
+use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorBoundaryHandle,
     CoreExecutorError, CoreExecutorInterruptHandle,
@@ -1927,19 +1928,15 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
             ));
             let contributing_input_ids = primitive.contributing_input_ids().to_vec();
             let conversation_digest = session_messages_sha256(&session);
-            Ok(CoreApplyOutput {
-               session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(RunBoundaryReceiptDraft {
                     run_id,
                     boundary: primitive.apply_boundary(),
                     contributing_input_ids,
                     conversation_digest: Some(conversation_digest),
                     message_count: session.messages().len(),
-                },
-                session_snapshot: Some(
+                }, Some(
                     serde_json::to_vec(&session).expect("serialize applied terminal session"),
-                ),
-                terminal: Some(
+                ), Some(
                     meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
                         error: meerkat_core::TurnErrorMetadata::terminal(
                             meerkat_core::TurnTerminalCauseKind::ToolFailure,
@@ -1947,8 +1944,7 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
                             "runtime-loop applied terminal",
                         ),
                     },
-                ),
-            })
+                )))
         }
 
         async fn cancel_after_boundary(
@@ -2239,18 +2235,17 @@ async fn no_pending_runtime_loop_exit_persists_unregister_before_exact_cleanup()
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: Some(CoreApplyTerminal::NoPendingBoundary),
-            })
+                None,
+                Some(CoreApplyTerminal::NoPendingBoundary),
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -2605,20 +2600,16 @@ async fn directed_machine_terminal_commit_failure_publishes_the_same_terminal_as
                 )
                 .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
             let session = meerkat_core::Session::with_id(self.session_id.clone());
-            Ok(CoreApplyOutput {
-               session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(RunBoundaryReceiptDraft {
                     run_id,
                     boundary: primitive.apply_boundary(),
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: Some(session_messages_sha256(&session)),
                     message_count: 0,
-                },
-                session_snapshot: Some(
+                }, Some(
                     serde_json::to_vec(&session)
                         .expect("serialize non-durable failed transcript"),
-                ),
-                terminal: Some(
+                ), Some(
                     meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
                         error: meerkat_core::TurnErrorMetadata::terminal(
                             meerkat_core::TurnTerminalCauseKind::ToolFailure,
@@ -2626,8 +2617,7 @@ async fn directed_machine_terminal_commit_failure_publishes_the_same_terminal_as
                             "directed failed-but-applied turn",
                         ),
                     },
-                ),
-            })
+                )))
         }
 
         async fn cancel_after_boundary(
@@ -2760,20 +2750,16 @@ async fn nondirected_machine_terminal_commit_failure_has_authorized_finalization
                 )
                 .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
             let session = meerkat_core::Session::with_id(self.session_id.clone());
-            Ok(CoreApplyOutput {
-               session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(RunBoundaryReceiptDraft {
                     run_id,
                     boundary: primitive.apply_boundary(),
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: Some(session_messages_sha256(&session)),
                     message_count: 0,
-                },
-                session_snapshot: Some(
+                }, Some(
                     serde_json::to_vec(&session)
                         .expect("serialize non-durable failed transcript"),
-                ),
-                terminal: Some(
+                ), Some(
                     meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
                         error: meerkat_core::TurnErrorMetadata::terminal(
                             meerkat_core::TurnTerminalCauseKind::ToolFailure,
@@ -2781,8 +2767,7 @@ async fn nondirected_machine_terminal_commit_failure_has_authorized_finalization
                             "non-directed failed-but-applied turn",
                         ),
                     },
-                ),
-            })
+                )))
         }
 
         async fn cancel_after_boundary(
@@ -5919,18 +5904,17 @@ async fn concurrent_unregister_callers_join_original_drain_result() {
                 .await
                 .expect("test release sender should stay alive until apply is released");
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn stop_runtime_executor(
@@ -6482,18 +6466,17 @@ async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_dra
                 .await
                 .expect("test release sender should stay alive until apply is released");
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn stop_runtime_executor(
@@ -6820,18 +6803,17 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                meerkat_core::lifecycle::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -6957,18 +6939,17 @@ async fn seed_terminal_keyed_prompt_store() -> (
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                meerkat_core::lifecycle::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -8506,18 +8487,17 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -9012,18 +8992,17 @@ async fn retire_recaptures_wake_sender_after_pending_attachment_commits() {
             let allowed_to_finish = self.allow_finish.notified();
             self.apply_started.notify_one();
             allowed_to_finish.await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -10126,18 +10105,17 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -10284,18 +10262,17 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -10461,18 +10438,17 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -10723,18 +10699,17 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -10994,18 +10969,17 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -11359,18 +11333,17 @@ async fn cancel_after_boundary_on_idle_attached_runtime_consumes_before_successo
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push("apply");
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -11566,18 +11539,17 @@ async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_app
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -11875,18 +11847,17 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -12034,18 +12005,17 @@ mod stop_teardown_coordinator_class {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -12154,18 +12124,17 @@ mod stop_teardown_coordinator_class {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_one();
             self.release_apply.notified().await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -12197,18 +12166,17 @@ mod stop_teardown_coordinator_class {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -12249,22 +12217,21 @@ mod stop_teardown_coordinator_class {
                 started.notify_one();
                 release.notified().await;
             }
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: if self.fail_checkpoint {
+                if self.fail_checkpoint {
                     Some(vec![1, 2, 3])
                 } else {
                     None
                 },
-                terminal: None,
-            })
+                None,
+            ))
         }
 
         async fn checkpoint_committed_session_snapshot(
@@ -12309,18 +12276,17 @@ mod stop_teardown_coordinator_class {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -13787,22 +13753,21 @@ mod stop_under_gate_deadlock_class {
                 started.notify_one();
                 release.notified().await;
             }
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: if self.fail_checkpoint {
+                if self.fail_checkpoint {
                     Some(vec![1, 2, 3])
                 } else {
                     None
                 },
-                terminal: None,
-            })
+                None,
+            ))
         }
 
         async fn checkpoint_committed_session_snapshot(
@@ -14492,18 +14457,17 @@ impl CoreExecutor for BoundaryCancelCallbackRaceExecutor {
             })?;
         }
 
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -14662,18 +14626,17 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
             let allowed_to_finish = self.allow_finish.notified();
             self.apply_started.notify_one();
             allowed_to_finish.await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -15181,18 +15144,17 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
                 .await
                 .expect("test release sender should stay alive until apply is released");
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -15349,18 +15311,17 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
                     .push("apply2_start");
             }
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -15621,18 +15582,17 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
             let allowed_to_finish = self.allow_finish.notified();
             self.apply_started.notify_one();
             allowed_to_finish.await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -15877,18 +15837,17 @@ impl CoreExecutor for InterruptYieldingBlockingExecutor {
         let allowed_to_finish = self.allow_finish.notified();
         self.apply_started.notify_one();
         allowed_to_finish.await;
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: primitive.apply_boundary(),
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -16333,18 +16292,17 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -16700,18 +16658,17 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -16906,18 +16863,17 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -17114,18 +17070,17 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
             self.apply_started.notify_one();
             allowed_to_finish.await;
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -17265,18 +17220,17 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -17458,18 +17412,17 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -18736,18 +18689,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -19021,18 +18973,17 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -19315,18 +19266,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -19571,18 +19521,17 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -20304,18 +20253,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -20525,18 +20473,17 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -21017,18 +20964,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -21216,18 +21162,17 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -21898,18 +21843,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -22093,18 +22037,17 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -22769,18 +22712,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -23040,18 +22982,17 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
             allowed_to_finish.await;
             self.apply_finished.notify_one();
 
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -24264,7 +24205,6 @@ async fn run_commit_rejection_preserves_registered_running_session() {
         vec![input_id.clone()],
         batch_receipt(rejected_run_id, vec![input_id.clone()]),
         None,
-        None,
         Vec::new(),
         None,
     )
@@ -24312,7 +24252,6 @@ async fn run_commit_mismatched_input_rejection_preserves_active_run() {
         run_id.clone(),
         vec![wrong_input_id.clone()],
         batch_receipt(run_id.clone(), vec![wrong_input_id]),
-        None,
         None,
         Vec::new(),
         None,
@@ -25616,18 +25555,17 @@ async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -26157,7 +26095,6 @@ async fn run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
         staged_ids.clone(),
         batch_receipt(RunId::new(), staged_ids.clone()),
         None,
-        None,
         Vec::new(),
         None,
     )
@@ -26186,7 +26123,6 @@ async fn run_commit_rejects_reordered_receipt_contributors_before_mutation() {
         staged_ids.clone(),
         batch_receipt(run_id.clone(), receipt_contributors),
         None,
-        None,
         Vec::new(),
         None,
     )
@@ -26213,8 +26149,9 @@ async fn completed_run_rejects_foreign_session_witness_before_mutation() {
         run_id.clone(),
         vec![input_id.clone()],
         receipt,
-        Some(serde_json::to_vec(&foreign_session).unwrap()),
-        None,
+        Some(BoundSessionCommit::untyped(
+            serde_json::to_vec(&foreign_session).unwrap(),
+        )),
         Vec::new(),
         None,
     )
@@ -26256,8 +26193,7 @@ async fn persistent_commit_atomic_apply_failure_preserves_pre_terminal_state() {
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(session_snapshot),
-        None,
+        Some(BoundSessionCommit::untyped(session_snapshot)),
         Vec::new(),
         None,
     )
@@ -26301,8 +26237,7 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(session_snapshot.clone()),
-        None,
+        Some(BoundSessionCommit::untyped(session_snapshot.clone())),
         Vec::new(),
         None,
     )
@@ -26398,8 +26333,9 @@ async fn persistent_commit_success_uses_one_durable_receipt_terminal_write() {
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(serde_json::to_vec(&session).expect("serialize session snapshot")),
-        None,
+        Some(BoundSessionCommit::untyped(
+            serde_json::to_vec(&session).expect("serialize session snapshot"),
+        )),
         Vec::new(),
         None,
     )
@@ -30655,18 +30591,17 @@ async fn session_has_executor_follows_generated_registration_phase() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -30798,18 +30733,17 @@ async fn recovered_predecessor_inputs_are_silently_abandoned_before_attachment_s
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -31121,18 +31055,17 @@ async fn exact_attachment_is_not_serving_until_retained_publication_lease_commit
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -31692,18 +31625,17 @@ impl CoreExecutor for CleanupRuntimeGatedStopExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -32091,18 +32023,17 @@ async fn replacement_cancels_old_input_before_a_new_request_can_run_on_b() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_one();
             self.release_apply.notified().await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -32319,18 +32250,17 @@ async fn cancelled_executor_setup_caller_leaves_process_owned_claim_to_commit() 
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -32494,18 +32424,17 @@ async fn ensure_session_with_executor_waits_for_startup_reconciliation() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn reconcile_committed_compaction_projections(
@@ -32592,18 +32521,17 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_one();
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn reconcile_committed_compaction_projections(
@@ -33043,18 +32971,17 @@ async fn failed_startup_reconciliation_surfaces_and_unregisters_attachment() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn reconcile_committed_compaction_projections(
@@ -33149,18 +33076,17 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: primitive.apply_boundary(),
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn reconcile_committed_compaction_projections(
@@ -33425,18 +33351,17 @@ async fn cold_executor_attach_replaces_retired_process_projection() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -33509,18 +33434,17 @@ async fn runtime_loop_driver_authority_rejects_detached_driver_after_unregister(
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -33592,18 +33516,17 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -33749,18 +33672,17 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             let allowed_to_finish = self.allow_finish.notified();
             self.apply_started.notify_one();
             allowed_to_finish.await;
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -33906,18 +33828,17 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -34023,18 +33944,17 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -34558,18 +34478,17 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -34600,18 +34519,17 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
             self.apply_started.notify_one();
             allowed_to_finish.await;
         }
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -39228,18 +39146,17 @@ mod prepared_materialization_transactions {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(
@@ -39268,18 +39185,17 @@ mod prepared_materialization_transactions {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                session: None,
-                receipt: RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(

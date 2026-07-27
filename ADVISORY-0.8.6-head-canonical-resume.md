@@ -40,16 +40,22 @@ Only sessions with a row in `continuity_session_heads` are at risk. Check with
 a read-only query against a **stopped** gateway:
 
 ```sh
-# Note the `test -f` guard: sqlite3 will silently CREATE a 0-byte file at a
-# path that does not exist, even with ?immutable=1.
+# mode=ro refuses to create a missing file and, unlike immutable=1, reads
+# through the write-ahead log. Keep the -wal and -shm files next to the
+# database or recent rows will be invisible. Do NOT use ?immutable=1 here:
+# it silently ignores the WAL and can report "unaffected" for a database
+# whose head rows still live only in the -wal file.
 DB=<state>/continuity.db
-test -f "$DB" && sqlite3 "file:$DB?immutable=1" \
+test -f "$DB" && sqlite3 "file:$DB?mode=ro" \
   "SELECT session_id, message_count FROM continuity_session_heads;"
 ```
 
 - **No rows / no such table** — you are not affected.
 - **Rows returned** — those sessions are head-canonical and at risk. Every
   other identity in the same file is blob-canonical and reads correctly.
+- **Read-only open errors** — that means "cannot determine", NOT
+  "unaffected". Restore the `-wal`/`-shm` companions next to the database
+  and rerun; never fall back to `?immutable=1` for this check.
 
 In the reference corpus this was diagnosed against, 18 identities had
 continuity records, exactly 2 had head rows, and exactly those 2 failed.
@@ -94,7 +100,24 @@ history. The stale document is the *archive*, not the truth.
 
 ## Status
 
-Fix in progress. This advisory will be updated when it ships.
+Fixed in meerkat 0.8.9; the paired mobkit release picks it up. Both forms are
+closed at the read path, and neither fix touches durable rows except to
+promote them:
+
+- **Form 1.** Cold reads now drive a typed, machine-owned read-source
+  decision. A committed head-canonical head is served as authority, and a
+  durable tail whose boundary commit lost the shutdown race is recovered
+  through a machine-authorized commit instead of being withheld in favor of
+  the stale runtime snapshot. Ambiguous evidence is held intact and resume
+  fails typed (`SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` /
+  `SESSION_DURABLE_EVIDENCE_QUARANTINED`) rather than serving a wrong copy.
+- **Form 2.** An archived document whose runtime record never reached
+  `Retired` is reported as archived (typed) instead of missing, and a
+  repeated archive retires the residual runtime.
+
+The operational guidance above stands until you are on the fixed versions:
+do not downgrade, restore, or delete — the durable rows are the good copy,
+and the fixed reader resumes them with full history.
 
 ## Credit
 

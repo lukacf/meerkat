@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, CheckpointProvenanceClassValues, DurableHeadRelationValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LegacyCheckpointMigrationDispositionValues, LegacyCheckpointTranscriptRelationValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, RuntimeProjectionConflictDispositionValues, RuntimeSnapshotReadDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
+CONSTANTS BooleanValues, CheckpointProvenanceClassValues, DurableHeadRelationValues, DurableTailExecutionEvidenceValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LegacyCheckpointMigrationDispositionValues, LegacyCheckpointTranscriptRelationValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, RuntimeProjectionConflictDispositionValues, RuntimeSnapshotReadDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -838,33 +838,33 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, session_is_live) ==
+ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, session_is_live, tail_execution) ==
     /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance = "Committed") /\ (session_is_live = FALSE))
+    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance = "Committed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, session_is_live) ==
+ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, session_is_live, tail_execution) ==
     /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance # "Committed") /\ (session_is_live = FALSE))
+    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance # "Committed") /\ (session_is_live = FALSE) /\ (tail_execution = "BoundExecution"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live) ==
+ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live, tail_execution) ==
     /\ phase = "Ready"
-    /\ (IF ((relation = "Diverged") /\ (store_provenance # "IntraTurn")) THEN TRUE ELSE (relation = "Unverifiable"))
+    /\ (IF ((relation = "Diverged") /\ (store_provenance # "IntraTurn")) THEN TRUE ELSE (IF (relation = "Unverifiable") THEN TRUE ELSE ((relation = "VerifiedStrictDescendant") /\ (store_provenance # "Committed") /\ (session_is_live = FALSE) /\ (tail_execution = "UnboundExecution"))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live) ==
+ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live, tail_execution) ==
     /\ phase = "Ready"
-    /\ ((relation # "Unverifiable") /\ (IF (relation # "Diverged") THEN TRUE ELSE (store_provenance = "IntraTurn")) /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (session_is_live = TRUE)))
+    /\ ((relation # "Unverifiable") /\ (IF (relation # "Diverged") THEN TRUE ELSE (store_provenance = "IntraTurn")) /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE ((store_provenance # "Committed") /\ (IF (session_is_live = TRUE) THEN TRUE ELSE (tail_execution = "NoExecutionContent")))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -880,7 +880,7 @@ ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinal
 
 ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
     /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")))
+    /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -888,13 +888,13 @@ ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardina
 
 ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
     /\ phase = "Ready"
-    /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "SingleRunId") THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE ((terminal_stop_reason = "EndTurn") /\ (dangling_tool_use_count # 0)))))))
+    /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "SingleRunId") THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE (dangling_tool_use_count # 0))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeProjectionConflictRetain(session_id, relation, authority_supersedes_row) ==
+ResolveRuntimeProjectionConflictRetain(session_id, relation, row_provenance, authority_supersedes_row) ==
     /\ phase = "Ready"
     /\ (relation = "VerifiedStrictDescendant")
     /\ phase' = "Ready"
@@ -902,17 +902,17 @@ ResolveRuntimeProjectionConflictRetain(session_id, relation, authority_supersede
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeProjectionConflictConverge(session_id, relation, authority_supersedes_row) ==
+ResolveRuntimeProjectionConflictConverge(session_id, relation, row_provenance, authority_supersedes_row) ==
     /\ phase = "Ready"
-    /\ ((relation # "VerifiedStrictDescendant") /\ (authority_supersedes_row = TRUE))
+    /\ ((relation # "VerifiedStrictDescendant") /\ (row_provenance = "IntraTurn") /\ (authority_supersedes_row = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeProjectionConflictReject(session_id, relation, authority_supersedes_row) ==
+ResolveRuntimeProjectionConflictReject(session_id, relation, row_provenance, authority_supersedes_row) ==
     /\ phase = "Ready"
-    /\ ((relation # "VerifiedStrictDescendant") /\ (authority_supersedes_row = FALSE))
+    /\ ((relation # "VerifiedStrictDescendant") /\ (IF (authority_supersedes_row = FALSE) THEN TRUE ELSE (row_provenance # "IntraTurn")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -1194,16 +1194,16 @@ Next ==
     \/ ClassifyLiveSessionAuthorityDurableRevision(TRUE, FALSE, FALSE, FALSE)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, FALSE)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, FALSE)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, session_is_live, tail_execution)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E tail_execution \in DurableTailExecutionEvidenceValues : ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, FALSE, tail_execution)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live, tail_execution)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live, tail_execution)
     \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE)
     \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE)
     \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E messages_after_terminal \in BOOLEAN : ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E authority_supersedes_row \in BOOLEAN : ResolveRuntimeProjectionConflictRetain(session_id, relation, authority_supersedes_row)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : ResolveRuntimeProjectionConflictConverge(session_id, relation, TRUE)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : ResolveRuntimeProjectionConflictReject(session_id, relation, FALSE)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : \E authority_supersedes_row \in BOOLEAN : ResolveRuntimeProjectionConflictRetain(session_id, relation, row_provenance, authority_supersedes_row)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : ResolveRuntimeProjectionConflictConverge(session_id, relation, row_provenance, TRUE)
+    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : \E authority_supersedes_row \in BOOLEAN : ResolveRuntimeProjectionConflictReject(session_id, relation, row_provenance, authority_supersedes_row)
     \/ \E session_id \in SessionIdValues : ResolveRuntimeCheckpointProjectionActive(session_id)
     \/ \E session_id \in SessionIdValues : ResolveRuntimeCheckpointProjectionArchived(session_id)
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)

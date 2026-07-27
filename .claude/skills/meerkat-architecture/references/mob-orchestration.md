@@ -27,6 +27,16 @@ MobBuilder::new(definition, storage)
 - `Resume { session_id }` — resume existing session
 - `Fork { source_member_id, fork_context }` — fork from another member's history
 
+Resume resolves through the REQUIRED (defaultless)
+`MobSessionService::load_session_for_resume`, returning the typed
+`ResumeSessionLoad`: `Active` / `Revivable` (archived but machine-revivable) /
+`ArchivedNotRevivable { runtime_state }` / `Absent`. Archived-not-revivable is
+NOT absence: it surfaces `MobError::SessionUnavailableForResume` with a typed
+`SessionResumeUnavailableReason` and classifies as
+`MobFailureClass::TargetArchived`. Implementations must state this truth
+directly — a composition over the legacy optional reads can never produce
+`ArchivedNotRevivable`, which is why the method has no default.
+
 `ForkContext`:
 
 - `FullHistory` — `Session::fork()` (O(1) CoW)

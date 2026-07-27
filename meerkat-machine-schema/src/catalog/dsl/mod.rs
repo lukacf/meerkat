@@ -826,6 +826,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &["Absent", "EndTurn", "ToolUse", "Other"],
             ),
             NamedTypeBinding::string_enum(
+                "DurableTailExecutionEvidence",
+                &["NoExecutionContent", "BoundExecution", "UnboundExecution"],
+            ),
+            NamedTypeBinding::string_enum(
                 "DurableTailRecoveryClass",
                 &[
                     "CompletedCandidate",
@@ -1180,6 +1184,42 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RepairAndCommitInterrupted",
                     "HoldIntact",
                 ],
+            ),
+            // Typed projections of the persisted machine-lifecycle row and
+            // its current-run fact, observed by the shell at recovery
+            // authorization time and judged by the machine guards.
+            NamedTypeBinding::string_enum(
+                "DurableRecoveryObservedLifecycle",
+                &[
+                    "MissingRow",
+                    "Idle",
+                    "Retired",
+                    "NonQuiescent",
+                    "Undecodable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableRecoveryObservedRun",
+                &["NoRun", "CandidateRun", "OtherRun"],
+            ),
+            // Durable evidence the recovery guards judge instead of a shell
+            // predicate: what the committed receipts say about the candidate's
+            // own content, and whether durable identity can attribute the
+            // input rows the recovered boundary would terminalize. The
+            // fail-closed variant is listed FIRST so the generated kernel's
+            // first-variant default lands on it too.
+            NamedTypeBinding::string_enum(
+                "DurableRecoveryPriorCommit",
+                &[
+                    "DivergesFromCandidate",
+                    "NoPriorCommit",
+                    "PrecedesCandidate",
+                    "MatchesCandidate",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableRecoveryInputEvidence",
+                &["Unfenceable", "UnboundContentInput", "AllBoundOrInert"],
             ),
             NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
             NamedTypeBinding::string("AuthBindingRef"),
@@ -2466,6 +2506,7 @@ runtime_internal_inputs!(
         ObserveSupervisorRotation,
         ResolveSupervisorCleanupCommandAdmission,
         AuthorizeDeferredSessionSystemContextAppend,
+        AuthorizeDurableTailRecovery,
         BeginUnregisterSession,
         BeginUnregisterUnservedAttachment,
         BindSupervisor,

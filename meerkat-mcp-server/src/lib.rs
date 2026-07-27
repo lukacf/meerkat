@@ -5294,17 +5294,17 @@ mod tests {
             run_id: meerkat_core::RunId,
             primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
         ) -> Result<CoreApplyOutput, meerkat_core::lifecycle::CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
                     run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                     conversation_digest: None,
                     message_count: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-            })
+                None,
+                None,
+            ))
         }
 
         async fn cancel_after_boundary(

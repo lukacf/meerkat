@@ -55,6 +55,38 @@ When you add a new handle field, `prepare_bindings()` and the factory's `Session
 - `PersistentRuntimeDriver::recover()` owns input/runtime/control recovery (replay from store)
 - `MeerkatMachine` owns session-entry runtime recovery: `ops_lifecycle`, `epoch_id`, shared cursor state
 - `SessionRuntimeBindings` are the epoch-local witness for that ownership
+- Durable-tail recovery of the session document is a separate machine-owned pipeline (below); shells never promote or discard a durable tail
+
+## Durable-tail recovery
+
+The intra-turn checkpointer writes the canonical session store outside the
+boundary transaction, so a crash can leave a durable tail — up to a fully
+completed turn — whose boundary commit never landed. Ownership splits three
+ways (never-discard; full contract in `docs/reference/machine-authority.mdx`):
+
+- `SessionDocumentMachine` classifies: typed cold-read source disposition
+  (`UseRuntimeSnapshot` / `UseCommittedStoreHead` / `RecoveryRequired` /
+  `Quarantine`) and `DurableTailRecoveryClass` (`CompletedCandidate` /
+  `InterruptedRepairableCandidate` / `Ambiguous`; any dangling `tool_use` is
+  Ambiguous — held, never closed with synthetic results).
+- `MeerkatMachine` authorizes: `AuthorizeDurableTailRecovery` judges the
+  persisted lifecycle row, the prior-commit receipt comparison, and input
+  attributability; both hold paths are machine-minted; commit verdicts emit
+  `DurableTailRecoveryCommitAuthorized` with the machine-minted boundary
+  sequence (one past the last committed receipt).
+- `RuntimeStore` realizes: one `atomic_apply` boundary (recovered snapshot +
+  receipt + input terminalization), fenced on the observed lifecycle-row
+  version and per-input-row digests (`expected_row_digest` MUST be enforced
+  inside the writing transaction; typed `InputRowVersionConflict` /
+  `MachineLifecycleVersionConflict`).
+
+The classification verdict crosses the seam sealed:
+`DurableTailRecoveryRequest::from_classification` (meerkat-runtime/src/recovery.rs)
+is the only constructor and requires the classifier's `DurableTailClassified`
+effect. While a tail is held or evidence is quarantined, resume fails typed
+(`SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined`)
+with content retained. Read-triggered recovery runs under an exclusive
+per-session fence and converges idempotently when a competing process wins.
 
 ## Key operations
 
@@ -186,6 +218,8 @@ entrypoints that bypass `scripts/repo-cargo`.
 - `meerkat-runtime/src/ops_lifecycle.rs` — `RuntimeOpsLifecycleRegistry`
 - `meerkat-runtime/src/policy_table.rs` — `DefaultPolicyTable`
 - `meerkat-runtime/src/runtime_loop.rs` — completion-feed wake injection and runtime loop
+- `meerkat-runtime/src/recovery.rs` — durable-tail recovery authorization/realization (`DurableTailRecoveryRequest`)
+- `meerkat-runtime/src/store/mod.rs` — `RuntimeStore` contract (fenced records, boundary receipts)
 - `meerkat-core/src/completion_feed.rs` — monotonic completion-feed contract
 - `meerkat-runtime/src/peer_handling_mode.rs` — handling_mode validation
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`

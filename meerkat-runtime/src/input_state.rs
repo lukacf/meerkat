@@ -765,6 +765,7 @@ impl StoredInputState {
 #[derive(Debug, Clone)]
 pub struct InputStatePersistenceRecord {
     bundle: StoredInputState,
+    expected_row_digest: Option<String>,
 }
 
 impl InputStatePersistenceRecord {
@@ -776,7 +777,29 @@ impl InputStatePersistenceRecord {
             &bundle.state.input_id,
             &bundle.seed,
         )?;
-        Ok(Self { bundle })
+        Ok(Self {
+            bundle,
+            expected_row_digest: None,
+        })
+    }
+
+    /// Fence this update on the exact stored row bytes it was derived from
+    /// (domain-prefixed SHA-256, as reported by
+    /// `RuntimeStore::load_input_states_with_versions`). A store applying a
+    /// fenced record MUST verify the current stored row still hashes to this
+    /// digest inside the same transaction and fail the whole boundary with
+    /// `RuntimeStoreError::InputRowVersionConflict` otherwise. Cold recovery
+    /// uses this: between loading a row and committing the recovered
+    /// boundary, another process may advance, adopt, or terminalize the
+    /// input, and a blind upsert would overwrite the newer truth.
+    pub(crate) fn with_expected_row_digest(mut self, digest: String) -> Self {
+        self.expected_row_digest = Some(digest);
+        self
+    }
+
+    /// Exact prior row digest this update is fenced on, when present.
+    pub fn expected_row_digest(&self) -> Option<&str> {
+        self.expected_row_digest.as_deref()
     }
 
     /// Raw bundle approved for durable persistence.
@@ -792,6 +815,12 @@ impl InputStatePersistenceRecord {
     /// Consume the approved record into its raw bundle.
     pub fn into_stored(self) -> StoredInputState {
         self.bundle
+    }
+
+    /// Consume the approved record into its raw bundle plus the expected
+    /// prior row digest it is fenced on.
+    pub fn into_stored_and_expected(self) -> (StoredInputState, Option<String>) {
+        (self.bundle, self.expected_row_digest)
     }
 }
 

@@ -1665,56 +1665,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         terminal: Option<CoreApplyTerminal>,
     ) -> Result<CoreApplyOutput, SessionError> {
         let session = self.export_session(id).await?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to serialize session snapshot for runtime commit: {err}"
-            )))
-        })?;
         let receipt =
             Self::build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
 
         // Hand the boundary the session we already have, so nothing
-        // downstream deserializes these bytes back into it.
-        let typed_session = std::sync::Arc::new(session);
-        Ok(match terminal {
-            Some(CoreApplyTerminal::RunResult(run_result)) => {
-                CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), *run_result)
-                    .with_session(std::sync::Arc::clone(&typed_session))
-            }
-            Some(CoreApplyTerminal::CallbackPending {
-                tool_use_id,
-                tool_name,
-                args,
-            }) => CoreApplyOutput::with_callback_pending(
-                receipt,
-                Some(session_snapshot),
-                tool_use_id,
-                tool_name,
-                args,
-            ),
-            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
-                CoreApplyOutput::with_callback_batch_pending(
-                    receipt,
-                    Some(session_snapshot),
-                    pending_tool_calls,
-                )
-                .with_session(std::sync::Arc::clone(&typed_session))
-            }
-            Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
-                receipt,
-                session_snapshot: Some(session_snapshot),
-                session: Some(std::sync::Arc::clone(&typed_session)),
-                terminal: Some(CoreApplyTerminal::NoPendingBoundary),
-            },
-            Some(terminal @ CoreApplyTerminal::MachineTerminalFailure { .. }) => CoreApplyOutput {
-                receipt,
-                session_snapshot: Some(session_snapshot),
-                session: Some(std::sync::Arc::clone(&typed_session)),
-                terminal: Some(terminal),
-            },
-            None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot))
-                .with_session(std::sync::Arc::clone(&typed_session)),
-        })
+        // downstream deserializes these bytes back into it. `with_session`
+        // performs the single serialization and seals the typed session to
+        // the exact bytes it produced.
+        CoreApplyOutput::new(receipt, terminal)
+            .with_session(std::sync::Arc::new(session))
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to serialize session snapshot for runtime commit: {err}"
+                )))
+            })
     }
 
     async fn require_inline_video_support(

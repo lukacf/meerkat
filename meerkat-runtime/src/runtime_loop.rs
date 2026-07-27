@@ -648,10 +648,11 @@ async fn commit_runtime_loop_output_owned(
     run_id: RunId,
     input_ids: Vec<InputId>,
     receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
-    session_snapshot: Option<Vec<u8>>,
-    // The same session those bytes came from, when the executor had it. Lets
-    // the boundary validator skip re-parsing the document it just serialized.
-    typed_session: Option<std::sync::Arc<meerkat_core::Session>>,
+    // Sealed: bytes plus, when the executor certified it, the exact session
+    // they were serialized from. Carrying the pair as one value lets the
+    // boundary validator skip re-parsing the document without opening a seam
+    // where the validated and persisted documents could differ.
+    committed: Option<meerkat_core::lifecycle::core_executor::BoundSessionCommit>,
     directed_interaction_ids: Vec<InteractionId>,
     terminal: Option<CoreApplyTerminal>,
     machine_terminal_error: Option<meerkat_core::TurnErrorMetadata>,
@@ -700,14 +701,14 @@ async fn commit_runtime_loop_output_owned(
         }
 
         let commit_result = if let Some(error) = machine_terminal_error {
-            match session_snapshot {
-                Some(session_snapshot) => crate::meerkat_machine::commit_machine_terminal_run(
+            match committed {
+                Some(committed) => crate::meerkat_machine::commit_machine_terminal_run(
                     &driver,
                     run_id.clone(),
                     error,
                     crate::meerkat_machine::driver::MachineTerminalAppliedDraft {
                         receipt,
-                        session_snapshot,
+                        session_snapshot: committed.into_snapshot_bytes(),
                     },
                 )
                 .await
@@ -722,8 +723,7 @@ async fn commit_runtime_loop_output_owned(
                 run_id.clone(),
                 input_ids,
                 receipt,
-                session_snapshot,
-                typed_session.as_deref(),
+                committed,
                 directed_interaction_ids,
                 terminal.as_ref(),
             )
@@ -4715,12 +4715,12 @@ async fn process_queue(
                                 return true;
                             }
                         };
-                        let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                            receipt,
-                            session_snapshot,
-                            session: typed_session,
-                            terminal,
-                        } = output;
+                        // The committed document stays sealed across this
+                        // handoff: the bytes were serialized from the typed
+                        // session inside `with_session`, so the witness
+                        // validator and the store commit cannot be handed
+                        // different documents.
+                        let (receipt, committed, terminal) = output.into_parts();
                         // A resume against a session that has no pending
                         // boundary is a successful terminal observation, but
                         // the executor must not remain attached afterward.
@@ -4731,7 +4731,9 @@ async fn process_queue(
                             terminal.as_ref(),
                             Some(CoreApplyTerminal::NoPendingBoundary)
                         );
-                        let committed_session_snapshot = session_snapshot.clone();
+                        let committed_session_snapshot = committed
+                            .as_ref()
+                            .map(|commit| commit.snapshot_bytes().to_vec());
                         let machine_terminal_error = match terminal.as_ref() {
                             Some(CoreApplyTerminal::MachineTerminalFailure { error }) => {
                                 Some(error.clone())
@@ -4746,8 +4748,7 @@ async fn process_queue(
                                 run_id.clone(),
                                 input_ids.clone(),
                                 receipt,
-                                session_snapshot,
-                                typed_session.clone(),
+                                committed,
                                 directed_interaction_ids.clone(),
                                 terminal.clone(),
                                 machine_terminal_error.clone(),

@@ -740,18 +740,17 @@ impl CoreExecutor for NoopExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            session: None,
-            receipt: meerkat_core::RunBoundaryReceiptDraft {
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            meerkat_core::RunBoundaryReceiptDraft {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
                 conversation_digest: None,
                 message_count: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-        })
+            None,
+            None,
+        ))
     }
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())

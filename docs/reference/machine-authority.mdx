@@ -86,31 +86,53 @@ ways:
   dangling/orphan tool counts) and emits `DurableTailClassified` with a
   `DurableTailRecoveryClass`: `CompletedCandidate`,
   `InterruptedRepairableCandidate`, or `Ambiguous`. The classification
-  transitions are total and disjoint over the observation. The
-  `RecoveryCandidateId` binds the exact evidence (session, authority stamp,
+  transitions are total and disjoint over the observation. A tail carrying
+  any dangling tool call classifies `Ambiguous`: the call proves intent, not
+  execution, so the tail is held for reconciliation rather than repaired.
+  The candidate id binds the exact evidence (session, authority stamp,
   store-head digest, CAS token, observed run identity), so classifying one
   head can never authorize mutating a later head.
-- **`MeerkatMachine` authorizes.** `AuthorizeDurableTailRecovery` consumes the
-  exact classified candidate and compares its run identity against the
-  machine's own run facts. It emits `DurableTailRecoveryAuthorized` with a
-  `DurableTailRecoveryDisposition`: `CommitCompleted`,
-  `RepairAndCommitInterrupted`, `HoldIntact`, or `RefuseRecovery`. Recovery is
-  admissible only from a quiescent phase (`Idle` or `Retired`) with no current
-  run and no recorded terminal for the candidate's run; every other phase, and
-  any conflicting run fact, refuses. All decision transitions are self-loops —
-  authorization never mutates lifecycle or run state.
-- **`RuntimeStore` realizes.** Only the authorizing effect may drive the
-  recovery commit, and it lands through `RuntimeStore::atomic_apply` as one
-  boundary: recovered session snapshot, boundary receipt, input lifecycle
-  transitions, terminal outcome, and outbox rows commit together. No shell
-  promotes or discards the tail.
+- **`MeerkatMachine` authorizes.** `AuthorizeDurableTailRecovery` consumes
+  the exact classified candidate together with typed projections of the
+  durable evidence: the persisted machine-lifecycle row and its current-run
+  fact (`DurableRecoveryObservedLifecycle`, `DurableRecoveryObservedRun` — a
+  cold recovery drives a freshly registered authority whose in-process facts
+  are vacuously quiescent, so the persisted row is the real evidence), the
+  highest durably committed receipt compared against the candidate's own
+  content (`DurableRecoveryPriorCommit` — a candidate the receipts already
+  cover refuses instead of committing a phantom duplicate boundary), and the
+  attributability of the input rows the commit would terminalize
+  (`DurableRecoveryInputEvidence`). Recovery is admissible only when both
+  the in-process and the persisted facts are quiescent (`Idle`, `Retired`,
+  or a missing row) with no current run and no recorded terminal for the
+  candidate's run; every other shape refuses. Commit verdicts arrive as
+  `DurableTailRecoveryCommitAuthorized` (`CommitCompleted` or
+  `RepairAndCommitInterrupted`), carry the machine-minted boundary sequence
+  — one past the last committed receipt for the run — and record the
+  candidate run as the turn terminal; hold and refusal verdicts arrive as
+  `DurableTailRecoveryAuthorized` (`HoldIntact`, `RefuseRecovery`) and
+  mutate nothing. Both hold paths — ambiguous classification and
+  unattributable input evidence — are machine-minted: no shell predicate may
+  downgrade a commit authorization to a hold. Authorization never changes
+  the lifecycle phase.
+- **`RuntimeStore` realizes.** Only the machine's commit-authorizing effect
+  may drive the recovery commit, and it lands through
+  `RuntimeStore::atomic_apply` as one boundary: recovered session snapshot,
+  boundary receipt, input lifecycle transitions, terminal outcome, and
+  outbox rows commit together — fenced on the exact observed lifecycle-row
+  version and per-input-row digests, so a concurrent writer fails the whole
+  boundary typed instead of being overwritten. No shell promotes or discards
+  the tail. The classification verdict crosses the crate seam sealed:
+  `DurableTailRecoveryRequest` has private fields and one constructor,
+  `from_classification`, which requires the classifier's own
+  `DurableTailClassified` effect — the request cannot exist without the
+  verdict that justifies it.
 
 The recovery rule is never-discard: every verified durable descendant is
 preserved. Recovery commits a completed tail as a recovered run boundary,
-closes an interrupted tail as interrupted (content preserved, provider-invalid
-structure repaired with synthetic interrupted tool results and a typed
-recovery notice, the original run terminalized — never requeued), or holds
-ambiguous evidence intact with autonomous execution blocked. The
+closes an interrupted tail as interrupted (content preserved, a typed
+recovery notice appended, the original run terminalized — never requeued), or
+holds ambiguous evidence intact with autonomous execution blocked. The
 `SessionDocumentMachine` conflict input `ResolveRuntimeProjectionConflict`
 resolves a verified strict descendant to `RetainForRecovery`; the former
 `RebuildToAuthority` disposition, which authorized shrinking an ahead row, no
@@ -121,7 +143,11 @@ Recovered commits carry their own checkpoint provenances,
 `RecoveredInterruptedBoundary` (interrupted tail), defined in
 `meerkat-core/src/checkpoint.rs`. Both are typed successors anchored to the
 last committed runtime snapshot — never to the intra-turn projection, which
-remains forbidden as an authority base.
+remains forbidden as an authority base. Stamp schema versions are selected
+per record from provenance: ordinary stamps write v1, recovered stamps write
+v2 (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED`), so only recovered
+records refuse on older binaries — and refusal is typed in both directions
+(a future schema version, or a version that mis-advertises its provenance).
 
 ## Canonical Compositions
 

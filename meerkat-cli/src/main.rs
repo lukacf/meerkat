@@ -9756,6 +9756,13 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_under_runtime_turn_boundary(&self.inner, req).await
     }
 
+    async fn load_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::runtime::ResumeSessionLoad, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_session_for_resume(&self.inner, session_id).await
+    }
+
     async fn create_session_with_actor_witness_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -19735,6 +19742,22 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        /// Test double: the two-read composition is the exact truth here.
+        async fn load_session_for_resume(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_mob::runtime::ResumeSessionLoad, meerkat_core::service::SessionError>
+        {
+            use meerkat_mob::runtime::ResumeSessionLoad;
+            if let Some(session) = self.load_persisted_session(session_id).await? {
+                return Ok(ResumeSessionLoad::Active(Box::new(session)));
+            }
+            if let Some(session) = self.load_revivable_retired_session(session_id).await? {
+                return Ok(ResumeSessionLoad::Revivable(Box::new(session)));
+            }
+            Ok(ResumeSessionLoad::Absent)
+        }
+
         async fn create_session_under_runtime_turn_boundary(
             &self,
             req: CreateSessionRequest,

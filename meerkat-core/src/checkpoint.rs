@@ -17,8 +17,37 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fmt;
 
-/// Current durable schema for [`SessionCheckpointStamp`].
+/// Base durable schema for [`SessionCheckpointStamp`]: the original (v1)
+/// provenance vocabulary.
 pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION: u32 = 1;
+/// Extended durable schema (v2): identical shape, provenance vocabulary
+/// extended with the recovered-boundary variants
+/// ([`SessionCheckpointProvenance::RecoveredRunBoundaryCommit`],
+/// [`SessionCheckpointProvenance::RecoveredInterruptedBoundary`]).
+///
+/// Version selection is PER RECORD: a stamp whose provenance fits the v1
+/// vocabulary is still written as v1, so ordinary sessions stay readable by
+/// older binaries after a downgrade; only recovered stamps advertise v2 —
+/// and only those refuse (typed, on this binary; as an unknown-variant
+/// decode error on binaries predating the vocabulary) instead of silently
+/// reinterpreting a fact they do not know.
+pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED: u32 = 2;
+
+/// The schema version a stamp with this provenance must advertise.
+fn required_stamp_schema_version(provenance: SessionCheckpointProvenance) -> u32 {
+    match provenance {
+        SessionCheckpointProvenance::SessionCreated
+        | SessionCheckpointProvenance::Forked
+        | SessionCheckpointProvenance::IntraTurnCheckpoint
+        | SessionCheckpointProvenance::RunBoundaryCommit
+        | SessionCheckpointProvenance::TranscriptRewrite
+        | SessionCheckpointProvenance::RecoveryMigration => SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION,
+        SessionCheckpointProvenance::RecoveredRunBoundaryCommit
+        | SessionCheckpointProvenance::RecoveredInterruptedBoundary => {
+            SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED
+        }
+    }
+}
 
 /// Stable identity of one session-authority lineage.
 ///
@@ -281,7 +310,7 @@ impl SessionCheckpointStamp {
         provenance: SessionCheckpointProvenance,
     ) -> Self {
         Self {
-            schema_version: SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION,
+            schema_version: required_stamp_schema_version(provenance),
             session_id,
             lineage_id,
             generation,
@@ -523,7 +552,15 @@ impl SessionCheckpointStamp {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionCheckpointError> {
-        if self.schema_version != SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION {
+        // A version newer than this binary's vocabulary is a typed
+        // future-schema refusal; a version that does not match the record's
+        // own provenance vocabulary (e.g. a recovered provenance claiming
+        // the v1 schema) is a mis-advertised record and refuses the same
+        // way rather than letting the durable record lie about which readers
+        // can decode it.
+        if self.schema_version > SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED
+            || self.schema_version != required_stamp_schema_version(self.provenance)
+        {
             return Err(SessionCheckpointError::UnsupportedSchemaVersion(
                 self.schema_version,
             ));
@@ -947,6 +984,28 @@ static GLOBAL_CONTENT_DIGEST_BYTES: std::sync::atomic::AtomicU64 =
 #[must_use]
 pub fn global_session_content_digest_bytes() -> u64 {
     GLOBAL_CONTENT_DIGEST_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Process-wide count of bytes PRODUCED by whole-session boundary
+/// serialization (`CoreApplyOutput::with_session`, prepared checkpoint
+/// documents, recovery snapshots). The digest counter above cannot see an
+/// O(document) reserialize that hashes nothing; structural
+/// size-independence gates assert this counter alongside it so a serialize
+/// or persist regression cannot hide behind a flat digest curve.
+static GLOBAL_SESSION_ENCODE_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Record bytes produced by one whole-session boundary serialization.
+#[doc(hidden)]
+pub fn record_session_encode_bytes(bytes: u64) {
+    GLOBAL_SESSION_ENCODE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Process-wide count of whole-session boundary serialization output bytes.
+#[doc(hidden)]
+#[must_use]
+pub fn global_session_encode_bytes() -> u64 {
+    GLOBAL_SESSION_ENCODE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Number of buckets in the content-digest byte attribution table.

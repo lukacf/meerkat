@@ -737,6 +737,28 @@ struct SessionSerdeRef<'a> {
     usage: &'a Usage,
 }
 
+/// Bind every persisted field of `session` into the borrowed encode view.
+///
+/// This is the exhaustiveness anchor for the durable envelope: a persisted
+/// field added to [`SessionSerdeRef`] stops this construction from compiling,
+/// and every site that destructures the returned view must then classify the
+/// addition instead of silently dropping it. `metadata_override` substitutes
+/// the compacted map the snapshot seam builds in place of the live one.
+fn persisted_envelope_ref<'a>(
+    session: &'a Session,
+    metadata_override: Option<&'a serde_json::Map<String, serde_json::Value>>,
+) -> SessionSerdeRef<'a> {
+    SessionSerdeRef {
+        version: session.version,
+        id: &session.id,
+        messages: session.messages(),
+        created_at: &session.created_at,
+        updated_at: &session.updated_at,
+        metadata: metadata_override.unwrap_or(&session.metadata),
+        usage: &session.usage,
+    }
+}
+
 impl Serialize for Session {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -757,16 +779,7 @@ impl Serialize for Session {
         } else {
             None
         };
-        let metadata = compacted_metadata.as_ref().unwrap_or(&self.metadata);
-        let serde_repr = SessionSerdeRef {
-            version: self.version,
-            id: &self.id,
-            messages: self.messages(),
-            created_at: &self.created_at,
-            updated_at: &self.updated_at,
-            metadata,
-            usage: &self.usage,
-        };
+        let serde_repr = persisted_envelope_ref(self, compacted_metadata.as_ref());
         serde_repr.serialize(serializer)
     }
 }
@@ -6319,13 +6332,70 @@ impl Session {
         Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
     }
 
-    /// Install a prevalidated semantic checkpoint stamp on this exact
-    /// document without changing its content timestamps.
+    /// Adopt a durable head's non-transcript persisted state onto a recovery
+    /// document whose transcript was rebuilt through the typed mutation seam.
     ///
-    /// This is a mechanical serialization seam, not target-store write
-    /// authority. A persistence implementation must still atomically validate
-    /// its own observation and fencing preconditions before committing the
-    /// resulting bytes.
+    /// This is a mechanical document seam, not target-store write authority. A
+    /// persistence implementation must still atomically validate its own
+    /// observation and fencing preconditions before committing the resulting
+    /// bytes.
+    ///
+    /// Exhaustive over the persisted envelope (`SessionSerde` and its
+    /// borrowed encode view `SessionSerdeRef`):
+    /// - `version`, `id`, `created_at` — identity fields the digest-verified
+    ///   prefix relation already proved equal; untouched.
+    /// - `messages` (and the inline transcript-history graph under
+    ///   [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`]) — rebuilt by recovery
+    ///   through the mutation seam; owned by the target.
+    /// - the checkpoint stamp and intra-turn provenance marker — minted by
+    ///   recovery as the committed authority's typed successor; owned by the
+    ///   target.
+    /// - `updated_at`, `usage`, and EVERY other metadata key (compaction
+    ///   projection intents, visibility state, deferred context, ...) — the
+    ///   head's values are the newer durable truth and are adopted verbatim,
+    ///   including deletions.
+    ///
+    /// Anyone adding a persisted field must classify it here: the head is read
+    /// through an exhaustive `SessionSerdeRef` destructure with no `..` rest
+    /// pattern, so an unclassified addition is a compile error at this
+    /// adoption site rather than a field that silently reverts to the stale
+    /// snapshot value on every recovery.
+    pub fn adopt_recovered_head_state(&mut self, head: &Session) {
+        const RECOVERY_OWNED_KEYS: [&str; 3] = [
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            SESSION_CHECKPOINT_STAMP_KEY,
+            SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY,
+        ];
+        // The bindings below ARE the classification: identity-invariant and
+        // recovery-owned fields are bound to `_`-prefixed names precisely
+        // because reading them from the head would be wrong.
+        let SessionSerdeRef {
+            version: _identity_version,
+            id: _identity_id,
+            messages: _recovery_owned_messages,
+            created_at: _identity_created_at,
+            updated_at: head_updated_at,
+            metadata: head_metadata,
+            usage: head_usage,
+        } = persisted_envelope_ref(head, None);
+        self.usage = head_usage.clone();
+        self.metadata.retain(|key, _| {
+            RECOVERY_OWNED_KEYS.contains(&key.as_str()) || head_metadata.contains_key(key)
+        });
+        for (key, value) in head_metadata {
+            if RECOVERY_OWNED_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            self.metadata.insert(key.clone(), value.clone());
+        }
+        // `updated_at` and general metadata are part of the canonical digest
+        // document: route through the seal-clearing mutator so a stale
+        // sealed proof can never survive the adoption.
+        self.mark_content_mutated(*head_updated_at);
+    }
+
+    /// Install a prevalidated semantic checkpoint stamp on this exact document
+    /// without changing its content timestamps.
     pub fn install_checkpoint_stamp(
         &mut self,
         stamp: crate::checkpoint::SessionCheckpointStamp,

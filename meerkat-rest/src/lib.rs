@@ -8599,8 +8599,7 @@ mod tests {
 
         let exported: Session = serde_json::from_slice(
             output
-                .session_snapshot
-                .as_deref()
+                .snapshot_bytes()
                 .expect("runtime output should carry a staged session snapshot"),
         )
         .expect("staged REST session snapshot should deserialize");

@@ -965,6 +965,63 @@ impl PersistentRuntimeDriver {
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
     }
 
+    /// Persist the just-staged run bindings BEFORE the run executes.
+    ///
+    /// `StageForRun` binds each contributing input to the run inside the
+    /// generated machine, but that fact was previously durable only with the
+    /// boundary commit — so a crash mid-run left the executed turn's inputs
+    /// durably unbound, indistinguishable by identity from freshly queued
+    /// work. Recovery refuses to guess (text is content evidence, never
+    /// identity) and would hold such a tail; making the binding durable at
+    /// staging closes that window for every run started by this binary.
+    /// Fail-closed: a persist failure aborts the run start.
+    pub(crate) async fn persist_staged_input_bindings(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let mut records = Vec::new();
+        for input_id in input_ids {
+            let Some(bundle) = self.inner.stored_input_state(input_id) else {
+                continue;
+            };
+            records.push(
+                InputStatePersistenceRecord::from_machine_snapshot(bundle)
+                    .map_err(RuntimeDriverError::Internal)?,
+            );
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        match self
+            .store
+            .persist_input_states_atomically(&self.runtime_id, &records)
+            .await
+        {
+            Ok(()) => Ok(()),
+            // Backends without the batch seam persist row by row. Atomicity
+            // across the batch is not required here: each binding record is
+            // independently valid evidence, and a partial write can only
+            // narrow (never widen) what a later recovery is willing to
+            // terminalize.
+            Err(crate::store::RuntimeStoreError::Unsupported(_)) => {
+                for record in &records {
+                    self.store
+                        .persist_input_state(&self.runtime_id, record)
+                        .await
+                        .map_err(|e| {
+                            RuntimeDriverError::Internal(format!(
+                                "staged input binding persist failed: {e}"
+                            ))
+                        })?;
+                }
+                Ok(())
+            }
+            Err(e) => Err(RuntimeDriverError::Internal(format!(
+                "staged input binding persist failed: {e}"
+            ))),
+        }
+    }
+
     pub(crate) async fn abandon_pending_inputs(
         &mut self,
         reason: InputAbandonReason,

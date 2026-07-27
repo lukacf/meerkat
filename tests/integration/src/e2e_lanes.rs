@@ -5251,19 +5251,21 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
         "mob-turn-latency" => Some(&Spec {
             id: None,
             lane: Lane::Smoke,
-            title: "Mob turn-latency size-independence gate",
+            title: "Mob turn-latency instrument gate (flatness recorded, not asserted)",
             // Each smoke scenario builds in its own isolated target dir, so
             // this scenario cold-compiles the smoke_mob_turn_latency test
             // binary first. The test boots a persistent 3-member mob against
             // SQLite session + runtime stores, grows one member to a ~10MB
-            // transcript, drives identical one-word turns at a ~256KB member
-            // and at the ~10MB member, and asserts per-turn process-CPU cost
-            // is flat between them (turn-boundary work must be O(delta), not
-            // O(document)). While the defect is present each large turn costs
-            // ~1 minute (that IS the defect), so the budget covers cold
-            // compile plus a fully red run; a flat-cost run finishes in a
-            // fraction of it. No live provider: members run against a
-            // scripted LLM client.
+            // transcript, and drives identical one-word turns at a ~256KB
+            // member and at the ~10MB member. ASSERTED: fixture validity,
+            // the calibrated small-side hashed-bytes band (instrument
+            // honesty), and per-fixture boundary-serialization envelopes
+            // (repeated-reserialize backstop). RECORDED ONLY: the
+            // large/small flatness ratio — size-independent turn-boundary
+            // work is gated on the witness-v3 migration and its assertion
+            // lives in `mob_turn_flatness_red_by_design`, deliberately
+            // outside every lane until that lands. No live provider:
+            // members run against a scripted LLM client.
             timeout_secs: 1200,
             required_env: &[],
             required_bins: &["cargo"],

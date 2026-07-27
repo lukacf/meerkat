@@ -1007,6 +1007,7 @@ pub fn session_persistence_version_authority_schema_metadata() -> MachineSchemaM
                 "SessionEnvelope",
                 "StoredInputState",
                 "SessionMetadataSchema",
+                "TranscriptHistoryWitnessFormat",
             ],
         )],
         Vec::new(),

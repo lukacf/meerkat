@@ -2847,7 +2847,7 @@ struct SessionPersistenceVersionPlan {
 /// The `enum_variant` of each spec is cross-checked against the schema's
 /// `SessionPersistenceVersionField` binding so a renamed/added/removed variant
 /// fails the walk rather than silently mis-emitting.
-const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] = [
+const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 4] = [
     SessionPersistenceVersionFieldSpec {
         enum_variant: "SessionEnvelope",
         restore_input: "RestoreSessionEnvelopeVersion",
@@ -2868,6 +2868,13 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] =
         current_const: "SESSION_METADATA_SCHEMA_VERSION",
         current_accessor: "session_metadata_schema_version",
         restore_fn: "restore_session_metadata_schema_version",
+    },
+    SessionPersistenceVersionFieldSpec {
+        enum_variant: "TranscriptHistoryWitnessFormat",
+        restore_input: "RestoreTranscriptHistoryWitnessFormat",
+        current_const: "TRANSCRIPT_HISTORY_WITNESS_FORMAT",
+        current_accessor: "transcript_history_witness_format",
+        restore_fn: "restore_transcript_history_witness_format",
     },
 ];
 

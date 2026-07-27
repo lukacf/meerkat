@@ -306,7 +306,8 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
     fn deserialize_persisted_session(
         bytes: &[u8],
     ) -> Result<meerkat_core::Session, RuntimeStoreError> {
-        serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        meerkat_core::Session::from_persisted_bytes(bytes)
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
     /// Deserialize a persisted `StoredInputState` row through typed serde.
@@ -1810,8 +1811,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
             tokio::task::spawn_blocking(move || {
-                let incoming =
-                    serde_json::from_slice(&session_delta.session_snapshot)
+                let incoming: meerkat_core::Session =
+                    meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -1900,7 +1901,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let runtime_id = runtime_id.clone();
             let commit = commit.clone();
             tokio::task::spawn_blocking(move || {
-                let incoming = serde_json::from_slice::<meerkat_core::Session>(
+                let incoming = meerkat_core::Session::from_persisted_bytes(
                     &session_delta.session_snapshot,
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -1955,7 +1956,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 let session_snapshot = session_delta
                     .as_ref()
                     .map(|delta| {
-                        serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot)
+                        meerkat_core::Session::from_persisted_bytes(&delta.session_snapshot)
                             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
                     })
                     .transpose()?;
@@ -2073,7 +2074,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
-                let session = serde_json::from_slice::<meerkat_core::Session>(
+                let session = meerkat_core::Session::from_persisted_bytes(
                     &session_delta.session_snapshot,
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;

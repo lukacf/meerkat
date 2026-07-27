@@ -32,8 +32,22 @@ pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION: u32 = 1;
 /// decode error on binaries predating the vocabulary) instead of silently
 /// reinterpreting a fact they do not know.
 pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED: u32 = 2;
+/// Extended durable schema (v3): identical shape, minted whenever the
+/// document's canonical digest folds a FORMAT-3 transcript-history witness
+/// (the revision-identity computation). The schema bump is the downgrade
+/// one-way door: a pre-v3 binary refuses the stamp through its existing
+/// typed future-schema path instead of recomputing a v2 witness, reading a
+/// digest mismatch, and failing the whole document with a misleading error.
+///
+/// Version selection stays PER RECORD and is
+/// `max(provenance-required, witness-format-required)`: a session with no
+/// transcript graph (or v2 witness evidence) keeps minting the lowest
+/// schema its provenance allows, so plain sessions stay readable by older
+/// binaries after a downgrade.
+pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3: u32 = 3;
 
-/// The schema version a stamp with this provenance must advertise.
+/// The schema version a stamp with this provenance must advertise, before
+/// the witness-format axis is applied.
 fn required_stamp_schema_version(provenance: SessionCheckpointProvenance) -> u32 {
     match provenance {
         SessionCheckpointProvenance::SessionCreated
@@ -46,6 +60,19 @@ fn required_stamp_schema_version(provenance: SessionCheckpointProvenance) -> u32
         | SessionCheckpointProvenance::RecoveredInterruptedBoundary => {
             SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED
         }
+    }
+}
+
+/// The schema floor a stamp minted over this witness format must advertise.
+fn required_stamp_schema_version_for_witness(witness_format: Option<u32>) -> u32 {
+    match witness_format {
+        Some(format)
+            if format
+                >= crate::generated::session_persistence_version_authority::TRANSCRIPT_HISTORY_WITNESS_FORMAT =>
+        {
+            SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3
+        }
+        _ => SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION,
     }
 }
 
@@ -306,17 +333,19 @@ impl SessionCheckpointStamp {
         generation: SessionGeneration,
         checkpoint_revision: SessionCheckpointRevision,
         authority_base: SessionCheckpointAuthorityBase,
-        digest: SessionCheckpointDigest,
+        digest: MintedCheckpointDigest,
         provenance: SessionCheckpointProvenance,
     ) -> Self {
         Self {
-            schema_version: required_stamp_schema_version(provenance),
+            schema_version: required_stamp_schema_version(provenance).max(
+                required_stamp_schema_version_for_witness(digest.witness_format),
+            ),
             session_id,
             lineage_id,
             generation,
             checkpoint_revision,
             authority_base,
-            digest,
+            digest: digest.digest,
             provenance,
         }
     }
@@ -341,7 +370,7 @@ impl SessionCheckpointStamp {
             SessionGeneration::INITIAL,
             SessionCheckpointRevision::INITIAL,
             SessionCheckpointAuthorityBase::Absent,
-            session_checkpoint_digest(session)?,
+            session_checkpoint_digest_for_mint(session)?,
             provenance,
         );
         stamp.validate_for_session(session.id())?;
@@ -385,11 +414,15 @@ impl SessionCheckpointStamp {
                 actual: source_session.id().clone(),
             });
         }
-        let digest = session_checkpoint_digest(session)?;
+        // Evidence-format digests on BOTH sides: the equality check compares
+        // the migrated document against its legacy source, so the witness
+        // format must be the one those legacy documents declare, never a
+        // mint-current upgrade (which would manufacture a mismatch).
+        let digest = session_checkpoint_digest_selected(session, WitnessSelection::Evidence)?;
         let source_digest = session_checkpoint_digest(&source_session)?;
-        if source_digest != digest {
+        if source_digest != digest.digest {
             return Err(SessionCheckpointError::LegacySourceBlobMismatch {
-                expected: digest,
+                expected: digest.digest,
                 actual: source_digest,
             });
         }
@@ -444,7 +477,7 @@ impl SessionCheckpointStamp {
             SessionCheckpointAuthorityBase::Typed {
                 anchor: SessionCheckpointAnchor::from_stamp(authority),
             },
-            session_checkpoint_digest(session)?,
+            session_checkpoint_digest_for_mint(session)?,
             provenance,
         );
         stamp.validate_for_session(session.id())?;
@@ -479,7 +512,7 @@ impl SessionCheckpointStamp {
             anchor.generation,
             anchor.checkpoint_revision.checked_next()?,
             SessionCheckpointAuthorityBase::Typed { anchor },
-            session_checkpoint_digest(session)?,
+            session_checkpoint_digest_for_mint(session)?,
             SessionCheckpointProvenance::IntraTurnCheckpoint,
         );
         stamp.validate_for_session(session.id())?;
@@ -496,6 +529,10 @@ impl SessionCheckpointStamp {
         digest: SessionCheckpointDigest,
         provenance: SessionCheckpointProvenance,
     ) -> Self {
+        let digest = MintedCheckpointDigest {
+            digest,
+            witness_format: None,
+        };
         Self::from_parts(
             session_id,
             lineage_id,
@@ -557,10 +594,15 @@ impl SessionCheckpointStamp {
         // own provenance vocabulary (e.g. a recovered provenance claiming
         // the v1 schema) is a mis-advertised record and refuses the same
         // way rather than letting the durable record lie about which readers
-        // can decode it.
-        if self.schema_version > SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED
-            || self.schema_version != required_stamp_schema_version(self.provenance)
-        {
+        // can decode it. The two legal versions per record are the
+        // provenance floor and — when the document's canonical digest folds
+        // a format-3 history witness — the witness-v3 schema; a stamp whose
+        // schema mislabels the witness axis fails closed downstream at the
+        // digest comparison (the digest values differ per witness format),
+        // so this check owns vocabulary honesty, not witness binding.
+        let provenance_floor = required_stamp_schema_version(self.provenance);
+        let witness_v3 = provenance_floor.max(SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3);
+        if self.schema_version != provenance_floor && self.schema_version != witness_v3 {
             return Err(SessionCheckpointError::UnsupportedSchemaVersion(
                 self.schema_version,
             ));
@@ -840,6 +882,15 @@ pub enum SessionCheckpointError {
         computed: SessionCheckpointDigest,
     },
     #[error(
+        "unsupported transcript-history witness format {0}: this binary predates the format; \
+         refusing before any normalization or healing of the row"
+    )]
+    UnsupportedTranscriptHistoryWitnessFormat(u32),
+    #[error("unsupported transcript-history revision digest format {0}")]
+    UnsupportedTranscriptHistoryRevisionDigestFormat(u32),
+    #[error("malformed transcript-history witness carrier: {0}")]
+    MalformedTranscriptHistoryWitness(String),
+    #[error(
         "legacy migration source BLOB semantic digest mismatch: expected {expected}, got {actual}"
     )]
     LegacySourceBlobMismatch {
@@ -941,7 +992,46 @@ pub fn session_content_digest_computations() -> u64 {
 }
 
 pub(crate) fn record_content_digest_computation() {
+    #[cfg(any(test, debug_assertions))]
+    if DIGEST_ACCOUNTING_SUPPRESSED.with(Cell::get) {
+        return;
+    }
     CONTENT_DIGEST_COMPUTATIONS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(any(test, debug_assertions))]
+thread_local! {
+    /// Debug/test-only: digest accounting suppressed on this thread while a
+    /// verification cross-check runs, so the budget regression tests keep
+    /// measuring the production path instead of the scaffolding that proves
+    /// it. Never compiled into release builds.
+    static DIGEST_ACCOUNTING_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Restores digest accounting when a debug cross-check scope ends.
+#[cfg(any(test, debug_assertions))]
+pub(crate) struct DigestAccountingSuppressionScope(bool);
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for DigestAccountingSuppressionScope {
+    fn drop(&mut self) {
+        DIGEST_ACCOUNTING_SUPPRESSED.with(|flag| flag.set(self.0));
+    }
+}
+
+/// Suppress digest accounting on this thread until the guard drops.
+///
+/// Verification scaffolding only (debug/test builds): a cross-check that
+/// re-runs a validator to prove a fast path must not appear in the
+/// `session_content_digest_computations`/`..._bytes` budgets the structural
+/// regression tests measure — they exist to observe the production path.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn suppress_digest_accounting() -> DigestAccountingSuppressionScope {
+    DIGEST_ACCOUNTING_SUPPRESSED.with(|flag| {
+        let previous = flag.get();
+        flag.set(true);
+        DigestAccountingSuppressionScope(previous)
+    })
 }
 
 thread_local! {
@@ -964,6 +1054,10 @@ pub fn session_content_digest_bytes() -> u64 {
 }
 
 pub(crate) fn record_content_digest_bytes(bytes: u64) {
+    #[cfg(any(test, debug_assertions))]
+    if DIGEST_ACCOUNTING_SUPPRESSED.with(Cell::get) {
+        return;
+    }
     CONTENT_DIGEST_BYTES.with(|count| count.set(count.get().saturating_add(bytes)));
     GLOBAL_CONTENT_DIGEST_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     DIGEST_SITE_BYTES[CURRENT_DIGEST_SITE.with(Cell::get)]
@@ -1093,8 +1187,48 @@ pub(crate) fn enter_digest_site(site: usize) -> DigestSiteScope {
 pub fn session_checkpoint_digest(
     session: &Session,
 ) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    Ok(session_checkpoint_digest_selected(session, WitnessSelection::Evidence)?.digest)
+}
+
+/// [`session_checkpoint_digest`] for stamp MINTS: the transcript-history
+/// witness is computed at the CURRENT format for full-graph documents (the
+/// per-session lazy v3 upgrade — the schema-3 stamp and the v3 witness land
+/// inside the same document write), while slim projections keep the format
+/// their carrier declares (a slim row can never relabel itself: it lacks the
+/// retained bodies an authority would need to validate first). The returned
+/// witness format selects the stamp schema floor.
+pub(crate) fn session_checkpoint_digest_for_mint(
+    session: &Session,
+) -> Result<MintedCheckpointDigest, SessionCheckpointError> {
+    session_checkpoint_digest_selected(session, WitnessSelection::MintCurrent)
+}
+
+/// A canonical checkpoint digest plus the transcript-history witness format
+/// folded into it (`None` when the document carries no history witness).
+pub(crate) struct MintedCheckpointDigest {
+    pub(crate) digest: SessionCheckpointDigest,
+    pub(crate) witness_format: Option<u32>,
+}
+
+fn session_checkpoint_digest_selected(
+    session: &Session,
+    selection: WitnessSelection,
+) -> Result<MintedCheckpointDigest, SessionCheckpointError> {
     let _digest_site = enter_digest_site(DIGEST_SITE_CHECKPOINT_DIGEST);
-    let digest = session_checkpoint_digest_uncached(session)?;
+    // No count here: every canonical pass this performs — the history-graph
+    // witness (when computed) and the document pass — is counted at the pass
+    // site, `canonical_value_digest` or the framed splice path. Counting the
+    // caller too used to hide a whole-graph pass inside one recorded
+    // "computation".
+    let witness = resolve_transcript_history_witness(session, selection)?;
+    let history_digest = witness.as_ref().map(TranscriptHistoryWitness::digest);
+    let digest = match framed_session_checkpoint_digest(session, history_digest) {
+        Some(digest) => digest,
+        None => {
+            let document = checkpoint_digest_document_for_hash(session, history_digest)?;
+            canonical_value_digest(&document)?
+        }
+    };
     // Computing this digest IS a complete canonical verification of this
     // exact document, so seal the proof on the document itself — it cannot
     // survive a mutation of that document or leak to a different one. A
@@ -1102,18 +1236,28 @@ pub fn session_checkpoint_digest(
     // document then costs ONE canonical pass instead of two; any content
     // mutation in between clears the seal and pays the full recompute.
     session.seal_verified_checkpoint_digest(&digest);
-    Ok(digest)
+    Ok(MintedCheckpointDigest {
+        digest,
+        witness_format: witness.map(|witness| witness.witness_format()),
+    })
 }
 
-fn session_checkpoint_digest_uncached(
+/// Build the exact value the canonical checkpoint digest hashes: the
+/// session's digest document with the stamp/provenance/history keys removed
+/// and the compact history marker substituted.
+fn checkpoint_digest_document_for_hash(
     session: &Session,
-) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
-    // No count here: every canonical pass this performs — the history-graph
-    // witness (when computed) and the document pass — is counted at the pass
-    // site, `canonical_value_digest`. Counting the caller too used to hide a
-    // whole-graph pass inside one recorded "computation".
-    let history_digest = session_transcript_history_checkpoint_digest(session)?;
+    history_digest: Option<&SessionCheckpointDigest>,
+) -> Result<serde_json::Value, SessionCheckpointError> {
     let mut document = session.checkpoint_digest_document()?;
+    strip_checkpoint_digest_metadata(&mut document, history_digest);
+    Ok(document)
+}
+
+fn strip_checkpoint_digest_metadata(
+    document: &mut serde_json::Value,
+    history_digest: Option<&SessionCheckpointDigest>,
+) {
     if let Some(metadata) = document
         .as_object_mut()
         .and_then(|session| session.get_mut("metadata"))
@@ -1126,15 +1270,107 @@ fn session_checkpoint_digest_uncached(
         if let Some(digest) = history_digest {
             metadata.insert(
                 SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
-                checkpoint_history_digest_marker(&digest),
+                checkpoint_history_digest_marker(digest),
             );
         }
     }
-    canonical_value_digest(&document)
+}
+
+/// Framed-midstate fast path for the canonical checkpoint digest.
+///
+/// The canonical document is `{"created_at":C,"id":I,"messages":[…],…}`:
+/// only the two immutable identity fields sort before the transcript, so a
+/// retained SHA-256 midstate over `prefix ++ "[" ++ elements` finalized with
+/// `"]" ++ suffix` reproduces the byte-identical digest while only the
+/// turn-sized suffix is serialized per call. This is a representation
+/// change, never a verdict: any surprise — marker not found exactly once,
+/// parked accumulator, prefix mismatch, serialization failure — returns
+/// `None` and the caller runs the full document path.
+fn framed_session_checkpoint_digest(
+    session: &Session,
+    history_digest: Option<&SessionCheckpointDigest>,
+) -> Option<SessionCheckpointDigest> {
+    let (mut document, marker) = session.checkpoint_digest_framed_document().ok()?;
+    strip_checkpoint_digest_metadata(&mut document, history_digest);
+    let mut framed = Vec::new();
+    write_canonical_json(&document, &mut framed).ok()?;
+    let needle = serde_json::to_string(&marker).ok()?;
+    let (prefix, suffix) = split_exactly_once(&framed, needle.as_bytes())?;
+    let mut hasher = session.framed_document_hasher(prefix)?;
+    hasher.update(b"]");
+    hasher.update(suffix);
+    record_content_digest_computation();
+    record_content_digest_bytes(prefix.len() as u64 + 1 + suffix.len() as u64);
+    let digest = SessionCheckpointDigest(format!("sha256:{:x}", hasher.finalize()));
+    if crate::session::digest_accumulator_take_verification_sample() {
+        // Debug builds verify every framed serve, release builds the first
+        // N per process, both against the untouched full path with digest
+        // accounting suppressed so the budget tests keep measuring the
+        // production path (same discipline as the accumulator witness).
+        #[cfg(any(test, debug_assertions))]
+        let _suppress = suppress_digest_accounting();
+        if let Ok(document) = checkpoint_digest_document_for_hash(session, history_digest)
+            && let Ok(reference) = canonical_value_digest_uncounted(&document)
+        {
+            assert_eq!(
+                digest, reference,
+                "framed checkpoint digest diverged from the canonical document digest: a \
+                 framing seam changed the canonical byte stream without invalidating the midstate"
+            );
+        }
+    }
+    Some(digest)
+}
+
+/// Seed the session's framed checkpoint midstate if it is absent.
+///
+/// A long-lived producer session (the agent's own) never computes a
+/// checkpoint digest itself — mints and verifies run on copies decoded from
+/// the bytes it seals — so without this, every sealed snapshot carries an
+/// empty framed midstate and every downstream copy pays a fresh O(document)
+/// reseed per checkpoint digest. Seeding once here (the prefix is a pure
+/// function of the immutable `created_at`/`id`, so it is stable for the
+/// session's lifetime) lets ordinary appends extend it and every sealed
+/// snapshot carry it forward. Failure is fine: consumers fall back to the
+/// full canonical path.
+pub fn warm_framed_checkpoint_midstate(session: &Session) {
+    let _digest_site = enter_digest_site(DIGEST_SITE_CHECKPOINT_DIGEST);
+    let Ok((mut document, marker)) = session.checkpoint_digest_framed_document() else {
+        return;
+    };
+    strip_checkpoint_digest_metadata(&mut document, None);
+    let mut framed = Vec::new();
+    if write_canonical_json(&document, &mut framed).is_err() {
+        return;
+    }
+    let Ok(needle) = serde_json::to_string(&marker) else {
+        return;
+    };
+    let Some((prefix, _)) = split_exactly_once(&framed, needle.as_bytes()) else {
+        return;
+    };
+    let _ = session.framed_document_hasher(prefix);
+}
+
+/// Locate `needle` in `haystack` exactly once. Two or more occurrences —
+/// e.g. a metadata value that happens to carry the marker text — return
+/// `None` so the caller falls back instead of splicing at the wrong site.
+fn split_exactly_once<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    let first = haystack
+        .windows(needle.len())
+        .position(|window| window == needle)?;
+    let rest = &haystack[first + 1..];
+    if rest.len() >= needle.len() && rest.windows(needle.len()).any(|window| window == needle) {
+        return None;
+    }
+    Some((&haystack[..first], &haystack[first + needle.len()..]))
 }
 
 /// Resolve the storage-invariant transcript-history witness carried by a
-/// session document.
+/// session document, verifying under the format the evidence declares.
 ///
 /// Full documents derive it from the canonical retained graph. Incremental
 /// projections carry the same digest under a reserved metadata key because
@@ -1144,43 +1380,347 @@ fn session_checkpoint_digest_uncached(
 pub fn session_transcript_history_checkpoint_digest(
     session: &Session,
 ) -> Result<Option<SessionCheckpointDigest>, SessionCheckpointError> {
+    Ok(session_transcript_history_witness(session)?.map(TranscriptHistoryWitness::into_digest))
+}
+
+/// [`session_transcript_history_checkpoint_digest`] returning the full typed
+/// carrier, for writers that persist the witness on slim projections.
+pub fn session_transcript_history_witness(
+    session: &Session,
+) -> Result<Option<TranscriptHistoryWitness>, SessionCheckpointError> {
+    resolve_transcript_history_witness(session, WitnessSelection::Evidence)
+}
+
+/// Which transcript-history witness format a derivation runs under.
+#[derive(Debug, Clone, Copy)]
+enum WitnessSelection {
+    /// Verify under the format the document's own evidence declares: the
+    /// typed carrier on slim rows, the stamp schema on full documents, and
+    /// format 2 for pre-carrier legacy rows. v2 evidence verifies as v2
+    /// indefinitely — mixed stores, no flag day.
+    Evidence,
+    /// Verify under the format a SPECIFIC stamp's schema declares — the
+    /// install seam, where the stamp being installed is not (yet) the one
+    /// in the document's metadata, so metadata evidence would resolve the
+    /// PREDECESSOR's format and refuse a valid freshly minted stamp.
+    DeclaredBySchema(u32),
+    /// Mint at the CURRENT format for full-graph documents (the lazy
+    /// per-session upgrade seam); slim rows keep their carried format.
+    MintCurrent,
+}
+
+/// [`session_checkpoint_digest`] verified under the witness format `stamp`'s
+/// schema declares. For the stamp-install seam only; see
+/// [`WitnessSelection::DeclaredBySchema`].
+pub(crate) fn session_checkpoint_digest_for_stamp(
+    session: &Session,
+    stamp: &SessionCheckpointStamp,
+) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    Ok(session_checkpoint_digest_selected(
+        session,
+        WitnessSelection::DeclaredBySchema(stamp.schema_version()),
+    )?
+    .digest)
+}
+
+/// The two-axis typed transcript-history witness carrier.
+///
+/// `witness_format` names the WITNESS computation (2 = sequential canonical
+/// whole-graph hash, 3 = revision-identity digest); `revision_digest_format`
+/// names the revision-STRING format the graph's content addresses use
+/// (`TRANSCRIPT_DIGEST_FORMAT_CURRENT`, independent axis — see the graph's
+/// `digest_format` field, which this deliberately does not touch). Bare
+/// digest strings — every pre-v3 durable row — normalize to
+/// `{witness_format: 2, revision_digest_format: 2}`. An unknown
+/// `witness_format` refuses typed BEFORE any normalization or healing, via
+/// the generated `SessionPersistenceVersionAuthority` membership gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptHistoryWitness {
+    witness_format: u32,
+    revision_digest_format: u32,
+    digest: SessionCheckpointDigest,
+}
+
+impl TranscriptHistoryWitness {
+    #[must_use]
+    pub const fn witness_format(&self) -> u32 {
+        self.witness_format
+    }
+
+    #[must_use]
+    pub const fn revision_digest_format(&self) -> u32 {
+        self.revision_digest_format
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &SessionCheckpointDigest {
+        &self.digest
+    }
+
+    #[must_use]
+    pub fn into_digest(self) -> SessionCheckpointDigest {
+        self.digest
+    }
+
+    /// The metadata value a slim projection persists under
+    /// `SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY`. v2 stays the bare
+    /// string every pre-v3 reader understands; v3 persists the typed object.
+    #[must_use]
+    pub fn to_carried_value(&self) -> serde_json::Value {
+        if self.witness_format <= 2 {
+            serde_json::Value::String(self.digest.as_str().to_string())
+        } else {
+            serde_json::json!({
+                "witness_format": self.witness_format,
+                "revision_digest_format": self.revision_digest_format,
+                "digest": self.digest.as_str(),
+            })
+        }
+    }
+
+    /// Parse a carried witness value. The format gate runs FIRST: an object
+    /// whose `witness_format` the generated persistence-version authority
+    /// does not accept refuses typed before any other field is interpreted.
+    pub fn from_carried_value(value: &serde_json::Value) -> Result<Self, SessionCheckpointError> {
+        match value {
+            serde_json::Value::String(digest) => Ok(Self {
+                witness_format: 2,
+                revision_digest_format: crate::session::TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+                digest: SessionCheckpointDigest(digest.clone()),
+            }),
+            serde_json::Value::Object(fields) => {
+                let witness_format = fields
+                    .get("witness_format")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|format| u32::try_from(format).ok())
+                    .ok_or_else(|| {
+                        SessionCheckpointError::MalformedTranscriptHistoryWitness(
+                            "carried witness object is missing a numeric witness_format"
+                                .to_string(),
+                        )
+                    })?;
+                crate::generated::session_persistence_version_authority::
+                    restore_transcript_history_witness_format(witness_format)
+                .map_err(|_| {
+                    SessionCheckpointError::UnsupportedTranscriptHistoryWitnessFormat(
+                        witness_format,
+                    )
+                })?;
+                let revision_digest_format = fields
+                    .get("revision_digest_format")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|format| u32::try_from(format).ok())
+                    .ok_or_else(|| {
+                        SessionCheckpointError::MalformedTranscriptHistoryWitness(
+                            "carried witness object is missing a numeric revision_digest_format"
+                                .to_string(),
+                        )
+                    })?;
+                if revision_digest_format != crate::session::TRANSCRIPT_DIGEST_FORMAT_CURRENT {
+                    return Err(
+                        SessionCheckpointError::UnsupportedTranscriptHistoryRevisionDigestFormat(
+                            revision_digest_format,
+                        ),
+                    );
+                }
+                let digest = fields
+                    .get("digest")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        SessionCheckpointError::MalformedTranscriptHistoryWitness(
+                            "carried witness object is missing a digest string".to_string(),
+                        )
+                    })?;
+                Ok(Self {
+                    witness_format,
+                    revision_digest_format,
+                    digest: SessionCheckpointDigest(digest.to_string()),
+                })
+            }
+            other => Err(SessionCheckpointError::MalformedTranscriptHistoryWitness(
+                format!("carried witness must be a digest string or a typed object, got {other}"),
+            )),
+        }
+    }
+}
+
+/// Resolve, compute, and cross-check the document's history witness under
+/// `selection`. Returns `None` only when the document carries neither a
+/// graph nor a carried witness.
+fn resolve_transcript_history_witness(
+    session: &Session,
+    selection: WitnessSelection,
+) -> Result<Option<TranscriptHistoryWitness>, SessionCheckpointError> {
     let carried = session
         .metadata()
         .get(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY)
-        .cloned()
-        .map(serde_json::from_value::<SessionCheckpointDigest>)
+        .map(TranscriptHistoryWitness::from_carried_value)
         .transpose()?;
-    let computed = match session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
-        // Deriving this canonicalizes and hashes every retained revision body.
-        // The session memoizes it for the exact graph value it currently
-        // carries, so the several derivations a single save boundary performs
-        // collapse to one; any write to the history key clears the memo.
-        Some(history) => match session.cached_transcript_history_witness() {
-            Some(cached) => Some(SessionCheckpointDigest(cached.to_string())),
-            None => {
-                // Incremental assembly first: cached canonical segments plus
-                // the retained sorted transcript stream reduce the derivation
-                // to one raw hash pass. Any structural surprise falls back to
-                // the full canonicalization below, which also remains the
-                // error-reporting path for malformed graphs.
-                let computed = match session.assemble_transcript_history_witness(history) {
-                    Some(assembled) => assembled,
-                    None => session_checkpoint_history_digest(history)?,
-                };
-                session.record_transcript_history_witness(computed.as_str());
-                Some(computed)
-            }
-        },
-        None => None,
+    let Some(history) = session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
+        return Ok(carried);
     };
-    match (carried, computed) {
-        (Some(carried), Some(computed)) if carried != computed => {
-            Err(SessionCheckpointError::TranscriptHistoryWitnessMismatch { carried, computed })
+    let format = match selection {
+        WitnessSelection::MintCurrent => {
+            crate::generated::session_persistence_version_authority::TRANSCRIPT_HISTORY_WITNESS_FORMAT
         }
-        (Some(carried), Some(_) | None) => Ok(Some(carried)),
-        (None, Some(computed)) => Ok(Some(computed)),
-        (None, None) => Ok(None),
+        WitnessSelection::DeclaredBySchema(schema) => match &carried {
+            Some(carrier) => carrier.witness_format,
+            None => witness_format_for_stamp_schema(schema),
+        },
+        WitnessSelection::Evidence => match &carried {
+            Some(carrier) => carrier.witness_format,
+            None => stamped_witness_format(session),
+        },
+    };
+    let computed = computed_transcript_history_witness(session, history, format)?;
+    if let Some(carrier) = &carried {
+        let cross = if carrier.witness_format == format {
+            computed.clone()
+        } else {
+            computed_transcript_history_witness(session, history, carrier.witness_format)?
+        };
+        if carrier.digest != cross {
+            return Err(SessionCheckpointError::TranscriptHistoryWitnessMismatch {
+                carried: carrier.digest.clone(),
+                computed: cross,
+            });
+        }
     }
+    Ok(Some(TranscriptHistoryWitness {
+        witness_format: format,
+        revision_digest_format: crate::session::TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        digest: computed,
+    }))
+}
+
+/// The witness format a FULL document's stamp evidence implies: schema-v3
+/// stamps were minted over the v3 witness, everything older (including
+/// unstamped legacy rows) over v2. Malformed stamp values resolve to v2 —
+/// the stamp parse itself refuses them typed before any digest comparison
+/// is trusted, so this default can only make a broken document fail closed
+/// with a digest mismatch instead of a panic.
+fn stamped_witness_format(session: &Session) -> u32 {
+    session
+        .metadata()
+        .get(SESSION_CHECKPOINT_STAMP_KEY)
+        .and_then(|stamp| stamp.get("schema_version"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|schema| u32::try_from(schema).ok())
+        .map_or(2, witness_format_for_stamp_schema)
+}
+
+fn witness_format_for_stamp_schema(schema: u32) -> u32 {
+    if schema >= SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3 {
+        crate::generated::session_persistence_version_authority::TRANSCRIPT_HISTORY_WITNESS_FORMAT
+    } else {
+        2
+    }
+}
+
+/// Compute the history witness for `history` under `format`, serving and
+/// feeding the per-session per-format memo.
+fn computed_transcript_history_witness(
+    session: &Session,
+    history: &serde_json::Value,
+    format: u32,
+) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    if let Some(cached) = session.cached_transcript_history_witness(format) {
+        return Ok(SessionCheckpointDigest(cached.to_string()));
+    }
+    let computed = match format {
+        2 => {
+            // Incremental assembly first: cached canonical segments plus
+            // the retained sorted transcript stream reduce the derivation
+            // to one raw hash pass. Any structural surprise falls back to
+            // the full canonicalization below, which also remains the
+            // error-reporting path for malformed graphs.
+            match session.assemble_transcript_history_witness(history) {
+                Some(assembled) => assembled,
+                None => session_checkpoint_history_digest(history)?,
+            }
+        }
+        3 => session_checkpoint_history_digest_v3(history)?,
+        other => {
+            return Err(SessionCheckpointError::UnsupportedTranscriptHistoryWitnessFormat(other));
+        }
+    };
+    session.record_transcript_history_witness(format, computed.as_str());
+    Ok(computed)
+}
+
+/// Domain separator for the format-3 transcript-history witness preimage.
+pub(crate) const TRANSCRIPT_HISTORY_WITNESS_DOMAIN_V3: &str =
+    "meerkat/transcript-history-witness/v3";
+
+/// Format-3 (revision-identity) transcript-history witness.
+///
+/// The preimage pins the head revision, the digest of the canonical full
+/// ordered commit log, and the digest of the sorted unique retained revision
+/// IDs — content addresses that transitively pin canonical message content
+/// (ingress verifies body bytes against revision strings; the integrity
+/// budget moved there, it did not vanish). Complexity is honestly O(number
+/// of retained revisions + commit log), never O(retained body BYTES): no
+/// message body is touched.
+fn session_checkpoint_history_digest_v3(
+    history: &serde_json::Value,
+) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    let _digest_site = enter_digest_site(DIGEST_SITE_WITNESS);
+    let malformed = |what: &str| {
+        SessionCheckpointError::MalformedTranscriptHistoryWitness(format!(
+            "transcript history graph value is missing {what}"
+        ))
+    };
+    let object = history
+        .as_object()
+        .ok_or_else(|| malformed("an object form"))?;
+    let head = object
+        .get("head")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| malformed("a head revision string"))?;
+    // The commit log round-trips through the typed form so canonical bytes
+    // are identical no matter which legacy spelling the raw value carries —
+    // the same normalization the v2 witness assembly applies.
+    let commits: Vec<crate::TranscriptRewriteCommit> = match object.get("commits") {
+        Some(commits) => serde_json::from_value(commits.clone())?,
+        None => Vec::new(),
+    };
+    let commits_value = serde_json::to_value(&commits)?;
+    let mut commits_bytes = Vec::new();
+    write_canonical_json(&commits_value, &mut commits_bytes)?;
+    let mut revision_ids: Vec<&str> = match object.get("revisions") {
+        Some(revisions) => revisions
+            .as_array()
+            .ok_or_else(|| malformed("a revisions array"))?
+            .iter()
+            .map(|body| {
+                body.get("revision")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| malformed("a revision id on every retained body"))
+            })
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
+    revision_ids.sort_unstable();
+    revision_ids.dedup();
+    let ids_value = serde_json::Value::Array(
+        revision_ids
+            .into_iter()
+            .map(|id| serde_json::Value::String(id.to_string()))
+            .collect(),
+    );
+    let mut ids_bytes = Vec::new();
+    write_canonical_json(&ids_value, &mut ids_bytes)?;
+    record_content_digest_bytes((commits_bytes.len() + ids_bytes.len()) as u64);
+    let commits_digest = format!("sha256:{:x}", Sha256::digest(&commits_bytes));
+    let retained_revisions_digest = format!("sha256:{:x}", Sha256::digest(&ids_bytes));
+    let preimage = serde_json::json!({
+        "domain": TRANSCRIPT_HISTORY_WITNESS_DOMAIN_V3,
+        "revision_digest_format": crate::session::TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        "head_revision": head,
+        "commits_digest": commits_digest,
+        "retained_revisions_digest": retained_revisions_digest,
+    });
+    canonical_value_digest(&preimage)
 }
 
 /// Exact byte digest of a legacy source BLOB used only as migration custody.
@@ -1242,6 +1782,20 @@ fn canonical_value_digest(
     // whole-graph pass per boundary grew release timing 211x.
     record_content_digest_computation();
     record_content_digest_bytes(canonical.len() as u64);
+    Ok(SessionCheckpointDigest(format!(
+        "sha256:{:x}",
+        Sha256::digest(canonical)
+    )))
+}
+
+/// [`canonical_value_digest`] without digest accounting. Reserved for the
+/// framed-fast-path cross-check: verification scaffolding must not appear in
+/// the budgets the structural regression tests measure.
+fn canonical_value_digest_uncounted(
+    value: &serde_json::Value,
+) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    let mut canonical = Vec::new();
+    write_canonical_json(value, &mut canonical)?;
     Ok(SessionCheckpointDigest(format!(
         "sha256:{:x}",
         Sha256::digest(canonical)

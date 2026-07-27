@@ -185,12 +185,16 @@ fn hash_digest_erased_message_fields(hasher: &mut Sha256, message: &crate::Messa
 /// (written by pre-marker code) and every decoded document's graph
 /// validation otherwise pay a full canonical-JSON + SHA-256 pass over
 /// retained transcript bodies on EVERY decode — O(document) work per repeat
-/// load of unchanged bytes. Admission requires one complete verification,
-/// so the first decode after boot always hashes, and changed structure
+/// load of unchanged bytes. Admission requires full validity: either one
+/// complete verification (the decode path, the FullVerify producer seams)
+/// or a typed construction-plus-content proof whose conjunction IS full
+/// validity (the append and rewrite fast paths, which fall through to
+/// FullVerify for any shape their O(1) proofs cannot cover). A cold reader
+/// of bytes nobody admitted still hashes in full, and changed structure
 /// re-keys the memo (digest format, revision strings, counts, parents,
 /// created_at, or commit bytes change) and re-verifies. Bounded FIFO
 /// eviction only forces a redundant re-verification. Write and typed
-/// mutation seams never consult these memos.
+/// mutation seams never CONSULT these memos.
 struct BoundedTranscriptGraphMemo<V> {
     capacity: usize,
     entries: HashMap<String, V>,
@@ -366,14 +370,99 @@ pub(super) fn memoized_validated_transcript_graph(
 /// Record the post-prune graph one completed full validation proved for
 /// this exact graph shape. The entry is measured by its serialized size —
 /// paid once, on the decode that just paid a full validation — so the memo's
-/// byte budget bounds real retention, not entry counts.
+/// byte budget bounds real retention, not entry counts. Sizing streams
+/// through a counting writer instead of materializing the document bytes:
+/// the size feeds a memory BUDGET only, never an integrity boundary, so an
+/// allocation-free count is sufficient.
 pub(super) fn record_validated_transcript_graph(key: String, state: Arc<TranscriptHistoryState>) {
-    let Ok(bytes) = serde_json::to_vec(state.as_ref()) else {
+    let Some(bytes) = approximate_serialized_bytes(state.as_ref()) else {
         return;
     };
     if let Ok(mut memo) = transcript_graph_validated_memo().lock() {
-        memo.record(key, state, bytes.len());
+        memo.record(key, state, bytes);
     }
+}
+
+/// Admit a graph a PRODUCER just proved (or extended under a typed inductive
+/// proof) and is about to persist, so the next decode of those exact bytes
+/// substitutes the proven value instead of paying a full re-validation.
+///
+/// Semantic rule: memoizing a graph is strictly less consequential than
+/// persisting it — if the producer's proof were unsound, the unsound graph
+/// reaches disk regardless, so the memo introduces no failure mode that
+/// persistence does not already accept. A cold reader (restart, other
+/// process, other host) still validates fully.
+///
+/// The key MUST come from [`transcript_graph_shape_key`] under
+/// [`TRANSCRIPT_GRAPH_FACT_VALIDATED`] — same fact tag, same key function as
+/// the decode-side recorder — so producer and consumer can never drift.
+/// `approx_bytes` is a memory-budget estimate (callers size it from the
+/// serialized `Value` they already hold), never an integrity input. Honors
+/// the `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` kill-switch so disabling the memo
+/// reproduces the pre-memo decode cost end to end.
+pub(in crate::session) fn record_producer_validated_transcript_graph(
+    state: Arc<TranscriptHistoryState>,
+    approx_bytes: usize,
+) {
+    if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
+        return;
+    }
+    let Some(key) = transcript_graph_shape_key(
+        TRANSCRIPT_GRAPH_FACT_VALIDATED,
+        state.digest_format,
+        &state.head,
+        &state.commits,
+        &state.revisions,
+    ) else {
+        return;
+    };
+    if let Ok(mut memo) = transcript_graph_validated_memo().lock() {
+        memo.record(key, state, approx_bytes);
+    }
+}
+
+/// Approximate serialized size of a JSON value without serializing it.
+///
+/// Feeds the validated-memo byte budget only — an estimate is sufficient for
+/// a memory bound, and the exact serialize this replaces was an O(document)
+/// pass whose entire output was one `usize`.
+pub(in crate::session) fn approximate_json_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 5,
+        serde_json::Value::Number(_) => 12,
+        serde_json::Value::String(text) => text.len().saturating_add(8),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(approximate_json_bytes)
+            .fold(2usize.saturating_add(items.len()), usize::saturating_add),
+        serde_json::Value::Object(entries) => entries
+            .iter()
+            .map(|(key, value)| {
+                key.len()
+                    .saturating_add(4)
+                    .saturating_add(approximate_json_bytes(value))
+            })
+            .fold(2usize, usize::saturating_add),
+    }
+}
+
+/// Exact serialized byte count via a counting writer: the format pass runs,
+/// but no document-sized buffer is allocated. Budget sizing only.
+fn approximate_serialized_bytes<T: serde::Serialize>(value: &T) -> Option<usize> {
+    struct CountingWriter(usize);
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value).ok()?;
+    Some(writer.0)
 }
 
 /// Validation trust mode for

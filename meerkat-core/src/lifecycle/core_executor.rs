@@ -431,6 +431,18 @@ impl BoundSessionCommit {
     pub fn sealed(session: std::sync::Arc<crate::Session>) -> Result<Self, serde_json::Error> {
         let snapshot = serde_json::to_vec(session.as_ref())?;
         crate::checkpoint::record_session_encode_bytes(snapshot.len() as u64);
+        // Downstream copies of this snapshot mint and verify checkpoint
+        // stamps; seed the framed checkpoint midstate on the producer (a
+        // one-time pass per session lifetime — appends extend it, so every
+        // later seal carries it warm) so those copies inherit it instead of
+        // each paying an O(document) reseed.
+        crate::checkpoint::warm_framed_checkpoint_midstate(&session);
+        // The warm digest midstates this session retains are pure functions
+        // of the exact bytes just produced; record them under those bytes so
+        // an in-process decode of this snapshot (guards, checkpoint copies,
+        // the row read back next boundary) adopts them instead of reseeding
+        // with O(document) canonicalize-and-hash passes.
+        session.record_digest_midstates_for_bytes(&snapshot);
         Ok(Self {
             snapshot,
             session: Some(session),

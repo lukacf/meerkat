@@ -439,6 +439,7 @@ pub async fn run_compaction<C>(
     compactor: &Arc<dyn Compactor>,
     curator: Option<&Arc<dyn CompactionCurator>>,
     window: CompactionWindow<'_>,
+    parent_revision: String,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
 ) -> Result<CompactionOutcome, CompactionError>
@@ -593,7 +594,8 @@ where
         }
         return Err(error);
     }
-    let rewrite_authority = ValidatedCompactionRewrite::from_validated(messages, &result.messages)?;
+    let rewrite_authority =
+        ValidatedCompactionRewrite::from_validated(parent_revision, messages, &result.messages)?;
     let messages_after = result.messages.len();
 
     Ok(CompactionOutcome {
@@ -619,9 +621,30 @@ pub(crate) struct ValidatedCompactionRewrite {
 }
 
 impl ValidatedCompactionRewrite {
-    fn from_validated(messages: &[Message], rebuilt: &[Message]) -> Result<Self, CompactionError> {
-        let parent_revision = crate::session::transcript_messages_digest(messages)
-            .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?;
+    /// Mint the token from the caller's already-proved parent revision plus
+    /// one fresh digest of the rebuilt transcript (new content — the one
+    /// hash a compaction genuinely owes). `parent_revision` MUST be the
+    /// format-2 digest of exactly `messages`; the production caller serves
+    /// it from the session accumulator, which is contractually byte-identical
+    /// to `transcript_messages_digest(messages)` (pinned by
+    /// `canonicalize_messages_for_digest_is_element_wise`), and the debug
+    /// cross-check below keeps that binding evidence-backed without counting
+    /// against the digest budget.
+    fn from_validated(
+        parent_revision: String,
+        messages: &[Message],
+        rebuilt: &[Message],
+    ) -> Result<Self, CompactionError> {
+        #[cfg(debug_assertions)]
+        {
+            let recomputed = crate::session::transcript_messages_digest_uncounted(messages)
+                .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?;
+            assert_eq!(
+                recomputed, parent_revision,
+                "compaction authority minted with a parent revision that is not \
+                 the digest of the exact pre-compaction transcript"
+            );
+        }
         let revision = crate::session::transcript_messages_digest(rebuilt)
             .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?;
         Ok(Self {
@@ -632,15 +655,36 @@ impl ValidatedCompactionRewrite {
         })
     }
 
-    pub(crate) fn authorizes(
+    /// Whether the token's parent side binds this exact live transcript:
+    /// digest and both length facts. The rebuilt side deliberately binds at
+    /// the commit seam instead, where its one required digest is computed —
+    /// see `Session::replace_messages_for_compaction_internal`.
+    pub(crate) fn authorizes_parent_digest(
         &self,
-        messages: &[Message],
-        rebuilt: &[Message],
-    ) -> Result<bool, serde_json::Error> {
-        Ok(self.messages_before == messages.len()
-            && self.messages_after == rebuilt.len()
-            && self.parent_revision == crate::session::transcript_messages_digest(messages)?
-            && self.revision == crate::session::transcript_messages_digest(rebuilt)?)
+        parent_revision: &str,
+        messages_before: usize,
+        messages_after: usize,
+    ) -> bool {
+        self.messages_before == messages_before
+            && self.messages_after == messages_after
+            && self.parent_revision == parent_revision
+    }
+
+    /// Whether the validated rebuild is content-identical to its parent.
+    /// Answered from the token's own two digests — the mint bound them to
+    /// the exact accepted pair, so no re-hash is needed to ask.
+    pub(crate) fn is_no_op(&self) -> bool {
+        self.parent_revision == self.revision
+    }
+
+    /// The parent-side digest the token was minted over.
+    pub(crate) fn parent_revision(&self) -> &str {
+        &self.parent_revision
+    }
+
+    /// The rebuilt-side digest the token was minted over.
+    pub(crate) fn revision(&self) -> &str {
+        &self.revision
     }
 
     pub(crate) fn authorizes_commit(&self, commit: &crate::TranscriptRewriteCommit) -> bool {
@@ -663,7 +707,9 @@ impl ValidatedCompactionRewrite {
         messages: &[Message],
         rebuilt: &[Message],
     ) -> Result<Self, CompactionError> {
-        Self::from_validated(messages, rebuilt)
+        let parent_revision = crate::session::transcript_messages_digest(messages)
+            .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?;
+        Self::from_validated(parent_revision, messages, rebuilt)
     }
 }
 

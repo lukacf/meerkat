@@ -796,7 +796,7 @@ impl VerifiedCheckpointAuthority {
         expected_session_id: &SessionId,
         role: &str,
     ) -> Result<Self, SessionError> {
-        let session: Session = serde_json::from_slice(&serialized).map_err(|error| {
+        let session: Session = Session::from_persisted_bytes(&serialized).map_err(|error| {
             SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
                 "failed to decode {role} for session {expected_session_id}: {error}"
             ))))
@@ -814,6 +814,7 @@ impl VerifiedCheckpointAuthority {
                 "failed to serialize {role} for session {expected_session_id}: {error}"
             )))
         })?;
+        session.record_digest_midstates_for_bytes(&serialized);
         Self::from_session_with_serialized(session, serialized, expected_session_id, role)
     }
 
@@ -931,6 +932,7 @@ impl PreparedCheckpointDocument {
             )))
         })?;
         meerkat_core::checkpoint::record_session_encode_bytes(serialized.len() as u64);
+        session.record_digest_midstates_for_bytes(&serialized);
         Ok(Self {
             session,
             stamp,
@@ -1074,7 +1076,7 @@ async fn load_runtime_checkpoint_copy(
     else {
         return Ok(CommittedCheckpointCopy::Absent);
     };
-    let session: Session = serde_json::from_slice(&serialized).map_err(|error| {
+    let session: Session = Session::from_persisted_bytes(&serialized).map_err(|error| {
         SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
             "failed to decode {role} for session {session_id}: {error}"
         ))))
@@ -4135,7 +4137,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?
             .map(|bytes| {
-                serde_json::from_slice::<Session>(&bytes).map_err(|err| {
+                Session::from_persisted_bytes(&bytes).map_err(|err| {
                     SessionError::Store(Box::new(SessionStoreError::Serialization(format!(
                         "failed to deserialize runtime session snapshot for {runtime_id}: {err}"
                     ))))
@@ -4925,7 +4927,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Ok(Some(bytes)) = self.runtime_store.load_session_snapshot(&runtime_id).await else {
             return Ok(None);
         };
-        let Ok(current) = serde_json::from_slice::<Session>(&bytes) else {
+        let Ok(current) = Session::from_persisted_bytes(&bytes) else {
             return Ok(None);
         };
         let (Ok(current_digest), Ok(recovered_digest)) = (

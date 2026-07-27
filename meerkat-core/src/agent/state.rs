@@ -513,6 +513,14 @@ where
         if let Err(e) = self.sync_system_context_state_to_session() {
             tracing::warn!("Failed to sync system-context state into session: {}", e);
         }
+        // Warm the framed checkpoint midstate on the LIVE session before any
+        // persistence path clones it: the checkpoint documents downstream are
+        // minted on per-save clones, so a framed-less live session pays one
+        // O(document) reseed per clone per boundary, while a warmed live
+        // session hands every clone (and, through the sealed snapshots, every
+        // decoded copy) a midstate that ordinary appends keep extending.
+        // One-time O(document) per session lifetime; a no-op when warm.
+        crate::checkpoint::warm_framed_checkpoint_midstate(&self.session);
         if let Some(ref checkpointer) = self.checkpointer {
             checkpointer.checkpoint(&self.session).await;
             return;
@@ -1976,19 +1984,38 @@ where
                         };
                         self.compaction_cadence
                             .last_compaction_attempt_boundary_index = Some(current_boundary_index);
-                        let outcome = crate::agent::compact::run_compaction(
-                            self.client.as_ref(),
-                            compactor,
-                            self.compaction_curator.as_ref(),
-                            crate::compact::CompactionWindow {
-                                messages: self.session.messages(),
-                                last_input_tokens: self.last_input_tokens,
-                                session_boundary_index: current_boundary_index,
-                            },
-                            event_tx,
-                            &self.event_tap,
-                        )
-                        .await;
+                        // The accumulator serves the parent revision in
+                        // O(delta); it is contractually byte-identical to
+                        // `transcript_messages_digest(self.session.messages())`
+                        // and binds the compaction authority to the exact
+                        // pre-compaction transcript.
+                        let outcome = match self.session.transcript_content_digest() {
+                            Ok(parent_revision) => {
+                                crate::agent::compact::run_compaction(
+                                    self.client.as_ref(),
+                                    compactor,
+                                    self.compaction_curator.as_ref(),
+                                    crate::compact::CompactionWindow {
+                                        messages: self.session.messages(),
+                                        last_input_tokens: self.last_input_tokens,
+                                        session_boundary_index: current_boundary_index,
+                                    },
+                                    parent_revision,
+                                    event_tx,
+                                    &self.event_tap,
+                                )
+                                .await
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    "live transcript is not digestible; skipping compaction"
+                                );
+                                Err(crate::agent::compact::CompactionError::InvalidRebuild(
+                                    format!("live transcript is not digestible: {error}"),
+                                ))
+                            }
+                        };
 
                         if let Ok(outcome) = outcome {
                             // A successful summary call is real provider work

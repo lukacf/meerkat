@@ -218,6 +218,9 @@ pub fn write_session_snapshot_in_txn(
     let session_id = session.id().to_string();
     let metadata_json = serde_json::to_string(session.metadata())?;
     let session_json = serde_json::to_vec(session)?;
+    // In-process reads of these exact bytes adopt the warm digest midstates
+    // instead of reseeding them with O(document) canonical passes.
+    session.record_digest_midstates_for_bytes(&session_json);
     // Derived projection counters must round-trip through the durable i64
     // columns without loss. A count that exceeds i64::MAX is itself an
     // impossible state, so fail closed rather than silently clamping to a
@@ -276,7 +279,7 @@ fn load_session_snapshot_in_txn(
         |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
     )
     .optional()?
-    .map(|bytes| serde_json::from_slice::<Session>(&bytes).map_err(StoreError::Serialization))
+    .map(|bytes| Session::from_persisted_bytes(&bytes).map_err(StoreError::Serialization))
     .transpose()
 }
 

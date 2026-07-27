@@ -157,6 +157,80 @@ fn record_slim_materialization_verified(id: &SessionId, revision: &str, count: u
     memo.push_back((id.to_string(), revision.to_string(), count));
 }
 
+/// Process-global SUBSTITUTION memo for slim materialization: the exact
+/// message vector (shared `Arc`, O(1) to record) plus its proven digest
+/// midstates, keyed by `(session id, head revision, message count)`.
+///
+/// The head writer proves `digest(messages) == head_revision` when it mints
+/// the head row; recording that proven vector lets `into_session` SERVE it
+/// on the next materialization of the same `(id, revision, count)` instead
+/// of re-hashing the row-assembled vector — substitution, never blessing:
+/// a hit discards whatever the rows materialized to and serves content the
+/// producer proved, so corrupt rows are displaced, not trusted (the same
+/// semantics as the transcript-graph decode memo). Debug builds compare the
+/// substituted vector against the materialized rows on every hit. One entry
+/// per recently-active session id: retention is the `Arc` the live session
+/// already holds, plus at most `SLIM_SNAPSHOT_MEMO_BOUND` documents after
+/// their sessions drop. Honors `MEERKAT_DISABLE_GRAPH_DECODE_MEMO`.
+const SLIM_SNAPSHOT_MEMO_BOUND: usize = 4;
+
+type SlimSnapshotEntry = (
+    String,
+    String,
+    u64,
+    crate::session::SharedTranscriptSnapshot,
+);
+
+fn slim_snapshot_memo() -> &'static std::sync::Mutex<std::collections::VecDeque<SlimSnapshotEntry>>
+{
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<SlimSnapshotEntry>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn record_slim_materialization_snapshot(
+    id: &SessionId,
+    revision: &str,
+    count: u64,
+    snapshot: crate::session::SharedTranscriptSnapshot,
+) {
+    if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
+        return;
+    }
+    let id = id.to_string();
+    let mut memo = slim_snapshot_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    memo.retain(|(existing, _, _, _)| existing != &id);
+    if memo.len() >= SLIM_SNAPSHOT_MEMO_BOUND {
+        memo.pop_front();
+    }
+    memo.push_back((id, revision.to_string(), count, snapshot));
+}
+
+fn slim_materialization_snapshot(
+    id: &SessionId,
+    revision: &str,
+    count: u64,
+) -> Option<crate::session::SharedTranscriptSnapshot> {
+    if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
+        return None;
+    }
+    let id = id.to_string();
+    let memo = slim_snapshot_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    memo.iter()
+        .find(|(mid, mrev, mcount, snapshot)| {
+            mid == &id
+                && mrev == revision
+                && *mcount == count
+                && snapshot.message_count() as u64 == count
+        })
+        .map(|(_, _, _, snapshot)| snapshot.clone())
+}
+
 /// Transcript digests a caller has already proved, handed to a save guard so
 /// it does not recompute them.
 ///
@@ -799,25 +873,29 @@ pub fn run_boundary_snapshot_save_guard(
             let Some(previous) = previous else {
                 // First runtime-boundary commit for a session this authority
                 // has never snapshotted: adoption of a resumed/imported
-                // session. A typed rewrite graph carried in is audited by its
-                // own commits — validate every one against its retained
-                // bodies and require the graph head to match the incoming
-                // digest. Plain `SessionStore::save` keeps rejecting such
-                // seeds (the trait-level append-only contract); adoption is a
+                // session. A typed rewrite graph carried in is audited by
+                // the sealed whole-graph proof — every retained body's
+                // digest, every commit's edit-shape relations, AND chain
+                // coherence (which the former per-commit loop never checked)
+                // — plus the graph-head/live-digest agreement below. Plain
+                // `SessionStore::save` keeps rejecting such seeds (the
+                // trait-level append-only contract); adoption is a
                 // runtime-authority decision, not an ordinary row write.
-                let incoming_revision = transcript_messages_digest(incoming.messages())
+                let incoming_revision = incoming
+                    .transcript_content_digest()
                     .map_err(SessionStoreError::from)?;
-                if let Some(state) = incoming.transcript_history_state().map_err(|err| {
-                    SessionStoreError::InvalidTranscriptRewrite {
-                        id: incoming.id().clone(),
-                        reason: format!("incoming transcript history state is malformed: {err}"),
-                    }
-                })? && !state.commits.is_empty()
-                    && state.head == incoming_revision
+                if let Some(sealed) =
+                    incoming
+                        .validated_transcript_history_state()
+                        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+                            id: incoming.id().clone(),
+                            reason: format!(
+                                "incoming transcript history state is malformed: {err}"
+                            ),
+                        })?
+                    && !sealed.commits.is_empty()
+                    && sealed.head == incoming_revision
                 {
-                    for commit in &state.commits {
-                        validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
-                    }
                     return Ok(());
                 }
                 return Err(append_error);
@@ -849,7 +927,7 @@ pub fn run_boundary_snapshot_save_guard(
             )?;
             if commits.is_none()
                 && run_boundary_context_summary_tail_projection_save_guard(
-                    incoming, previous, state,
+                    incoming, previous, &sealed,
                 )?
             {
                 return Ok(());
@@ -865,7 +943,10 @@ pub fn run_boundary_snapshot_save_guard(
                 // last rewrite and the incoming head extends it by plain
                 // appends. Unlike the non-empty chain below, no bridge guard
                 // runs here, so re-check the graph-head/message-digest
-                // agreement explicitly before accepting.
+                // agreement explicitly before accepting. Every retained
+                // commit's recorded bodies and edit-shape relations are
+                // proven by the seal; re-deriving them per commit repeated
+                // the whole-graph pass once per retained commit.
                 if state.head != incoming_revision {
                     return Err(SessionStoreError::InvalidTranscriptRewrite {
                         id: incoming.id().clone(),
@@ -875,20 +956,11 @@ pub fn run_boundary_snapshot_save_guard(
                         ),
                     });
                 }
-                for commit in &state.commits {
-                    validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
-                }
                 return Ok(());
             };
-            transcript_rewrite_bridge_save_guard(incoming, commit, state, &incoming_revision)?;
-            // Validate every retained commit's recorded bodies, not only the
-            // walked chain: a plain-continuation proof can legitimately end
-            // the walk before trailing rebookkept commits, and those must
-            // stay digest-consistent to ride along (mirrors the empty-chain
-            // arm above).
-            for commit in &state.commits {
-                validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
-            }
+            transcript_rewrite_bridge_save_guard(incoming, commit, &sealed, &incoming_revision)?;
+            // Trailing rebookkept commits beyond the walked chain stay
+            // digest-consistent by the same seal; no per-commit re-proof.
             Ok(())
         }
     }
@@ -985,17 +1057,11 @@ fn run_boundary_commitless_history_projection_save_guard(
 fn run_boundary_context_summary_tail_projection_save_guard(
     incoming: &Session,
     previous: &Session,
-    state: &TranscriptHistoryState,
+    state: &ValidatedTranscriptHistory,
 ) -> Result<bool, SessionStoreError> {
     if state.commits.is_empty() {
         return Ok(false);
     }
-    incoming
-        .validate_transcript_history_state()
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("incoming transcript history state is malformed: {err}"),
-        })?;
 
     let (incoming_system, incoming_tail) = match incoming.messages().split_first() {
         Some((Message::System(system), tail)) => (Some(system), tail),
@@ -1031,9 +1097,9 @@ fn run_boundary_context_summary_tail_projection_save_guard(
         return Ok(false);
     }
 
-    for commit in &state.commits {
-        validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
-    }
+    // Every retained commit's recorded bodies are proven by the sealed graph
+    // this guard now demands; the former per-commit loop re-ran the
+    // whole-graph pass once per retained commit.
     Ok(true)
 }
 
@@ -1314,7 +1380,7 @@ fn transcript_history_revision_extends(
 fn transcript_rewrite_bridge_save_guard(
     incoming: &Session,
     commit: &TranscriptRewriteCommit,
-    incoming_state: &TranscriptHistoryState,
+    incoming_state: &ValidatedTranscriptHistory,
     incoming_message_digest: &str,
 ) -> Result<(), SessionStoreError> {
     validate_transcript_rewrite_commit_bodies(incoming, commit, incoming_state)?;
@@ -1350,12 +1416,6 @@ pub fn transcript_rewrite_save_guard(
     previous: Option<&Session>,
     commit: &TranscriptRewriteCommit,
 ) -> Result<(), SessionStoreError> {
-    incoming
-        .validate_transcript_history_state()
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("incoming transcript history state is malformed: {err}"),
-        })?;
     let Some(previous) = previous else {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -1385,13 +1445,12 @@ pub fn transcript_rewrite_save_guard(
             actual: previous_revision,
         });
     }
-    let previous_message_digest =
-        transcript_messages_digest(previous.messages()).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("previous current transcript is not digestible: {err}"),
-            }
-        })?;
+    let previous_message_digest = previous.transcript_content_digest().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous current transcript is not digestible: {err}"),
+        }
+    })?;
     if previous_message_digest != commit.parent_revision {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -1416,13 +1475,12 @@ pub fn transcript_rewrite_save_guard(
             ),
         });
     }
-    let incoming_message_digest =
-        transcript_messages_digest(incoming.messages()).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("incoming current transcript is not digestible: {err}"),
-            }
-        })?;
+    let incoming_message_digest = incoming.transcript_content_digest().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming current transcript is not digestible: {err}"),
+        }
+    })?;
     if incoming_message_digest != commit.revision {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -1432,26 +1490,38 @@ pub fn transcript_rewrite_save_guard(
             ),
         });
     }
-    let Some(incoming_state) = incoming.transcript_history_state().map_err(|err| {
-        SessionStoreError::InvalidTranscriptRewrite {
+    let Some(incoming_state) = incoming
+        .validated_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: format!("incoming transcript history state is malformed: {err}"),
-        }
-    })?
+        })?
     else {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
         });
     };
-    validate_rewrite_save_retains_previous_commits(incoming, previous, &incoming_state)?;
+    validate_rewrite_save_retains_previous_commits(incoming, previous, incoming_state.state())?;
     validate_transcript_rewrite_commit_bodies(incoming, commit, &incoming_state)
 }
 
+/// Require a rewrite commit to be a member of a PROVEN incoming graph.
+///
+/// This function used to re-derive, per commit, everything the whole-graph
+/// validator already proves for every commit in the state: parent/revision
+/// body presence, message-count agreement, both body digests, selection
+/// bounds, span/prefix/suffix/replacement digests. Demanding
+/// [`ValidatedTranscriptHistory`] keeps every one of those checks — the seal
+/// cannot exist without them having passed — and reduces this call to the
+/// one fact the seal does not state: that THIS commit is in THAT graph.
+/// Callers holding an unproven parse must seal it first
+/// (`Session::validated_transcript_history_state`), which is exactly one
+/// whole-graph pass instead of one per consumer.
 fn validate_transcript_rewrite_commit_bodies(
     incoming: &Session,
     commit: &TranscriptRewriteCommit,
-    incoming_state: &TranscriptHistoryState,
+    incoming_state: &ValidatedTranscriptHistory,
 ) -> Result<(), SessionStoreError> {
     if !incoming_state
         .commits
@@ -1469,186 +1539,6 @@ fn validate_transcript_rewrite_commit_bodies(
                     .iter()
                     .map(|commit| (&commit.parent_revision, &commit.revision))
                     .collect::<Vec<_>>()
-            ),
-        });
-    }
-    let Some(parent_body) = incoming_state
-        .revisions
-        .iter()
-        .find(|body| body.revision == commit.parent_revision)
-    else {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "incoming rewrite omitted parent revision body {}",
-                commit.parent_revision
-            ),
-        });
-    };
-    let Some(revision_body) = incoming_state
-        .revisions
-        .iter()
-        .find(|body| body.revision == commit.revision)
-    else {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "incoming rewrite omitted new revision body {}",
-                commit.revision
-            ),
-        });
-    };
-    if parent_body.messages.len() != commit.messages_before
-        || revision_body.messages.len() != commit.messages_after
-    {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "commit message counts {} -> {} do not match persisted rewrite {} -> {}",
-                commit.messages_before,
-                commit.messages_after,
-                parent_body.messages.len(),
-                revision_body.messages.len()
-            ),
-        });
-    }
-    let parent_body_revision =
-        transcript_messages_digest(&parent_body.messages).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("parent revision body is not digestible: {err}"),
-            }
-        })?;
-    if parent_body_revision != commit.parent_revision {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "parent revision body digest {parent_body_revision} does not match commit parent {}",
-                commit.parent_revision
-            ),
-        });
-    }
-    let (start, end) = commit.selection.bounds();
-    if start > end || end > parent_body.messages.len() {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "commit selection {start}..{end} is invalid for parent revision with {} messages",
-                parent_body.messages.len()
-            ),
-        });
-    }
-    let original_span_digest = transcript_messages_digest(&parent_body.messages[start..end])
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("original span body is not digestible: {err}"),
-        })?;
-    if original_span_digest != commit.original_span_digest {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "original span digest {original_span_digest} does not match commit digest {}",
-                commit.original_span_digest
-            ),
-        });
-    }
-    let revision_body_digest =
-        transcript_messages_digest(&revision_body.messages).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("new revision body is not digestible: {err}"),
-            }
-        })?;
-    if revision_body_digest != commit.revision {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "new revision body digest {revision_body_digest} does not match commit revision {}",
-                commit.revision
-            ),
-        });
-    }
-    let removed_len = end - start;
-    let retained_len = commit
-        .messages_before
-        .checked_sub(removed_len)
-        .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "commit removed more messages than it recorded before rewrite".to_string(),
-        })?;
-    let replacement_len = commit
-        .messages_after
-        .checked_sub(retained_len)
-        .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "commit message counts cannot describe a replacement span".to_string(),
-        })?;
-    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
-        SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "replacement span end overflowed".to_string(),
-        }
-    })?;
-    if replacement_end > revision_body.messages.len() {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "replacement span {start}..{replacement_end} is invalid for revision with {} messages",
-                revision_body.messages.len()
-            ),
-        });
-    }
-    let parent_prefix_digest =
-        transcript_messages_digest(&parent_body.messages[..start]).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("parent prefix body is not digestible: {err}"),
-            }
-        })?;
-    let revision_prefix_digest = transcript_messages_digest(&revision_body.messages[..start])
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("revision prefix body is not digestible: {err}"),
-        })?;
-    if parent_prefix_digest != revision_prefix_digest {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "rewrite revision changed messages before the selected span".to_string(),
-        });
-    }
-    let parent_suffix_digest =
-        transcript_messages_digest(&parent_body.messages[end..]).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("parent suffix body is not digestible: {err}"),
-            }
-        })?;
-    let revision_suffix_digest =
-        transcript_messages_digest(&revision_body.messages[replacement_end..]).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("revision suffix body is not digestible: {err}"),
-            }
-        })?;
-    if parent_suffix_digest != revision_suffix_digest {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "rewrite revision changed messages after the selected span".to_string(),
-        });
-    }
-    let replacement_digest = transcript_messages_digest(
-        &revision_body.messages[start..replacement_end],
-    )
-    .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-        id: incoming.id().clone(),
-        reason: format!("replacement span body is not digestible: {err}"),
-    })?;
-    if replacement_digest != commit.replacement_digest {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "replacement span digest {replacement_digest} does not match commit digest {}",
-                commit.replacement_digest
             ),
         });
     }
@@ -1877,8 +1767,20 @@ impl SessionHead {
         let head_revision = session
             .transcript_content_digest()
             .map_err(SessionStoreError::from)?;
-        let history_digest =
-            crate::session_transcript_history_checkpoint_digest(session).map_err(|error| {
+        // The digest above just proved `digest(messages) == head_revision`
+        // for exactly this vector; admit the proven vector (shared Arc, O(1))
+        // so the next slim materialization of this head substitutes it
+        // instead of re-hashing the row-assembled copy.
+        if let Some(snapshot) = session.shared_transcript_snapshot() {
+            record_slim_materialization_snapshot(
+                session.id(),
+                &head_revision,
+                session.messages().len() as u64,
+                snapshot,
+            );
+        }
+        let history_witness = crate::checkpoint::session_transcript_history_witness(session)
+            .map_err(|error| {
                 SessionStoreError::Serialization(format!(
                     "failed to derive transcript-history checkpoint witness: {error}"
                 ))
@@ -1896,10 +1798,14 @@ impl SessionHead {
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<serde_json::Map<String, serde_json::Value>>();
-        if let Some(history_digest) = history_digest {
+        if let Some(history_witness) = history_witness {
+            // The typed carrier round-trips the witness FORMAT: v2 stays the
+            // bare string every pre-v3 reader understands, v3 persists the
+            // object form. A slim projection can never relabel the format —
+            // it re-carries exactly what the document's evidence declares.
             metadata.insert(
                 SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY.to_string(),
-                serde_json::Value::String(history_digest.as_str().to_string()),
+                history_witness.to_carried_value(),
             );
         }
         Ok(Self {
@@ -1926,6 +1832,40 @@ impl SessionHead {
     pub fn into_session(self, messages: Vec<Message>) -> Result<Session, SessionStoreError> {
         if messages.len() as u64 != self.message_count {
             return Err(SessionStoreError::Corrupted(self.id));
+        }
+        // Equality fast path: the head writer proved this exact
+        // (id, revision, count) over the vector it recorded. When the
+        // materialized rows are IDENTICAL to that proven vector (a plain
+        // memory compare — no canonicalization, no hashing), serving the
+        // proven vector with its warm digest midstates is exactly the
+        // full verification's outcome at a fraction of the cost. ANY
+        // difference — tampered rows, but also legitimate representation
+        // deltas the digest erases (externalized media forms) — is NOT a
+        // verdict: it falls through to the unchanged first-sight digest
+        // verification below, which accepts digest-equal representations
+        // and fails tampered rows closed as `Corrupted`.
+        if let Some(snapshot) =
+            slim_materialization_snapshot(&self.id, &self.head_revision, self.message_count)
+            && *snapshot.messages().as_ref() == messages
+        {
+            let SessionHead {
+                id,
+                version,
+                created_at,
+                updated_at,
+                usage,
+                metadata,
+                ..
+            } = self;
+            let transcript = crate::session::TranscriptMessages::from_shared_snapshot(&snapshot);
+            return Session::from_head_parts_with_transcript(
+                version, id, transcript, created_at, updated_at, metadata, usage,
+            )
+            .map_err(|err| {
+                SessionStoreError::Serialization(format!(
+                    "failed to restore session from head row: {err}"
+                ))
+            });
         }
         // The head revision IS the transcript content digest, so one full
         // verification per (session, revision, count) per process proves the
@@ -3024,6 +2964,86 @@ mod tests {
         );
 
         run_boundary_snapshot_save_guard(&incoming, Some(&previous))?;
+        Ok(())
+    }
+
+    /// Adoption-arm strengthening pin (seal retype, 0.8.9): a first-boundary
+    /// adoption graph whose rewrite records are INDIVIDUALLY valid but whose
+    /// commit chain does not link must be rejected. The retired per-commit
+    /// loop this arm used to run never checked chain linkage, so this shape
+    /// was silently accepted; the sealed whole-graph proof the arm now
+    /// demands includes the chain walk. Behaviour change in the safe
+    /// direction — this test pins it.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn adoption_arm_rejects_a_graph_whose_commit_chain_does_not_link()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut lineage_a = Session::new();
+        lineage_a.push(Message::User(UserMessage::text("a-1".to_string())));
+        lineage_a.push(Message::User(UserMessage::text("a-2".to_string())));
+        lineage_a.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "a-2-rewritten".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+
+        let mut lineage_b = Session::new();
+        lineage_b.push(Message::User(UserMessage::text("b-1".to_string())));
+        lineage_b.push(Message::User(UserMessage::text("b-2".to_string())));
+        lineage_b.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "b-2-rewritten".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+
+        let state_a = lineage_a
+            .transcript_history_state()?
+            .expect("lineage A graph");
+        let state_b = lineage_b
+            .transcript_history_state()?
+            .expect("lineage B graph");
+        // Splice: A's record followed by B's record. B's parent is neither
+        // A's revision nor an extension of it; every body is present and
+        // digest-consistent, so each record validates in isolation.
+        let mut spliced = state_a.clone();
+        spliced.commits.extend(state_b.commits.iter().cloned());
+        for body in &state_b.revisions {
+            if !spliced
+                .revisions
+                .iter()
+                .any(|existing| existing.revision == body.revision)
+            {
+                spliced.revisions.push(body.clone());
+            }
+        }
+        spliced.head = state_b.head.clone();
+
+        // The incoming live transcript matches the spliced head exactly, so
+        // the retired per-commit loop's only other check (head == incoming
+        // digest) would have passed and the graph would have been adopted.
+        let mut incoming = lineage_b.clone();
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(&spliced)?,
+        );
+
+        let error = run_boundary_snapshot_save_guard(&incoming, None)
+            .expect_err("non-linking adoption chain must be rejected");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("transcript history state is malformed")
+                || rendered.contains("does not extend"),
+            "expected the sealed whole-graph proof to reject the non-linking \
+             chain, got: {rendered}"
+        );
         Ok(())
     }
 

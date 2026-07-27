@@ -98,6 +98,20 @@ struct SortedStream {
     covered: usize,
 }
 
+/// SHA-256 midstate over `prefix ++ "[" ++ sorted canonical elements` (no
+/// closing `]`) — the canonical checkpoint DOCUMENT's transcript span. The
+/// canonical document sorts only the immutable `created_at` and `id` before
+/// `messages`, so the prefix is constant per session instance and everything
+/// after the array is turn-sized; finalizing with `"]" ++ suffix` yields the
+/// byte-identical whole-document digest. Keyed by the exact prefix bytes so
+/// a document-framing change reseeds instead of serving a wrong digest.
+#[derive(Debug, Clone)]
+struct FramedMidstate {
+    prefix: Vec<u8>,
+    hasher: Sha256,
+    covered: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AccumulatorState {
     /// Midstate over the identity byte stream of the CURRENT message vector.
@@ -108,6 +122,8 @@ struct AccumulatorState {
     boundaries: VecDeque<Midstate>,
     /// Canonical-sorted byte stream for witness assembly, when enabled.
     sorted_stream: Option<SortedStream>,
+    /// Canonical checkpoint-document midstate, when enabled.
+    framed: Option<FramedMidstate>,
     /// Monotonic count of non-append transcript mutations. Observability for
     /// tests and diagnostics; correctness does not depend on it.
     epoch: u64,
@@ -160,8 +176,13 @@ thread_local! {
 /// wrong `head_revision` would be persisted into two durable stores and
 /// make sessions unloadable. Sampling converts that argument into evidence
 /// at bounded cost; a mismatch panics before anything wrong is persisted.
+/// 64, not 32: three sampled cross-checks now share this budget (the
+/// accumulator witness, the framed checkpoint digest, and the rewrite
+/// fast-path validator), so the original 32 would halve-or-worse each
+/// check's coverage. Raised deliberately when the framed and fast-path
+/// samples were added (2026-07-27).
 static RELEASE_VERIFICATION_BUDGET: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(32);
+    std::sync::atomic::AtomicU32::new(64);
 
 pub(crate) fn take_verification_sample() -> bool {
     if cfg!(any(test, debug_assertions)) {
@@ -193,6 +214,7 @@ impl TranscriptDigestAccumulator {
         state.stream_a = None;
         state.boundaries.clear();
         state.sorted_stream = None;
+        state.framed = None;
         state.parked = None;
         state.epoch = state.epoch.saturating_add(1);
     }
@@ -213,23 +235,34 @@ impl TranscriptDigestAccumulator {
                     state.stream_a = None;
                     state.boundaries.clear();
                     state.sorted_stream = None;
+                    state.framed = None;
                     state.epoch = state.epoch.saturating_add(1);
                     return;
                 }
             }
         }
-        if let Some(sorted) = state.sorted_stream.as_mut() {
+        if state.sorted_stream.is_some() || state.framed.is_some() {
             for message in appended {
                 match sorted_canonical_message_bytes(message) {
                     Ok(bytes) => {
-                        if sorted.covered > 0 {
-                            sorted.bytes.push(b',');
+                        if let Some(sorted) = state.sorted_stream.as_mut() {
+                            if sorted.covered > 0 {
+                                sorted.bytes.push(b',');
+                            }
+                            sorted.bytes.extend_from_slice(&bytes);
+                            sorted.covered += 1;
                         }
-                        sorted.bytes.extend_from_slice(&bytes);
-                        sorted.covered += 1;
+                        if let Some(framed) = state.framed.as_mut() {
+                            if framed.covered > 0 {
+                                framed.hasher.update(b",");
+                            }
+                            framed.hasher.update(&bytes);
+                            framed.covered += 1;
+                        }
                     }
                     Err(_) => {
                         state.sorted_stream = None;
+                        state.framed = None;
                         break;
                     }
                 }
@@ -240,7 +273,10 @@ impl TranscriptDigestAccumulator {
     /// Park the accumulator across an in-place scan of unknown outcome.
     fn begin_in_place_scan(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
-        if state.stream_a.is_none() && state.boundaries.is_empty() && state.sorted_stream.is_none()
+        if state.stream_a.is_none()
+            && state.boundaries.is_empty()
+            && state.sorted_stream.is_none()
+            && state.framed.is_none()
         {
             return;
         }
@@ -248,6 +284,7 @@ impl TranscriptDigestAccumulator {
             stream_a: state.stream_a.take(),
             boundaries: std::mem::take(&mut state.boundaries),
             sorted_stream: state.sorted_stream.take(),
+            framed: state.framed.take(),
             epoch: state.epoch,
             parked: None,
         };
@@ -277,6 +314,7 @@ impl TranscriptDigestAccumulator {
         state.stream_a = parked.stream_a;
         state.boundaries = parked.boundaries;
         state.sorted_stream = parked.sorted_stream;
+        state.framed = parked.framed;
     }
 
     /// Digest of `messages` — witness-served when the retained midstate covers
@@ -407,6 +445,54 @@ impl TranscriptDigestAccumulator {
         crate::checkpoint::record_content_digest_bytes(sorted.bytes.len() as u64 + 2);
         true
     }
+
+    /// SHA-256 midstate over `prefix ++ "[" ++ canonical elements of exactly
+    /// this vector` (no closing `]`) — a clone the caller finalizes with
+    /// `"]" ++ suffix` to obtain the byte-identical canonical checkpoint
+    /// document digest.
+    ///
+    /// Serves the retained midstate when it covers exactly this vector under
+    /// exactly this prefix; otherwise reseeds with one full canonicalization
+    /// pass (counted — that is the pass the digest budget observes) and
+    /// retains the result. `None` when the accumulator is parked or a
+    /// message fails to serialize; the caller falls back to the full
+    /// document path — the fail-safe direction.
+    fn framed_document_hasher(&self, messages: &[Message], prefix: &[u8]) -> Option<Sha256> {
+        let mut state = self.locked();
+        if state.parked.is_some() {
+            return None;
+        }
+        if let Some(framed) = state.framed.as_ref()
+            && framed.covered == messages.len()
+            && framed.prefix == prefix
+        {
+            return Some(framed.hasher.clone());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(prefix);
+        hasher.update(b"[");
+        let mut element_bytes = 0u64;
+        let mut covered = 0usize;
+        for message in messages {
+            let Ok(bytes) = sorted_canonical_message_bytes(message) else {
+                return None;
+            };
+            if covered > 0 {
+                hasher.update(b",");
+                element_bytes = element_bytes.saturating_add(1);
+            }
+            hasher.update(&bytes);
+            element_bytes = element_bytes.saturating_add(bytes.len() as u64);
+            covered += 1;
+        }
+        crate::checkpoint::record_content_digest_bytes(element_bytes);
+        state.framed = Some(FramedMidstate {
+            prefix: prefix.to_vec(),
+            hasher: hasher.clone(),
+            covered,
+        });
+        Some(hasher)
+    }
 }
 
 /// Canonical-sorted bytes of one message: `write_canonical_json` over the
@@ -417,6 +503,238 @@ fn sorted_canonical_message_bytes(message: &Message) -> Result<Vec<u8>, serde_js
     let mut bytes = Vec::new();
     crate::checkpoint::write_canonical_json(&canonical, &mut bytes)?;
     Ok(bytes)
+}
+
+/// Process-global bounded memo carrying accumulator midstates across the
+/// serialize → deserialize boundary, keyed by the SHA-256 of the EXACT
+/// serialized session bytes.
+///
+/// Every fact in an [`AccumulatorState`] is a pure function of the message
+/// vector, and the message vector is a pure function of the serialized
+/// bytes, so a key that is a collision-resistant hash of those exact bytes
+/// binds precisely what a fresh recompute would bind — this is the
+/// byte-binding discipline the P0 memo review required, not a shape key.
+/// Producers record the WARM state at the moment they serialize a session
+/// (or fully verify a decoded one); a decode of the same bytes adopts the
+/// snapshot instead of reseeding every midstate with an O(document)
+/// canonicalize-and-hash pass per guard, head build, and checkpoint
+/// verification. The debug/release sampled witness cross-checks
+/// (`take_verification_sample`) keep verifying adopted midstates against
+/// full recomputes, so a keying defect fails loudly instead of persisting a
+/// wrong digest. Entries are byte-budgeted (the sorted stream retains the
+/// canonical transcript bytes); eviction only costs a reseed. Honors
+/// `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` so the established kill-switch
+/// restores the full pre-memo decode cost end to end.
+struct ByteBoundAccumulatorMemo {
+    budget_bytes: usize,
+    entry_cap_bytes: usize,
+    retained_bytes: usize,
+    entries: std::collections::HashMap<[u8; 32], (Arc<AccumulatorState>, usize)>,
+    order: VecDeque<[u8; 32]>,
+}
+
+const BYTE_BOUND_ACCUMULATOR_MEMO_BUDGET: usize = 128 * 1024 * 1024;
+const BYTE_BOUND_ACCUMULATOR_MEMO_ENTRY_CAP: usize = BYTE_BOUND_ACCUMULATOR_MEMO_BUDGET / 2;
+
+impl ByteBoundAccumulatorMemo {
+    fn get(&mut self, key: &[u8; 32]) -> Option<Arc<AccumulatorState>> {
+        let (state, _) = self.entries.get(key)?;
+        let state = Arc::clone(state);
+        if let Some(position) = self.order.iter().position(|entry| entry == key)
+            && let Some(entry) = self.order.remove(position)
+        {
+            self.order.push_back(entry);
+        }
+        Some(state)
+    }
+
+    fn record(&mut self, key: [u8; 32], state: Arc<AccumulatorState>, bytes: usize) {
+        if bytes > self.entry_cap_bytes {
+            return;
+        }
+        if let Some((_, existing)) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(existing);
+            if let Some(position) = self.order.iter().position(|entry| entry == &key) {
+                self.order.remove(position);
+            }
+        }
+        while self.retained_bytes + bytes > self.budget_bytes {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, evicted_bytes)) = self.entries.remove(&evicted) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(evicted_bytes);
+            }
+        }
+        self.order.push_back(key);
+        self.retained_bytes += bytes;
+        self.entries.insert(key, (state, bytes));
+    }
+}
+
+static BYTE_BOUND_ACCUMULATOR_MEMO: std::sync::OnceLock<Mutex<ByteBoundAccumulatorMemo>> =
+    std::sync::OnceLock::new();
+
+fn byte_bound_accumulator_memo() -> &'static Mutex<ByteBoundAccumulatorMemo> {
+    BYTE_BOUND_ACCUMULATOR_MEMO.get_or_init(|| {
+        Mutex::new(ByteBoundAccumulatorMemo {
+            budget_bytes: BYTE_BOUND_ACCUMULATOR_MEMO_BUDGET,
+            entry_cap_bytes: BYTE_BOUND_ACCUMULATOR_MEMO_ENTRY_CAP,
+            retained_bytes: 0,
+            entries: std::collections::HashMap::new(),
+            order: VecDeque::new(),
+        })
+    })
+}
+
+fn session_bytes_key(serialized: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(serialized);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest);
+    key
+}
+
+fn accumulator_state_retained_bytes(state: &AccumulatorState) -> usize {
+    let sorted = state
+        .sorted_stream
+        .as_ref()
+        .map_or(0, |sorted| sorted.bytes.len());
+    let framed = state
+        .framed
+        .as_ref()
+        .map_or(0, |framed| framed.prefix.len() + 128);
+    // Midstates and the boundary ring are ~constant-size hasher states.
+    sorted + framed + 4096
+}
+
+/// Shared handle to a message vector plus the accumulator midstates proven
+/// for it — the value type of the slim-materialization substitution memo.
+/// The vector rides the buffer's own copy-on-write `Arc`, so recording is
+/// O(1) and retention is shared with the live session while it is alive.
+#[derive(Debug, Clone)]
+pub(crate) struct SharedTranscriptSnapshot {
+    messages: Arc<Vec<Message>>,
+    state: Arc<AccumulatorState>,
+}
+
+impl SharedTranscriptSnapshot {
+    pub(crate) fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub(crate) fn messages(&self) -> &Arc<Vec<Message>> {
+        &self.messages
+    }
+}
+
+impl TranscriptMessages {
+    /// Snapshot the current buffer and its midstates for the substitution
+    /// memo. `None` when the accumulator is parked or a retained midstate
+    /// does not cover exactly this vector.
+    pub(crate) fn shared_snapshot(&self) -> Option<SharedTranscriptSnapshot> {
+        let state = self.accumulator.locked();
+        if state.parked.is_some()
+            || state
+                .stream_a
+                .as_ref()
+                .is_some_and(|stream| stream.covered != self.messages.len())
+            || state
+                .sorted_stream
+                .as_ref()
+                .is_some_and(|sorted| sorted.covered != self.messages.len())
+            || state
+                .framed
+                .as_ref()
+                .is_some_and(|framed| framed.covered != self.messages.len())
+        {
+            return None;
+        }
+        let snapshot = (**state).clone();
+        drop(state);
+        Some(SharedTranscriptSnapshot {
+            messages: Arc::clone(&self.messages),
+            state: Arc::new(snapshot),
+        })
+    }
+
+    /// Rebuild a buffer from a snapshot: the shared vector plus the exact
+    /// midstates proven for it.
+    pub(crate) fn from_shared_snapshot(snapshot: &SharedTranscriptSnapshot) -> Self {
+        Self {
+            messages: Arc::clone(&snapshot.messages),
+            accumulator: Box::new(TranscriptDigestAccumulator {
+                state: Mutex::new(Box::new((*snapshot.state).clone())),
+            }),
+        }
+    }
+
+    /// Record this buffer's retained midstates under the SHA-256 of the
+    /// exact bytes the enclosing session just serialized to (or was fully
+    /// verified against). No-op when nothing is retained, when the
+    /// accumulator is parked mid-scan, or when the kill-switch is set.
+    pub(crate) fn record_state_for_serialized_bytes(&self, serialized: &[u8]) {
+        if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
+            return;
+        }
+        let state = self.accumulator.locked();
+        if state.parked.is_some()
+            || (state.stream_a.is_none() && state.sorted_stream.is_none() && state.framed.is_none())
+        {
+            return;
+        }
+        // Only snapshot states that cover exactly the current buffer: a
+        // stale-but-uninvalidated midstate cannot exist by construction, but
+        // count agreement is cheap and keeps the recorded fact self-evident.
+        if state
+            .stream_a
+            .as_ref()
+            .is_some_and(|stream| stream.covered != self.messages.len())
+        {
+            return;
+        }
+        let snapshot: AccumulatorState = (**state).clone();
+        drop(state);
+        let bytes = accumulator_state_retained_bytes(&snapshot);
+        if let Ok(mut memo) = byte_bound_accumulator_memo().lock() {
+            memo.record(session_bytes_key(serialized), Arc::new(snapshot), bytes);
+        }
+    }
+
+    /// Adopt the midstates previously recorded for these EXACT serialized
+    /// bytes. Sound because the key is a collision-resistant hash of the
+    /// bytes this buffer was just decoded from: the recorded state was
+    /// computed over the identical message vector. Count mismatches (or a
+    /// recorded parked state) are discarded, and every witness serve stays
+    /// covered by the sampled full-recompute cross-check.
+    pub(crate) fn adopt_state_for_serialized_bytes(&mut self, serialized: &[u8]) {
+        if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_some() {
+            return;
+        }
+        let Some(snapshot) = byte_bound_accumulator_memo()
+            .lock()
+            .ok()
+            .and_then(|mut memo| memo.get(&session_bytes_key(serialized)))
+        else {
+            return;
+        };
+        if snapshot.parked.is_some()
+            || snapshot
+                .stream_a
+                .as_ref()
+                .is_some_and(|stream| stream.covered != self.messages.len())
+            || snapshot
+                .sorted_stream
+                .as_ref()
+                .is_some_and(|sorted| sorted.covered != self.messages.len())
+            || snapshot
+                .framed
+                .as_ref()
+                .is_some_and(|framed| framed.covered != self.messages.len())
+        {
+            return;
+        }
+        **self.accumulator.locked() = (*snapshot).clone();
+    }
 }
 
 fn record_boundary(state: &mut AccumulatorState, stream: &Midstate) {
@@ -562,6 +880,13 @@ impl TranscriptMessages {
     pub(crate) fn hash_sorted_canonical_into(&self, hasher: &mut Sha256) -> bool {
         self.accumulator
             .hash_sorted_canonical_into(&self.messages, hasher)
+    }
+
+    /// Canonical checkpoint-document midstate for the current buffer under
+    /// `prefix`; see [`TranscriptDigestAccumulator::framed_document_hasher`].
+    pub(crate) fn framed_document_hasher(&self, prefix: &[u8]) -> Option<Sha256> {
+        self.accumulator
+            .framed_document_hasher(&self.messages, prefix)
     }
 }
 

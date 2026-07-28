@@ -8004,6 +8004,7 @@ mod tests {
     struct BoundaryContextRecordingClient {
         call_count: Mutex<u32>,
         seen_system_messages: Mutex<Vec<String>>,
+        seen_terminal_notice_counts: Mutex<Vec<usize>>,
     }
 
     impl BoundaryContextRecordingClient {
@@ -8011,11 +8012,16 @@ mod tests {
             Self {
                 call_count: Mutex::new(0),
                 seen_system_messages: Mutex::new(Vec::new()),
+                seen_terminal_notice_counts: Mutex::new(Vec::new()),
             }
         }
 
         fn seen_system_messages(&self) -> Vec<String> {
             self.seen_system_messages.lock().unwrap().clone()
+        }
+
+        fn seen_terminal_notice_counts(&self) -> Vec<usize> {
+            self.seen_terminal_notice_counts.lock().unwrap().clone()
         }
     }
 
@@ -8038,6 +8044,24 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
+            );
+            self.seen_terminal_notice_counts.lock().unwrap().push(
+                messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            Message::SystemNotice(notice)
+                                if notice.blocks.iter().any(|block| matches!(
+                                    block,
+                                    crate::types::SystemNoticeBlock::Comms {
+                                        kind: crate::types::CommsNoticeKind::ResponseTerminal,
+                                        ..
+                                    }
+                                ))
+                        )
+                    })
+                    .count(),
             );
 
             let mut calls = self.call_count.lock().unwrap();
@@ -8786,6 +8810,133 @@ mod tests {
                 .skip(1)
                 .any(|system| system.contains("STEER_MARKER_visible_after_tool")),
             "active-turn staged context must be present on the model request after the tool boundary; seen={seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_turn_terminal_fact_is_visible_and_persisted_as_notice() {
+        let client = Arc::new(BoundaryContextRecordingClient::new());
+        let tool_started = Arc::new(Notify::new());
+        let release_tool = Arc::new(Notify::new());
+        let tools = Arc::new(BlockingToolDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "blocks until the test releases it",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+            started: Arc::clone(&tool_started),
+            release: Arc::clone(&release_tool),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .system_prompt("base system prompt")
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        let state = agent.system_context_state();
+
+        let (tx, _rx) = mpsc::channel(32);
+        let run = tokio::spawn(async move {
+            let result = agent
+                .run_with_events("start with a tool".to_string().into(), tx)
+                .await;
+            (result, agent)
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
+            .await
+            .expect("tool should start");
+
+        let route_identity = crate::handles::PeerResponseTerminalRouteIdentity::parse(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect("route identity");
+        let correlation_id = crate::handles::PeerResponseTerminalCorrelationId::parse(
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+        )
+        .expect("correlation id");
+        let fact = crate::handles::PeerResponseTerminalFact::new(
+            crate::handles::PeerResponseTerminalSource::new(
+                None,
+                route_identity,
+                crate::handles::PeerResponseTerminalDisplayIdentity::parse("Analyst")
+                    .expect("display identity"),
+            ),
+            correlation_id,
+            crate::handles::PeerResponseTerminalProjectionStatus::Completed,
+            crate::handles::PeerResponseTerminalRenderPayload::new(Some(
+                serde_json::json!({"token": "birch seventeen"}),
+            )),
+        );
+        state
+            .stage_active_turn_append(
+                &crate::service::AppendSystemContextRequest {
+                    content: crate::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+                        kind: crate::types::SystemNoticeKind::Comms,
+                        body: Some("Peer terminal response context".to_string()),
+                        blocks: vec![crate::types::SystemNoticeBlock::Comms {
+                            kind: crate::types::CommsNoticeKind::ResponseTerminal,
+                            direction: crate::types::SystemNoticeDirection::Incoming,
+                            peer: Some(crate::types::SystemNoticePeer {
+                                id: fact.source.route_identity.peer_id(),
+                                display_name: Some(fact.source.display_identity.to_string()),
+                            }),
+                            sender_taint: None,
+                            request_id: Some(fact.correlation_id.to_string()),
+                            intent: None,
+                            status: Some(fact.status.label().to_string()),
+                            summary: Some("Peer terminal response".to_string()),
+                            payload: fact.render_payload_value().cloned(),
+                            content: Vec::new(),
+                        }],
+                    },
+                    source: Some(fact.context_key()),
+                    idempotency_key: Some(fact.context_key()),
+                    source_kind: crate::session::SystemContextSource::Normal,
+                    peer_response_terminal: Some(fact),
+                },
+                crate::time_compat::SystemTime::now(),
+            )
+            .expect("active terminal fact should stage");
+
+        release_tool.notify_waiters();
+        let (result, agent) = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("run should complete")
+            .expect("run task should join");
+        assert_eq!(result.expect("agent run should succeed").turns, 2);
+
+        let seen_counts = client.seen_terminal_notice_counts();
+        assert!(
+            seen_counts.iter().skip(1).any(|count| *count == 1),
+            "the post-tool provider request must see the terminal notice: {seen_counts:?}"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        Message::SystemNotice(notice)
+                            if notice.blocks.iter().any(|block| matches!(
+                                block,
+                                crate::types::SystemNoticeBlock::Comms {
+                                    kind: crate::types::CommsNoticeKind::ResponseTerminal,
+                                    ..
+                                }
+                            ))
+                    )
+                })
+                .count(),
+            1,
+            "consuming the active boundary must persist the terminal notice canonically"
+        );
+        assert!(
+            client
+                .seen_system_messages()
+                .iter()
+                .all(|system| !system.contains("Peer terminal response")),
+            "terminal facts must never enter the leading system prompt"
         );
     }
 

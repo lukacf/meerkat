@@ -332,7 +332,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Set typed provider-native tool defaults (resolved at build time, not persisted).
+    /// Set typed provider-native request defaults (resolved at build time, not persisted).
     pub fn provider_tool_defaults(
         mut self,
         defaults: crate::lifecycle::run_primitive::ProviderTag,

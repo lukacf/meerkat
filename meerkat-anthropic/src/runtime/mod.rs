@@ -49,7 +49,25 @@ use meerkat_llm_core::provider_runtime::errors::{
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
+
 pub use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_cache_control_for_backend(backend: AnthropicBackendKind) -> AnthropicCacheControlPolicy {
+    match backend {
+        AnthropicBackendKind::Bedrock => AnthropicCacheControlPolicy::Disabled,
+        AnthropicBackendKind::AnthropicApi
+        | AnthropicBackendKind::Vertex
+        | AnthropicBackendKind::Foundry => AnthropicCacheControlPolicy::Automatic,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bool {
+    !matches!(backend, AnthropicBackendKind::Bedrock)
+}
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 struct ClaudeAiOAuthAuthorizer {
@@ -527,6 +545,10 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             let client = crate::AnthropicClient::builder(String::new())
                 .authorizer(authorizer)
                 .base_url(base_url)
+                .default_cache_control(default_cache_control_for_backend(backend_kind))
+                .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
                 .build()
                 .map_err(ProviderClientError::from)?;
             return Ok(Arc::new(client));
@@ -576,6 +598,10 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 let client = crate::AnthropicClient::builder(String::new())
                     .authorizer(authorizer)
                     .base_url(base_url)
+                    .default_cache_control(default_cache_control_for_backend(backend_kind))
+                    .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                        backend_kind,
+                    ))
                     .build()
                     .map_err(ProviderClientError::from)?;
                 Ok(Arc::new(client))
@@ -610,6 +636,10 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 let client = crate::AnthropicClient::builder(String::new())
                     .authorizer(authorizer)
                     .base_url(base_url)
+                    .default_cache_control(default_cache_control_for_backend(backend_kind))
+                    .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                        backend_kind,
+                    ))
                     .build()
                     .map_err(ProviderClientError::from)?;
                 Ok(Arc::new(client))
@@ -694,6 +724,38 @@ mod tests {
     #[test]
     fn provider_id_is_anthropic() {
         assert_eq!(AnthropicProviderRuntime.provider_id(), Provider::Anthropic);
+    }
+
+    #[test]
+    fn cache_control_defaults_follow_backend_capabilities() {
+        assert_eq!(
+            default_cache_control_for_backend(AnthropicBackendKind::AnthropicApi),
+            AnthropicCacheControlPolicy::Automatic
+        );
+        assert_eq!(
+            default_cache_control_for_backend(AnthropicBackendKind::Vertex),
+            AnthropicCacheControlPolicy::Automatic
+        );
+        assert_eq!(
+            default_cache_control_for_backend(AnthropicBackendKind::Foundry),
+            AnthropicCacheControlPolicy::Automatic
+        );
+        assert_eq!(
+            default_cache_control_for_backend(AnthropicBackendKind::Bedrock),
+            AnthropicCacheControlPolicy::Disabled
+        );
+        assert!(backend_supports_automatic_cache_control(
+            AnthropicBackendKind::AnthropicApi
+        ));
+        assert!(backend_supports_automatic_cache_control(
+            AnthropicBackendKind::Vertex
+        ));
+        assert!(backend_supports_automatic_cache_control(
+            AnthropicBackendKind::Foundry
+        ));
+        assert!(!backend_supports_automatic_cache_control(
+            AnthropicBackendKind::Bedrock
+        ));
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

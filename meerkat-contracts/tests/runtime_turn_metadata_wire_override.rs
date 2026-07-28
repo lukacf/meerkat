@@ -285,6 +285,7 @@ fn wire_metadata_openai_gpt_56_advanced_params_round_trip() {
             reasoning_mode: Some(OpenAiReasoningMode::Pro),
             reasoning_context: Some(OpenAiReasoningContext::AllTurns),
             text_verbosity: Some(OpenAiTextVerbosity::High),
+            prompt_cache_enabled: Some(false),
             prompt_cache_options: Some(OpenAiPromptCacheOptions {
                 mode: Some(OpenAiPromptCacheMode::Explicit),
                 ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
@@ -305,6 +306,7 @@ fn wire_metadata_openai_gpt_56_advanced_params_round_trip() {
     assert_eq!(tag["reasoning_mode"], serde_json::json!("pro"));
     assert_eq!(tag["reasoning_context"], serde_json::json!("all_turns"));
     assert_eq!(tag["text_verbosity"], serde_json::json!("high"));
+    assert_eq!(tag["prompt_cache_enabled"], serde_json::json!(false));
     assert_eq!(
         tag["prompt_cache_options"],
         serde_json::json!({"mode": "explicit", "ttl": "30m"})
@@ -326,6 +328,7 @@ fn wire_metadata_openai_gpt_56_advanced_params_round_trip() {
         Some(OpenAiReasoningContext::AllTurns)
     );
     assert_eq!(tag.text_verbosity, Some(OpenAiTextVerbosity::High));
+    assert_eq!(tag.prompt_cache_enabled, Some(false));
     assert_eq!(
         tag.prompt_cache_options,
         Some(OpenAiPromptCacheOptions {
@@ -389,7 +392,7 @@ fn wire_metadata_prompt_cache_fields_round_trip() {
 
     let anthropic_params = ProviderParamsOverride {
         provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
-            cache_control: Some(AnthropicCacheControlPolicy::SystemPrefix),
+            cache_control: Some(AnthropicCacheControlPolicy::Automatic),
             ..Default::default()
         })),
         ..Default::default()
@@ -402,7 +405,7 @@ fn wire_metadata_prompt_cache_fields_round_trip() {
     let json = serde_json::to_value(&wire).expect("serialize anthropic wire metadata");
     assert_eq!(
         json["provider_params"]["value"]["provider_tag"]["cache_control"],
-        serde_json::json!("system_prefix")
+        serde_json::json!("automatic")
     );
 
     let gemini_params = ProviderParamsOverride {

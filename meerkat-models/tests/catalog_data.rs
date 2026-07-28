@@ -957,6 +957,13 @@ mod schema {
             assert!(cache.get("minProperties").is_none());
 
             let keys = property_keys(&schema);
+            assert!(keys.contains("prompt_cache_enabled"));
+            assert!(keys.contains("prompt_cache_key"));
+            assert_eq!(
+                schema["properties"]["prompt_cache_enabled"]["type"],
+                "boolean"
+            );
+            assert_eq!(schema["properties"]["prompt_cache_key"]["type"], "string");
             for unsupported in ["seed", "frequency_penalty", "presence_penalty"] {
                 assert!(
                     !keys.contains(unsupported),

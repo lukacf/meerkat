@@ -117,14 +117,36 @@ Pass provider parameter overrides via `AgentBuildConfig`. The JSON bag is retire
 `provider_params` is the typed `ProviderParamsOverride` (temperature, `top_p`,
 `max_output_tokens`, reasoning mode, `thinking_budget_tokens`, and an optional
 provider-specific `provider_tag`), parsed fail-closed at each surface ingress.
-Provider tags also carry opt-in provider cache hints: OpenAI can override
-Responses `store` (default remains `false`) and set `prompt_cache_key` /
-`prompt_cache_retention`; Anthropic can mark the stable system prefix with
-`cache_control`; Gemini can pass an explicit `cached_content_name`. When
-OpenAI `store` is explicitly enabled, stored response IDs may be reused as
-`previous_response_id` hints; Meerkat still keeps the local transcript as the
-canonical replay source and falls back to full replay if the provider rejects
-the hint.
+Provider tags also carry provider cache policy: OpenAI can override Responses
+`store` (default remains `false`) and set `prompt_cache_key` /
+`prompt_cache_retention`. Factory-built public OpenAI API GPT-5.6 sessions default to
+`prompt_cache_options: {"mode":"implicit","ttl":"30m"}` plus a stable
+per-session routing key derived from the durable `SessionId`; a caller-supplied
+key wins. These defaults are not applied automatically to the private ChatGPT
+or Azure OpenAI backend wires. `prompt_cache_options.mode: "explicit"` makes Meerkat author
+append-monotone breakpoints at deterministic message boundaries for Responses
+and Chat Completions. Set `prompt_cache_enabled: false` for a durable opt-out; it emits
+explicit-only mode without a breakpoint and incurs no cache-write charges.
+Keep traffic near OpenAI's recommended 15 requests per minute per cache key;
+partition higher-volume traffic with a stable mapping. Tool-calling agents can
+make several model requests during one user turn, so a single tool-heavy turn
+can reach that guidance without concurrent users; per-session and per-identity
+keys are both subject to the ceiling. Choose and monitor the partition using
+the observed model-request rate. Cache reads consider only the latest 50
+breakpoints.
+Anthropic API, Vertex, and Foundry clients default to
+`cache_control: automatic`, which keeps a moving five-minute breakpoint on the
+growing conversation (`disabled` opts out and `system_prefix` narrows the
+breakpoint). Amazon Bedrock defaults to disabled because it does not support
+Anthropic automatic caching and rejects an explicit `automatic` override
+locally; manual `system_prefix` caching remains available. Automatic lookup
+scans backward at most 20 cacheable blocks. Direct `AnthropicClientBuilder`
+users targeting a custom backend must declare whether it supports automatic
+caching; the provider runtime handles this for configured backends. Gemini can
+pass an explicit `cached_content_name`. When OpenAI `store` is explicitly
+enabled, stored response IDs may be reused as `previous_response_id` hints;
+Meerkat still keeps the local transcript as the canonical replay source and
+falls back to full replay if the provider rejects the hint.
 
 ```rust
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;

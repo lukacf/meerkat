@@ -9339,6 +9339,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -9984,6 +9985,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -16214,6 +16221,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -16769,6 +16777,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -44155,6 +44169,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -45908,6 +45923,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -50031,6 +50052,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -50676,6 +50698,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -76069,6 +76097,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -76674,6 +76703,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -81660,6 +81695,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -82261,6 +82297,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -82607,6 +82649,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -83208,6 +83251,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -87083,6 +87132,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -87638,6 +87688,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -88231,6 +88287,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -88676,6 +88733,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -91096,6 +91159,11 @@
             "type": "string"
           },
           {
+            "const": "automatic",
+            "description": "Ask Anthropic to keep a moving breakpoint on the last cacheable block.\n\nThis is the normal multi-turn policy: the provider advances the\nbreakpoint as conversation history grows. Anthropic searches backward\nup to 20 cacheable blocks from that breakpoint, so a hit is not\nguaranteed when more than 20 new blocks are added between requests.",
+            "type": "string"
+          },
+          {
             "const": "system_prefix",
             "description": "Mark the stable top-level system prompt as an ephemeral cache prefix.",
             "type": "string"
@@ -91922,7 +91990,7 @@
                 "type": "null"
               }
             ],
-            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+            "description": "Automatic (`implicit`) placement or Meerkat-authored explicit placement."
           },
           "ttl": {
             "anyOf": [
@@ -92274,6 +92342,13 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "description": "Meerkat-owned prompt-cache enable intent.\n\n`false` is a durable opt-out. On GPT-5.6 it lowers to explicit-only\nmode with no authored breakpoints, which performs no cache reads or\nwrites and incurs no cache-write charges.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -93333,6 +93408,11 @@
             "type": "string"
           },
           {
+            "const": "automatic",
+            "description": "Ask Anthropic to keep a moving breakpoint on the last cacheable block.\n\nThis is the normal multi-turn policy: the provider advances the\nbreakpoint as conversation history grows. Anthropic searches backward\nup to 20 cacheable blocks from that breakpoint, so a hit is not\nguaranteed when more than 20 new blocks are added between requests.",
+            "type": "string"
+          },
+          {
             "const": "system_prefix",
             "description": "Mark the stable top-level system prompt as an ephemeral cache prefix.",
             "type": "string"
@@ -94159,7 +94239,7 @@
                 "type": "null"
               }
             ],
-            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+            "description": "Automatic (`implicit`) placement or Meerkat-authored explicit placement."
           },
           "ttl": {
             "anyOf": [
@@ -94511,6 +94591,13 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "description": "Meerkat-owned prompt-cache enable intent.\n\n`false` is a durable opt-out. On GPT-5.6 it lowers to explicit-only\nmode with no authored breakpoints, which performs no cache reads or\nwrites and incurs no cache-write charges.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -95581,6 +95668,11 @@
           {
             "const": "disabled",
             "description": "Do not request Anthropic prompt-cache breakpoints.",
+            "type": "string"
+          },
+          {
+            "const": "automatic",
+            "description": "Ask Anthropic to keep a moving breakpoint on the last cacheable block.\n\nThis is the normal multi-turn policy: the provider advances the\nbreakpoint as conversation history grows. Anthropic searches backward\nup to 20 cacheable blocks from that breakpoint, so a hit is not\nguaranteed when more than 20 new blocks are added between requests.",
             "type": "string"
           },
           {
@@ -96676,7 +96768,7 @@
                 "type": "null"
               }
             ],
-            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+            "description": "Automatic (`implicit`) placement or Meerkat-authored explicit placement."
           },
           "ttl": {
             "anyOf": [
@@ -97028,6 +97120,13 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "description": "Meerkat-owned prompt-cache enable intent.\n\n`false` is a durable opt-out. On GPT-5.6 it lowers to explicit-only\nmode with no authored breakpoints, which performs no cache reads or\nwrites and incurs no cache-write charges.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -117103,6 +117202,7 @@
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
+          "automatic",
           "system_prefix"
         ],
         "type": "string"
@@ -117585,6 +117685,12 @@
                 "format": "float",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },

@@ -27,7 +27,8 @@ use crate::tokio;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
-    StopReason, ToolDef, ToolName, ToolProvenance, ToolResult, Usage, UserMessage,
+    StopReason, SystemNoticeMessage, ToolDef, ToolName, ToolProvenance, ToolResult, Usage,
+    UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -3747,17 +3748,132 @@ fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
 /// classification key. Nothing reads this back to make a semantic decision.
 const SYSTEM_CONTEXT_RENDER_LABEL: &str = "[Runtime System Context]";
 
-/// Render a sequence of system-context appends into the
-/// [`SYSTEM_CONTEXT_SEPARATOR`]-joined block text that
-/// [`Session::append_system_context_blocks`] concatenates onto the system
-/// prompt. The single composition rule — shared by the append path and the
-/// resume-time tail verification so the two can never drift apart.
-fn render_system_context_blocks_joined(appends: &[PendingSystemContextAppend]) -> String {
+/// Render only appends that belong in the durable leading system prompt.
+///
+/// A typed peer terminal response is a conversation event, not agent
+/// instruction. It is persisted as a [`Message::SystemNotice`] at the
+/// transcript tail instead, keeping the stable instruction prefix immutable.
+fn render_system_prompt_context_blocks_joined(appends: &[PendingSystemContextAppend]) -> String {
     appends
         .iter()
+        .filter(|append| append.peer_response_terminal.is_none())
         .map(render_system_context_block)
         .collect::<Vec<_>>()
         .join(SYSTEM_CONTEXT_SEPARATOR)
+}
+
+fn peer_response_terminal_notice(
+    append: &PendingSystemContextAppend,
+) -> Option<SystemNoticeMessage> {
+    append.peer_response_terminal.as_ref()?;
+    Some(append.content.clone().into_system_notice_message())
+}
+
+fn system_notice_semantically_matches(
+    existing: &SystemNoticeMessage,
+    candidate: &SystemNoticeMessage,
+) -> bool {
+    existing.kind == candidate.kind
+        && existing.body == candidate.body
+        && existing.blocks == candidate.blocks
+}
+
+/// Remove legacy terminal blocks only from a suffix proven to be
+/// runtime-context-owned.
+///
+/// A recorded assembled base is the strongest split boundary. Without one,
+/// the entire ordered applied-record rendering must match the complete prompt
+/// or an exact prompt suffix; otherwise migration fails closed and leaves the
+/// transcript byte-identical.
+fn remove_legacy_peer_terminal_system_tail(
+    system_prompt: &str,
+    prior_base: Option<&str>,
+    applied: &[PendingSystemContextAppend],
+    terminal_appends: &[PendingSystemContextAppend],
+) -> (String, usize) {
+    if terminal_appends.is_empty() {
+        return (system_prompt.to_string(), 0);
+    }
+
+    let applied_tail = applied
+        .iter()
+        .map(render_system_context_block)
+        .collect::<Vec<_>>()
+        .join(SYSTEM_CONTEXT_SEPARATOR);
+    if applied_tail.is_empty() {
+        return (system_prompt.to_string(), 0);
+    }
+
+    if let Some(base) = prior_base {
+        if system_prompt == base {
+            return (system_prompt.to_string(), 0);
+        }
+        let Some(context_tail) = system_prompt
+            .strip_prefix(base)
+            .and_then(|suffix| suffix.strip_prefix(SYSTEM_CONTEXT_SEPARATOR))
+        else {
+            return (system_prompt.to_string(), 0);
+        };
+        let mut terminal_budget = BTreeMap::<String, usize>::new();
+        let mut non_terminal_renderings = BTreeSet::new();
+        for append in applied {
+            let rendered = render_system_context_block(append);
+            if append.peer_response_terminal.is_some() {
+                *terminal_budget.entry(rendered).or_default() += 1;
+            } else {
+                non_terminal_renderings.insert(rendered);
+            }
+        }
+        let mut retained = Vec::new();
+        let mut removed = 0;
+        for segment in context_tail.split(SYSTEM_CONTEXT_SEPARATOR) {
+            let terminal_remaining = terminal_budget.get_mut(segment);
+            if terminal_remaining.is_some() && non_terminal_renderings.contains(segment) {
+                return (system_prompt.to_string(), 0);
+            }
+            if let Some(remaining) = terminal_remaining.filter(|remaining| **remaining > 0) {
+                *remaining -= 1;
+                removed += 1;
+            } else {
+                retained.push(segment);
+            }
+        }
+        if removed == 0 {
+            return (system_prompt.to_string(), 0);
+        }
+        let retained_tail = retained.join(SYSTEM_CONTEXT_SEPARATOR);
+        let cleaned = if retained_tail.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{retained_tail}")
+        };
+        return (cleaned, removed);
+    }
+
+    let retained_tail = applied
+        .iter()
+        .filter(|append| append.peer_response_terminal.is_none())
+        .map(render_system_context_block)
+        .collect::<Vec<_>>()
+        .join(SYSTEM_CONTEXT_SEPARATOR);
+    let removed = terminal_appends.len();
+    let (base, tail_is_whole_prompt) = if system_prompt == applied_tail {
+        ("", true)
+    } else {
+        let suffix = format!("{SYSTEM_CONTEXT_SEPARATOR}{applied_tail}");
+        let Some(base) = system_prompt.strip_suffix(&suffix) else {
+            return (system_prompt.to_string(), 0);
+        };
+        (base, false)
+    };
+    let cleaned = if tail_is_whole_prompt {
+        retained_tail
+    } else if retained_tail.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{retained_tail}")
+    };
+    (cleaned, removed)
 }
 
 /// Compose a system prompt from a base and a verified runtime-context tail
@@ -4317,11 +4433,16 @@ mod system_context_authority {
                     }
                     continue;
                 }
-                if current_system_prompt.contains(&rendered) {
+                if append.peer_response_terminal.is_none()
+                    && current_system_prompt.contains(&rendered)
+                {
                     record_applied_append(state, append);
                     continue;
                 }
-            } else if new_appends.contains(append) || current_system_prompt.contains(&rendered) {
+            } else if new_appends.contains(append)
+                || (append.peer_response_terminal.is_none()
+                    && current_system_prompt.contains(&rendered))
+            {
                 continue;
             }
             record_applied_append(state, append);
@@ -5219,7 +5340,45 @@ impl Session {
         removed
     }
 
-    /// Append one or more runtime system-context blocks to the canonical system prompt.
+    /// Persist typed peer terminal facts as conversation-tail notices.
+    ///
+    /// The semantic comparison intentionally ignores `created_at`: a replayed
+    /// delivery of the same terminal fact must not mint another notice merely
+    /// because construction happened at a different wall-clock instant.
+    pub(crate) fn append_peer_response_terminal_notices(
+        &mut self,
+        appends: &[PendingSystemContextAppend],
+    ) -> usize {
+        let mut notices = Vec::new();
+        for candidate in appends.iter().filter_map(peer_response_terminal_notice) {
+            let already_persisted = self.messages.iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(existing)
+                        if system_notice_semantically_matches(existing, &candidate)
+                )
+            });
+            let already_staged = notices.iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(existing)
+                        if system_notice_semantically_matches(existing, &candidate)
+                )
+            });
+            if !already_persisted && !already_staged {
+                notices.push(Message::SystemNotice(candidate));
+            }
+        }
+        let appended = notices.len();
+        self.push_batch(notices);
+        appended
+    }
+
+    /// Apply runtime context at the canonical model boundary.
+    ///
+    /// Instruction-like context extends the leading system prompt. Typed peer
+    /// terminal responses are durable conversation events and are appended as
+    /// [`Message::SystemNotice`] records at the transcript tail instead.
     pub fn append_system_context_blocks(&mut self, appends: &[PendingSystemContextAppend]) {
         if appends.is_empty() {
             return;
@@ -5255,27 +5414,74 @@ impl Session {
             return;
         }
 
-        let rendered = render_system_context_blocks_joined(&new_appends);
-
-        let next = match self.messages.first() {
-            Some(Message::System(sys)) if !sys.content.is_empty() => {
-                format!("{}{}{}", sys.content, SYSTEM_CONTEXT_SEPARATOR, rendered)
+        let rendered = render_system_prompt_context_blocks_joined(&new_appends);
+        if !rendered.is_empty() {
+            let next = match self.messages.first() {
+                Some(Message::System(sys)) if !sys.content.is_empty() => {
+                    format!("{}{}{}", sys.content, SYSTEM_CONTEXT_SEPARATOR, rendered)
+                }
+                _ => rendered,
+            };
+            if let Err(err) = self.set_system_prompt_with_source(
+                next,
+                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+            ) {
+                tracing::warn!(
+                    error = %err,
+                    "generated session durable-config authority rejected system-context prompt append"
+                );
+                return;
             }
-            _ => rendered,
-        };
-        if let Err(err) = self.set_system_prompt_with_source(
-            next,
-            session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
-        ) {
-            tracing::warn!(
-                error = %err,
-                "generated session durable-config authority rejected system-context prompt append"
-            );
-            return;
         }
+        self.append_peer_response_terminal_notices(&new_appends);
         if let Err(err) = self.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to persist applied system-context state");
         }
+    }
+
+    /// Upgrade legacy rows that rendered typed terminal facts into the
+    /// leading system prompt before terminal facts became transcript notices.
+    ///
+    /// Exact typed records are the only authority for selecting blocks. The
+    /// old rendered blocks are removed through an audited transcript rewrite,
+    /// then missing notices are appended through the normal append path. This
+    /// produces valid persistence edges and preserves the applied/seen dedupe
+    /// records that now belong to the durable notice.
+    fn migrate_legacy_peer_terminal_context(
+        &mut self,
+        actor: Option<String>,
+    ) -> Result<bool, TranscriptEditError> {
+        let applied = self
+            .system_context_state()
+            .map(|state| state.applied)
+            .unwrap_or_default();
+        let terminal_appends = applied
+            .iter()
+            .filter(|append| append.peer_response_terminal.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        if terminal_appends.is_empty() {
+            return Ok(false);
+        }
+
+        let mut migrated = false;
+        if let Some(Message::System(system)) = self.messages.first() {
+            let prior_base = self
+                .build_state()
+                .and_then(|state| state.assembled_system_prompt);
+            let (cleaned, removed) = remove_legacy_peer_terminal_system_tail(
+                &system.content,
+                prior_base.as_deref(),
+                &applied,
+                &terminal_appends,
+            );
+            if removed > 0 {
+                self.commit_resume_system_prompt_rewrite(cleaned, true, actor)?;
+                migrated = true;
+            }
+        }
+        migrated |= self.append_peer_response_terminal_notices(&terminal_appends) > 0;
+        Ok(migrated)
     }
 
     /// Reconcile a resumed session's persisted system prompt with a freshly
@@ -5308,6 +5514,7 @@ impl Session {
         assembled_base: String,
         actor: Option<String>,
     ) -> Result<ResumedSystemPromptReconciliation, TranscriptEditError> {
+        let migrated_terminal_context = self.migrate_legacy_peer_terminal_context(actor.clone())?;
         let persisted = match self.messages.first() {
             Some(Message::System(system)) => Some((system.content.clone(), system.mutation_kind)),
             _ => None,
@@ -5315,7 +5522,11 @@ impl Session {
 
         let Some((persisted_content, persisted_mutation_kind)) = persisted else {
             if assembled_base.is_empty() {
-                return Ok(ResumedSystemPromptReconciliation::NoChange);
+                return Ok(if migrated_terminal_context {
+                    ResumedSystemPromptReconciliation::RewrittenBase
+                } else {
+                    ResumedSystemPromptReconciliation::NoChange
+                });
             }
             // The persisted transcript never had a system prompt; introducing
             // one changes the transcript, so it flows through the same typed
@@ -5325,7 +5536,11 @@ impl Session {
         };
 
         if persisted_content == assembled_base {
-            return Ok(ResumedSystemPromptReconciliation::PreservedContinuation);
+            return Ok(if migrated_terminal_context {
+                ResumedSystemPromptReconciliation::RewrittenBase
+            } else {
+                ResumedSystemPromptReconciliation::PreservedContinuation
+            });
         }
 
         // Byte-exact reconciliation first: when the persisted content splits
@@ -5339,7 +5554,11 @@ impl Session {
         if let Some(tail) = self.verified_runtime_context_tail(&persisted_content) {
             let expected = compose_system_prompt_with_context_tail(&assembled_base, &tail);
             if expected == persisted_content {
-                return Ok(ResumedSystemPromptReconciliation::PreservedContinuation);
+                return Ok(if migrated_terminal_context {
+                    ResumedSystemPromptReconciliation::RewrittenBase
+                } else {
+                    ResumedSystemPromptReconciliation::PreservedContinuation
+                });
             }
             self.commit_resume_system_prompt_rewrite(expected, true, actor)?;
             return Ok(ResumedSystemPromptReconciliation::RewrittenBase);
@@ -5357,7 +5576,11 @@ impl Session {
             &persisted_content,
             persisted_mutation_kind,
         ) {
-            return Ok(ResumedSystemPromptReconciliation::PreservedContinuation);
+            return Ok(if migrated_terminal_context {
+                ResumedSystemPromptReconciliation::RewrittenBase
+            } else {
+                ResumedSystemPromptReconciliation::PreservedContinuation
+            });
         }
 
         // The base diverged and the runtime-context tail is not
@@ -5367,9 +5590,12 @@ impl Session {
         // be deduplicated forever — so clear the orphaned records to keep the
         // context restorable by the host.
         let dropping_applied_context = persisted_mutation_kind.is_runtime_context_append()
-            || self
-                .system_context_state()
-                .is_some_and(|state| !state.applied.is_empty());
+            || self.system_context_state().is_some_and(|state| {
+                state
+                    .applied
+                    .iter()
+                    .any(|append| append.peer_response_terminal.is_none())
+            });
         self.commit_resume_system_prompt_rewrite(assembled_base, true, actor)?;
         if dropping_applied_context {
             tracing::warn!(
@@ -5377,7 +5603,7 @@ impl Session {
                 "resume base-prompt refresh dropped an unverifiable runtime system-context tail; \
                  clearing applied-append records so keyed re-sends can restore the context"
             );
-            self.clear_applied_system_context_records();
+            self.clear_applied_system_prompt_context_records();
         }
         Ok(ResumedSystemPromptReconciliation::RewrittenBase)
     }
@@ -5409,7 +5635,7 @@ impl Session {
         }
         let rendered_tail = self
             .system_context_state()
-            .map(|state| render_system_context_blocks_joined(&state.applied))
+            .map(|state| render_system_prompt_context_blocks_joined(&state.applied))
             .unwrap_or_default();
         if rendered_tail.is_empty() {
             return None;
@@ -5464,7 +5690,7 @@ impl Session {
     /// Clear applied-append records (and their idempotency keys) after a
     /// resume rewrite dropped their rendered blocks from the System prompt,
     /// so the same keyed appends re-apply instead of deduplicating forever.
-    fn clear_applied_system_context_records(&mut self) {
+    fn clear_applied_system_prompt_context_records(&mut self) {
         let mut state = match self.try_system_context_state() {
             Ok(Some(state)) => state,
             Ok(None) => return,
@@ -5477,17 +5703,31 @@ impl Session {
                 return;
             }
         };
-        if state.applied.is_empty() {
+        if !state
+            .applied
+            .iter()
+            .any(|append| append.peer_response_terminal.is_none())
+        {
             return;
         }
         let dropped_keys: Vec<String> = state
             .applied
             .iter()
+            .filter(|append| append.peer_response_terminal.is_none())
             .filter_map(|append| append.idempotency_key.clone())
             .collect();
-        state.applied.clear();
+        state
+            .applied
+            .retain(|append| append.peer_response_terminal.is_some());
+        let retained_keys: BTreeSet<&str> = state
+            .applied
+            .iter()
+            .filter_map(|append| append.idempotency_key.as_deref())
+            .collect();
         for key in &dropped_keys {
-            state.seen.remove(key);
+            if !retained_keys.contains(key.as_str()) {
+                state.seen.remove(key);
+            }
         }
         if let Err(error) = self.set_system_context_state(state) {
             tracing::warn!(
@@ -7782,7 +8022,7 @@ pub fn resolve_session_llm_identity_override(
 ///
 /// `SessionLlmIdentity` is the durable semantic identity. This projection is
 /// the per-turn request policy the live agent must use for the next LLM call,
-/// including provider params and provider-native tool defaults resolved for
+/// including provider params and provider-native request defaults resolved for
 /// the same target model/provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -7791,7 +8031,7 @@ pub struct SessionLlmRequestPolicy {
     /// Typed explicit provider parameter overrides for the next LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
-    /// Typed provider-native tool defaults resolved for the swapped target.
+    /// Typed provider-native request defaults resolved for the swapped target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tool_defaults: Option<crate::lifecycle::run_primitive::ProviderTag>,
 }
@@ -8131,10 +8371,17 @@ mod tests {
     }
     use super::transcript_history::heal::legacy_transcript_messages_digest;
     use super::*;
+    use crate::handles::{
+        PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
+        PeerResponseTerminalFact, PeerResponseTerminalProjectionStatus,
+        PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
+        PeerResponseTerminalSource,
+    };
     use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
-        AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
-        UserMessage,
+        AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock, StopReason,
+        SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
+        SystemNoticePeer, Usage, UserMessage,
     };
     use std::sync::Arc;
 
@@ -13815,6 +14062,434 @@ mod tests {
         }
     }
 
+    fn peer_terminal_append(
+        key: &str,
+        request_id: &str,
+        status: PeerResponseTerminalProjectionStatus,
+    ) -> PendingSystemContextAppend {
+        let route_identity =
+            PeerResponseTerminalRouteIdentity::parse("550e8400-e29b-41d4-a716-446655440000")
+                .expect("route identity");
+        let display_identity =
+            PeerResponseTerminalDisplayIdentity::parse("Analyst").expect("display identity");
+        let correlation_id =
+            PeerResponseTerminalCorrelationId::parse(request_id).expect("correlation id");
+        let payload = serde_json::json!({"token": "birch seventeen"});
+        let fact = PeerResponseTerminalFact::new(
+            PeerResponseTerminalSource::new(None, route_identity, display_identity),
+            correlation_id,
+            status,
+            PeerResponseTerminalRenderPayload::new(Some(payload.clone())),
+        );
+        PendingSystemContextAppend {
+            content: crate::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Comms,
+                body: Some("Peer terminal response context".to_string()),
+                blocks: vec![SystemNoticeBlock::Comms {
+                    kind: CommsNoticeKind::ResponseTerminal,
+                    direction: SystemNoticeDirection::Incoming,
+                    peer: Some(SystemNoticePeer {
+                        id: fact.source.route_identity.peer_id(),
+                        display_name: Some(fact.source.display_identity.to_string()),
+                    }),
+                    sender_taint: None,
+                    request_id: Some(fact.correlation_id.to_string()),
+                    intent: None,
+                    status: Some(fact.status.label().to_string()),
+                    summary: Some("Peer terminal response".to_string()),
+                    payload: Some(payload),
+                    content: Vec::new(),
+                }],
+            },
+            source: Some(format!(
+                "peer_response_terminal:{}:{}",
+                fact.source.route_identity, fact.correlation_id
+            )),
+            idempotency_key: Some(key.to_string()),
+            source_kind: SystemContextSource::Normal,
+            peer_response_terminal: Some(fact),
+            accepted_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn terminal_notice_count(session: &Session) -> usize {
+        session
+            .messages()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(SystemNoticeMessage {
+                        kind: SystemNoticeKind::Comms,
+                        blocks,
+                        ..
+                    }) if blocks.iter().any(|block| matches!(
+                        block,
+                        SystemNoticeBlock::Comms {
+                            kind: CommsNoticeKind::ResponseTerminal,
+                            ..
+                        }
+                    ))
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn peer_terminal_context_preserves_system_prefix_and_appends_typed_notice() {
+        let append = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let mut session = Session::new();
+        session.set_system_prompt("byte-stable system prompt".to_string());
+        let leading_before = session.messages().first().cloned();
+
+        session.append_system_context_blocks(std::slice::from_ref(&append));
+
+        assert_eq!(
+            session.messages().first(),
+            leading_before.as_ref(),
+            "terminal conversation facts must not mutate the leading system message"
+        );
+        assert_eq!(terminal_notice_count(&session), 1);
+        assert!(matches!(
+            session.messages().last(),
+            Some(Message::SystemNotice(_))
+        ));
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![append]);
+        assert_eq!(
+            state.seen["terminal-1"].state,
+            SeenSystemContextState::Applied
+        );
+    }
+
+    #[test]
+    fn peer_terminal_context_dedupes_same_and_conflicting_key() {
+        let first = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let duplicate = PendingSystemContextAppend {
+            accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ..first.clone()
+        };
+        let conflicting = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f2",
+            PeerResponseTerminalProjectionStatus::Failed,
+        );
+        let mut session = Session::new();
+        session.set_system_prompt("stable".to_string());
+
+        session.append_system_context_blocks(std::slice::from_ref(&first));
+        session.append_system_context_blocks(std::slice::from_ref(&duplicate));
+        session.append_system_context_blocks(std::slice::from_ref(&conflicting));
+
+        assert_eq!(terminal_notice_count(&session), 1);
+        assert_eq!(leading_system_content(&session), "stable");
+        assert_eq!(
+            session.system_context_state().expect("typed state").applied,
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn mixed_terminal_and_instruction_context_route_to_distinct_transcript_roles() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let roster = roster_append();
+        let mut session = Session::new();
+        session.set_system_prompt("base".to_string());
+
+        session.append_system_context_blocks(&[terminal, roster]);
+
+        let system = leading_system_content(&session);
+        assert!(system.starts_with("base"));
+        assert!(system.contains("peer roster: lead-1, w-1"));
+        assert!(!system.contains("Peer terminal response"));
+        assert_eq!(terminal_notice_count(&session), 1);
+    }
+
+    #[test]
+    fn resume_base_change_preserves_terminal_notice_and_dedupe_authority() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let mut session = Session::new();
+        session.set_system_prompt("old base".to_string());
+        session.append_system_context_blocks(std::slice::from_ref(&terminal));
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("new base".to_string(), None)
+            .expect("reconcile changed base");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&session), "new base");
+        assert_eq!(terminal_notice_count(&session), 1);
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![terminal.clone()]);
+        assert!(state.seen.contains_key("terminal-1"));
+
+        session.append_system_context_blocks(std::slice::from_ref(&terminal));
+        assert_eq!(
+            terminal_notice_count(&session),
+            1,
+            "retry after cold-resume reconciliation must remain idempotent"
+        );
+        assert_eq!(leading_system_content(&session), "new base");
+    }
+
+    fn legacy_session_with_system_context(
+        base: &str,
+        appends: &[PendingSystemContextAppend],
+    ) -> Session {
+        let mut session = Session::new();
+        let rendered = appends
+            .iter()
+            .map(render_system_context_block)
+            .collect::<Vec<_>>()
+            .join(SYSTEM_CONTEXT_SEPARATOR);
+        session
+            .set_system_prompt_with_source(
+                format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{rendered}"),
+                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+            )
+            .expect("legacy runtime-context prompt");
+        let mut state = SessionSystemContextState::default();
+        let accepted =
+            system_context_authority::record_applied_system_context_blocks(&mut state, appends, "");
+        assert_eq!(accepted, appends);
+        session
+            .set_system_context_state(state)
+            .expect("legacy applied state");
+        session
+            .set_build_state(SessionBuildState {
+                assembled_system_prompt: Some(base.to_string()),
+                ..Default::default()
+            })
+            .expect("legacy build state");
+        session
+    }
+
+    #[test]
+    fn cold_resume_migrates_legacy_terminal_system_tail_to_notice() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let legacy = legacy_session_with_system_context("base", std::slice::from_ref(&terminal));
+        let mut resumed: Session =
+            serde_json::from_value(serde_json::to_value(legacy).expect("serialize legacy session"))
+                .expect("deserialize legacy session");
+
+        let outcome = resumed
+            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
+            .expect("migrate legacy terminal context");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&resumed), "base");
+        assert_eq!(terminal_notice_count(&resumed), 1);
+        let state = resumed.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![terminal.clone()]);
+        assert!(state.seen.contains_key("terminal-1"));
+
+        resumed.append_system_context_blocks(std::slice::from_ref(&terminal));
+        assert_eq!(terminal_notice_count(&resumed), 1);
+        assert_eq!(leading_system_content(&resumed), "base");
+    }
+
+    #[test]
+    fn resume_migrates_legacy_terminal_but_preserves_roster_tail() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let roster = roster_append();
+        let mut session =
+            legacy_session_with_system_context("old base", &[roster.clone(), terminal.clone()]);
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("new base".to_string(), Some("resume".to_string()))
+            .expect("migrate mixed legacy context");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        let system = leading_system_content(&session);
+        assert!(system.starts_with("new base"));
+        assert!(system.contains("peer roster: lead-1, w-1"));
+        assert!(!system.contains("Peer terminal response"));
+        assert_eq!(terminal_notice_count(&session), 1);
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![roster, terminal]);
+        assert!(state.seen.contains_key("comms:roster:v1"));
+        assert!(state.seen.contains_key("terminal-1"));
+    }
+
+    #[test]
+    fn terminal_migration_never_removes_base_owned_collision() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let base = format!(
+            "base text{SYSTEM_CONTEXT_SEPARATOR}{}",
+            render_system_context_block(&terminal)
+        );
+        let mut session = Session::new();
+        session.set_system_prompt(base.clone());
+        session
+            .set_build_state(SessionBuildState {
+                assembled_system_prompt: Some(base.clone()),
+                ..Default::default()
+            })
+            .expect("build state");
+        session.append_system_context_blocks(std::slice::from_ref(&terminal));
+        let document_before =
+            serde_json::to_vec(&session).expect("serialize pre-reconcile collision session");
+
+        let outcome = session
+            .reconcile_resumed_system_prompt(base, Some("resume".to_string()))
+            .expect("reconcile base-owned collision");
+
+        assert_eq!(
+            outcome,
+            ResumedSystemPromptReconciliation::PreservedContinuation
+        );
+        assert_eq!(
+            serde_json::to_vec(&session).expect("serialize post-reconcile collision session"),
+            document_before,
+            "typed terminal state must never authorize rewriting base-owned bytes"
+        );
+        assert_eq!(terminal_notice_count(&session), 1);
+    }
+
+    #[test]
+    fn legacy_migration_fails_closed_on_typed_rendering_ambiguity() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let ordinary_collision = PendingSystemContextAppend {
+            idempotency_key: Some("ordinary-collision".to_string()),
+            peer_response_terminal: None,
+            ..terminal.clone()
+        };
+        assert_eq!(
+            render_system_context_block(&ordinary_collision),
+            render_system_context_block(&terminal)
+        );
+        let mut session = legacy_session_with_system_context(
+            "base",
+            &[ordinary_collision.clone(), terminal.clone()],
+        );
+        let system_before = leading_system_content(&session);
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
+            .expect("migrate colliding typed tail");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(
+            leading_system_content(&session),
+            system_before,
+            "ambiguous identical terminal/non-terminal renderings must not authorize removal"
+        );
+        assert_eq!(terminal_notice_count(&session), 1);
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![ordinary_collision, terminal]);
+        assert!(state.seen.contains_key("ordinary-collision"));
+        assert!(state.seen.contains_key("terminal-1"));
+    }
+
+    #[test]
+    fn legacy_migration_handles_applied_only_active_boundary_terminal() {
+        let rendered_terminal = peer_terminal_append(
+            "terminal-a",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let applied_only_terminal = peer_terminal_append(
+            "terminal-b",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f2",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let mut session =
+            legacy_session_with_system_context("base", std::slice::from_ref(&rendered_terminal));
+        let mut state = session.system_context_state().expect("legacy typed state");
+        let accepted = system_context_authority::record_applied_system_context_blocks(
+            &mut state,
+            std::slice::from_ref(&applied_only_terminal),
+            &leading_system_content(&session),
+        );
+        assert_eq!(accepted, vec![applied_only_terminal.clone()]);
+        session
+            .set_system_context_state(state)
+            .expect("active-boundary applied-only state");
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
+            .expect("migrate partial legacy terminal tail");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&session), "base");
+        assert_eq!(terminal_notice_count(&session), 2);
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(
+            state.applied,
+            vec![rendered_terminal, applied_only_terminal]
+        );
+        assert!(state.seen.contains_key("terminal-a"));
+        assert!(state.seen.contains_key("terminal-b"));
+    }
+
+    #[test]
+    fn legacy_migration_caps_removal_at_typed_terminal_multiplicity() {
+        let terminal = peer_terminal_append(
+            "terminal-1",
+            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+            PeerResponseTerminalProjectionStatus::Completed,
+        );
+        let mut session =
+            legacy_session_with_system_context("base", std::slice::from_ref(&terminal));
+        let rendered = render_system_context_block(&terminal);
+        session
+            .set_system_prompt_with_source(
+                format!(
+                    "base{SYSTEM_CONTEXT_SEPARATOR}{rendered}\
+                     {SYSTEM_CONTEXT_SEPARATOR}{rendered}"
+                ),
+                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+            )
+            .expect("duplicate legacy terminal-shaped segment");
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
+            .expect("migrate duplicate legacy terminal-shaped suffix");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(
+            leading_system_content(&session),
+            format!("base{SYSTEM_CONTEXT_SEPARATOR}{rendered}"),
+            "one typed terminal record may remove only one matching suffix occurrence"
+        );
+        assert_eq!(terminal_notice_count(&session), 1);
+        let state = session.system_context_state().expect("typed state");
+        assert_eq!(state.applied, vec![terminal]);
+        assert!(state.seen.contains_key("terminal-1"));
+    }
+
     fn resumed_session_with_context_appended_prompt(base: &str) -> Session {
         let mut session = Session::new();
         session.set_system_prompt(base.to_string());
@@ -13829,6 +14504,8 @@ mod tests {
         session.set_system_prompt("base prompt".to_string());
         session.push(Message::User(UserMessage::text("hello".to_string())));
         let digest_before = transcript_messages_digest(session.messages()).unwrap();
+        let document_before =
+            serde_json::to_vec(&session).expect("serialize pre-reconcile session document");
 
         let outcome = session
             .reconcile_resumed_system_prompt("base prompt".to_string(), None)
@@ -13842,6 +14519,11 @@ mod tests {
             transcript_messages_digest(session.messages()).unwrap(),
             digest_before,
             "identical base must leave the transcript revision unchanged"
+        );
+        assert_eq!(
+            serde_json::to_vec(&session).expect("serialize post-reconcile session document"),
+            document_before,
+            "a session without legacy terminal context must be a byte-identical no-op"
         );
     }
 

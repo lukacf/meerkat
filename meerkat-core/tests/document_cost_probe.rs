@@ -32,7 +32,7 @@ fn digest_table(label: &str, before: [u64; 8]) {
                 println!("    digest bytes by pass ({label}):");
                 printed = true;
             }
-            println!("      {name:<20} {:>12} B", delta);
+            println!("      {name:<20} {delta:>12} B");
         }
     }
     if !printed {
@@ -58,7 +58,7 @@ fn document_cost_probe() {
     let t = Instant::now();
     let session = Session::from_persisted_bytes(&bytes).expect("decode durable document");
     let decode = t.elapsed();
-    println!("\n  decode                {:>8.2?}", decode);
+    println!("\n  decode                {decode:>8.2?}");
     digest_table("decode", mark);
     println!("    live messages: {}", session.messages().len());
 

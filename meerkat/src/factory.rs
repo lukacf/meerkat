@@ -1128,24 +1128,26 @@ impl meerkat_core::ModelOperationalDefaultsResolver for RegistryBackedDefaultsRe
     }
 }
 
-fn provider_tool_defaults_for(
+fn provider_request_defaults_for(
     provider: Provider,
+    model: &str,
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
     web_search_override: ToolCategoryOverride,
+    session_id: Option<&meerkat_core::SessionId>,
+    openai_cache_defaults_supported: bool,
 ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
     use meerkat_core::lifecycle::run_primitive::{
-        AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag, ProviderTag,
+        AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiPromptCacheOptions,
+        OpenAiProviderTag, ProviderTag,
     };
-    if matches!(web_search_override, ToolCategoryOverride::Disable) {
-        return None;
-    }
-    if !model_profile.is_some_and(|profile| profile.supports_web_search) {
-        return None;
-    }
+    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+
+    let web_search_enabled = !matches!(web_search_override, ToolCategoryOverride::Disable)
+        && model_profile.is_some_and(|profile| profile.supports_web_search);
 
     match provider {
-        Provider::Anthropic if config.provider_tools.anthropic.web_search => {
+        Provider::Anthropic if web_search_enabled && config.provider_tools.anthropic.web_search => {
             Some(ProviderTag::Anthropic(AnthropicProviderTag {
                 web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
                     "type": "web_search_20250305",
@@ -1154,15 +1156,46 @@ fn provider_tool_defaults_for(
                 ..Default::default()
             }))
         }
-        Provider::OpenAI if config.provider_tools.openai.web_search => {
-            Some(ProviderTag::OpenAi(OpenAiProviderTag {
-                web_search: Some(OpaqueProviderBody::from_value(
-                    &serde_json::json!({"type": "web_search"}),
-                )),
-                ..Default::default()
-            }))
+        Provider::OpenAI => {
+            let cache_capabilities = if openai_cache_defaults_supported {
+                meerkat_models::capabilities_for(Provider::OpenAI, model)
+                    .and_then(|capabilities| capabilities.openai_responses_params)
+            } else {
+                None
+            };
+            let prompt_cache_options = cache_capabilities.and_then(|capabilities| {
+                capabilities
+                    .prompt_cache_modes
+                    .contains(&OpenAiPromptCacheMode::Implicit)
+                    .then_some(OpenAiPromptCacheOptions {
+                        mode: Some(OpenAiPromptCacheMode::Implicit),
+                        ttl: capabilities
+                            .prompt_cache_ttls
+                            .contains(&OpenAiPromptCacheTtl::ThirtyMinutes)
+                            .then_some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                    })
+            });
+            let prompt_cache_key = prompt_cache_options
+                .is_some()
+                .then(|| session_id.map(|id| format!("meerkat:session:{id}")))
+                .flatten();
+            let prompt_cache_enabled = prompt_cache_options.is_some().then_some(true);
+            let web_search =
+                (web_search_enabled && config.provider_tools.openai.web_search).then(|| {
+                    OpaqueProviderBody::from_value(&serde_json::json!({"type": "web_search"}))
+                });
+
+            (prompt_cache_options.is_some() || web_search.is_some()).then(|| {
+                ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search,
+                    prompt_cache_enabled,
+                    prompt_cache_key,
+                    prompt_cache_options,
+                    ..Default::default()
+                })
+            })
         }
-        Provider::Gemini if config.provider_tools.gemini.google_search => {
+        Provider::Gemini if web_search_enabled && config.provider_tools.gemini.google_search => {
             Some(ProviderTag::Gemini(GeminiProviderTag {
                 google_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({}))),
                 ..Default::default()
@@ -1170,6 +1203,20 @@ fn provider_tool_defaults_for(
         }
         _ => None,
     }
+}
+
+fn openai_cache_defaults_supported(
+    config: &Config,
+    auth_binding: Option<&meerkat_core::AuthBindingRef>,
+) -> bool {
+    let Some(auth_binding) = auth_binding else {
+        return true;
+    };
+    if auth_binding.is_env_default() {
+        return true;
+    }
+    meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding)
+        .is_ok_and(|target| target.backend.backend_kind == "openai_api")
 }
 
 /// Typed create-session model hints supplied by a public surface.
@@ -3571,11 +3618,34 @@ impl AgentFactory {
     /// (`SessionMetadata.tooling.web_search`). It MUST be threaded through so a
     /// model/provider hot-swap preserves a session's `--no-web-search` disable
     /// instead of silently re-enabling the provider-native web-search body.
+    ///
+    /// This source-compatible seam has no session identity, so it can resolve
+    /// model policy but cannot synthesize a routing-affinity key.
     pub fn request_policy_for_llm_identity(
         &self,
         config: &Config,
         identity: &SessionLlmIdentity,
         web_search: ToolCategoryOverride,
+    ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
+        self.request_policy_for_llm_identity_inner(config, identity, web_search, None)
+    }
+
+    pub(crate) fn request_policy_for_session_llm_identity(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        web_search: ToolCategoryOverride,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
+        self.request_policy_for_llm_identity_inner(config, identity, web_search, Some(session_id))
+    }
+
+    fn request_policy_for_llm_identity_inner(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        web_search: ToolCategoryOverride,
+        session_id: Option<&meerkat_core::SessionId>,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
         let registry = config
             .model_registry(meerkat_models::canonical())
@@ -3584,11 +3654,15 @@ impl AgentFactory {
         Ok(meerkat_core::SessionLlmRequestPolicy {
             model: identity.model.clone(),
             provider_params: identity.provider_params.clone(),
-            provider_tool_defaults: provider_tool_defaults_for(
+            provider_tool_defaults: provider_request_defaults_for(
                 identity.provider,
+                &identity.model,
                 config,
                 model_profile.as_ref(),
                 web_search,
+                session_id,
+                identity.provider != Provider::OpenAI
+                    || openai_cache_defaults_supported(config, identity.auth_binding.as_ref()),
             ),
         })
     }
@@ -4604,10 +4678,11 @@ impl AgentFactory {
             && config.model_fallback.enabled
         {
             let explicit_fallback_chain = !config.model_fallback.chain.is_empty();
-            let primary_request_policy = self.request_policy_for_llm_identity(
+            let primary_request_policy = self.request_policy_for_session_llm_identity(
                 config,
                 &resolved_llm_identity,
                 build_config.override_web_search,
+                session.id(),
             )?;
             let primary_target_profile = registry.profile_witness_for_provider(
                 resolved_llm_identity.provider,
@@ -4687,10 +4762,11 @@ impl AgentFactory {
                     Arc::new(adapter),
                     build_config.agent_llm_client_decorator.as_ref(),
                 );
-                let request_policy = self.request_policy_for_llm_identity(
+                let request_policy = self.request_policy_for_session_llm_identity(
                     config,
                     &identity,
                     build_config.override_web_search,
+                    session.id(),
                 )?;
                 candidates.push(ModelFallbackCandidate {
                     target_profile,
@@ -5864,11 +5940,15 @@ impl AgentFactory {
             .with_tools_config(config.tools.clone())
             .with_call_timeout_override(effective_call_timeout_override);
 
-        if let Some(defaults) = provider_tool_defaults_for(
+        if let Some(defaults) = provider_request_defaults_for(
             provider,
+            &model,
             config,
             model_profile.as_ref(),
             build_config.override_web_search,
+            Some(session.id()),
+            provider != Provider::OpenAI
+                || openai_cache_defaults_supported(config, build_config.auth_binding.as_ref()),
         ) {
             builder = builder.provider_tool_defaults(defaults);
         }
@@ -6537,6 +6617,9 @@ impl AgentFactory {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::StopReason;
     use meerkat_core::config::ModelFallbackTarget;
     #[cfg(feature = "skills")]
     use meerkat_core::skills::{
@@ -6834,6 +6917,46 @@ mod tests {
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    struct CapturingLlmClient {
+        request: Arc<std::sync::Mutex<Option<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CapturingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            *self.request.lock().expect("capture request") = Some(request.clone());
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
     }
@@ -7814,8 +7937,9 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_defaults_suppressed_on_web_search_disable() {
+    fn provider_request_defaults_suppress_only_web_search_on_disable() {
         let config = Config::default();
+        let session_id = meerkat_core::SessionId::new();
         // Profile advertises web-search support and config enables the provider
         // tool — without the override this would resolve the native body.
         let profile = meerkat_core::model_profile::ModelProfile {
@@ -7836,11 +7960,14 @@ mod tests {
             call_timeout_secs: None,
         };
 
-        let enabled = provider_tool_defaults_for(
+        let enabled = provider_request_defaults_for(
             Provider::OpenAI,
+            "gpt-5.4",
             &config,
             Some(&profile),
             ToolCategoryOverride::Inherit,
+            Some(&session_id),
+            true,
         );
         assert_eq!(
             enabled,
@@ -7857,15 +7984,272 @@ mod tests {
             "Inherit must leave owned web-search defaults intact"
         );
 
-        let disabled = provider_tool_defaults_for(
+        let disabled = provider_request_defaults_for(
             Provider::OpenAI,
+            "gpt-5.4",
             &config,
             Some(&profile),
             ToolCategoryOverride::Disable,
+            Some(&session_id),
+            true,
         );
         assert!(
             disabled.is_none(),
             "Disable must suppress the native web-search body even when profile+config would enable it"
+        );
+    }
+
+    #[test]
+    fn gpt_56_cache_defaults_are_stable_below_persisted_provider_params() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderParamsCarrier,
+            ProviderParamsOverride, ProviderTag,
+        };
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+            .expect("fixed session id");
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.6-sol".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let first = factory
+            .request_policy_for_session_llm_identity(
+                &config,
+                &identity,
+                ToolCategoryOverride::Disable,
+                &session_id,
+            )
+            .expect("first request policy");
+        let after_restart = factory
+            .request_policy_for_session_llm_identity(
+                &config,
+                &identity,
+                ToolCategoryOverride::Disable,
+                &session_id,
+            )
+            .expect("same durable session request policy");
+
+        assert!(
+            first.provider_params.is_none(),
+            "cache defaults must stay below persisted provider params so old resumed sessions inherit them"
+        );
+        assert_eq!(
+            first.provider_tool_defaults, after_restart.provider_tool_defaults,
+            "the cache bucket must be stable when the same durable session is rebuilt"
+        );
+        let Some(ProviderTag::OpenAi(defaults)) = first.provider_tool_defaults else {
+            panic!("GPT-5.6 must receive OpenAI request defaults");
+        };
+        assert_eq!(
+            defaults.prompt_cache_key.as_deref(),
+            Some("meerkat:session:018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+        );
+        assert_eq!(defaults.prompt_cache_enabled, Some(true));
+        assert_eq!(
+            defaults.prompt_cache_options,
+            Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            })
+        );
+
+        let caller_key = "mobkit:identity:parent-1";
+        let caller_params = ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_key: Some(caller_key.to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let effective = ProviderParamsCarrier {
+            params: caller_params,
+            tool_defaults: Some(ProviderTag::OpenAi(defaults.clone())),
+        }
+        .effective_params()
+        .expect("caller params and Meerkat defaults merge");
+        let Some(ProviderTag::OpenAi(effective)) = effective.provider_tag else {
+            panic!("effective OpenAI tag");
+        };
+        assert_eq!(
+            effective.prompt_cache_key.as_deref(),
+            Some(caller_key),
+            "a host with better identity granularity must override Meerkat's session floor"
+        );
+        assert_eq!(
+            effective.prompt_cache_options,
+            Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            }),
+            "cache policy remains first-class when only the host key is explicit"
+        );
+
+        let disabled = ProviderParamsCarrier {
+            params: ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    prompt_cache_enabled: Some(false),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            tool_defaults: Some(ProviderTag::OpenAi(defaults)),
+        }
+        .effective_params()
+        .expect("durable opt-out and Meerkat defaults merge");
+        let Some(ProviderTag::OpenAi(disabled)) = disabled.provider_tag else {
+            panic!("disabled OpenAI tag");
+        };
+        assert_eq!(
+            disabled.prompt_cache_enabled,
+            Some(false),
+            "explicit disable intent must win over default-on across resume and feature growth"
+        );
+    }
+
+    #[test]
+    fn gpt_56_cache_defaults_are_scoped_to_public_openai_backend() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut realm = inline_realm_section(&[("openai", "test-key")]);
+        realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert("cache_test".to_string(), realm);
+        let auth_binding = configured_auth_binding("cache_test", "default_openai");
+        let target = meerkat_core::resolve_explicit_auth_binding_target(&config, &auth_binding)
+            .expect("valid ChatGPT backend binding");
+        assert_eq!(target.backend.backend_kind, "chatgpt_backend");
+
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.6-sol".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(auth_binding),
+        };
+        let policy = factory
+            .request_policy_for_session_llm_identity(
+                &config,
+                &identity,
+                ToolCategoryOverride::Disable,
+                &SessionId::new(),
+            )
+            .expect("request policy");
+        assert!(
+            policy.provider_tool_defaults.is_none(),
+            "public OpenAI cache defaults must not leak onto the private ChatGPT backend wire"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn resumed_gpt_56_agent_with_empty_provider_params_sends_cache_defaults() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiPromptCacheOptions, ProviderTag};
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+
+        let session_id =
+            SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f").expect("fixed session id");
+        let mut session = Session::with_id(session_id.clone());
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.6-sol".to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("persisted resume metadata");
+
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mut build = AgentBuildConfig::new("ignored-by-resume");
+        build.resume_session = Some(session);
+        build.llm_client_override = Some(Arc::new(CapturingLlmClient {
+            request: Arc::clone(&captured),
+        }));
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("resumed GPT-5.6 agent");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text(
+                "exercise cache defaults".into(),
+            ))
+            .await
+            .expect("resumed agent turn");
+
+        let request = captured
+            .lock()
+            .expect("captured request lock")
+            .clone()
+            .expect("provider request");
+        let Some(ProviderTag::OpenAi(tag)) = request.provider_params else {
+            panic!("effective OpenAI provider tag");
+        };
+        assert_eq!(
+            tag.prompt_cache_key.as_deref(),
+            Some("meerkat:session:018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+        );
+        assert_eq!(tag.prompt_cache_enabled, Some(true));
+        assert_eq!(
+            tag.prompt_cache_options,
+            Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            })
+        );
+        assert!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("session metadata")
+                .provider_params
+                .is_none(),
+            "derived cache defaults must not rewrite persisted provider params"
         );
     }
 

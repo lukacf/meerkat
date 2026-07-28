@@ -98,6 +98,59 @@ impl CoreRenderable {
             }
         }
     }
+
+    /// Lower runtime-authored content into the canonical system-notice
+    /// transcript representation.
+    ///
+    /// This is shared by ordinary conversation appends and typed terminal
+    /// response facts so the two paths cannot drift in their wire/model
+    /// projection.
+    #[must_use]
+    pub fn into_system_notice_message(self) -> crate::types::SystemNoticeMessage {
+        use crate::types::{SystemNoticeBlock, SystemNoticeKind, SystemNoticeMessage};
+
+        match self {
+            Self::SystemNotice { kind, body, blocks } => {
+                SystemNoticeMessage::with_blocks(kind, body, blocks)
+            }
+            Self::Text { text } => SystemNoticeMessage::with_block(
+                SystemNoticeKind::Generic,
+                Some(text.clone()),
+                SystemNoticeBlock::RuntimeNotice {
+                    category: "runtime_notice".to_string(),
+                    detail: Some(text),
+                    payload: None,
+                },
+            ),
+            Self::Blocks { blocks } => SystemNoticeMessage::with_block(
+                SystemNoticeKind::Generic,
+                None,
+                SystemNoticeBlock::RuntimeNotice {
+                    category: "runtime_notice".to_string(),
+                    detail: Some(crate::types::text_content(&blocks)),
+                    payload: None,
+                },
+            ),
+            Self::Json { value } => SystemNoticeMessage::with_block(
+                SystemNoticeKind::Generic,
+                None,
+                SystemNoticeBlock::RuntimeNotice {
+                    category: "runtime_notice".to_string(),
+                    detail: None,
+                    payload: Some(value),
+                },
+            ),
+            Self::Reference { uri, label } => SystemNoticeMessage::with_block(
+                SystemNoticeKind::Generic,
+                label,
+                SystemNoticeBlock::RuntimeNotice {
+                    category: "runtime_notice".to_string(),
+                    detail: Some(uri),
+                    payload: None,
+                },
+            ),
+        }
+    }
 }
 
 /// Which role to append to in the conversation.
@@ -405,6 +458,13 @@ pub enum AnthropicCompactionConfig {
 pub enum AnthropicCacheControlPolicy {
     /// Do not request Anthropic prompt-cache breakpoints.
     Disabled,
+    /// Ask Anthropic to keep a moving breakpoint on the last cacheable block.
+    ///
+    /// This is the normal multi-turn policy: the provider advances the
+    /// breakpoint as conversation history grows. Anthropic searches backward
+    /// up to 20 cacheable blocks from that breakpoint, so a hit is not
+    /// guaranteed when more than 20 new blocks are added between requests.
+    Automatic,
     /// Mark the stable top-level system prompt as an ephemeral cache prefix.
     SystemPrefix,
 }
@@ -471,7 +531,7 @@ pub enum OpenAiPromptCacheRetention {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiPromptCacheOptions {
-    /// Automatic (`implicit`) or explicit-only cache breakpoint placement.
+    /// Automatic (`implicit`) placement or Meerkat-authored explicit placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<OpenAiPromptCacheMode>,
     /// Minimum cache lifetime. GPT-5.6 currently accepts only `30m`.
@@ -528,6 +588,13 @@ pub struct OpenAiProviderTag {
     /// `Some(true)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// Meerkat-owned prompt-cache enable intent.
+    ///
+    /// `false` is a durable opt-out. On GPT-5.6 it lowers to explicit-only
+    /// mode with no authored breakpoints, which performs no cache reads or
+    /// writes and incurs no cache-write charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_enabled: Option<bool>,
     /// OpenAI prompt-cache affinity routing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
@@ -856,6 +923,10 @@ impl ProviderTag {
                 );
                 fill(&mut target.thinking, &default.thinking);
                 fill(&mut target.store, &default.store);
+                fill(
+                    &mut target.prompt_cache_enabled,
+                    &default.prompt_cache_enabled,
+                );
                 fill(&mut target.prompt_cache_key, &default.prompt_cache_key);
                 fill(
                     &mut target.prompt_cache_retention,
@@ -911,8 +982,9 @@ impl ProviderTag {
 /// Config-resident typed owner of provider parameter facts.
 ///
 /// The carrier pairs the explicit, persisted [`ProviderParamsOverride`] (the
-/// LLM-edge value domain) with the build-derived provider-native tool
-/// defaults. It is parsed fail-closed at config ingress — malformed provider
+/// LLM-edge value domain) with build-derived provider-native request defaults,
+/// including tool bodies and cache policy. It is parsed fail-closed at config
+/// ingress — malformed provider
 /// params are rejected when the config is read, never deferred to the first
 /// LLM call — and the per-turn effective params are produced by a typed
 /// field-wise merge ([`ProviderParamsCarrier::effective_params`]), replacing
@@ -926,8 +998,9 @@ impl ProviderTag {
 pub struct ProviderParamsCarrier {
     /// Explicit provider parameter overrides (persisted).
     pub params: ProviderParamsOverride,
-    /// Build-derived provider-native tool defaults for the session's
-    /// provider (e.g. web-search / grounding tool bodies). Never persisted.
+    /// Build-derived provider-native request defaults for the session's
+    /// provider (e.g. web-search / grounding tool bodies and cache policy).
+    /// Never persisted.
     #[serde(skip)]
     pub tool_defaults: Option<ProviderTag>,
 }
@@ -953,7 +1026,7 @@ impl ProviderParamsCarrier {
         self.params.is_empty()
     }
 
-    /// Produce the effective per-turn params: explicit overrides win, tool
+    /// Produce the effective per-turn params: explicit overrides win, request
     /// defaults fill the unset provider-native slots. A provider-family
     /// conflict propagates typed.
     pub fn effective_params(&self) -> Result<ProviderParamsOverride, ProviderParamsMergeError> {

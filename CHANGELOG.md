@@ -13,6 +13,63 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Breaking
+
+- `AnthropicCacheControlPolicy` and
+  `WireAnthropicCacheControlPolicy` add the `Automatic` variant.
+- `OpenAiProviderTag` adds the `prompt_cache_enabled` field.
+- `WireProviderTag::OpenAi` adds the `prompt_cache_enabled` field.
+
+### Billing-affecting default change
+
+- Anthropic API, Vertex, and Foundry text requests now default to Anthropic's
+  five-minute automatic prompt cache, which advances a breakpoint across the
+  growing conversation. Explicit `cache_control` request policy still wins:
+  `disabled` opts out and `system_prefix` preserves the narrower legacy
+  behavior. Amazon Bedrock remains disabled by default because its Anthropic
+  Messages backend does not support automatic caching, and explicitly
+  requesting `automatic` there now fails locally. A qualifying five-minute
+  cold cache write bills input tokens at 1.25x the base rate; cache hits bill
+  cached input tokens at 0.1x. Automatic lookup scans backward at most 20
+  cacheable blocks, so adding more than 20 blocks between requests can still
+  miss. Write/read accounting remains visible through
+  `Usage.cache_creation_tokens` / `cache_read_tokens`.
+- Factory-built public OpenAI API GPT-5.6 sessions now send
+  `prompt_cache_options: {"mode":"implicit","ttl":"30m"}` and a stable
+  per-session `prompt_cache_key` derived from the durable `SessionId`. A
+  caller-supplied key still wins, allowing hosts such as MobKit to use a
+  longer-lived identity bucket. These defaults are re-derived below persisted
+  provider parameters, so existing resumed sessions inherit them without a
+  metadata rewrite. GPT-5.6 cache writes bill at 1.25x the uncached input-token
+  rate; hits bill at the model's cached-input rate. `mode: "explicit"` authors
+  append-monotone breakpoints at deterministic message boundaries for both
+  Responses and Chat Completions. Set `prompt_cache_enabled: false` for a
+  durable opt-out: Meerkat emits explicit-only mode without a breakpoint, so
+  the request performs no cache reads or writes and incurs no cache-write
+  charges. Enabling explicit mode on a large cold transcript may create up to
+  four writes; normal growth adds one new boundary per model invocation.
+  Automatic defaults are capability-gated off for the private ChatGPT backend
+  and Azure OpenAI until those backend contracts explicitly admit them.
+  OpenAI recommends keeping traffic near 15 requests per minute per cache key;
+  higher-volume hosts should partition keys with a stable mapping. Agentic
+  tool loops can issue several model requests inside one user turn, so a
+  single tool-heavy turn can reach that guidance even without concurrent
+  users; neither a per-session nor per-identity key removes that risk. Cache
+  reads consider only the latest 50 breakpoints.
+- These defaults make Meerkat's policy and routing affinity deterministic;
+  they do not make a changing prefix cacheable. This patch does not prove
+  every system-prompt writer stable. A timestamp, changing tool membership,
+  or any other mutation before the breakpoint can still produce repeated
+  billable writes with no reads.
+
+### Changed
+
+- Typed peer terminal-response facts now persist as deduplicated
+  `SystemNotice` messages at the conversation tail instead of mutating the
+  leading system prompt. Active-turn delivery commits the notice to the
+  canonical transcript, and cold resume migrates legacy terminal blocks out
+  of the system prompt without losing their applied/idempotency records.
+
 ## [0.8.10] - 2026-07-28
 
 ### Breaking

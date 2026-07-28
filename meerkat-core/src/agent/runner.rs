@@ -1295,6 +1295,7 @@ where
     ) -> Result<(), SystemContextStateError> {
         let pending_count = boundary.appends().len();
         let mut next_session = self.session.clone();
+        next_session.append_peer_response_terminal_notices(boundary.appends());
         next_session
             .set_system_context_state(boundary.projected_state_after_consume())
             .map_err(SystemContextStateError::SystemContext)?;
@@ -1676,53 +1677,7 @@ where
                 self.session.push(Message::User(message));
             }
             ConversationAppendRole::SystemNotice => {
-                let notice = match append.content {
-                    CoreRenderable::SystemNotice { kind, body, blocks } => {
-                        crate::types::SystemNoticeMessage::with_blocks(kind, body, blocks)
-                    }
-                    CoreRenderable::Text { text } => crate::types::SystemNoticeMessage::with_block(
-                        crate::types::SystemNoticeKind::Generic,
-                        Some(text.clone()),
-                        crate::types::SystemNoticeBlock::RuntimeNotice {
-                            category: "runtime_notice".to_string(),
-                            detail: Some(text),
-                            payload: None,
-                        },
-                    ),
-                    CoreRenderable::Blocks { blocks } => {
-                        crate::types::SystemNoticeMessage::with_block(
-                            crate::types::SystemNoticeKind::Generic,
-                            None,
-                            crate::types::SystemNoticeBlock::RuntimeNotice {
-                                category: "runtime_notice".to_string(),
-                                detail: Some(crate::types::text_content(&blocks)),
-                                payload: None,
-                            },
-                        )
-                    }
-                    CoreRenderable::Json { value } => {
-                        crate::types::SystemNoticeMessage::with_block(
-                            crate::types::SystemNoticeKind::Generic,
-                            None,
-                            crate::types::SystemNoticeBlock::RuntimeNotice {
-                                category: "runtime_notice".to_string(),
-                                detail: None,
-                                payload: Some(value),
-                            },
-                        )
-                    }
-                    CoreRenderable::Reference { uri, label } => {
-                        crate::types::SystemNoticeMessage::with_block(
-                            crate::types::SystemNoticeKind::Generic,
-                            label,
-                            crate::types::SystemNoticeBlock::RuntimeNotice {
-                                category: "runtime_notice".to_string(),
-                                detail: Some(uri),
-                                payload: None,
-                            },
-                        )
-                    }
-                };
+                let notice = append.content.into_system_notice_message();
                 self.session.push(Message::SystemNotice(notice));
             }
             ConversationAppendRole::InjectedContext => {

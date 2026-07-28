@@ -131,6 +131,8 @@ fn anthropic_thinking_schema(mode: ThinkingSupport) -> Option<Value> {
 // - reasoning_mode: string enum    (GPT-5.6 Responses)
 // - reasoning_context: string enum (GPT-5.6 Responses)
 // - text_verbosity: string enum    (GPT-5.6 Responses)
+// - prompt_cache_enabled: boolean  (GPT-5.6 Responses)
+// - prompt_cache_key: string       (GPT-5.6 Responses)
 // - prompt_cache_options: object   (GPT-5.6 Responses)
 // - seed: integer
 // - frequency_penalty: number
@@ -186,6 +188,20 @@ fn build_openai_schema(caps: &ModelCapabilities) -> Value {
 
         let mut cache_props = serde_json::Map::new();
         if !advanced.prompt_cache_modes.is_empty() {
+            props.insert(
+                "prompt_cache_enabled".into(),
+                json!({
+                    "description": "Enable prompt caching; false is a durable no-read/no-write opt-out.",
+                    "type": "boolean"
+                }),
+            );
+            props.insert(
+                "prompt_cache_key".into(),
+                json!({
+                    "description": "Stable cache-routing affinity key shared by requests with reusable prefixes.",
+                    "type": "string"
+                }),
+            );
             cache_props.insert(
                 "mode".into(),
                 string_enum_schema(

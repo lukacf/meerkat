@@ -180,16 +180,28 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
 
 <Tabs>
   <Tab title="Anthropic">
-    | Parameter | Description |
-    |-----------|-------------|
-    | `thinking_budget_tokens` | Token budget for extended thinking (integer) |
-    | `top_k` | Top-k sampling parameter (integer) |
+    | Parameter | Values | Description |
+    |-----------|--------|-------------|
+    | `thinking_budget_tokens` | integer | Token budget for extended thinking |
+    | `top_k` | integer | Top-k sampling parameter |
+    | `cache_control` | `automatic`, `system_prefix`, `disabled` | Prompt-cache policy; native Anthropic, Vertex, and Foundry clients default to a moving automatic conversation breakpoint. Amazon Bedrock defaults to disabled because that backend does not support Anthropic automatic caching. |
 
     ```bash
     rkat run --model claude-sonnet-4-6 --params-json \
       '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000}}' \
       "Solve this problem"
     ```
+
+    <Note>
+    Automatic caching uses Anthropic's five-minute ephemeral cache and advances
+    the breakpoint as the conversation grows. A qualifying cold write bills
+    input tokens at 1.25x the base rate; a cache hit bills cached input tokens
+    at 0.1x. Automatic lookup scans backward at most 20 cacheable blocks, so
+    adding more than 20 blocks between requests can still miss. Set
+    `cache_control: "disabled"` to opt out, or `system_prefix` when only the
+    stable system prompt should be cached. Amazon Bedrock rejects `automatic`
+    locally but continues to support `system_prefix`.
+    </Note>
   </Tab>
   <Tab title="OpenAI">
     | Parameter | Values | Description |
@@ -198,7 +210,9 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
     | `reasoning_mode` | `standard`, `pro` | GPT-5.6 Responses execution mode; default is `standard` |
     | `reasoning_context` | `auto`, `current_turn`, `all_turns` | GPT-5.6 persisted-reasoning context |
     | `text_verbosity` | `low`, `medium`, `high` | GPT-5.6 default output detail |
-    | `prompt_cache_options` | `mode`: `implicit` or `explicit`; `ttl`: `30m` | GPT-5.6 request-wide cache policy; an empty object uses API defaults |
+    | `prompt_cache_enabled` | boolean | Durable prompt-cache intent; `false` disables reads, writes, and cache-write charges |
+    | `prompt_cache_key` | string | Stable cache-routing affinity key; explicit host values override Meerkat's per-session default |
+    | `prompt_cache_options` | `mode`: `implicit` or `explicit`; `ttl`: `30m` | GPT-5.6 request-wide cache policy; explicit mode makes Meerkat mark deterministic message boundaries |
 
     ```bash
     rkat run --model gpt-5.6-terra --params-json \
@@ -212,9 +226,30 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
     GPT-5.6 uses `prompt_cache_options`; the older `prompt_cache_retention`
     field is deprecated for these models. The two fields remain independent at
     the API boundary, and the only legacy retention value accepted by GPT-5.6
-    is `24h`. Meerkat does not yet author per-content cache breakpoints,
-    so `mode: "explicit"` currently disables automatic placement without adding
-    a write breakpoint.
+    is `24h`. Factory-built public OpenAI API GPT-5.6 sessions default to
+    implicit caching and a stable
+    `meerkat:session:<durable-session-id>` routing key. A key supplied by the
+    caller wins, so a long-lived host can choose a coarser stable identity
+    bucket. The default is re-derived on resume rather than persisted into
+    provider parameters and is not automatically applied to the private
+    ChatGPT or Azure OpenAI backend wires. In `mode: "explicit"`, Meerkat re-authors stable
+    breakpoints at deterministic historical message boundaries and adds new
+    ones only as the conversation grows, for both Responses and Chat
+    Completions. Set `prompt_cache_enabled: false` for a durable opt-out;
+    Meerkat then emits explicit-only mode without authoring a breakpoint, so
+    the request performs no caching and incurs no cache-write charges.
+    Enabling explicit mode on a large cold transcript can create up to four
+    writes; normal growth adds one new boundary per model invocation.
+    OpenAI recommends keeping traffic near 15 requests per minute per cache
+    key; partition higher-volume traffic with a stable mapping rather than
+    assuming a coarser identity key always improves hits. Tool-calling agents
+    can make several model requests during one user turn, so one tool-heavy
+    turn can reach that guidance without any concurrent users. Per-session and
+    per-identity keys can both hit the ceiling; choose and monitor the
+    partition from actual request rate. Cache reads consider only the latest
+    50 breakpoints.
+    GPT-5.6 cache writes bill at 1.25x the uncached input token rate; hits use
+    the model's cached-input rate.
     </Note>
   </Tab>
   <Tab title="Gemini">

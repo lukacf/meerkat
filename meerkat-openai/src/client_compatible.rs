@@ -196,9 +196,23 @@ impl OpenAiCompatibleClient {
     }
 
     fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        let tag = crate::client::openai_tag(request);
+        let author_explicit_breakpoints = tag.is_some_and(|tag| {
+            tag.prompt_cache_enabled != Some(false)
+                && tag.prompt_cache_options.is_some_and(|options| {
+                    options.mode
+                        == Some(
+                            meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit,
+                        )
+                })
+        });
+        let messages = Self::convert_to_chat_messages_with_cache(
+            &request.messages,
+            author_explicit_breakpoints,
+        )?;
         let mut body = serde_json::json!({
             "model": self.remote_model,
-            "messages": Self::convert_to_chat_messages(&request.messages)?,
+            "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
             "max_completion_tokens": request.max_tokens,
@@ -230,7 +244,35 @@ impl OpenAiCompatibleClient {
             );
         }
 
-        if let Some(tag) = crate::client::openai_tag(request) {
+        if let Some(tag) = tag {
+            if tag.prompt_cache_enabled == Some(false) {
+                // Stable Meerkat opt-out. This remains authoritative over
+                // compatible Chat Completions breakpoint authoring.
+                body["prompt_cache_options"] = serde_json::json!({"mode": "explicit"});
+            } else {
+                if let Some(key) = tag.prompt_cache_key.as_ref() {
+                    body["prompt_cache_key"] = Value::String(key.clone());
+                }
+                if let Some(retention) = tag.prompt_cache_retention {
+                    body["prompt_cache_retention"] = Value::String(
+                        match retention {
+                            meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention::InMemory => "in_memory",
+                            meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention::TwentyFourHours => "24h",
+                        }
+                        .to_string(),
+                    );
+                }
+                if let Some(options) = tag.prompt_cache_options {
+                    body["prompt_cache_options"] =
+                        serde_json::to_value(options).map_err(|error| {
+                            LlmError::InvalidRequest {
+                                message: format!("invalid prompt_cache_options: {error}"),
+                            }
+                        })?;
+                } else if tag.prompt_cache_enabled == Some(true) {
+                    body["prompt_cache_options"] = serde_json::json!({"mode": "implicit"});
+                }
+            }
             if self.supports_reasoning {
                 if let Some(reasoning) = tag.reasoning.as_ref() {
                     let v = reasoning.as_value();
@@ -277,7 +319,43 @@ impl OpenAiCompatibleClient {
         Ok(body)
     }
 
+    fn author_chat_content_breakpoint(content: &mut Value) -> bool {
+        if let Some(parts) = content.as_array_mut() {
+            for part in parts.iter_mut().rev() {
+                if matches!(
+                    part.get("type").and_then(Value::as_str),
+                    Some("text" | "image_url" | "input_audio" | "file" | "refusal")
+                ) {
+                    part["prompt_cache_breakpoint"] = serde_json::json!({"mode": "explicit"});
+                    return true;
+                }
+            }
+            return false;
+        }
+        if let Some(text) = content
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+        {
+            *content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "prompt_cache_breakpoint": {"mode": "explicit"}
+            }]);
+            return true;
+        }
+        false
+    }
+
+    #[cfg(test)]
     fn convert_to_chat_messages(messages: &[Message]) -> Result<Vec<Value>, LlmError> {
+        Self::convert_to_chat_messages_with_cache(messages, false)
+    }
+
+    fn convert_to_chat_messages_with_cache(
+        messages: &[Message],
+        author_explicit_breakpoints: bool,
+    ) -> Result<Vec<Value>, LlmError> {
         let mut out = Vec::new();
         for message in messages {
             match message {
@@ -292,6 +370,9 @@ impl OpenAiCompatibleClient {
                         "role": "user",
                         "content": Self::system_notice_chat_content(notice)
                     }));
+                    if author_explicit_breakpoints && let Some(message) = out.last_mut() {
+                        Self::author_chat_content_breakpoint(&mut message["content"]);
+                    }
                 }
                 Message::User(user) => {
                     if meerkat_core::has_non_text_content(&user.content) {
@@ -309,6 +390,9 @@ impl OpenAiCompatibleClient {
                             "role": "user",
                             "content": user.text_content()
                         }));
+                    }
+                    if author_explicit_breakpoints && let Some(message) = out.last_mut() {
+                        Self::author_chat_content_breakpoint(&mut message["content"]);
                     }
                 }
                 Message::BlockAssistant(assistant) => {
@@ -349,12 +433,20 @@ impl OpenAiCompatibleClient {
                     }));
                 }
                 Message::ToolResults { results, .. } => {
+                    let first_result_message = out.len();
                     for result in results {
                         out.push(serde_json::json!({
                             "role": "tool",
                             "tool_call_id": result.tool_use_id,
                             "content": result.text_content()
                         }));
+                    }
+                    if author_explicit_breakpoints {
+                        for message in out[first_result_message..].iter_mut().rev() {
+                            if Self::author_chat_content_breakpoint(&mut message["content"]) {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -510,8 +602,14 @@ impl LlmClient for OpenAiCompatibleClient {
                                     let usage = Usage {
                                         input_tokens: event_usage.prompt_tokens.unwrap_or(0),
                                         output_tokens: event_usage.completion_tokens.unwrap_or(0),
-                                        cache_creation_tokens: None,
-                                        cache_read_tokens: None,
+                                        cache_creation_tokens: event_usage
+                                            .prompt_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.cache_write_tokens),
+                                        cache_read_tokens: event_usage
+                                            .prompt_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.cached_tokens),
                                     };
                                     yield LlmEvent::UsageUpdate { usage };
                                 }
@@ -729,6 +827,16 @@ struct ChatUsage {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<ChatPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1102,6 +1210,245 @@ mod tests {
 
         assert_eq!(body["reasoning"]["effort"], "xhigh");
         assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn chat_completions_lowers_cache_policy_key_and_durable_disable() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheOptions, OpenAiPromptCacheRetention,
+        };
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        );
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_enabled = Some(true);
+            tag.prompt_cache_key = Some("identity:parent-1".to_string());
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            });
+        });
+        let body = client
+            .build_chat_completions_body(&request)
+            .expect("cache-enabled body");
+        assert_eq!(body["prompt_cache_key"], "identity:parent-1");
+        assert_eq!(
+            body["prompt_cache_options"],
+            serde_json::json!({"mode":"implicit","ttl":"30m"})
+        );
+        assert!(
+            !body.to_string().contains("prompt_cache_breakpoint"),
+            "implicit mode must leave breakpoint placement to OpenAI"
+        );
+
+        let disabled = request.with_openai_tag_merge(|tag| {
+            tag.prompt_cache_enabled = Some(false);
+            tag.prompt_cache_retention = Some(OpenAiPromptCacheRetention::InMemory);
+        });
+        let disabled_body = client
+            .build_chat_completions_body(&disabled)
+            .expect("durable cache opt-out body");
+        assert!(disabled_body.get("prompt_cache_key").is_none());
+        assert!(disabled_body.get("prompt_cache_retention").is_none());
+        assert_eq!(
+            disabled_body["prompt_cache_options"],
+            serde_json::json!({"mode":"explicit"})
+        );
+    }
+
+    #[test]
+    fn chat_completions_explicit_breakpoints_are_append_monotone() {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        );
+        let first_request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            });
+        });
+        let first_body = client
+            .build_chat_completions_body(&first_request)
+            .expect("first explicit body");
+        let mut second_request = first_request;
+        second_request
+            .messages
+            .push(Message::User(UserMessage::text("again".to_string())));
+        let second_body = client
+            .build_chat_completions_body(&second_request)
+            .expect("growing explicit body");
+
+        assert_eq!(first_body["messages"][0], second_body["messages"][0]);
+        assert_eq!(
+            first_body["messages"][0]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode":"explicit"})
+        );
+        assert_eq!(
+            second_body["messages"][1]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode":"explicit"})
+        );
+    }
+
+    #[test]
+    fn chat_explicit_handles_no_boundary_and_marks_final_multimodal_part() {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        );
+        let explicit = |messages| {
+            LlmRequest::new("gpt-5.6-sol", messages).with_openai_tag_merge(|tag| {
+                tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Explicit),
+                    ttl: None,
+                });
+            })
+        };
+
+        let system_only = client
+            .build_chat_completions_body(&explicit(vec![Message::System(
+                meerkat_core::SystemMessage::new("system only"),
+            )]))
+            .expect("explicit mode without a markable boundary is valid");
+        assert!(!system_only.to_string().contains("prompt_cache_breakpoint"));
+
+        let multimodal = client
+            .build_chat_completions_body(&explicit(vec![Message::User(UserMessage::with_blocks(
+                vec![
+                    ContentBlock::Text {
+                        text: "describe this".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "iVBOR...".to_string(),
+                        },
+                    },
+                ],
+            ))]))
+            .expect("multimodal explicit body");
+        assert!(
+            multimodal["messages"][0]["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none()
+        );
+        assert_eq!(
+            multimodal["messages"][0]["content"][1]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"}),
+            "the marker belongs on the final supported multimodal part"
+        );
+    }
+
+    #[test]
+    fn chat_explicit_tool_results_mark_last_cacheable_result() {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        );
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![
+                Message::User(UserMessage::text("run tools".to_string())),
+                Message::tool_results(vec![
+                    ToolResult::new(
+                        "call-1".to_string(),
+                        "large stable output".to_string(),
+                        false,
+                    ),
+                    ToolResult::new("call-2".to_string(), String::new(), false),
+                ]),
+            ],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            });
+        });
+
+        let body = client
+            .build_chat_completions_body(&request)
+            .expect("parallel tool results");
+        assert_eq!(
+            body["messages"][1]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode":"explicit"})
+        );
+        assert!(
+            body["messages"][2]["content"]
+                .to_string()
+                .find("prompt_cache_breakpoint")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completions_maps_cache_read_and_write_usage() {
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":20}}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let (base_url, handle) = spawn_chat_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            base_url,
+            None,
+            options(true, true, true, false),
+        );
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let events: Vec<_> = client.stream(&request).collect().await;
+        let usage = events
+            .into_iter()
+            .filter_map(Result::ok)
+            .find_map(|event| match event {
+                LlmEvent::UsageUpdate { usage } => Some(usage),
+                _ => None,
+            })
+            .expect("usage update");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        assert_eq!(usage.cache_creation_tokens, Some(20));
+        handle.abort();
     }
 
     #[tokio::test]

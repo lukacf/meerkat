@@ -720,7 +720,7 @@ impl SessionRuntimeLlmReconfigureHost {
             Err(_) => meerkat_core::ToolCategoryOverride::Inherit,
         };
         self.factory
-            .request_policy_for_llm_identity(&config, identity, web_search)
+            .request_policy_for_session_llm_identity(&config, identity, web_search, session_id)
             .map_err(|e| {
                 RuntimeDriverError::Internal(format!(
                     "Failed to build LLM request policy for session {session_id} identity hot-swap: {e}"

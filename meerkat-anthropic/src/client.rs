@@ -44,6 +44,13 @@ pub struct AnthropicClient {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
+    /// Backend-owned cache default. Native Anthropic, Vertex, and Foundry use
+    /// automatic moving breakpoints; Amazon Bedrock disables this because its
+    /// Messages surface does not support Anthropic automatic caching.
+    default_cache_control: AnthropicCacheControlPolicy,
+    /// Whether this backend accepts Anthropic's request-wide automatic cache
+    /// policy. Amazon Bedrock supports manual breakpoints but not this mode.
+    automatic_cache_control_supported: bool,
     /// Dynamic authorizer — when set, replaces the `x-api-key` header
     /// path with `HttpAuthorizer::authorize` invocation (used for
     /// OAuth and cloud backends where the Bearer token is acquired at
@@ -58,6 +65,8 @@ pub struct AnthropicClientBuilder {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
+    default_cache_control: AnthropicCacheControlPolicy,
+    automatic_cache_control_supported: bool,
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
@@ -69,6 +78,8 @@ impl AnthropicClientBuilder {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
+            default_cache_control: AnthropicCacheControlPolicy::Automatic,
+            automatic_cache_control_supported: true,
             authorizer: None,
         }
     }
@@ -87,6 +98,27 @@ impl AnthropicClientBuilder {
         authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
     ) -> Self {
         self.authorizer = Some(authorizer);
+        self
+    }
+
+    /// Set the backend-owned default prompt-cache policy.
+    ///
+    /// Per-request typed provider params still take precedence. Provider
+    /// runtimes use this to disable automatic caching for Amazon Bedrock while
+    /// keeping it enabled for Anthropic API, Vertex, and Foundry.
+    pub fn default_cache_control(mut self, policy: AnthropicCacheControlPolicy) -> Self {
+        self.default_cache_control = policy;
+        self
+    }
+
+    /// Declare whether the selected backend supports request-wide automatic
+    /// prompt caching.
+    ///
+    /// This is a capability guard, separate from the default policy: an
+    /// explicit per-request `Automatic` override is rejected locally when the
+    /// backend does not support it.
+    pub fn automatic_cache_control_supported(mut self, supported: bool) -> Self {
+        self.automatic_cache_control_supported = supported;
         self
     }
 
@@ -132,6 +164,8 @@ impl AnthropicClientBuilder {
             connect_timeout,
             request_timeout,
             pool_idle_timeout,
+            default_cache_control: self.default_cache_control,
+            automatic_cache_control_supported: self.automatic_cache_control_supported,
             authorizer: self.authorizer,
         })
     }
@@ -666,8 +700,26 @@ impl AnthropicClient {
             "stream": true
         });
 
+        let cache_control = anthropic_tag(request)
+            .and_then(|tag| tag.cache_control)
+            .unwrap_or(self.default_cache_control);
+
+        if matches!(cache_control, AnthropicCacheControlPolicy::Automatic)
+            && !self.automatic_cache_control_supported
+        {
+            return Err(LlmError::InvalidRequest {
+                message: "automatic Anthropic prompt caching is not supported by the configured \
+                          backend; use cache_control \"disabled\" or \"system_prefix\""
+                    .to_string(),
+            });
+        }
+
         if let Some(system) = system_prompt {
-            body["system"] = Self::anthropic_system_prompt_value(&system, anthropic_tag(request));
+            body["system"] = Self::anthropic_system_prompt_value(&system, cache_control);
+        }
+
+        if matches!(cache_control, AnthropicCacheControlPolicy::Automatic) {
+            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
         }
 
         if Self::request_supports_temperature(request)
@@ -789,9 +841,12 @@ impl AnthropicClient {
         Ok(body)
     }
 
-    fn anthropic_system_prompt_value(system: &str, tag: Option<&AnthropicProviderTag>) -> Value {
-        match tag.and_then(|t| t.cache_control) {
-            Some(AnthropicCacheControlPolicy::SystemPrefix) => serde_json::json!([{
+    fn anthropic_system_prompt_value(
+        system: &str,
+        cache_control: AnthropicCacheControlPolicy,
+    ) -> Value {
+        match cache_control {
+            AnthropicCacheControlPolicy::SystemPrefix => serde_json::json!([{
                 "type": "text",
                 "text": system,
                 "cache_control": {"type": "ephemeral"}
@@ -2278,6 +2333,11 @@ mod tests {
         assert!(body.get("thinking").is_none());
         assert!(body.get("top_k").is_none());
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "native Anthropic requests should automatically cache the growing conversation prefix"
+        );
         Ok(())
     }
 
@@ -2310,6 +2370,10 @@ mod tests {
             body["messages"].to_string().find("cache_control").is_none(),
             "dynamic conversation messages must not receive cache_control"
         );
+        assert!(
+            body.get("cache_control").is_none(),
+            "explicit system-prefix mode must not also consume an automatic breakpoint slot"
+        );
         Ok(())
     }
 
@@ -2331,6 +2395,105 @@ mod tests {
         let body = client.build_request_body(&request)?;
 
         assert_eq!(body["system"], "stable system prefix");
+        assert!(
+            body.get("cache_control").is_none(),
+            "explicit disabled policy must suppress the backend default"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_automatic_cache_control_overrides_disabled_supported_backend_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .default_cache_control(AnthropicCacheControlPolicy::Disabled)
+            .build()?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_anthropic_tag_merge(|tag| {
+            tag.cache_control = Some(AnthropicCacheControlPolicy::Automatic);
+        });
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_automatic_cache_control_rejects_unsupported_backend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .default_cache_control(AnthropicCacheControlPolicy::Disabled)
+            .automatic_cache_control_supported(false)
+            .build()?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_anthropic_tag_merge(|tag| {
+            tag.cache_control = Some(AnthropicCacheControlPolicy::Automatic);
+        });
+
+        let error = client
+            .build_request_body(&request)
+            .expect_err("unsupported automatic cache policy must fail locally");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidRequest { message }
+                if message.contains("automatic Anthropic prompt caching is not supported")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_system_prefix_cache_control_remains_available_on_unsupported_automatic_backend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .default_cache_control(AnthropicCacheControlPolicy::Disabled)
+            .automatic_cache_control_supported(false)
+            .build()?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![
+                Message::System(SystemMessage::new("stable system prefix".to_string())),
+                Message::User(UserMessage::text("test".to_string())),
+            ],
+        )
+        .with_anthropic_tag_merge(|tag| {
+            tag.cache_control = Some(AnthropicCacheControlPolicy::SystemPrefix);
+        });
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        assert!(body.get("cache_control").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_builder_can_disable_automatic_cache_control() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .default_cache_control(AnthropicCacheControlPolicy::Disabled)
+            .build()?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+
+        let body = client.build_request_body(&request)?;
+
+        assert!(body.get("cache_control").is_none());
         Ok(())
     }
 

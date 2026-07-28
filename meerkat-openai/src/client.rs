@@ -596,13 +596,27 @@ impl OpenAiClient {
 
     /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        let author_explicit_breakpoints = openai_tag(request).is_some_and(|tag| {
+            tag.prompt_cache_enabled != Some(false)
+                && tag.prompt_cache_options.is_some_and(|options| {
+                    options.mode
+                        == Some(
+                            meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit,
+                        )
+                })
+        });
         let (input, instructions) = if self.is_chatgpt_backend_wire() {
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::ExtractToInstructions,
+                author_explicit_breakpoints,
             )?
         } else {
-            (Self::convert_to_responses_input(&request.messages)?, None)
+            Self::convert_to_responses_input_with_system_mode(
+                &request.messages,
+                SystemMessageMode::IncludeInInput,
+                author_explicit_breakpoints,
+            )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
 
@@ -668,43 +682,63 @@ impl OpenAiClient {
                     ),
                 });
             }
-            if let Some(retention) = tag.prompt_cache_retention
-                && crate::request_support::supports_prompt_cache_retention(
-                    &request.model,
-                    retention,
-                ) == Some(false)
-            {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "OpenAI model '{}' supports only '24h' prompt_cache_retention",
-                        request.model
-                    ),
-                });
-            }
-            if let Some(options) = tag.prompt_cache_options {
-                if let Some(mode) = options.mode
-                    && crate::request_support::supports_prompt_cache_mode(&request.model, mode)
-                        == Some(false)
+            if let Some(enabled) = tag.prompt_cache_enabled {
+                let required_mode = if enabled {
+                    meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Implicit
+                } else {
+                    meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit
+                };
+                if crate::request_support::supports_prompt_cache_mode(&request.model, required_mode)
+                    == Some(false)
                 {
                     return Err(LlmError::InvalidRequest {
                         message: format!(
-                            "OpenAI model '{}' does not support prompt cache mode '{}'",
+                            "OpenAI model '{}' does not support the '{}' mode required by prompt_cache_enabled={enabled}",
                             request.model,
-                            mode.as_wire_str()
+                            required_mode.as_wire_str()
                         ),
                     });
                 }
-                if let Some(ttl) = options.ttl
-                    && crate::request_support::supports_prompt_cache_ttl(&request.model, ttl)
-                        == Some(false)
+            }
+            if tag.prompt_cache_enabled != Some(false) {
+                if let Some(retention) = tag.prompt_cache_retention
+                    && crate::request_support::supports_prompt_cache_retention(
+                        &request.model,
+                        retention,
+                    ) == Some(false)
                 {
                     return Err(LlmError::InvalidRequest {
                         message: format!(
-                            "OpenAI model '{}' does not support prompt cache TTL '{}'",
-                            request.model,
-                            ttl.as_wire_str()
+                            "OpenAI model '{}' supports only '24h' prompt_cache_retention",
+                            request.model
                         ),
                     });
+                }
+                if let Some(options) = tag.prompt_cache_options {
+                    if let Some(mode) = options.mode
+                        && crate::request_support::supports_prompt_cache_mode(&request.model, mode)
+                            == Some(false)
+                    {
+                        return Err(LlmError::InvalidRequest {
+                            message: format!(
+                                "OpenAI model '{}' does not support prompt cache mode '{}'",
+                                request.model,
+                                mode.as_wire_str()
+                            ),
+                        });
+                    }
+                    if let Some(ttl) = options.ttl
+                        && crate::request_support::supports_prompt_cache_ttl(&request.model, ttl)
+                            == Some(false)
+                    {
+                        return Err(LlmError::InvalidRequest {
+                            message: format!(
+                                "OpenAI model '{}' does not support prompt cache TTL '{}'",
+                                request.model,
+                                ttl.as_wire_str()
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -779,25 +813,36 @@ impl OpenAiClient {
                 body["store"] = Value::Bool(store);
             }
 
-            if let Some(prompt_cache_key) = tag.prompt_cache_key.as_ref() {
-                body["prompt_cache_key"] = Value::String(prompt_cache_key.clone());
-            }
+            if tag.prompt_cache_enabled == Some(false) {
+                // Durable Meerkat opt-out: explicit-only mode with no authored
+                // breakpoints performs no cache reads or writes. Keep this
+                // branch authoritative over explicit breakpoint authoring.
+                body["prompt_cache_options"] = serde_json::json!({"mode": "explicit"});
+            } else {
+                if let Some(prompt_cache_key) = tag.prompt_cache_key.as_ref() {
+                    body["prompt_cache_key"] = Value::String(prompt_cache_key.clone());
+                }
 
-            if let Some(retention) = tag.prompt_cache_retention {
-                body["prompt_cache_retention"] = Value::String(
-                    match retention {
-                        OpenAiPromptCacheRetention::InMemory => "in_memory",
-                        OpenAiPromptCacheRetention::TwentyFourHours => "24h",
-                    }
-                    .to_string(),
-                );
-            }
+                if let Some(retention) = tag.prompt_cache_retention {
+                    body["prompt_cache_retention"] = Value::String(
+                        match retention {
+                            OpenAiPromptCacheRetention::InMemory => "in_memory",
+                            OpenAiPromptCacheRetention::TwentyFourHours => "24h",
+                        }
+                        .to_string(),
+                    );
+                }
 
-            if let Some(options) = tag.prompt_cache_options {
-                body["prompt_cache_options"] =
-                    serde_json::to_value(options).map_err(|error| LlmError::InvalidRequest {
-                        message: format!("invalid prompt_cache_options: {error}"),
-                    })?;
+                if let Some(options) = tag.prompt_cache_options {
+                    body["prompt_cache_options"] =
+                        serde_json::to_value(options).map_err(|error| {
+                            LlmError::InvalidRequest {
+                                message: format!("invalid prompt_cache_options: {error}"),
+                            }
+                        })?;
+                } else if tag.prompt_cache_enabled == Some(true) {
+                    body["prompt_cache_options"] = serde_json::json!({"mode": "implicit"});
+                }
             }
 
             if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
@@ -962,6 +1007,7 @@ impl OpenAiClient {
         Self::convert_to_responses_input_with_system_mode(
             messages,
             SystemMessageMode::IncludeInInput,
+            false,
         )
         .map(|(input, _)| input)
     }
@@ -987,6 +1033,34 @@ impl OpenAiClient {
                 "text": block.text_projection()
             }),
         }
+    }
+
+    fn author_responses_content_breakpoint(content: &mut Value) -> bool {
+        if let Some(parts) = content.as_array_mut() {
+            for part in parts.iter_mut().rev() {
+                if matches!(
+                    part.get("type").and_then(Value::as_str),
+                    Some("input_text" | "input_image" | "input_file")
+                ) {
+                    part["prompt_cache_breakpoint"] = serde_json::json!({"mode": "explicit"});
+                    return true;
+                }
+            }
+            return false;
+        }
+        if let Some(text) = content
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+        {
+            *content = serde_json::json!([{
+                "type": "input_text",
+                "text": text,
+                "prompt_cache_breakpoint": {"mode": "explicit"}
+            }]);
+            return true;
+        }
+        false
     }
 
     fn tool_result_responses_output(result: &ToolResult) -> Result<Value, LlmError> {
@@ -1081,6 +1155,7 @@ impl OpenAiClient {
     fn convert_to_responses_input_with_system_mode(
         messages: &[Message],
         system_mode: SystemMessageMode,
+        author_explicit_breakpoints: bool,
     ) -> Result<(Vec<Value>, Option<String>), LlmError> {
         let mut items = Vec::new();
         let mut instructions = Vec::new();
@@ -1107,6 +1182,9 @@ impl OpenAiClient {
                         "role": "user",
                         "content": Self::system_notice_responses_content(notice)
                     }));
+                    if author_explicit_breakpoints && let Some(item) = items.last_mut() {
+                        Self::author_responses_content_breakpoint(&mut item["content"]);
+                    }
                 }
                 Message::User(u) => {
                     if meerkat_core::has_non_text_content(&u.content) {
@@ -1126,6 +1204,9 @@ impl OpenAiClient {
                             "role": "user",
                             "content": u.text_content()
                         }));
+                    }
+                    if author_explicit_breakpoints && let Some(item) = items.last_mut() {
+                        Self::author_responses_content_breakpoint(&mut item["content"]);
                     }
                 }
                 Message::BlockAssistant(a) => {
@@ -1167,6 +1248,7 @@ impl OpenAiClient {
                     }
                 }
                 Message::ToolResults { results, .. } => {
+                    let first_result_item = items.len();
                     for r in results {
                         let output = Self::tool_result_responses_output(r)?;
                         items.push(serde_json::json!({
@@ -1174,6 +1256,13 @@ impl OpenAiClient {
                             "call_id": r.tool_use_id,
                             "output": output
                         }));
+                    }
+                    if author_explicit_breakpoints {
+                        for item in items[first_result_item..].iter_mut().rev() {
+                            if Self::author_responses_content_breakpoint(&mut item["output"]) {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -3779,8 +3868,9 @@ mod tests {
             tag.reasoning_mode = Some(OpenAiReasoningMode::Pro);
             tag.reasoning_context = Some(OpenAiReasoningContext::AllTurns);
             tag.text_verbosity = Some(OpenAiTextVerbosity::High);
+            tag.prompt_cache_key = Some("meerkat:session:stable".to_string());
             tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
-                mode: Some(OpenAiPromptCacheMode::Explicit),
+                mode: Some(OpenAiPromptCacheMode::Implicit),
                 ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
             });
         });
@@ -3791,9 +3881,14 @@ mod tests {
         assert_eq!(body["reasoning"]["mode"], "pro");
         assert_eq!(body["reasoning"]["context"], "all_turns");
         assert_eq!(body["text"]["verbosity"], "high");
+        assert_eq!(body["prompt_cache_key"], "meerkat:session:stable");
         assert_eq!(
             body["prompt_cache_options"],
-            serde_json::json!({"mode": "explicit", "ttl": "30m"})
+            serde_json::json!({"mode": "implicit", "ttl": "30m"})
+        );
+        assert!(
+            !body.to_string().contains("prompt_cache_breakpoint"),
+            "implicit mode must leave breakpoint placement to OpenAI"
         );
     }
 
@@ -3837,12 +3932,24 @@ mod tests {
             client.build_request_body(&cache),
             Err(LlmError::InvalidRequest { .. })
         ));
+
+        let enabled = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_enabled = Some(true);
+        });
+        assert!(matches!(
+            client.build_request_body(&enabled),
+            Err(LlmError::InvalidRequest { .. })
+        ));
     }
 
     #[test]
-    fn prompt_cache_retention_and_options_are_independent() {
+    fn explicit_cache_mode_authors_append_monotone_responses_breakpoints() {
         let client = OpenAiClient::new("test-key".to_string());
-        let request = LlmRequest::new(
+        let first_request = LlmRequest::new(
             "gpt-5.6-sol",
             vec![Message::User(UserMessage::text("Hello".to_string()))],
         )
@@ -3853,12 +3960,141 @@ mod tests {
                 ttl: None,
             });
         });
-        let body = client.build_request_body(&request).expect("build request");
+        let first_body = client
+            .build_request_body(&first_request)
+            .expect("build first request");
+        let mut second_request = first_request;
+        second_request
+            .messages
+            .push(Message::User(UserMessage::text("Again".to_string())));
+        let second_body = client
+            .build_request_body(&second_request)
+            .expect("build growing request");
 
-        assert_eq!(body["prompt_cache_retention"], "24h");
+        assert_eq!(first_body["prompt_cache_retention"], "24h");
+        assert_eq!(
+            first_body["prompt_cache_options"],
+            serde_json::json!({"mode": "explicit"})
+        );
+        assert_eq!(
+            first_body["input"][0]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"})
+        );
+        assert_eq!(
+            first_body["input"][0], second_body["input"][0],
+            "growing a conversation must not mutate an earlier marked prefix"
+        );
+        assert_eq!(
+            second_body["input"][1]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"})
+        );
+    }
+
+    #[test]
+    fn explicit_responses_marks_final_supported_multimodal_part() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR...".into(),
+                },
+            ]))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            });
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+        assert!(
+            body["input"][0]["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none()
+        );
+        assert_eq!(
+            body["input"][0]["content"][1]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"}),
+            "the marker belongs on the final supported multimodal part"
+        );
+    }
+
+    #[test]
+    fn explicit_responses_handles_no_boundary_and_empty_tail_tool_results() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let explicit = |messages| {
+            LlmRequest::new("gpt-5.6-sol", messages).with_openai_tag_merge(|tag| {
+                tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Explicit),
+                    ttl: None,
+                });
+            })
+        };
+
+        let system_only = client
+            .build_request_body(&explicit(vec![Message::System(
+                meerkat_core::SystemMessage::new("system only"),
+            )]))
+            .expect("explicit mode without a markable boundary is valid");
+        assert!(!system_only.to_string().contains("prompt_cache_breakpoint"));
+
+        let tool_results = client
+            .build_request_body(&explicit(vec![
+                Message::User(UserMessage::text("run tools".to_string())),
+                Message::tool_results(vec![
+                    ToolResult::new(
+                        "call-1".to_string(),
+                        "large stable output".to_string(),
+                        false,
+                    ),
+                    ToolResult::new("call-2".to_string(), String::new(), false),
+                ]),
+            ]))
+            .expect("parallel tool results");
+        assert_eq!(
+            tool_results["input"][1]["output"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode":"explicit"}),
+            "an empty final result must fall back to the last cacheable result"
+        );
+        assert!(
+            tool_results["input"][2]["output"]
+                .to_string()
+                .find("prompt_cache_breakpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn durable_cache_disable_overrides_conflicting_cache_fields() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_enabled = Some(false);
+            tag.prompt_cache_key = Some("identity:must-not-leak".to_string());
+            tag.prompt_cache_retention = Some(OpenAiPromptCacheRetention::InMemory);
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            });
+        });
+
+        let body = client
+            .build_request_body(&request)
+            .expect("disable must ignore inactive conflicting cache fields");
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("prompt_cache_retention").is_none());
         assert_eq!(
             body["prompt_cache_options"],
-            serde_json::json!({"mode": "explicit"})
+            serde_json::json!({"mode":"explicit"})
         );
     }
 

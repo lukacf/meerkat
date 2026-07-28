@@ -763,6 +763,7 @@ impl From<WireAnthropicContextWindow>
 #[serde(rename_all = "snake_case")]
 pub enum WireAnthropicCacheControlPolicy {
     Disabled,
+    Automatic,
     SystemPrefix,
 }
 
@@ -773,6 +774,7 @@ impl From<meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy>
         use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy as Core;
         match value {
             Core::Disabled => Self::Disabled,
+            Core::Automatic => Self::Automatic,
             Core::SystemPrefix => Self::SystemPrefix,
         }
     }
@@ -784,6 +786,7 @@ impl From<WireAnthropicCacheControlPolicy>
     fn from(value: WireAnthropicCacheControlPolicy) -> Self {
         match value {
             WireAnthropicCacheControlPolicy::Disabled => Self::Disabled,
+            WireAnthropicCacheControlPolicy::Automatic => Self::Automatic,
             WireAnthropicCacheControlPolicy::SystemPrefix => Self::SystemPrefix,
         }
     }
@@ -1166,6 +1169,8 @@ pub enum WireProviderTag {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         store: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_cache_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_cache_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_cache_retention: Option<WireOpenAiPromptCacheRetention>,
@@ -1237,6 +1242,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
                 chat_template_kwargs: t.chat_template_kwargs.map(|v| v.as_value()),
                 thinking: t.thinking.map(|v| v.as_value()),
                 store: t.store,
+                prompt_cache_enabled: t.prompt_cache_enabled,
                 prompt_cache_key: t.prompt_cache_key,
                 prompt_cache_retention: t.prompt_cache_retention.map(Into::into),
                 prompt_cache_options: t.prompt_cache_options.map(Into::into),
@@ -1304,6 +1310,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 chat_template_kwargs,
                 thinking,
                 store,
+                prompt_cache_enabled,
                 prompt_cache_key,
                 prompt_cache_retention,
                 prompt_cache_options,
@@ -1324,6 +1331,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                     .map(|v| OpaqueProviderBody::from_value(&v)),
                 thinking: thinking.map(|v| OpaqueProviderBody::from_value(&v)),
                 store,
+                prompt_cache_enabled,
                 prompt_cache_key,
                 prompt_cache_retention: prompt_cache_retention.map(Into::into),
                 prompt_cache_options: prompt_cache_options.map(Into::into),

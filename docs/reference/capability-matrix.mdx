@@ -181,7 +181,7 @@ Gemini video URI support follows the active Google backend. Vertex Gemini accept
 
 ## Provider-native web search
 
-Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific tool defaults at build time as a typed, never-persisted `ProviderTag` (the `tool_defaults` half of `ProviderParamsCarrier`). Effective per-turn params are a typed field-wise merge: explicit `provider_params` win and tool defaults fill only the unset provider-native slots -- the old RFC 7396 raw-JSON merge-patch is retired.
+Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific request defaults at build time as a typed, never-persisted `ProviderTag` (the legacy-named `tool_defaults` half of `ProviderParamsCarrier`). These defaults include provider-native tool bodies and model-capability-derived cache policy. Effective per-turn params are a typed field-wise merge: explicit `provider_params` win and build defaults fill only the unset provider-native slots -- the old RFC 7396 raw-JSON merge-patch is retired.
 
 | Provider | Tool type | Config key | Default |
 |----------|-----------|------------|---------|
@@ -201,7 +201,7 @@ Web search is enabled by default for all catalog models with `supports_web_searc
 
 **Extraction turns:** Web search tools are stripped during structured output extraction to maintain the deterministic, tool-free invariant.
 
-**Hook interaction:** Pre-LLM hooks see the merged tool defaults in `HookLlmRequest.provider_params` as an observational projection. Hooks cannot rewrite effective provider params.
+**Hook interaction:** Pre-LLM hooks see the merged request defaults in `HookLlmRequest.provider_params` as an observational projection. Hooks cannot rewrite effective provider params.
 
 ## MCP server loading
 

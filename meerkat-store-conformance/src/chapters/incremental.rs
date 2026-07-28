@@ -17,8 +17,9 @@ const CHAPTER: &str = "incremental";
 /// Incremental profile: O(delta) `append_messages` semantics, CAS-guarded
 /// `save_head` (`Create` / `IfToken`), `commit_rewrite` CAS against the head
 /// token, `TranscriptRevisionConflict` on token/parent mismatch,
-/// `load_messages` / `load_rewrites` round-trips, and the conditional
-/// range-read capability contract (`load_canonical_head` /
+/// `load_messages` / `load_rewrites` round-trips, reconstruction fidelity
+/// across chained rewrites that share no prefix with their parent, and the
+/// conditional range-read capability contract (`load_canonical_head` /
 /// `load_rewrite_commits`).
 ///
 /// Invoke this chapter only for stores whose `as_incremental` returns
@@ -37,6 +38,7 @@ pub async fn incremental(factory: &dyn SessionStoreFactory) -> Result<(), Confor
     append_contract(&steps, inc.as_ref()).await?;
     save_head_cas(&steps, inc.as_ref()).await?;
     rewrite_commit_and_adoption(&steps, factory, &store, inc.as_ref()).await?;
+    chained_prefix_rewrites(&steps, factory, &store, inc.as_ref()).await?;
     range_read_capability(&steps, &store, inc.as_ref()).await?;
     Ok(())
 }
@@ -237,6 +239,139 @@ async fn range_read_capability(
         )?;
     }
     Ok(())
+}
+
+/// Chained rewrites that share NO prefix with the transcript they replace.
+///
+/// Every round here replaces message 0 and preserves every later message —
+/// the field shape (a per-resume system-prompt refresh). Prefix addressing
+/// buys a backend nothing on this shape, so a durable store must express the
+/// superseded transcript as a delta of its successor. The contract this pins
+/// is reconstruction, not layout: after N chained rewrites, every retained
+/// body must still come back EXACTLY, the live transcript must still be the
+/// last revision, and all of it must survive reopen. A backend that keeps
+/// whole revisions materialized passes too — this chapter refuses to encode
+/// any one storage strategy, only the fidelity every strategy owes.
+async fn chained_prefix_rewrites(
+    steps: &Steps,
+    factory: &dyn SessionStoreFactory,
+    store: &Arc<dyn meerkat_core::SessionStore>,
+    inc: &dyn IncrementalSessionStore,
+) -> Result<(), ConformanceFailure> {
+    const STEP: &str = "chained_prefix_rewrites";
+    const ROUNDS: usize = 4;
+    let (session, _head, mut token) =
+        seed(steps, STEP, inc, &["opening", "second", "third"]).await?;
+
+    let mut live = session.clone();
+    let mut expected: Vec<(Vec<Message>, Vec<Message>)> = Vec::new();
+    for round in 0..ROUNDS {
+        let parent_messages = live.messages().to_vec();
+        let commit = steps.wrap(
+            STEP,
+            live.commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(format!(
+                    "[conformance] refreshed opening {round}"
+                )))],
+                TranscriptRewriteReason::new("conformance"),
+                Some("meerkat-store-conformance".to_string()),
+                None,
+            ),
+        )?;
+        let parent_body = steps
+            .wrap(STEP, live.transcript_revision_body(&commit.parent_revision))?
+            .ok_or_else(|| steps.fail(STEP, "rewrite must retain the parent revision body"))?;
+        let revision_body = steps
+            .wrap(STEP, live.transcript_revision_body(&commit.revision))?
+            .ok_or_else(|| steps.fail(STEP, "rewrite must retain the new revision body"))?;
+        let record = steps.wrap(
+            STEP,
+            TranscriptRewriteRecord::new(commit, parent_body, revision_body),
+        )?;
+        let next = steps.wrap(
+            STEP,
+            inc.commit_rewrite(
+                session.id(),
+                &record,
+                SessionHeadCas::IfToken(token.clone()),
+            )
+            .await,
+        )?;
+        steps.wrap(
+            STEP,
+            inc.save_head(&next, SessionHeadCas::IfToken(token)).await,
+        )?;
+        token = steps.wrap(STEP, session_head_cas_token(&next))?;
+        expected.push((parent_messages, live.messages().to_vec()));
+    }
+
+    let records = steps.wrap(STEP, inc.load_rewrites(session.id()).await)?;
+    steps.ensure(
+        STEP,
+        records.len() == ROUNDS,
+        format!(
+            "all {ROUNDS} adopted rewrites must be served, got {}",
+            records.len()
+        ),
+    )?;
+    for (index, (record, (parent_messages, revision_messages))) in
+        records.iter().zip(&expected).enumerate()
+    {
+        steps.ensure(
+            STEP,
+            &record.parent_body.messages == parent_messages,
+            format!("chained rewrite {index} must reconstruct its parent body exactly"),
+        )?;
+        steps.ensure(
+            STEP,
+            &record.revision_body.messages == revision_messages,
+            format!("chained rewrite {index} must reconstruct its revision body exactly"),
+        )?;
+    }
+    ensure_commit_view_matches(steps, STEP, inc, session.id(), "chained prefix rewrites").await?;
+
+    let slim = steps
+        .wrap(STEP, store.load(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "chained-rewrite session must load"))?;
+    steps.ensure(
+        STEP,
+        slim.messages() == live.messages(),
+        "the slim load must serve exactly the last chained revision",
+    )?;
+
+    // Reopen: whatever a backend rewrote its representation into has to read
+    // back the same way from a cold handle.
+    let reopened = factory.open().await?;
+    let reopened_inc = Arc::clone(&reopened).as_incremental().ok_or_else(|| {
+        steps.fail(
+            STEP,
+            "reopened handle must still expose the incremental capability",
+        )
+    })?;
+    let survived = steps.wrap(STEP, reopened_inc.load_rewrites(session.id()).await)?;
+    steps.ensure(
+        STEP,
+        survived.len() == records.len(),
+        "every chained rewrite must survive reopen",
+    )?;
+    for (index, (after, before)) in survived.iter().zip(&records).enumerate() {
+        steps.ensure(
+            STEP,
+            after.commit == before.commit
+                && after.parent_body.messages == before.parent_body.messages
+                && after.revision_body.messages == before.revision_body.messages,
+            format!("chained rewrite {index} must reconstruct identically after reopen"),
+        )?;
+    }
+    let survived_slim = steps
+        .wrap(STEP, reopened.load(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "chained-rewrite session must load after reopen"))?;
+    steps.ensure(
+        STEP,
+        survived_slim.messages() == live.messages(),
+        "the reopened slim load must serve exactly the last chained revision",
+    )
 }
 
 /// Seed one session through the incremental write path and return

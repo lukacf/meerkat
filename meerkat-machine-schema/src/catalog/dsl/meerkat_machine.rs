@@ -6699,11 +6699,22 @@ macro_rules! meerkat_catalog_machine_dsl {
         // and RETAINS the unbound row for ordinary redelivery: nothing is
         // terminalized, no consumption is fabricated, no input can ever be
         // dropped. The worst case is one duplicate redelivered turn — the
-        // legacy fleet's own restart semantics. Under a modern writer the
-        // staging invariant means an unbound row coexisting with a clean
-        // tail is a genuinely different never-staged input, so the modern
-        // era, interrupted shapes, and unfenceable rows all hold exactly as
-        // before.
+        // legacy fleet's own restart semantics. Interrupted shapes and
+        // unfenceable rows hold exactly as before.
+        //
+        // ERA PRECISION, STATED PLAINLY: `writer_era` comes from the head
+        // stamp's schema floor, and a MODERN binary still mints sub-v3
+        // stamps for graph-less sessions, so this arm also admits a modern
+        // graph-less row whose cold tail is a verified strict descendant.
+        // That admission is correct rather than merely tolerated: under a
+        // modern writer an unbound content row is one that never staged
+        // (staging bindings are fenced before execution), so redelivering it
+        // is right, while the rows the observation PROVED bound to the
+        // recovered run are terminalized by the realize pass — the adopted
+        // tail consumed them. The alternative for that shape is an
+        // unrecoverable hold over digest-proven content, which is the very
+        // wedge this arm exists to clear. What this arm never does, in any
+        // era, is claim an unattributed row as consumed.
         transition AuthorizeDurableTailRecoveryCommitLegacyRetainInputs {
             per_phase [Idle, Retired]
             on input AuthorizeDurableTailRecovery {

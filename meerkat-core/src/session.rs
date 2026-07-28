@@ -494,8 +494,12 @@ impl SharedTranscriptHistoryState {
 /// `write_canonical_json` form of `{"messages": canonicalized, "revision": r}`
 /// — exactly the per-element bytes `canonicalize_checkpoint_history_value`
 /// produces for this body.
-fn canonical_history_body_chunk(body_value: &serde_json::Value) -> Option<Vec<u8>> {
-    let body: TranscriptRevisionBody = serde_json::from_value(body_value.clone()).ok()?;
+///
+/// Takes the MATERIALIZED body rather than the durable JSON entry: the durable
+/// revision chain stores every body after the anchor as an inverse splice, so
+/// the raw entry no longer carries a message vector to canonicalize. The typed
+/// body is the same value the full canonicalization path parses.
+fn canonical_history_body_chunk(body: &TranscriptRevisionBody) -> Option<Vec<u8>> {
     let canonical = serde_json::json!({
         "revision": body.revision,
         "messages": canonicalize_messages_for_digest(&body.messages),
@@ -5627,6 +5631,19 @@ impl Session {
         let commits_array = commits_value.as_array()?;
         let revisions = object.get("revisions")?.as_array()?;
 
+        // Retained bodies come from the session's own parsed graph, not from
+        // the raw entries: the durable revision chain stores everything after
+        // the anchor as an inverse splice, so a raw entry has no message
+        // vector of its own. `history` IS the metadata value this cache is
+        // paired with (the shared parse is cleared by every write to the same
+        // key), and the per-index revision cross-check below refuses to
+        // assemble if the two ever disagree — a `None` there costs only the
+        // full canonicalization fall-back.
+        let graph = self.transcript_history_state_shared().ok()??;
+        if graph.head != head || graph.revisions.len() != revisions.len() {
+            return None;
+        }
+
         let commits_last = match commits_array.last() {
             Some(commit) => commit.get("revision")?.as_str()?.to_string(),
             None => String::new(),
@@ -5658,11 +5675,13 @@ impl Session {
         // streams from the accumulator's retained sorted transcript bytes.
         let mut chunks: Vec<(&str, Option<std::sync::Arc<[u8]>>)> =
             Vec::with_capacity(revisions.len());
-        for body_value in revisions {
+        for (body_value, body) in revisions.iter().zip(graph.revisions.iter()) {
             let revision = body_value.get("revision")?.as_str()?;
+            if revision != body.revision {
+                return None;
+            }
             if revision == head {
-                let body_messages = body_value.get("messages")?.as_array()?;
-                if body_messages.len() != self.messages.len() {
+                if body.messages.len() != self.messages.len() {
                     return None;
                 }
                 chunks.push((revision, None));
@@ -5671,7 +5690,7 @@ impl Session {
             let bytes = match cache.bodies.get(revision) {
                 Some(bytes) => std::sync::Arc::clone(bytes),
                 None => {
-                    let bytes = canonical_history_body_chunk(body_value)?;
+                    let bytes = canonical_history_body_chunk(body)?;
                     let bytes: std::sync::Arc<[u8]> = bytes.into();
                     cache
                         .bodies
@@ -9246,21 +9265,27 @@ mod tests {
         // Changed content re-keys the memo and re-verifies: appending a
         // message to the retained head body (message count changes the
         // shape key) must be caught by full validation, never laundered
-        // through memoized trust.
+        // through memoized trust. The tamper is applied to the TYPED graph
+        // and re-encoded so it lands whichever way the durable revision
+        // chain happens to spell the head body — as the chain anchor or as
+        // an inverse splice onto one.
         let mut tampered = document.clone();
-        let head = tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["head"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let bodies = tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
-            .as_array_mut()
-            .unwrap();
-        let head_body = bodies
+        let mut tampered_state: TranscriptHistoryState = serde_json::from_value(
+            tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
+        )
+        .unwrap();
+        let tampered_head = tampered_state.head.clone();
+        let head_body = tampered_state
+            .revisions
             .iter_mut()
-            .find(|body| body["revision"].as_str() == Some(head.as_str()))
+            .find(|body| body.revision == tampered_head)
             .unwrap();
-        let smuggled = head_body["messages"][0].clone();
-        head_body["messages"].as_array_mut().unwrap().push(smuggled);
+        let smuggled = head_body.messages[0].clone();
+        head_body.messages.push(smuggled);
+        // Keep the forged pre-marker shape this test decodes under.
+        tampered_state.digest_format = 0;
+        tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] =
+            serde_json::to_value(&tampered_state).unwrap();
         let digests_before_tampered = session_content_digest_computations();
         let error = serde_json::from_value::<Session>(tampered).unwrap_err();
         assert!(
@@ -9787,14 +9812,26 @@ mod tests {
         envelope["messages"] = serde_json::to_value(&messages).expect("legacy live messages");
         envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] =
             serde_json::to_value(&legacy).expect("legacy unbounded history");
-        for body in envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
-            .as_array_mut()
-            .expect("legacy revisions")
-        {
-            body.as_object_mut()
-                .expect("legacy revision body")
-                .remove("parent_revision");
-        }
+        // The pre-parent-pointer v1 writer spelled every retained body in
+        // full and carried no lineage at all. Rebuild that exact array
+        // (`TranscriptRevisionBody`'s own encoding IS the full spelling) so
+        // this test keeps exercising the legacy append-order inference
+        // rather than the current delta chain.
+        envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"] =
+            serde_json::Value::Array(
+                legacy
+                    .revisions
+                    .iter()
+                    .map(|body| {
+                        let mut body =
+                            serde_json::to_value(body).expect("legacy revision body encodes");
+                        body.as_object_mut()
+                            .expect("legacy revision body")
+                            .remove("parent_revision");
+                        body
+                    })
+                    .collect(),
+            );
         let raw = serde_json::to_vec(&envelope).expect("raw legacy bytes");
 
         let restored: Session = serde_json::from_slice(&raw).expect("legacy restore");

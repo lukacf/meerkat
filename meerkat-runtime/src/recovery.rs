@@ -474,21 +474,24 @@ pub async fn authorize_and_commit_durable_tail_recovery(
         }
     };
 
-    // Realize-only pass: the machine already judged this evidence class as
-    // fully attributable, so every observed row here is terminalized. The
-    // retain-inputs disposition terminalizes NOTHING by definition — its
-    // evidence class (UnboundContentInput) attributes no rows, and this
-    // mechanical guard keeps that true even if the observation contract
-    // drifts: an unbound input is retained for redelivery, never claimed as
-    // consumed.
-    let attributed =
-        if disposition == DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs {
-            Vec::new()
-        } else {
-            inputs.attributed
-        };
-    let input_updates =
-        terminalize_attributed_inputs(attributed, &request.candidate_run_id, boundary_sequence)?;
+    // Realize-only pass: terminalize exactly the rows the observation PROVED
+    // bound to the candidate run — durable staging bindings or a committed
+    // boundary receipt naming them. Never more.
+    //
+    // This holds for the retain-inputs disposition too, and that is the point
+    // of the word "retain": the unbound rows that set its evidence class are
+    // retained for ordinary redelivery, while rows the same scan proved
+    // consumed by the adopted tail are closed out. Clearing the attribution
+    // wholesale here (as this once did) does not make the pass safer — it
+    // strands proven-consumed rows non-terminal, and redelivery then
+    // re-executes a turn the boundary just committed. Attribution is the
+    // safety property; it is enforced by the observation, which only ever
+    // attributes a row on durable run-binding evidence.
+    let input_updates = terminalize_attributed_inputs(
+        inputs.attributed,
+        &request.candidate_run_id,
+        boundary_sequence,
+    )?;
     let contributing_input_ids: Vec<InputId> = input_updates
         .iter()
         .map(|record| record.as_stored().state.input_id.clone())
@@ -649,7 +652,23 @@ async fn observe_candidate_run_inputs(
         Err(error) => return Err(error.into()),
     };
 
+    // Scan EVERY row before deciding. An unbound content row sets the
+    // evidence class, but it must not erase the rows this same scan proved
+    // bound to the candidate run: those were consumed by the very tail being
+    // adopted (durable staging bindings, or a committed boundary receipt
+    // naming them). Returning early with an empty attribution — as this did
+    // — strands them non-terminal, and the input lifecycle then rolls
+    // Staged back to Queued and re-admits them, re-executing an
+    // already-committed turn: a duplicate provider call with re-fired tool
+    // side effects. Proven-bound rows are terminalized; only genuinely
+    // unbound rows are retained for redelivery.
+    //
+    // Legacy documents are unaffected by construction: a pre-0.8.9 writer
+    // persisted its staging bindings in memory only, so its rows carry no
+    // `last_run_id` and no receipt binding, attribute nothing, and take the
+    // identical retain-everything path they always did.
     let mut attributed = Vec::new();
+    let mut unbound_content_input = false;
     for (bundle, row_digest) in rows {
         if is_terminal(bundle.seed.phase) {
             continue;
@@ -658,17 +677,18 @@ async fn observe_candidate_run_inputs(
             || receipt_bound_inputs.contains(&bundle.state.input_id.to_string());
         if !bound_to_candidate {
             if carries_redeliverable_content(bundle.state.persisted_input.as_ref()) {
-                return Ok(CandidateInputObservation {
-                    evidence: mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
-                    attributed: Vec::new(),
-                });
+                unbound_content_input = true;
             }
             continue;
         }
         attributed.push((bundle, row_digest));
     }
     Ok(CandidateInputObservation {
-        evidence: mm_dsl::DurableRecoveryInputEvidence::AllBoundOrInert,
+        evidence: if unbound_content_input {
+            mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput
+        } else {
+            mm_dsl::DurableRecoveryInputEvidence::AllBoundOrInert
+        },
         attributed,
     })
 }

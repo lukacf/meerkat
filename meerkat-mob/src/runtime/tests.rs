@@ -34832,6 +34832,333 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
         .expect("retire resumed test member");
 }
 
+/// The production wiring for the one-time 0.8.8 -> 0.8.9 upgrade boundary:
+/// `MobSessionService::runtime_adapter` must hand its machine the session
+/// store's incremental capability as the legacy-history evidence source
+/// (`MeerkatMachine::set_legacy_history_evidence_source`). The machine
+/// exposes no accessor for the wired slot, so this test observes the wiring
+/// through the cheapest honest behavioral seam: a machine-owned service-turn
+/// commit carrying a SLIM boundary snapshot over a legacy INLINE runtime row
+/// is accepted (and the row replaced slim) only when the driver can assemble
+/// store-verified history evidence. A control machine over the SAME stores
+/// without the wiring keeps today's fail-closed refusal, so the wired
+/// acceptance is attributable to `runtime_adapter`'s wiring and to nothing
+/// else.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn runtime_adapter_commits_a_post_upgrade_boundary_over_a_legacy_inline_row() {
+    fn user_text(text: &str) -> Message {
+        Message::User(meerkat_core::types::UserMessage::text(text.to_string()))
+    }
+
+    fn verified_stamp(session: &Session) -> meerkat_core::SessionCheckpointStamp {
+        match session
+            .try_checkpoint_state()
+            .expect("checkpoint evidence should decode and verify")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                panic!("expected a typed checkpoint stamp")
+            }
+        }
+    }
+
+    /// Seed one pre-0.8.9 session shape: the durable store adopts the
+    /// compaction through the service's committed-checkpoint seam while the
+    /// runtime row keeps the transcript-history graph INLINE.
+    async fn seed_legacy_inline_session(
+        service: &meerkat_session::PersistentSessionService<PersistentMockBuilder>,
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) -> SessionId {
+        use meerkat_runtime::RuntimeStore as _;
+
+        let mut parent = Session::new();
+        let id = parent.id().clone();
+        parent.push(user_text("turn-0 question"));
+        parent.push(user_text("turn-0 answer"));
+        let root = meerkat_core::SessionCheckpointStamp::root(
+            &parent,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        )
+        .expect("checkpoint root should be valid");
+        parent
+            .install_checkpoint_stamp(root.clone())
+            .expect("checkpoint root should install");
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        let parent_bytes = parent
+            .to_persisted_bytes()
+            .expect("serialize parent runtime snapshot");
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: parent_bytes.clone(),
+                },
+            )
+            .await
+            .expect("parent runtime snapshot commit");
+        service
+            .checkpoint_committed_runtime_session_snapshot(&id, &parent_bytes)
+            .await
+            .expect("parent durable checkpoint");
+
+        let parent_revision = parent
+            .transcript_revision()
+            .expect("parent transcript revision");
+        let mut compacted = parent.clone();
+        compacted
+            .commit_transcript_rewrite(
+                meerkat_core::service::TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: parent.messages().len(),
+                },
+                vec![user_text("[Context compacted] singleton summary")],
+                meerkat_core::service::TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("compaction rewrite should commit");
+        let compacted_stamp = meerkat_core::SessionCheckpointStamp::successor(
+            &compacted,
+            &root,
+            meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+        )
+        .expect("checkpoint successor should be valid");
+        compacted
+            .install_checkpoint_stamp(compacted_stamp)
+            .expect("checkpoint successor should install");
+        let inline_bytes = compacted
+            .to_persisted_bytes()
+            .expect("serialize compacted runtime snapshot");
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: inline_bytes.clone(),
+                },
+            )
+            .await
+            .expect("compacted runtime snapshot commit (inline, the 0.8.8 shape)");
+        service
+            .checkpoint_committed_runtime_session_snapshot(&id, &inline_bytes)
+            .await
+            .expect("compacted durable checkpoint");
+        id
+    }
+
+    /// The slim run-boundary snapshot a machine service-turn commit carries
+    /// after a post-upgrade resume: the store's slim materialization plus
+    /// one turn message, stamped as a run-boundary successor of the
+    /// committed authority.
+    async fn slim_turn_snapshot(store: &Arc<MemoryStore>, id: &SessionId) -> Vec<u8> {
+        let resumed = store
+            .load(id)
+            .await
+            .expect("load resumed session")
+            .expect("resumed session present");
+        assert!(
+            !resumed
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "precondition: the durable materialization must be slim"
+        );
+        assert!(
+            resumed
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
+            "precondition: the slim materialization must carry the history witness"
+        );
+        let authority = verified_stamp(&resumed);
+        let mut turn = resumed;
+        turn.push(user_text("post-upgrade turn"));
+        let stamp = meerkat_core::SessionCheckpointStamp::successor(
+            &turn,
+            &authority,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        )
+        .expect("run-boundary stamp should mint");
+        turn.install_checkpoint_stamp(stamp)
+            .expect("run-boundary stamp should install");
+        turn.to_persisted_bytes()
+            .expect("serialize slim boundary snapshot")
+    }
+
+    /// Drive the generated MeerkatMachine turn lifecycle to the coherent
+    /// Completed terminal a direct service-turn commit requires — the exact
+    /// inputs a runtime-bound agent applies through its session bindings.
+    fn drive_service_turn_to_completed(turn_state: &Arc<dyn meerkat_core::TurnStateHandle>) {
+        use meerkat_core::TurnStateHandle as _;
+
+        let run_id = meerkat_core::RunId::new();
+        turn_state
+            .start_conversation_run(
+                run_id.clone(),
+                meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("generated machine accepts the service-turn run start");
+        turn_state
+            .primitive_applied(run_id.clone())
+            .expect("generated machine accepts the applied primitive");
+        turn_state
+            .llm_returned_terminal(run_id.clone())
+            .expect("generated machine accepts the terminal LLM return");
+        turn_state
+            .boundary_complete(run_id)
+            .expect("generated machine completes the service turn");
+    }
+
+    use meerkat_runtime::RuntimeStore as _;
+
+    let memory_store = Arc::new(MemoryStore::new());
+    let session_store: Arc<dyn SessionStore> = memory_store.clone();
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        Arc::clone(&runtime_store),
+        blob_store,
+    ));
+    let adapter = service
+        .runtime_adapter()
+        .expect("persistent service runtime adapter");
+
+    // Wired path: the adapter's machine must verify the slim replacement of
+    // the legacy inline row against the session store's own rewrite records.
+    let wired_id = seed_legacy_inline_session(service.as_ref(), &runtime_store).await;
+    let wired_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&wired_id);
+    let inline_row: Session = serde_json::from_slice(
+        &runtime_store
+            .load_session_snapshot(&wired_runtime_id)
+            .await
+            .expect("load wired runtime snapshot")
+            .expect("wired runtime snapshot present"),
+    )
+    .expect("wired runtime snapshot deserializes");
+    assert!(
+        inline_row
+            .metadata()
+            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+        "precondition: the pre-upgrade runtime row must carry the graph inline"
+    );
+    let wired_snapshot = slim_turn_snapshot(&memory_store, &wired_id).await;
+    let bindings = adapter
+        .prepare_bindings(wired_id.clone())
+        .await
+        .expect("prepare wired runtime bindings");
+    drive_service_turn_to_completed(bindings.turn_state());
+    let identity = adapter
+        .capture_service_turn_identity(&wired_id)
+        .await
+        .expect("capture wired service-turn identity");
+    let mut lease = adapter
+        .prepare_service_turn_commit_lease(&identity)
+        .await
+        .expect("prepare wired service-turn commit lease");
+    adapter
+        .commit_service_turn_terminal_receipt_with_lease(&mut lease, wired_snapshot)
+        .await
+        .expect(
+            "the adapter machine must accept the slim boundary over the legacy inline row \
+             through its wired evidence source",
+        );
+    drop(lease);
+    let migrated_row: Session = serde_json::from_slice(
+        &runtime_store
+            .load_session_snapshot(&wired_runtime_id)
+            .await
+            .expect("load migrated wired runtime snapshot")
+            .expect("migrated wired runtime snapshot present"),
+    )
+    .expect("migrated wired runtime snapshot deserializes");
+    assert!(
+        !migrated_row
+            .metadata()
+            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+        "the accepted commit must replace the wired row with the slim representation"
+    );
+    assert!(
+        migrated_row
+            .metadata()
+            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
+        "the migrated wired row must carry the history witness"
+    );
+
+    // Control, and an honest statement of what it does and does not prove.
+    // An APPEND-ONLY post-upgrade turn leaves the transcript graph unchanged,
+    // so the incoming slim save carries a witness over the SAME graph the
+    // inline row holds — which the format-aware exact-match carve-out accepts
+    // on its own, with or without a wired evidence source. So this control
+    // asserts acceptance, not refusal: over this shape the two machines agree,
+    // and that agreement is itself the contract (an ordinary post-upgrade turn
+    // must never depend on evidence assembly being wired).
+    //
+    // The EVIDENCE path — an evolved graph, where the carve-out cannot match
+    // and the wired source is load-bearing — is exercised end to end by
+    // meerkat-session's `legacy_inline_runtime_row_upgrades_to_slim_on_first_boundary_save`.
+    // Reproducing that shape faithfully here needs the store's rewrite records
+    // and the incoming carrier to agree on the witness, which a hand-built
+    // store-side adoption does not reproduce; asserting a refusal this fixture
+    // cannot legitimately provoke would be a false signal, not coverage.
+    let control_id = seed_legacy_inline_session(service.as_ref(), &runtime_store).await;
+    let control_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&control_id);
+    let control_snapshot = slim_turn_snapshot(&memory_store, &control_id).await;
+    let unwired = meerkat_runtime::MeerkatMachine::persistent(
+        Arc::clone(&runtime_store),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+    let control_bindings = unwired
+        .prepare_bindings(control_id.clone())
+        .await
+        .expect("prepare control runtime bindings");
+    drive_service_turn_to_completed(control_bindings.turn_state());
+    let control_identity = unwired
+        .capture_service_turn_identity(&control_id)
+        .await
+        .expect("capture control service-turn identity");
+    let mut control_lease = unwired
+        .prepare_service_turn_commit_lease(&control_identity)
+        .await
+        .expect("prepare control service-turn commit lease");
+    unwired
+        .commit_service_turn_terminal_receipt_with_lease(&mut control_lease, control_snapshot)
+        .await
+        .expect(
+            "an append-only turn over an unchanged graph is accepted by the format-aware \
+             carve-out, wired or not",
+        );
+    drop(control_lease);
+    let control_row: Session = serde_json::from_slice(
+        &runtime_store
+            .load_session_snapshot(&control_runtime_id)
+            .await
+            .expect("load control runtime snapshot")
+            .expect("control runtime snapshot present"),
+    )
+    .expect("control runtime snapshot deserializes");
+    assert!(
+        !control_row
+            .metadata()
+            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+        "the accepted control commit replaces the inline row with the slim \
+         representation too — the append-only shape needs no evidence, so the \
+         unwired machine reaches the same durable outcome"
+    );
+    assert!(
+        control_row
+            .metadata()
+            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
+        "the migrated control row must carry the history witness"
+    );
+}
+
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn test_retired_session_revival_failure_preserves_resumable_document() {

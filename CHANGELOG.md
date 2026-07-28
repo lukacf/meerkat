@@ -13,6 +13,8 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-07-28
+
 ### Fixed
 
 - **0.8.8 → 0.8.9 upgrade boundary: legacy durable-tail adoption.** A clean
@@ -52,11 +54,40 @@ via cargo-semver-checks against the published baselines).
   machine-lifecycle record, and input terminalization stay one
   all-or-nothing transaction; the migration adds no crash window).
 
+- **Recovered boundaries no longer strand proven-consumed inputs.** The
+  durable-tail observation returned early on the first unbound input row,
+  discarding the rows the same scan had already proved bound to the recovered
+  run (durable staging bindings, or a committed boundary receipt naming
+  them). Those rows stayed non-terminal, and the input lifecycle then rolled
+  Staged back to Queued and re-admitted them — re-executing a turn the
+  boundary had just committed, with a duplicate provider call and re-fired
+  tool side effects. The scan now completes before deciding: proven-bound
+  rows are terminalized, genuinely unbound rows are retained for ordinary
+  redelivery. Pre-0.8.9 documents are unaffected by construction (their
+  staging bindings never reached disk, so they attribute nothing).
+- **The upgrade-boundary evidence source is wired on every surface.** Only
+  mob hosts wired it; the facade's `PersistenceBundle` — the production
+  machine for CLI, REST and RPC — constructed its `MeerkatMachine` without
+  it, so machine-owned boundary commits on those surfaces fell back to the
+  evidence-less default and refused the first slim save over a legacy inline
+  row. Hosts whose session store is not incremental keep the previous
+  fail-closed behavior.
+- **A transient probe failure no longer disables the upgrade path.** The
+  driver's one-shot inline-row hint cached `false` when the probe's snapshot
+  load failed, permanently disabling evidence assembly for that driver's
+  lifetime; the hint now stays unresolved so the next commit re-probes.
+
 ### Upgrade notes
 
 - Identities with an in-flight input at shutdown replay it once after
   upgrade — the same behavior as a pre-upgrade restart. Expect one
   duplicate reply per such identity on upgrade day.
+- **Migrating a session with a large retained transcript history is
+  expensive and should be planned.** The head-canonical conversion
+  re-materializes every retained revision as strand rows; a production
+  session with 98 retained revisions over a 371-message transcript produced
+  ~16.7k rows and took minutes. Sessions whose durable document is dominated
+  by retained history should be pruned before conversion, not after.
 
 ## [0.8.9] - 2026-07-27
 

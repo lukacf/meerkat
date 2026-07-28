@@ -21,7 +21,7 @@ use crate::session::{
 use crate::time_compat::SystemTime;
 use crate::types::Message;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Immutable rewrite commit that advances a session transcript head.
@@ -64,6 +64,273 @@ pub struct TranscriptRevisionBody {
 struct SchemaSystemTime {
     secs_since_epoch: u64,
     nanos_since_epoch: u32,
+}
+
+/// Durable form of one retained revision inside a graph's revision chain.
+///
+/// The first entry of the chain is the ANCHOR and carries `messages` in full.
+/// Every later entry carries `rebase` instead: the inverse splice that
+/// reconstructs it from an entry that appears earlier in the same array. A
+/// retained revision therefore costs the bytes of the edit that distinguishes
+/// it from its neighbour, not a second copy of the whole transcript — the
+/// difference between a 371-message transcript retaining 98 revisions as 98
+/// full documents and retaining them as one document plus 98 splices.
+///
+/// Both spellings are accepted on decode. `messages` is not reserved to the
+/// anchor: a producer that hands the array a self-contained body (the store's
+/// evidence-rebuild paths do) stays readable, and a chain whose bases are all
+/// resolvable decodes identically either way.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RevisionEntryWire {
+    revision: String,
+    #[serde(default)]
+    parent_revision: Option<String>,
+    created_at: SystemTime,
+    #[serde(default)]
+    messages: Option<Vec<Message>>,
+    #[serde(default)]
+    rebase: Option<RevisionRebaseWire>,
+}
+
+/// The inverse splice that reconstructs one retained revision from another.
+///
+/// `insert` replaces the `removed` messages of `base` starting at index `at`.
+/// The shared prefix (`base[..at]`) and shared suffix (`base[at + removed..]`)
+/// are addressed by position and never re-serialized.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RevisionRebaseWire {
+    base: String,
+    at: usize,
+    removed: usize,
+    #[serde(default)]
+    insert: Vec<Message>,
+}
+
+/// Borrowed serialization mirror of [`RevisionEntryWire`].
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RevisionEntryRef<'a> {
+    revision: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_revision: Option<&'a str>,
+    created_at: &'a SystemTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages: Option<&'a [Message]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rebase: Option<RevisionRebaseRef<'a>>,
+}
+
+/// Borrowed serialization mirror of [`RevisionRebaseWire`].
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RevisionRebaseRef<'a> {
+    base: &'a str,
+    at: usize,
+    removed: usize,
+    insert: &'a [Message],
+}
+
+/// Published shape of one entry of the durable revision chain.
+///
+/// EXACTLY ONE of `messages` and `rebase` is present on every entry. The first
+/// entry of the array is the chain anchor and carries `messages`; every later
+/// entry carries `rebase` and is reconstructed by splicing it onto an entry
+/// that appeared earlier in the same array. A reader that materializes the
+/// array front to back always has the base in hand before it is referenced.
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename = "TranscriptRevisionEntry")]
+struct SchemaRevisionEntry {
+    revision: String,
+    parent_revision: Option<String>,
+    created_at: SchemaSystemTime,
+    /// The revision's full ordered messages. Present on the chain anchor.
+    messages: Option<Vec<serde_json::Value>>,
+    /// The inverse splice reconstructing this revision. Present on every
+    /// entry after the anchor.
+    rebase: Option<SchemaRevisionRebase>,
+}
+
+/// Published shape of one inverse splice.
+///
+/// `insert` replaces the `removed` messages of the entry named by `base`,
+/// starting at index `at`. The shared prefix and suffix are addressed by
+/// position and never carried.
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename = "TranscriptRevisionRebase")]
+struct SchemaRevisionRebase {
+    base: String,
+    at: usize,
+    removed: usize,
+    insert: Vec<serde_json::Value>,
+}
+
+/// The narrowest splice that turns `base` into `target`.
+///
+/// Returns `(at, removed, insert)` such that
+/// `base[..at] ++ insert ++ base[at + removed..] == target`, with `insert`
+/// borrowed straight out of `target`. Shared leading and trailing messages are
+/// elided, so an edit that touches one message carries one message however
+/// long the transcript is — including the pathological index-0 rewrite, which
+/// shares no prefix at all but shares the entire tail.
+fn minimal_splice<'a>(base: &[Message], target: &'a [Message]) -> (usize, usize, &'a [Message]) {
+    let at = base
+        .iter()
+        .zip(target.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = base[at..]
+        .iter()
+        .rev()
+        .zip(target[at..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    (
+        at,
+        base.len() - at - suffix,
+        &target[at..target.len() - suffix],
+    )
+}
+
+/// Encode a retained-body list as an anchor plus a chain of inverse splices.
+///
+/// Every entry after the first rebases onto an entry that already appeared, so
+/// a decoder resolves the chain in one forward pass. The base preference —
+/// an identical revision already emitted, else this body's lineage parent,
+/// else the immediately preceding entry — only decides how SMALL the splice
+/// is. Correctness does not depend on it: [`minimal_splice`] is computed from
+/// the two message vectors themselves, so any base whatsoever yields a splice
+/// that reconstructs the body exactly.
+fn encode_revision_chain(revisions: &[TranscriptRevisionBody]) -> Vec<RevisionEntryRef<'_>> {
+    let mut emitted: HashMap<&str, usize> = HashMap::with_capacity(revisions.len());
+    let mut entries = Vec::with_capacity(revisions.len());
+    for (index, body) in revisions.iter().enumerate() {
+        let base_index = if index == 0 {
+            None
+        } else if let Some(&same) = emitted.get(body.revision.as_str()) {
+            Some(same)
+        } else if let Some(&parent) = body
+            .parent_revision
+            .as_deref()
+            .and_then(|parent| emitted.get(parent))
+        {
+            Some(parent)
+        } else {
+            Some(index - 1)
+        };
+        let (messages, rebase) = match base_index.map(|base_index| &revisions[base_index]) {
+            Some(base) => {
+                let (at, removed, insert) = minimal_splice(&base.messages, &body.messages);
+                (
+                    None,
+                    Some(RevisionRebaseRef {
+                        base: &base.revision,
+                        at,
+                        removed,
+                        insert,
+                    }),
+                )
+            }
+            None => (Some(body.messages.as_slice()), None),
+        };
+        emitted.entry(body.revision.as_str()).or_insert(index);
+        entries.push(RevisionEntryRef {
+            revision: &body.revision,
+            parent_revision: body.parent_revision.as_deref(),
+            created_at: &body.created_at,
+            messages,
+            rebase,
+        });
+    }
+    entries
+}
+
+/// Materialize a decoded revision chain back into full retained bodies.
+///
+/// Returns the bodies together with whether any entry arrived as a splice —
+/// the pre-parent-pointer lineage inference below is a property of the
+/// all-full legacy spelling only, and must never fire on a chain whose
+/// parent pointers were written explicitly.
+fn decode_revision_chain<E>(
+    entries: Vec<RevisionEntryWire>,
+) -> Result<(Vec<TranscriptRevisionBody>, bool), E>
+where
+    E: serde::de::Error,
+{
+    let mut materialized: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+    let mut bodies: Vec<TranscriptRevisionBody> = Vec::with_capacity(entries.len());
+    let mut spliced = false;
+    for entry in entries {
+        let messages = match (entry.messages, entry.rebase) {
+            (Some(messages), None) => messages,
+            (None, Some(rebase)) => {
+                spliced = true;
+                let base = materialized
+                    .get(&rebase.base)
+                    .and_then(|index| bodies.get(*index))
+                    .ok_or_else(|| {
+                        E::custom(format!(
+                            "transcript revision body {} rebases on {}, which no \
+                             earlier retained body materializes",
+                            entry.revision, rebase.base
+                        ))
+                    })?
+                    .messages
+                    .as_slice();
+                let end = rebase
+                    .at
+                    .checked_add(rebase.removed)
+                    .filter(|end| *end <= base.len())
+                    .ok_or_else(|| {
+                        E::custom(format!(
+                            "transcript revision body {} splices {} messages at \
+                             index {} of its {}-message base {}",
+                            entry.revision,
+                            rebase.removed,
+                            rebase.at,
+                            base.len(),
+                            rebase.base
+                        ))
+                    })?;
+                let mut messages =
+                    Vec::with_capacity(base.len() - rebase.removed + rebase.insert.len());
+                messages.extend_from_slice(&base[..rebase.at]);
+                messages.extend(rebase.insert);
+                messages.extend_from_slice(&base[end..]);
+                messages
+            }
+            (Some(_), Some(_)) => {
+                return Err(E::custom(format!(
+                    "transcript revision body {} carries both a full message \
+                     vector and a rebase splice",
+                    entry.revision
+                )));
+            }
+            (None, None) => {
+                return Err(E::custom(format!(
+                    "transcript revision body {} carries neither a full message \
+                     vector nor a rebase splice",
+                    entry.revision
+                )));
+            }
+        };
+        let position = bodies.len();
+        materialized
+            .entry(entry.revision.clone())
+            .or_insert(position);
+        bodies.push(TranscriptRevisionBody {
+            revision: entry.revision,
+            parent_revision: entry.parent_revision,
+            messages,
+            created_at: entry.created_at,
+        });
+    }
+    Ok((bodies, spliced))
 }
 
 /// Self-contained append-only transcript rewrite record.
@@ -129,14 +396,20 @@ impl TranscriptRewriteRecord {
 }
 
 /// Typed session-local transcript revision graph state.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+///
+/// The typed value carries every retained body in full; the DURABLE form does
+/// not. Serialization emits `revisions` as an anchor plus a chain of inverse
+/// splices ([`encode_revision_chain`]) and deserialization materializes the
+/// full bodies back ([`decode_revision_chain`]), so retaining a revision costs
+/// the bytes of the edit that distinguishes it rather than a second copy of
+/// the transcript. Content addressing is unaffected: a materialized body is
+/// still verified against its revision string by
+/// [`validate_transcript_history_state`], and a splice that reconstructs the
+/// wrong messages fails exactly that check.
+#[derive(Debug, Clone)]
 pub struct TranscriptHistoryState {
     pub head: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<TranscriptRewriteCommit>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<TranscriptRevisionBody>,
     /// Digest-format generation of the revision strings. Documents stamped
     /// `>= 2` were written by the content-addressed digest format, so decode
@@ -144,16 +417,81 @@ pub struct TranscriptHistoryState {
     /// absent/0 means unknown provenance and the probe runs once — the next
     /// save persists the marker. A compatibility convenience, not an
     /// integrity boundary (checkpoint stamps own integrity).
-    #[serde(default, skip_serializing_if = "digest_format_is_unknown")]
     pub digest_format: u32,
 }
 
-fn digest_format_is_unknown(format: &u32) -> bool {
-    *format == 0
+/// Published shape of the durable transcript graph.
+///
+/// [`TranscriptHistoryState`] serializes through a hand-written impl, so a
+/// DERIVED schema over the typed struct would advertise `revisions` as an
+/// array of full [`TranscriptRevisionBody`] objects — bytes this writer no
+/// longer produces. Deriving a schema over a custom `Serialize` is exactly how
+/// a published schema comes to describe behaviour the code does not have, so
+/// the schema is taken from this mirror of the real wire form and
+/// [`TranscriptHistoryState`]'s `JsonSchema` forwards to it.
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename = "TranscriptHistoryState")]
+struct SchemaTranscriptHistoryState {
+    head: String,
+    #[serde(default)]
+    commits: Vec<TranscriptRewriteCommit>,
+    /// Chain anchor followed by inverse splices; see [`SchemaRevisionEntry`].
+    /// Omitted entirely when the graph retains nothing.
+    #[serde(default)]
+    revisions: Vec<SchemaRevisionEntry>,
+    /// Omitted when unknown (0).
+    #[serde(default)]
+    digest_format: u32,
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for TranscriptHistoryState {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TranscriptHistoryState".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <SchemaTranscriptHistoryState as schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
+fn digest_format_is_unknown(format: u32) -> bool {
+    format == 0
 }
 
 /// The digest-format generation minted by [`transcript_messages_digest`].
 pub(crate) const TRANSCRIPT_DIGEST_FORMAT_CURRENT: u32 = 2;
+
+impl Serialize for TranscriptHistoryState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+
+        let emit_commits = !self.commits.is_empty();
+        let emit_revisions = !self.revisions.is_empty();
+        let emit_digest_format = !digest_format_is_unknown(self.digest_format);
+        let fields = 1
+            + usize::from(emit_commits)
+            + usize::from(emit_revisions)
+            + usize::from(emit_digest_format);
+        let mut wire = serializer.serialize_struct("TranscriptHistoryState", fields)?;
+        wire.serialize_field("head", &self.head)?;
+        if emit_commits {
+            wire.serialize_field("commits", &self.commits)?;
+        }
+        if emit_revisions {
+            wire.serialize_field("revisions", &encode_revision_chain(&self.revisions))?;
+        }
+        if emit_digest_format {
+            wire.serialize_field("digest_format", &self.digest_format)?;
+        }
+        wire.end()
+    }
+}
 
 impl<'de> Deserialize<'de> for TranscriptHistoryState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -167,23 +505,27 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
             #[serde(default)]
             commits: Vec<TranscriptRewriteCommit>,
             #[serde(default)]
-            revisions: Vec<TranscriptRevisionBody>,
+            revisions: Vec<RevisionEntryWire>,
             #[serde(default)]
             digest_format: u32,
         }
         let wire = Wire::deserialize(deserializer)?;
+        let (revisions, spliced) = decode_revision_chain::<D::Error>(wire.revisions)?;
         let mut state = TranscriptHistoryState {
             head: wire.head,
             commits: wire.commits,
-            revisions: wire.revisions,
+            revisions,
             digest_format: wire.digest_format,
         };
         // Pre-parent-pointer v1 snapshots serialized each body as
         // {created_at,messages,revision}. When every non-root body lacks a
         // parent, the append order is the only lineage the old format
         // carried; reconstruct that exact linear order before digest healing
-        // and full validation.
-        if state.revisions.len() > 1
+        // and full validation. A spliced chain writes its parent pointers
+        // explicitly, so their absence there is a fact about lineage, not a
+        // gap the append order may fill.
+        if !spliced
+            && state.revisions.len() > 1
             && state
                 .revisions
                 .iter()

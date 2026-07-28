@@ -24,7 +24,27 @@
 //! that entry and never aborts the sweep (contrast
 //! `list_realm_manifests_in`, which fails the whole listing on one corrupt
 //! manifest).
+//!
+//! # Storage census
+//!
+//! [`census_storage_footprint`] measures what each session actually costs on
+//! disk — durable bytes against live-transcript bytes, the
+//! `session_strand_messages` pool split into live prefixes and retained
+//! copies (with `session_strand_links` supersessions counted so a
+//! spliced-away strand still shows up as a retained revision), and the
+//! frozen `sessions.session_json` archives behind head rows.
+//! Byte counts come from SQL `LENGTH(CAST(<column> AS BLOB))` over the
+//! durable columns (byte-exact for TEXT-or-BLOB storage) or, for a legacy
+//! inline document, from the raw serialized JSON — never from a typed
+//! re-serialization, which would report bytes the disk does not hold.
+//!
+//! The census is fail-closed: a row it cannot measure is counted, excluded
+//! from every aggregate, and reported as
+//! [`FINDING_STORAGE_CENSUS_UNMEASURED`]. It never reports an unmeasured
+//! pool as healthy, and every message names the tables it measured so the
+//! report cannot be read as covering a pool it never touched.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,8 +55,8 @@ use meerkat_core::storage_diagnostics::{
     StorageFinding, StorageInventoryEntry, StorageMigrator,
 };
 use meerkat_core::{
-    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, Session,
-    SessionCheckpointMetadataState, SessionId, SystemNoticeBlock, sanitize_realm_id,
+    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+    Session, SessionCheckpointMetadataState, SessionId, SystemNoticeBlock, sanitize_realm_id,
     session_checkpoint_metadata_state,
 };
 use meerkat_sqlite::JsonColumnBytes;
@@ -113,11 +133,53 @@ pub const FINDING_STATE_ROOT_UNREADABLE: &str = "state-root-unreadable";
 /// markers are normal first-start coordination; stale ones are crash
 /// leftovers, removed by age-based takeover on the next first start.
 pub const FINDING_FIRST_START_MARKER: &str = "first-start-marker";
+/// A session whose durable storage is disproportionate to the live
+/// transcript it serves (retained transcript history dominates the
+/// document).
+pub const FINDING_TRANSCRIPT_HISTORY_OVERSIZED: &str = "transcript-history-oversized";
+/// The `session_strand_messages` pool, split into the live head-strand
+/// prefixes and the retained non-live transcript copies. Reported even when
+/// healthy: an unmeasured pool is how 74.9x inflation went unnoticed.
+pub const FINDING_STRAND_DUPLICATION_RECLAIMABLE: &str = "strand-duplication-reclaimable";
+/// `sessions.session_json` bytes retained for sessions that already have a
+/// `session_heads` row (frozen archives the session store never reads).
+pub const FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE: &str = "frozen-blob-archive-reclaimable";
+/// Durable rows or documents the storage census could not measure. The
+/// footprint findings exclude them, so the report says *unknown* instead of
+/// implying the unmeasured bytes are healthy.
+pub const FINDING_STORAGE_CENSUS_UNMEASURED: &str = "storage-census-unmeasured";
 
 /// Cap on individually reported dangling blob references per database; the
 /// remainder is summarized in one finding so doctor stays usable on huge
 /// realms.
 const DANGLING_BLOB_REPORT_CAP: usize = 50;
+
+/// Warn threshold for one session's durable bytes ÷ live transcript bytes.
+///
+/// A session that stores each live message once sits at ~1.0 (a small head
+/// row plus one strand copy). Legitimate retention is bounded: one adopted
+/// rewrite retains at most one extra full transcript (~2x), and a handful
+/// of compactions add a few x more. The production regression this census
+/// exists to catch ran at 63.8x for one identity and 74.9x fleet-wide
+/// (worst session 118x), so 4.0 sits well above ordinary retention and far
+/// below every observed defect value.
+const TRANSCRIPT_HISTORY_RATIO_WARN: f64 = 4.0;
+
+/// Floor under which no footprint finding is raised, whatever the ratio:
+/// a small session's fixed head/metadata overhead can dwarf a two-message
+/// transcript with nothing wrong, and there is no operator action worth
+/// taking below a mebibyte of reclaimable bytes.
+const STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES: u64 = 1 << 20;
+
+/// Warn threshold for the strand pool as a whole: at 2.0 the pool holds as
+/// many retained bytes as live ones, i.e. duplication rather than
+/// conversation has become the majority of the durable transcript store.
+const STRAND_DUPLICATION_RATIO_WARN: f64 = 2.0;
+
+/// Cap on individually reported oversized sessions per database; the
+/// remainder is summarized (same discipline as
+/// [`DANGLING_BLOB_REPORT_CAP`], lower because each line is verbose).
+const TRANSCRIPT_HISTORY_REPORT_CAP: usize = 20;
 
 /// Doctor's staleness horizon for first-start reservation markers: younger
 /// markers are live coordination (info), older ones are crash leftovers
@@ -709,11 +771,15 @@ fn diagnose_realm_dir(
                 ) {
                     Ok(conn) => {
                         // One deferred read transaction so the checkpoint
-                        // census and the blob sweep observe a single SQLite
-                        // snapshot: a live legacy-to-strand migration landing
-                        // between separate autocommit queries could otherwise
-                        // move a session out of both views. The first SELECT
-                        // inside the transaction establishes the snapshot.
+                        // census, the blob sweep and the storage-footprint
+                        // census observe a single SQLite snapshot: a live
+                        // legacy-to-strand migration landing between separate
+                        // autocommit queries could otherwise move a session
+                        // out of both views (or let the footprint census
+                        // charge one session both its strand rows and the
+                        // blob row those rows were just built from). The
+                        // first SELECT inside the transaction establishes the
+                        // snapshot.
                         match conn.unchecked_transaction() {
                             Ok(tx) => {
                                 census_checkpoint_evidence(&tx, &sessions_db, realm, diagnosis);
@@ -724,6 +790,7 @@ fn diagnose_realm_dir(
                                     realm,
                                     diagnosis,
                                 );
+                                census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
                             }
                             Err(err) => {
                                 diagnosis.findings.push(
@@ -1230,6 +1297,818 @@ fn sweep_dangling_blobs(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Storage footprint census: durable bytes vs live conversation.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The head row's classification key for the strand pass.
+#[derive(Debug)]
+struct HeadKey {
+    /// `session_heads.strand`: the strand carrying the live transcript.
+    strand: String,
+    /// `session_heads.message_count`: rows `0..message_count` of that strand
+    /// are the live transcript; everything else is retained history.
+    message_count: u64,
+}
+
+/// One session's measured durable footprint, in bytes actually stored.
+#[derive(Debug, Default)]
+struct SessionFootprint {
+    /// Head-row identity. `None` means no usable `session_heads` row, so the
+    /// session is a legacy inline document (or its head row is unmeasurable).
+    head: Option<HeadKey>,
+    /// `session_heads.head_json` + `session_heads.metadata_json`.
+    head_bytes: u64,
+    /// Every `session_strand_messages` row for this session.
+    strand_bytes: u64,
+    /// The live head-strand prefix — the transcript a resume actually loads.
+    live_strand_bytes: u64,
+    /// Distinct strands carrying at least one measured row.
+    strands: u64,
+    /// `session_rewrites.commit_json`.
+    rewrite_bytes: u64,
+    /// `session_rewrites` rows.
+    rewrite_rows: u64,
+    /// `sessions.session_json`: the live document for a legacy session, a
+    /// frozen archive for a head-canonical one. Durable either way.
+    blob_bytes: u64,
+    /// Legacy inline document only: the serialized live `messages` array.
+    inline_live_bytes: u64,
+    /// Legacy inline document only: retained revision bodies in the inline
+    /// transcript-history graph.
+    inline_revisions: u64,
+    /// Legacy inline document only: rewrite commits in that graph.
+    inline_commits: u64,
+    /// Some durable part of this session could not be measured, so it is
+    /// excluded from every ratio finding (reported unknown, never healthy).
+    unmeasured: bool,
+}
+
+impl SessionFootprint {
+    /// Head-canonical sessions are measured across the head/strand/rewrite
+    /// tables; the rest are legacy inline documents.
+    fn head_canonical(&self) -> bool {
+        self.head.is_some()
+    }
+
+    /// Every durable byte the session owns, across every measured table.
+    fn document_bytes(&self) -> u64 {
+        self.head_bytes
+            .saturating_add(self.strand_bytes)
+            .saturating_add(self.rewrite_bytes)
+            .saturating_add(self.blob_bytes)
+    }
+
+    /// The transcript a resume loads — the only bytes the conversation needs.
+    fn live_bytes(&self) -> u64 {
+        if self.head_canonical() {
+            self.live_strand_bytes
+        } else {
+            self.inline_live_bytes
+        }
+    }
+
+    fn reclaimable_bytes(&self) -> u64 {
+        self.document_bytes().saturating_sub(self.live_bytes())
+    }
+
+    /// Retained revisions besides the live one: one per non-head strand for
+    /// a head-canonical session, one per retained body for an inline one.
+    fn retained_revisions(&self) -> u64 {
+        if self.head_canonical() {
+            self.strands.saturating_sub(1)
+        } else {
+            self.inline_revisions
+        }
+    }
+
+    fn commits(&self) -> u64 {
+        if self.head_canonical() {
+            self.rewrite_rows
+        } else {
+            self.inline_commits
+        }
+    }
+
+    /// Warn-worthy: fully measured, at least [the floor] of reclaimable
+    /// bytes, and past the ratio. A session with no live transcript at all
+    /// cannot have a ratio, so mass alone decides there.
+    ///
+    /// [the floor]: STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES
+    fn is_oversized(&self) -> bool {
+        if self.unmeasured || self.reclaimable_bytes() < STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES {
+            return false;
+        }
+        let live = self.live_bytes();
+        live == 0 || self.document_bytes() as f64 / live as f64 >= TRANSCRIPT_HISTORY_RATIO_WARN
+    }
+}
+
+/// The `session_strand_messages` pool, classified against the head rows.
+#[derive(Debug, Default)]
+struct StrandPoolCensus {
+    sessions: u64,
+    rows: u64,
+    bytes: u64,
+    live_rows: u64,
+    live_bytes: u64,
+    retained_rows: u64,
+    retained_bytes: u64,
+    /// Rows whose session has no usable head row: real durable bytes that
+    /// cannot be classified live-or-retained, so they are never counted as
+    /// either.
+    unclassified_rows: u64,
+    unclassified_bytes: u64,
+    /// `session_strand_links` supersession rows. Counted, not byte-measured:
+    /// the row carries no JSON payload, only the splice span that lets a
+    /// superseded strand stop storing a whole transcript copy.
+    links: u64,
+}
+
+/// Frozen `sessions.session_json` rows behind a `session_heads` row.
+#[derive(Debug, Default)]
+struct FrozenArchiveCensus {
+    sessions: u64,
+    bytes: u64,
+    /// Rows in a legacy `runtime_session_snapshots` table sharing this
+    /// database file (see [`legacy_runtime_snapshot_rows`]).
+    legacy_runtime_snapshots: u64,
+}
+
+/// What the census could not measure (fail-closed accounting).
+#[derive(Debug, Default)]
+struct CensusGaps {
+    /// Durable rows whose length/count columns did not read back as a
+    /// non-negative integer.
+    rows: u64,
+    /// Legacy inline documents whose JSON did not parse far enough to split
+    /// live transcript from retained history.
+    documents: u64,
+    /// Pools whose census query failed outright (each also reported as
+    /// [`FINDING_DATABASE_UNREADABLE`]).
+    pools: Vec<&'static str>,
+}
+
+impl CensusGaps {
+    fn is_empty(&self) -> bool {
+        self.rows == 0 && self.documents == 0 && self.pools.is_empty()
+    }
+
+    /// Record a pool the census could not query at all, and report it with
+    /// the same code the rest of doctor uses for an unreadable database.
+    fn pool_unreadable(
+        &mut self,
+        pool: &'static str,
+        error: &rusqlite::Error,
+        db_path: &Path,
+        realm: &str,
+        diagnosis: &mut StorageDiagnosis,
+    ) {
+        self.pools.push(pool);
+        diagnosis.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Error,
+                FINDING_DATABASE_UNREADABLE,
+                format!("storage census query over `{pool}` failed: {error}"),
+            )
+            .with_path(db_path.to_path_buf())
+            .with_realm(realm),
+        );
+    }
+
+    /// Suffix every aggregate message carries when the census is partial, so
+    /// no number in this report can be read as complete when it is not.
+    fn exclusion_note(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        format!(
+            " — partial census: {} unmeasurable row(s), {} unmeasurable document(s) and {} \
+             unreadable pool(s) are excluded from these numbers (see \
+             `{FINDING_STORAGE_CENSUS_UNMEASURED}`)",
+            self.rows,
+            self.documents,
+            self.pools.len()
+        )
+    }
+}
+
+/// A durable count/length column read fail-closed: NULL or negative is not a
+/// measurement.
+fn measured_u64(value: Option<i64>) -> Option<u64> {
+    value.and_then(|value| u64::try_from(value).ok())
+}
+
+/// Byte counts as an operator reads them.
+fn format_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    const KIB: u64 = 1 << 10;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// `durable ÷ live`, or an explicit "no live bytes" — never a fabricated
+/// ratio over a zero denominator.
+fn format_ratio(numerator: u64, denominator: u64) -> String {
+    if denominator == 0 {
+        return "n/a, no live bytes measured".to_string();
+    }
+    format!("{:.1}x", numerator as f64 / denominator as f64)
+}
+
+/// Read-only storage-footprint census over one sqlite session database (see
+/// the module docs). Callers pass a connection holding the per-database read
+/// snapshot, so the passes below agree with each other and with the
+/// checkpoint census and blob sweep that share it.
+fn census_storage_footprint(
+    conn: &Connection,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let mut sessions: BTreeMap<String, SessionFootprint> = BTreeMap::new();
+    let mut strand_pool = StrandPoolCensus::default();
+    let mut archives = FrozenArchiveCensus::default();
+    let mut gaps = CensusGaps::default();
+
+    // Order matters: the head pass establishes the classification key the
+    // strand and blob passes need. A pool that fails is reported and skipped;
+    // the rest of the census still runs and says so.
+    if let Err(error) = census_head_rows(conn, &mut sessions, &mut gaps) {
+        gaps.pool_unreadable("session_heads", &error, db_path, realm, diagnosis);
+    }
+    if let Err(error) = census_strand_rows(conn, &mut sessions, &mut strand_pool, &mut gaps) {
+        gaps.pool_unreadable("session_strand_messages", &error, db_path, realm, diagnosis);
+    }
+    if let Err(error) = census_strand_links(conn, &mut sessions, &mut strand_pool) {
+        gaps.pool_unreadable("session_strand_links", &error, db_path, realm, diagnosis);
+    }
+    if let Err(error) = census_rewrite_rows(conn, &mut sessions, &mut gaps) {
+        gaps.pool_unreadable("session_rewrites", &error, db_path, realm, diagnosis);
+    }
+    if let Err(error) = census_blob_rows(conn, &mut sessions, &mut archives, &mut gaps) {
+        gaps.pool_unreadable("sessions", &error, db_path, realm, diagnosis);
+    }
+
+    report_oversized_sessions(&sessions, &gaps, db_path, realm, diagnosis);
+    report_strand_pool(&strand_pool, &gaps, db_path, realm, diagnosis);
+    report_frozen_archives(&archives, &gaps, db_path, realm, diagnosis);
+    report_census_gaps(&gaps, db_path, realm, diagnosis);
+}
+
+/// Head rows: the classification key (live strand + prefix length) and the
+/// head row's own durable bytes.
+fn census_head_rows(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    gaps: &mut CensusGaps,
+) -> Result<(), rusqlite::Error> {
+    if !table_exists(conn, "session_heads")? {
+        return Ok(());
+    }
+    let mut statement = conn.prepare(
+        "SELECT session_id, strand, message_count, \
+         LENGTH(CAST(head_json AS BLOB)), LENGTH(CAST(metadata_json AS BLOB)) \
+         FROM session_heads ORDER BY session_id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let strand: Option<String> = row.get(1)?;
+        let message_count = measured_u64(row.get(2)?);
+        let head_json = measured_u64(row.get(3)?);
+        let metadata_json = measured_u64(row.get(4)?);
+        let footprint = sessions.entry(session_id).or_default();
+        match (strand, message_count) {
+            (Some(strand), Some(message_count)) => {
+                footprint.head = Some(HeadKey {
+                    strand,
+                    message_count,
+                });
+            }
+            _ => {
+                footprint.unmeasured = true;
+                gaps.rows += 1;
+            }
+        }
+        match (head_json, metadata_json) {
+            (Some(head_json), Some(metadata_json)) => {
+                footprint.head_bytes = head_json.saturating_add(metadata_json);
+            }
+            _ => {
+                footprint.unmeasured = true;
+                gaps.rows += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strand rows: the durable transcript pool, split per session into the live
+/// head-strand prefix and the retained copies every rewrite adds.
+fn census_strand_rows(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    pool: &mut StrandPoolCensus,
+    gaps: &mut CensusGaps,
+) -> Result<(), rusqlite::Error> {
+    if !table_exists(conn, "session_strand_messages")? {
+        return Ok(());
+    }
+    // Grouped by (session, strand) so distinct strands are counted by
+    // transition instead of a per-session set.
+    let mut statement = conn.prepare(
+        "SELECT session_id, strand, seq, LENGTH(CAST(message_json AS BLOB)) \
+         FROM session_strand_messages ORDER BY session_id, strand, seq",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut current_session: Option<String> = None;
+    let mut current_strand: Option<String> = None;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let strand: String = row.get(1)?;
+        let seq = measured_u64(row.get(2)?);
+        let bytes = measured_u64(row.get(3)?);
+        let (Some(seq), Some(bytes)) = (seq, bytes) else {
+            sessions.entry(session_id).or_default().unmeasured = true;
+            gaps.rows += 1;
+            continue;
+        };
+        if current_session.as_ref() != Some(&session_id) {
+            pool.sessions += 1;
+            current_session = Some(session_id.clone());
+            current_strand = None;
+        }
+        if current_strand.as_ref() != Some(&strand) {
+            sessions.entry(session_id.clone()).or_default().strands += 1;
+            current_strand = Some(strand.clone());
+        }
+        let footprint = sessions.entry(session_id).or_default();
+        footprint.strand_bytes = footprint.strand_bytes.saturating_add(bytes);
+        pool.rows += 1;
+        pool.bytes = pool.bytes.saturating_add(bytes);
+        match &footprint.head {
+            Some(head) if head.strand == strand && seq < head.message_count => {
+                footprint.live_strand_bytes = footprint.live_strand_bytes.saturating_add(bytes);
+                pool.live_rows += 1;
+                pool.live_bytes = pool.live_bytes.saturating_add(bytes);
+            }
+            Some(_) => {
+                pool.retained_rows += 1;
+                pool.retained_bytes = pool.retained_bytes.saturating_add(bytes);
+            }
+            None => {
+                pool.unclassified_rows += 1;
+                pool.unclassified_bytes = pool.unclassified_bytes.saturating_add(bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Supersession links: strands that keep only their divergent span and
+/// resolve the rest through a successor.
+///
+/// Censused for two reasons. A strand whose span was spliced away entirely
+/// owns no `session_strand_messages` row, so without this pass it would
+/// vanish from the retained-revision count; and a pool nobody counts is a
+/// pool the report would implicitly claim does not exist.
+fn census_strand_links(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    pool: &mut StrandPoolCensus,
+) -> Result<(), rusqlite::Error> {
+    if !table_exists(conn, "session_strand_links")? {
+        return Ok(());
+    }
+    // A link whose strand still owns physical rows was already counted by the
+    // strand pass; only the fully spliced-away strands are added here.
+    let probe_sql = "SELECT 1 FROM session_strand_messages \
+                     WHERE session_id = ?1 AND strand = ?2 LIMIT 1";
+    let mut materialized = if table_exists(conn, "session_strand_messages")? {
+        Some(conn.prepare(probe_sql)?)
+    } else {
+        None
+    };
+    let mut statement = conn.prepare(
+        "SELECT session_id, strand FROM session_strand_links ORDER BY session_id, strand",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let strand: String = row.get(1)?;
+        let has_rows = match materialized.as_mut() {
+            Some(probe) => probe.exists(rusqlite::params![session_id, strand])?,
+            None => false,
+        };
+        pool.links += 1;
+        if !has_rows {
+            sessions.entry(session_id).or_default().strands += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite commit rows (the adopted-commit ledger, not the bodies).
+fn census_rewrite_rows(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    gaps: &mut CensusGaps,
+) -> Result<(), rusqlite::Error> {
+    if !table_exists(conn, "session_rewrites")? {
+        return Ok(());
+    }
+    let mut statement = conn.prepare(
+        "SELECT session_id, LENGTH(CAST(commit_json AS BLOB)) FROM session_rewrites \
+         ORDER BY session_id, rewrite_idx",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let bytes = measured_u64(row.get(1)?);
+        let footprint = sessions.entry(session_id).or_default();
+        footprint.rewrite_rows += 1;
+        match bytes {
+            Some(bytes) => footprint.rewrite_bytes = footprint.rewrite_bytes.saturating_add(bytes),
+            None => {
+                footprint.unmeasured = true;
+                gaps.rows += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Blob rows: the stored byte length of every `sessions.session_json` (a
+/// frozen archive when a head row exists), plus a raw-JSON measurement of
+/// the live-vs-retained split for the legacy inline documents that have no
+/// head row.
+fn census_blob_rows(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    archives: &mut FrozenArchiveCensus,
+    gaps: &mut CensusGaps,
+) -> Result<(), rusqlite::Error> {
+    if !table_exists(conn, "sessions")? {
+        return Ok(());
+    }
+    {
+        let mut statement = conn.prepare(
+            "SELECT session_id, LENGTH(CAST(session_json AS BLOB)) FROM sessions \
+             ORDER BY session_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let bytes = measured_u64(row.get(1)?);
+            let footprint = sessions.entry(session_id).or_default();
+            let Some(bytes) = bytes else {
+                footprint.unmeasured = true;
+                gaps.rows += 1;
+                continue;
+            };
+            footprint.blob_bytes = footprint.blob_bytes.saturating_add(bytes);
+            if footprint.head_canonical() {
+                archives.sessions += 1;
+                archives.bytes = archives.bytes.saturating_add(bytes);
+            }
+        }
+    }
+    // Payloads are fetched only for the head-less rows: an archived document
+    // is bytes to count, never bytes to read (the store does not read them
+    // either).
+    let sql = if table_exists(conn, "session_heads")? {
+        "SELECT session_id, session_json FROM sessions \
+         WHERE session_id NOT IN (SELECT session_id FROM session_heads) ORDER BY session_id"
+    } else {
+        "SELECT session_id, session_json FROM sessions ORDER BY session_id"
+    };
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let document: JsonColumnBytes = row.get(1)?;
+        let footprint = sessions.entry(session_id).or_default();
+        match measure_inline_document(&document.into_bytes()) {
+            Some(measured) => {
+                footprint.inline_live_bytes = measured.live_bytes;
+                footprint.inline_revisions = measured.revisions;
+                footprint.inline_commits = measured.commits;
+            }
+            None => {
+                footprint.unmeasured = true;
+                gaps.documents += 1;
+            }
+        }
+    }
+    archives.legacy_runtime_snapshots = legacy_runtime_snapshot_rows(conn)?;
+    Ok(())
+}
+
+/// Rows in a legacy `runtime_session_snapshots` table sharing this database
+/// file.
+///
+/// The session store never reads an archived blob row again, but the
+/// runtime's LegacyUnverified recovery path
+/// (`meerkat-runtime/src/store/sqlite.rs`,
+/// `prepare_legacy_session_checkpoint`) still cross-reads
+/// `sessions.session_json` for byte identity when such a snapshot row
+/// exists — and it does so through the runtime store's own connection, i.e.
+/// only when both tables live in this one file. Doctor qualifies the
+/// frozen-archive finding rather than overstating it.
+fn legacy_runtime_snapshot_rows(conn: &Connection) -> Result<u64, rusqlite::Error> {
+    if !table_exists(conn, "runtime_session_snapshots")? {
+        return Ok(0);
+    }
+    let mut statement = conn.prepare("SELECT COUNT(*) FROM runtime_session_snapshots")?;
+    let count: i64 = statement.query_row([], |row| row.get(0))?;
+    Ok(measured_u64(Some(count)).unwrap_or(0))
+}
+
+/// What a legacy inline document holds, measured from its raw stored bytes.
+struct InlineDocumentMeasurement {
+    live_bytes: u64,
+    revisions: u64,
+    commits: u64,
+}
+
+/// Doctor's raw lens over a persisted session document: the live transcript
+/// array and the inline transcript-history graph.
+///
+/// Deliberately not a typed [`Session`] decode — the census must measure the
+/// bytes the disk holds (a typed round-trip would report the bytes this
+/// binary *would* write), and it must keep measuring documents that a future
+/// envelope change makes typed-undecodable.
+#[derive(Deserialize)]
+struct InlineDocumentLens<'a> {
+    #[serde(borrow)]
+    messages: &'a serde_json::value::RawValue,
+    #[serde(borrow, default)]
+    metadata: BTreeMap<String, &'a serde_json::value::RawValue>,
+}
+
+/// The retained half of an inline transcript-history graph. Counted, not
+/// validated: doctor measures whatever is stored under the key.
+#[derive(Deserialize, Default)]
+struct InlineHistoryLens<'a> {
+    #[serde(borrow, default)]
+    commits: Vec<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default)]
+    revisions: Vec<&'a serde_json::value::RawValue>,
+}
+
+/// `None` when the document cannot be measured (the caller then reports it
+/// unknown instead of assuming a healthy split).
+fn measure_inline_document(document: &[u8]) -> Option<InlineDocumentMeasurement> {
+    let lens: InlineDocumentLens<'_> = serde_json::from_slice(document).ok()?;
+    let history = match lens.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
+        Some(value) => serde_json::from_str::<InlineHistoryLens<'_>>(value.get()).ok()?,
+        None => InlineHistoryLens::default(),
+    };
+    Some(InlineDocumentMeasurement {
+        live_bytes: lens.messages.get().len() as u64,
+        revisions: history.revisions.len() as u64,
+        commits: history.commits.len() as u64,
+    })
+}
+
+/// Per-session footprint findings, worst reclaimable first, plus one
+/// database-wide summary whenever at least one session qualifies.
+fn report_oversized_sessions(
+    sessions: &BTreeMap<String, SessionFootprint>,
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let mut oversized: Vec<(&String, &SessionFootprint)> = sessions
+        .iter()
+        .filter(|(_, footprint)| footprint.is_oversized())
+        .collect();
+    if oversized.is_empty() {
+        return;
+    }
+    // The cap has to spend its lines on the biggest wins: a realm where
+    // thousands of sessions qualify still needs a usable report. Ties break
+    // by session id so the report is stable across runs.
+    oversized.sort_by_key(|(id, footprint)| (Reverse(footprint.reclaimable_bytes()), *id));
+
+    for (session_id, footprint) in oversized.iter().take(TRANSCRIPT_HISTORY_REPORT_CAP) {
+        let retained = if footprint.head_canonical() {
+            format!(
+                "{} retained revision strand(s) and {} rewrite commit(s) in \
+                 session_strand_messages + session_rewrites",
+                footprint.retained_revisions(),
+                footprint.commits()
+            )
+        } else {
+            format!(
+                "{} retained revision bod(ies) and {} rewrite commit(s) inline in \
+                 sessions.session_json",
+                footprint.retained_revisions(),
+                footprint.commits()
+            )
+        };
+        diagnosis.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Warning,
+                FINDING_TRANSCRIPT_HISTORY_OVERSIZED,
+                format!(
+                    "session {session_id} stores {} of durable transcript for {} of live \
+                     transcript, ratio {}: {retained}; {} is retained history",
+                    format_bytes(footprint.document_bytes()),
+                    format_bytes(footprint.live_bytes()),
+                    format_ratio(footprint.document_bytes(), footprint.live_bytes()),
+                    format_bytes(footprint.reclaimable_bytes()),
+                ),
+            )
+            .with_path(db_path.to_path_buf())
+            .with_realm(realm),
+        );
+    }
+
+    let measured = sessions.values().filter(|f| !f.unmeasured);
+    let (measured_sessions, document_bytes, live_bytes) =
+        measured.fold((0u64, 0u64, 0u64), |(count, documents, live), footprint| {
+            (
+                count + 1,
+                documents.saturating_add(footprint.document_bytes()),
+                live.saturating_add(footprint.live_bytes()),
+            )
+        });
+    let overflow = oversized
+        .len()
+        .saturating_sub(TRANSCRIPT_HISTORY_REPORT_CAP);
+    let overflow_note = if overflow > 0 {
+        format!("; {overflow} further session(s) over the threshold are not listed individually")
+    } else {
+        String::new()
+    };
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Warning,
+            FINDING_TRANSCRIPT_HISTORY_OVERSIZED,
+            format!(
+                "{} of {measured_sessions} measured session(s) exceed the \
+                 {TRANSCRIPT_HISTORY_RATIO_WARN:.1}x durable-to-live threshold; database-wide {} \
+                 durable for {} of live transcript, ratio {}, {} reclaimable{overflow_note}{}",
+                oversized.len(),
+                format_bytes(document_bytes),
+                format_bytes(live_bytes),
+                format_ratio(document_bytes, live_bytes),
+                format_bytes(document_bytes.saturating_sub(live_bytes)),
+                gaps.exclusion_note(),
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+}
+
+/// The strand pool, reported whenever it holds a row or a supersession link
+/// — a healthy pool nobody can see is how this class of defect stays
+/// invisible.
+fn report_strand_pool(
+    pool: &StrandPoolCensus,
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    if pool.rows == 0 && pool.links == 0 {
+        return;
+    }
+    let reclaimable = pool.retained_bytes.saturating_add(pool.unclassified_bytes);
+    let duplicated = reclaimable >= STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES
+        && (pool.live_bytes == 0
+            || pool.bytes as f64 / pool.live_bytes as f64 >= STRAND_DUPLICATION_RATIO_WARN);
+    let severity = if duplicated {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Info
+    };
+    let mut message = format!(
+        "`session_strand_messages` holds {} row(s) / {} across {} session(s): {} row(s) / {} are \
+         live head-strand prefixes and {} row(s) / {} are retained non-live revisions, \
+         pool-to-live ratio {}",
+        pool.rows,
+        format_bytes(pool.bytes),
+        pool.sessions,
+        pool.live_rows,
+        format_bytes(pool.live_bytes),
+        pool.retained_rows,
+        format_bytes(pool.retained_bytes),
+        format_ratio(pool.bytes, pool.live_bytes),
+    );
+    if pool.unclassified_rows > 0 {
+        message.push_str(&format!(
+            "; {} row(s) / {} belong to sessions with no usable `session_heads` row and could not \
+             be classified live-or-retained",
+            pool.unclassified_rows,
+            format_bytes(pool.unclassified_bytes),
+        ));
+    }
+    if pool.links > 0 {
+        message.push_str(&format!(
+            "; {} `session_strand_links` supersession row(s) keep superseded strands down to \
+             their divergent span (counted, not byte-measured: the row carries no payload)",
+            pool.links,
+        ));
+    }
+    message.push_str(&gaps.exclusion_note());
+    diagnosis.findings.push(
+        StorageFinding::new(severity, FINDING_STRAND_DUPLICATION_RECLAIMABLE, message)
+            .with_path(db_path.to_path_buf())
+            .with_realm(realm),
+    );
+}
+
+/// Frozen blob archives: bytes held for sessions whose canonical
+/// representation is the head row.
+fn report_frozen_archives(
+    archives: &FrozenArchiveCensus,
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    if archives.sessions == 0 {
+        return;
+    }
+    let severity = if archives.bytes >= STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Info
+    };
+    // The claim is verified, not inherited: every SqliteSessionStore read
+    // (load, load_meta, load_head, load_messages, load_rewrites,
+    // load_rewrite_commits, and each save/delete guard) resolves the head row
+    // first and only falls back to the blob row when there is none, and
+    // `list` excludes blob rows that have a head row outright.
+    let mut message = format!(
+        "{} frozen `sessions.session_json` row(s) hold {} for session(s) that already have a \
+         `session_heads` row; every SqliteSessionStore read resolves the head row first and \
+         `list` excludes blob rows that have one, so these bytes are never read again \
+         (meerkat-store/src/sqlite_store.rs: \"The blob row is left untouched as a frozen archive \
+         and is never read again once the head row exists\")",
+        archives.sessions,
+        format_bytes(archives.bytes),
+    );
+    if archives.legacy_runtime_snapshots > 0 {
+        message.push_str(&format!(
+            "; this database also holds {} legacy `runtime_session_snapshots` row(s), whose \
+             runtime recovery path still cross-reads `sessions.session_json` for byte identity — \
+             reclaim only after that table is drained",
+            archives.legacy_runtime_snapshots,
+        ));
+    }
+    message.push_str(&gaps.exclusion_note());
+    diagnosis.findings.push(
+        StorageFinding::new(severity, FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE, message)
+            .with_path(db_path.to_path_buf())
+            .with_realm(realm),
+    );
+}
+
+/// The census's own honesty finding: what it could not measure.
+fn report_census_gaps(
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    if gaps.is_empty() {
+        return;
+    }
+    let pools = if gaps.pools.is_empty() {
+        String::new()
+    } else {
+        format!(" and could not query {} at all", gaps.pools.join(", "))
+    };
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Warning,
+            FINDING_STORAGE_CENSUS_UNMEASURED,
+            format!(
+                "storage census could not measure {} durable row(s) and {} session \
+                 document(s){pools}; the footprint findings exclude them, so this database's \
+                 storage footprint is UNKNOWN rather than certified healthy",
+                gaps.rows, gaps.documents,
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+}
+
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1409,7 +2288,9 @@ fn sweep_artifacts(realm_dir: &Path, realm: &str, diagnosis: &mut StorageDiagnos
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use meerkat_core::{ImageData, UserMessage};
+    use meerkat_core::{
+        ImageData, TranscriptRewriteReason, TranscriptRewriteSelection, UserMessage,
+    };
 
     fn write_manifest(realms_root: &Path, realm_id: &str, backend: &str) -> PathBuf {
         let dir = realms_root.join(sanitize_realm_id(realm_id));
@@ -1458,6 +2339,118 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    // The head-canonical session tables, exactly as `SqliteSessionStore`
+    // creates them (see `sqlite_store::CREATE_SESSION_*_SQL`).
+    const SESSION_HEADS_DDL: &str = "CREATE TABLE session_heads (
+        session_id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        strand TEXT NOT NULL,
+        head_revision TEXT NOT NULL,
+        message_count INTEGER NOT NULL,
+        rewrite_count INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL,
+        head_json BLOB NOT NULL,
+        cas_token TEXT NOT NULL
+    )";
+
+    const SESSION_STRAND_MESSAGES_DDL: &str = "CREATE TABLE session_strand_messages (
+        session_id TEXT NOT NULL,
+        strand TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        message_json BLOB NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, strand, seq)
+    )";
+
+    const SESSION_STRAND_LINKS_DDL: &str = "CREATE TABLE session_strand_links (
+        session_id TEXT NOT NULL,
+        strand TEXT NOT NULL,
+        successor TEXT NOT NULL,
+        strand_len INTEGER NOT NULL,
+        splice_start INTEGER NOT NULL,
+        splice_end INTEGER NOT NULL,
+        successor_end INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, strand)
+    )";
+
+    const SESSION_REWRITES_DDL: &str = "CREATE TABLE session_rewrites (
+        session_id TEXT NOT NULL,
+        rewrite_idx INTEGER NOT NULL,
+        parent_strand TEXT NOT NULL,
+        parent_len INTEGER NOT NULL,
+        strand TEXT NOT NULL,
+        strand_len INTEGER NOT NULL,
+        commit_json BLOB NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, rewrite_idx)
+    )";
+
+    /// A sqlite session database carrying the full head-canonical schema.
+    fn head_canonical_db(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(SESSIONS_DDL).unwrap();
+        conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+        conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+        conn.execute_batch(SESSION_STRAND_LINKS_DDL).unwrap();
+        conn.execute_batch(SESSION_REWRITES_DDL).unwrap();
+        conn
+    }
+
+    /// One persisted transcript message carrying `payload` bytes of text.
+    fn strand_message(payload: usize) -> Vec<u8> {
+        serde_json::to_vec(&Message::User(UserMessage::text("x".repeat(payload)))).unwrap()
+    }
+
+    /// Insert a head row; returns the durable head bytes the census must
+    /// charge to the session (`head_json` + `metadata_json`).
+    fn insert_head(conn: &Connection, id: &SessionId, strand: &str, message_count: u64) -> u64 {
+        let head_json = serde_json::json!({
+            "id": id.to_string(),
+            "strand": strand,
+            "message_count": message_count,
+        })
+        .to_string();
+        let metadata_json = "{}";
+        conn.execute(
+            "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+             message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+             metadata_json, head_json, cas_token) \
+             VALUES (?1, 1, ?2, 'digest', ?3, 0, 0, 0, 0, ?4, ?5, 'cas')",
+            rusqlite::params![
+                id.to_string(),
+                strand,
+                message_count as i64,
+                metadata_json,
+                head_json.as_bytes(),
+            ],
+        )
+        .unwrap();
+        (head_json.len() + metadata_json.len()) as u64
+    }
+
+    fn insert_strand_row(
+        conn: &Connection,
+        id: &SessionId,
+        strand: &str,
+        seq: u64,
+        message_json: &[u8],
+    ) {
+        conn.execute(
+            "INSERT INTO session_strand_messages (session_id, strand, seq, message_json, \
+             created_at_ms) VALUES (?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![id.to_string(), strand, seq as i64, message_json],
+        )
+        .unwrap();
+    }
+
+    fn finding<'a>(diagnosis: &'a StorageDiagnosis, code: &str) -> Option<&'a StorageFinding> {
+        diagnosis.findings.iter().find(|f| f.code == code)
     }
 
     #[tokio::test]
@@ -2182,6 +3175,490 @@ mod tests {
         let diagnosis = diagnose_disk_roots(&scope(&[&scoped])).await;
         assert_eq!(diagnosis.inventory.len(), 1);
         assert_eq!(diagnosis.inventory[0].realm, "inside");
+    }
+
+    #[tokio::test]
+    async fn oversized_transcript_history_is_measured_per_session_and_summarized() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "bloat", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let id = Session::new().id().clone();
+        let message = strand_message(64 * 1024);
+        let head_bytes;
+        {
+            let conn = head_canonical_db(&db_path);
+            head_bytes = insert_head(&conn, &id, "root", 4);
+            for seq in 0..4 {
+                insert_strand_row(&conn, &id, "root", seq, &message);
+            }
+            // Six retained revisions, each a full copy of the four-message
+            // transcript: the shape per-rewrite full-transcript retention
+            // produces.
+            for revision in 0..6u64 {
+                for seq in 0..4 {
+                    insert_strand_row(&conn, &id, &format!("rewrite:{revision}"), seq, &message);
+                }
+            }
+        }
+        let before = std::fs::read(&db_path).unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let live_bytes = 4 * message.len() as u64;
+        let document_bytes = head_bytes + 28 * message.len() as u64;
+        let per_session = diagnosis
+            .findings
+            .iter()
+            .find(|f| {
+                f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED
+                    && f.message.contains(&id.to_string())
+            })
+            .expect("per-session footprint finding");
+        assert_eq!(per_session.severity, FindingSeverity::Warning);
+        assert_eq!(per_session.realm.as_deref(), Some("bloat"));
+        assert_eq!(per_session.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            per_session.message.contains(&format!(
+                "{:.1}x",
+                document_bytes as f64 / live_bytes as f64
+            )),
+            "{}",
+            per_session.message
+        );
+        assert!(
+            per_session
+                .message
+                .contains("6 retained revision strand(s) and 0 rewrite commit(s)"),
+            "{}",
+            per_session.message
+        );
+        assert!(
+            per_session
+                .message
+                .contains(&format_bytes(document_bytes - live_bytes)),
+            "{}",
+            per_session.message
+        );
+
+        let summary = diagnosis
+            .findings
+            .iter()
+            .find(|f| {
+                f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED
+                    && f.message.contains("measured session(s) exceed")
+            })
+            .expect("database-wide summary finding");
+        assert!(
+            summary
+                .message
+                .contains("1 of 1 measured session(s) exceed the 4.0x"),
+            "{}",
+            summary.message
+        );
+        assert!(
+            !summary.message.contains("partial census"),
+            "{}",
+            summary.message
+        );
+
+        // The duplicated copies are visible in the strand pool too.
+        let pool = finding(&diagnosis, FINDING_STRAND_DUPLICATION_RECLAIMABLE)
+            .expect("strand pool finding");
+        assert_eq!(pool.severity, FindingSeverity::Warning);
+        assert!(pool.message.contains("holds 28 row(s)"), "{}", pool.message);
+        let live_clause = format!(
+            "4 row(s) / {} are live head-strand prefixes",
+            format_bytes(live_bytes)
+        );
+        let retained_clause = format!(
+            "24 row(s) / {} are retained non-live revisions",
+            format_bytes(24 * message.len() as u64)
+        );
+        assert!(pool.message.contains(&live_clause), "{}", pool.message);
+        assert!(pool.message.contains(&retained_clause), "{}", pool.message);
+        assert!(
+            pool.message.contains("pool-to-live ratio 7.0x"),
+            "{}",
+            pool.message
+        );
+
+        // Nothing was archived and nothing was unmeasurable.
+        assert!(!codes(&diagnosis).contains(&FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE));
+        assert!(!codes(&diagnosis).contains(&FINDING_STORAGE_CENSUS_UNMEASURED));
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+        // Read-only: the census measures, it never writes.
+        assert_eq!(std::fs::read(&db_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn healthy_strand_pool_is_reported_without_a_footprint_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "healthy", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let id = Session::new().id().clone();
+        let message = strand_message(1024);
+        {
+            let conn = head_canonical_db(&db_path);
+            insert_head(&conn, &id, "root", 4);
+            for seq in 0..4 {
+                insert_strand_row(&conn, &id, "root", seq, &message);
+            }
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        assert!(
+            !codes(&diagnosis).contains(&FINDING_TRANSCRIPT_HISTORY_OVERSIZED),
+            "{diagnosis:?}"
+        );
+        assert!(!codes(&diagnosis).contains(&FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE));
+        assert!(!codes(&diagnosis).contains(&FINDING_STORAGE_CENSUS_UNMEASURED));
+        // A healthy pool is still measured out loud: an unmeasured pool is
+        // exactly how this class of defect stays invisible.
+        let pool = finding(&diagnosis, FINDING_STRAND_DUPLICATION_RECLAIMABLE)
+            .expect("strand pool finding even when healthy");
+        assert_eq!(pool.severity, FindingSeverity::Info);
+        assert!(pool.message.contains("holds 4 row(s)"), "{}", pool.message);
+        assert!(
+            pool.message
+                .contains("0 row(s) / 0 B are retained non-live revisions"),
+            "{}",
+            pool.message
+        );
+        assert!(
+            pool.message.contains("pool-to-live ratio 1.0x"),
+            "{}",
+            pool.message
+        );
+        assert!(!pool.message.contains("partial census"), "{}", pool.message);
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    #[tokio::test]
+    async fn frozen_blob_archives_are_counted_only_behind_a_head_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "archive", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+
+        let mut archived = Session::new();
+        archived.push(Message::User(UserMessage::text("a".repeat(1536 * 1024))));
+        let archived_bytes = serde_json::to_vec(&archived).unwrap().len() as u64;
+        let mut legacy = Session::new();
+        legacy.push(Message::User(UserMessage::text("b".repeat(640 * 1024))));
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap().len() as u64;
+        let live = strand_message(1024);
+        {
+            let conn = head_canonical_db(&db_path);
+            // Migrated session: head row canonical, blob row frozen.
+            insert_session(&conn, &archived);
+            insert_head(&conn, archived.id(), "root", 1);
+            insert_strand_row(&conn, archived.id(), "root", 0, &live);
+            // Legacy session: blob row is still the canonical document.
+            insert_session(&conn, &legacy);
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let archives = finding(&diagnosis, FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE)
+            .expect("frozen archive finding");
+        assert_eq!(archives.severity, FindingSeverity::Warning);
+        assert_eq!(archives.realm.as_deref(), Some("archive"));
+        assert!(
+            archives.message.starts_with("1 frozen"),
+            "only the head-backed row is an archive: {}",
+            archives.message
+        );
+        assert!(
+            archives.message.contains(&format_bytes(archived_bytes)),
+            "{}",
+            archives.message
+        );
+        assert!(
+            !archives
+                .message
+                .contains(&format_bytes(archived_bytes + legacy_bytes)),
+            "the legacy document must not be counted as an archive: {}",
+            archives.message
+        );
+        assert!(
+            archives
+                .message
+                .contains("never read again once the head row exists"),
+            "{}",
+            archives.message
+        );
+
+        // Archive bytes are durable bytes: they count toward the session's
+        // footprint, and the legacy document (all live) does not warn.
+        let oversized: Vec<&StorageFinding> = diagnosis
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED)
+            .collect();
+        assert!(
+            oversized
+                .iter()
+                .any(|f| f.message.contains(&archived.id().to_string())),
+            "{oversized:?}"
+        );
+        assert!(
+            !oversized
+                .iter()
+                .any(|f| f.message.contains(&legacy.id().to_string())),
+            "{oversized:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_inline_transcript_history_is_measured_from_the_stored_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "inline", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+
+        // A document whose retained history is genuinely heavy. Under delta
+        // retention a rewrite costs its EDIT, so churning a small message
+        // over a large transcript no longer retains much of anything — the
+        // fixture has to replace large content with different large content
+        // for the retained spans themselves to be worth reclaiming. That is
+        // also the shape the census exists to flag now: real content churn,
+        // not the per-resume prompt refresh that delta encoding erases.
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("c".repeat(512 * 1024))));
+        session.push(Message::User(UserMessage::text("second turn")));
+        for revision in 0..8 {
+            let replacement = Message::User(UserMessage::text(
+                format!("edited turn {revision} ").repeat(24 * 1024),
+            ));
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    vec![replacement],
+                    TranscriptRewriteReason::new("doctor-census-fixture"),
+                    None,
+                    None,
+                )
+                .expect("rewrite commits");
+        }
+        let document = serde_json::to_vec(&session).unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&document).unwrap();
+        let history = &decoded["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY];
+        let expected_revisions = history["revisions"].as_array().unwrap().len();
+        let expected_commits = history["commits"].as_array().unwrap().len();
+        let live_bytes = serde_json::to_string(&decoded["messages"]).unwrap().len() as u64;
+        let document_bytes = document.len() as u64;
+        // Guards: a fixture that stopped reproducing inline retention must
+        // fail here rather than pass vacuously.
+        assert!(expected_revisions >= 2, "{expected_revisions}");
+        assert!(
+            document_bytes - live_bytes >= STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES,
+            "{document_bytes} - {live_bytes}"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, ?2, 0, ?3, ?4)",
+                rusqlite::params![
+                    session.id().to_string(),
+                    session.messages().len() as i64,
+                    serde_json::to_string(&decoded["metadata"]).unwrap(),
+                    document.as_slice(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let per_session = finding(&diagnosis, FINDING_TRANSCRIPT_HISTORY_OVERSIZED)
+            .expect("inline footprint finding");
+        assert_eq!(per_session.severity, FindingSeverity::Warning);
+        assert!(
+            per_session.message.contains(&format!(
+                "{expected_revisions} retained revision bod(ies) and {expected_commits} rewrite \
+                 commit(s) inline in sessions.session_json"
+            )),
+            "{}",
+            per_session.message
+        );
+        assert!(
+            per_session.message.contains(&format!(
+                "{:.1}x",
+                document_bytes as f64 / live_bytes as f64
+            )),
+            "{}",
+            per_session.message
+        );
+        assert!(
+            per_session.message.contains(&format_bytes(document_bytes)),
+            "{}",
+            per_session.message
+        );
+        // No strand rows and no head rows exist here: the report must not
+        // imply those pools were censused.
+        assert!(!codes(&diagnosis).contains(&FINDING_STRAND_DUPLICATION_RECLAIMABLE));
+        assert!(!codes(&diagnosis).contains(&FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE));
+        assert!(!codes(&diagnosis).contains(&FINDING_STORAGE_CENSUS_UNMEASURED));
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    #[tokio::test]
+    async fn unmeasurable_rows_report_unknown_instead_of_healthy() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "unknown", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let head_less_id = Session::new().id().clone();
+        let null_head_id = Session::new().id().clone();
+        let message = strand_message(512 * 1024);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            // Deliberately permissive DDL: the real schema's NOT NULL is
+            // exactly what doctor may not assume about a corrupted or
+            // foreign-written file, and a NULL durable column is the row it
+            // must never silently count as zero bytes.
+            conn.execute_batch(
+                "CREATE TABLE session_heads (
+                    session_id TEXT PRIMARY KEY, version INTEGER, strand TEXT,
+                    head_revision TEXT, message_count INTEGER, rewrite_count INTEGER,
+                    total_tokens INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER,
+                    metadata_json TEXT, head_json BLOB, cas_token TEXT)",
+            )
+            .unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            conn.execute(
+                "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                 message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                 metadata_json, head_json, cas_token) \
+                 VALUES (?1, 1, 'root', 'digest', 1, 0, 0, 0, 0, '{}', NULL, 'cas')",
+                rusqlite::params![null_head_id.to_string()],
+            )
+            .unwrap();
+            insert_strand_row(&conn, &null_head_id, "root", 0, &message);
+            for revision in 0..3u64 {
+                let strand = format!("rewrite:{revision}");
+                insert_strand_row(&conn, &null_head_id, &strand, 0, &message);
+            }
+            // A blob document that is not JSON at all.
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 1, 0, '{}', ?2)",
+                rusqlite::params![head_less_id.to_string(), b"not-json".as_slice()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let unmeasured = finding(&diagnosis, FINDING_STORAGE_CENSUS_UNMEASURED)
+            .expect("unmeasured census finding");
+        assert_eq!(unmeasured.severity, FindingSeverity::Warning);
+        assert_eq!(unmeasured.realm.as_deref(), Some("unknown"));
+        assert!(
+            unmeasured
+                .message
+                .contains("could not measure 1 durable row(s) and 1 session document(s)"),
+            "{}",
+            unmeasured.message
+        );
+        assert!(
+            unmeasured.message.contains("UNKNOWN"),
+            "{}",
+            unmeasured.message
+        );
+        // 1.5 MiB of retained strand rows sit behind that head row, and the
+        // census still refuses to publish a ratio it cannot total.
+        assert!(
+            !codes(&diagnosis).contains(&FINDING_TRANSCRIPT_HISTORY_OVERSIZED),
+            "{diagnosis:?}"
+        );
+        // Every aggregate says out loud that it is partial.
+        let pool = finding(&diagnosis, FINDING_STRAND_DUPLICATION_RECLAIMABLE)
+            .expect("strand pool finding");
+        assert!(pool.message.contains("partial census"), "{}", pool.message);
+        // The undecodable document is still reported by the blob sweep.
+        assert!(codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE));
+    }
+
+    #[tokio::test]
+    async fn spliced_away_strands_still_count_as_retained_revisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "spliced", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let id = Session::new().id().clone();
+        let live = strand_message(1024);
+        let retained = strand_message(512 * 1024);
+        {
+            let conn = head_canonical_db(&db_path);
+            insert_head(&conn, &id, "root", 1);
+            insert_strand_row(&conn, &id, "root", 0, &live);
+            for seq in 0..3 {
+                insert_strand_row(&conn, &id, "rewrite:0", seq, &retained);
+            }
+            // A revision spliced away entirely: it survives only as a
+            // supersession link, with no row of its own.
+            conn.execute(
+                "INSERT INTO session_strand_links (session_id, strand, successor, strand_len, \
+                 splice_start, splice_end, successor_end, created_at_ms) \
+                 VALUES (?1, 'rewrite:1', 'root', 1, 0, 0, 1, 0)",
+                rusqlite::params![id.to_string()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let per_session = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED)
+            .expect("per-session footprint finding");
+        assert!(
+            per_session
+                .message
+                .contains("2 retained revision strand(s) and 0 rewrite commit(s)"),
+            "the link-only revision must be counted: {}",
+            per_session.message
+        );
+        let pool = finding(&diagnosis, FINDING_STRAND_DUPLICATION_RECLAIMABLE)
+            .expect("strand pool finding");
+        assert!(
+            pool.message
+                .contains("1 `session_strand_links` supersession row(s)"),
+            "{}",
+            pool.message
+        );
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    #[tokio::test]
+    async fn empty_and_absent_session_stores_produce_no_census_findings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let empty_dir = write_manifest(&root, "empty", "sqlite");
+        drop(head_canonical_db(&empty_dir.join("sessions.sqlite3")));
+        // A realm with no session database at all.
+        write_manifest(&root, "absent", "sqlite");
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        for code in [
+            FINDING_TRANSCRIPT_HISTORY_OVERSIZED,
+            FINDING_STRAND_DUPLICATION_RECLAIMABLE,
+            FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE,
+            FINDING_STORAGE_CENSUS_UNMEASURED,
+        ] {
+            assert!(!codes(&diagnosis).contains(&code), "{code}: {diagnosis:?}");
+        }
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+        assert_eq!(diagnosis.inventory.len(), 2);
     }
 
     #[tokio::test]

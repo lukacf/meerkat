@@ -200,7 +200,8 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
     let stamped = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
     assert_eq!(stamped.len(), 1, "{report:#}");
     assert_eq!(stamped[0]["action"], "stamped");
-    assert_eq!(stamped[0]["after"], 1);
+    // v2 = base-schema + strand-supersession-links.
+    assert_eq!(stamped[0]["after"], 2);
     let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
     assert_eq!(jobs.len(), 1, "{report:#}");
     assert_eq!(jobs[0]["action"], "stamped");

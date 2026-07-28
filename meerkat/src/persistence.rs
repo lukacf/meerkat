@@ -159,6 +159,16 @@ impl PersistenceBundle {
             runtime_store.clone(),
             blob_store.clone(),
         ));
+        // Wire the one-time pre-0.8.9 upgrade-boundary evidence source for
+        // every non-mob runtime-backed surface (CLI, REST, RPC). Without it
+        // the machine-owned queued-input and failed-run boundary commits fall
+        // back to the defaulted evidence-less path and refuse the first slim
+        // save over a legacy inline runtime row — the exact wedge 0.8.10
+        // exists to clear. Mob hosts wire the same seam in
+        // `MobSessionService::runtime_adapter`.
+        if let Some(source) = Arc::clone(&session_store).as_incremental() {
+            runtime_adapter.set_legacy_history_evidence_source(source);
+        }
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,

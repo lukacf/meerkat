@@ -19,7 +19,9 @@
 //!   `Some`: O(delta) `append_messages`, `commit_rewrite` CAS vs the head
 //!   token, `save_head` `Create`/`IfToken` semantics,
 //!   `TranscriptRevisionConflict` on mismatch, `load_messages`/
-//!   `load_rewrites` round-trips.
+//!   `load_rewrites` round-trips, and reconstruction fidelity across
+//!   chained rewrites that share no prefix with their parent (the shape a
+//!   backend must store as a delta rather than a fresh copy per revision).
 //! - [`chapters::transcript_rewrite`] — stores implementing
 //!   `save_transcript_rewrite` (the whole-blob compaction path): the proven
 //!   rewrite round-trips and survives reopen, an unproven rewrite (plain

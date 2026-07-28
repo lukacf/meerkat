@@ -232,12 +232,18 @@ impl PersistentRuntimeDriver {
                 .any(|window| window == needle.as_bytes()),
             Ok(None) => false,
             Err(error) => {
+                // A transient load failure is NOT evidence that the row is
+                // slim. Leave the hint unset so the next commit re-probes;
+                // caching `false` here would disable evidence assembly for
+                // the rest of the driver's life and turn one busy/IO blip
+                // into a permanently refused upgrade boundary.
                 tracing::warn!(
                     runtime_id = %self.runtime_id,
                     %error,
-                    "legacy upgrade hint probe failed to load the runtime snapshot row"
+                    "legacy upgrade hint probe failed to load the runtime snapshot row; \
+                     leaving the hint unresolved so the next commit re-probes"
                 );
-                false
+                return false;
             }
         };
         self.legacy_inline_row_hint = Some(hint);

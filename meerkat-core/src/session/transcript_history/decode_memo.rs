@@ -378,9 +378,37 @@ pub(super) fn record_validated_transcript_graph(key: String, state: Arc<Transcri
     let Some(bytes) = approximate_serialized_bytes(state.as_ref()) else {
         return;
     };
+    let bytes = retained_graph_bytes(state.as_ref(), bytes);
     if let Ok(mut memo) = transcript_graph_validated_memo().lock() {
         memo.record(key, state, bytes);
     }
+}
+
+/// What an `Arc`-retained graph costs in MEMORY, from what it costs on disk.
+///
+/// The durable form stores one anchor transcript plus a chain of inverse
+/// splices, but the retained value materializes every body in full — so the
+/// serialized size understates retention by roughly the number of retained
+/// revisions, and a budget fed the durable size would hold ~N times more
+/// graphs than it thinks. Scale by the message count across all bodies
+/// against the anchor's: the anchor dominates the durable bytes, so the
+/// ratio recovers the materialized size in O(retained revisions) instead of
+/// re-serializing every body in full — the exact pass delta retention
+/// exists to remove. A budget estimate, never an integrity input.
+fn retained_graph_bytes(state: &TranscriptHistoryState, durable_bytes: usize) -> usize {
+    let Some(anchor) = state
+        .revisions
+        .first()
+        .map(|body| body.messages.len())
+        .filter(|anchor| *anchor > 0)
+    else {
+        return durable_bytes;
+    };
+    let materialized: usize = state.revisions.iter().map(|body| body.messages.len()).sum();
+    durable_bytes
+        .saturating_mul(materialized)
+        .saturating_div(anchor)
+        .max(durable_bytes)
 }
 
 /// Admit a graph a PRODUCER just proved (or extended under a typed inductive
@@ -397,7 +425,9 @@ pub(super) fn record_validated_transcript_graph(key: String, state: Arc<Transcri
 /// [`TRANSCRIPT_GRAPH_FACT_VALIDATED`] — same fact tag, same key function as
 /// the decode-side recorder — so producer and consumer can never drift.
 /// `approx_bytes` is a memory-budget estimate (callers size it from the
-/// serialized `Value` they already hold), never an integrity input. Honors
+/// serialized `Value` they already hold, which [`retained_graph_bytes`] then
+/// scales from durable bytes to materialized bytes), never an integrity
+/// input. Honors
 /// the `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` kill-switch so disabling the memo
 /// reproduces the pre-memo decode cost end to end.
 pub(in crate::session) fn record_producer_validated_transcript_graph(
@@ -416,6 +446,7 @@ pub(in crate::session) fn record_producer_validated_transcript_graph(
     ) else {
         return;
     };
+    let approx_bytes = retained_graph_bytes(state.as_ref(), approx_bytes);
     if let Ok(mut memo) = transcript_graph_validated_memo().lock() {
         memo.record(key, state, approx_bytes);
     }
@@ -480,4 +511,75 @@ pub(crate) enum TranscriptGraphValidationMode {
     /// First sight still verifies fully and admits the proven graph into
     /// the bounded memo.
     DecodeMemoized,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::session::transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_CURRENT;
+    use crate::time_compat::UNIX_EPOCH;
+    use crate::types::{Message, UserMessage};
+
+    /// A graph carrying `counts` messages per retained body, built directly:
+    /// the estimator under test reads message COUNTS and nothing else, so
+    /// digests, lineage, and content are deliberately irrelevant here.
+    fn graph_with_body_message_counts(counts: &[usize]) -> TranscriptHistoryState {
+        TranscriptHistoryState {
+            head: String::new(),
+            commits: Vec::new(),
+            revisions: counts
+                .iter()
+                .enumerate()
+                .map(|(index, count)| TranscriptRevisionBody {
+                    revision: format!("sha256:body-{index}"),
+                    parent_revision: None,
+                    messages: (0..*count)
+                        .map(|message| {
+                            Message::User(UserMessage::text(format!("message {message}")))
+                        })
+                        .collect(),
+                    created_at: UNIX_EPOCH,
+                })
+                .collect(),
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        }
+    }
+
+    /// The memo bounds RETAINED MEMORY, and the retained value materializes
+    /// every body while the durable form stores one. Sizing the budget from
+    /// durable bytes would let a graph with N equal-length bodies claim a
+    /// single body's cost and hold N times more graphs than the budget
+    /// allows — the failure mode the byte budget replaced an entry-COUNT
+    /// bound to avoid.
+    #[test]
+    fn retained_bytes_scale_with_the_bodies_the_graph_materializes() {
+        let one = graph_with_body_message_counts(&[40]);
+        let eight = graph_with_body_message_counts(&[40; 8]);
+
+        assert_eq!(retained_graph_bytes(&one, 1_000), 1_000);
+        assert_eq!(
+            retained_graph_bytes(&eight, 1_000),
+            8_000,
+            "eight equal-length retained bodies cost eight bodies of memory"
+        );
+    }
+
+    /// Unequal bodies scale by their message share, and the estimate never
+    /// drops below the durable bytes it started from.
+    #[test]
+    fn retained_bytes_never_undercut_the_durable_size() {
+        let growing = graph_with_body_message_counts(&[40, 60, 100]);
+        assert_eq!(retained_graph_bytes(&growing, 1_000), 5_000);
+
+        let shrinking = graph_with_body_message_counts(&[100, 1]);
+        assert_eq!(
+            retained_graph_bytes(&shrinking, 1_000),
+            1_010,
+            "a graph whose anchor dominates still costs at least its anchor"
+        );
+
+        let empty = graph_with_body_message_counts(&[]);
+        assert_eq!(retained_graph_bytes(&empty, 1_000), 1_000);
+    }
 }

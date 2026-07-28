@@ -2263,9 +2263,28 @@ pub enum SessionHeadCas {
 /// Every retained transcript body is a prefix of some strand: the parent body
 /// of commit `k` is a prefix of the strand commit `k-1` created (or the root
 /// strand), and the revision body of commit `k` is a prefix of the strand it
-/// creates. Retained history therefore costs zero duplicate storage on the
-/// live path, and compaction persists O(live-after) instead of a superset
+/// creates. Compaction therefore persists O(live-after) instead of a superset
 /// blob.
+///
+/// # Storage bound (the contract, not merely an implementation note)
+///
+/// Prefix addressing alone does NOT bound total storage: successive strands
+/// are separate address spaces, so a rewrite that shares no *prefix* with its
+/// parent — the common shape, e.g. replacing the leading system projection —
+/// costs a full transcript of fresh rows, per rewrite, forever. Measured in
+/// the field: 98 rewrites of one 371-message transcript accumulated 16,672
+/// strand rows.
+///
+/// A conforming backend's persisted rows MUST stay bounded by
+/// `live transcript + Σ retained deltas`, where a retained delta is the span
+/// a superseded strand's successor genuinely dropped or replaced
+/// ([`StrandSplice`] is the shared vocabulary for that span, derived by
+/// comparison and never caller-attested). Concretely: `N` rewrites must not
+/// cost `N × transcript`, and a backend must not retain rows no read verb of
+/// this trait can reach. The observable contract is unchanged — every verb
+/// below still serves exactly the same content — so a backend that keeps
+/// whole strands materialized (an in-memory reference store, say) stays
+/// conformant on semantics; only durable backends owe the bound.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait IncrementalSessionStore: SessionStore {
@@ -2843,6 +2862,175 @@ pub fn reconstruct_rewrite_record(
             reason: format!("persisted rewrite record failed reconstruction: {err}"),
         }
     })
+}
+
+/// Where one row of a superseded strand physically lives.
+///
+/// See [`StrandSplice`]: a superseded strand keeps only the rows its
+/// successor cannot reproduce; every other row IS a row of the successor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrandRowSource {
+    /// Physically retained by the superseded strand itself, at this index.
+    Retained(u64),
+    /// Byte-identical to the successor strand's row at this index.
+    Successor(u64),
+}
+
+/// One contiguous run of a superseded strand's rows, resolved to a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrandSegment {
+    /// Rows physically retained by the superseded strand (its own indices).
+    Retained(std::ops::Range<u64>),
+    /// Rows served by the successor strand (successor indices).
+    Successor(std::ops::Range<u64>),
+}
+
+/// The minimal splice that re-expresses a superseded strand as a delta of
+/// the strand that replaced it.
+///
+/// # Why this exists
+///
+/// Every strand transition a session takes — adopting a transcript rewrite,
+/// rebasing onto an equivalence-admitted projection — produces a new strand
+/// whose rows are overwhelmingly the *same rows* as the strand it replaced.
+/// Storing each strand as an independent row vector therefore costs
+/// `O(transcript)` per transition and grows without bound: a rewrite that
+/// edits one message of a 371-message transcript persists 371 fresh rows,
+/// forever, for one changed message.
+///
+/// A splice bounds that: the superseded strand physically retains only
+/// `[splice_start, splice_end)` — the rows the successor genuinely dropped
+/// or replaced — and every other row resolves to the successor. Total
+/// storage becomes `live transcript + Σ retained spans` instead of
+/// `revisions × transcript`.
+///
+/// # Invariants
+///
+/// With `S` the superseded strand and `N` its successor:
+/// - `S[0..splice_start) == N[0..splice_start)` (shared prefix);
+/// - `S[splice_end..strand_len) == N[successor_end..successor_len())`
+///   (shared suffix);
+/// - `S[splice_start..splice_end)` is retained by `S` itself;
+/// - `splice_start <= splice_end <= strand_len` and
+///   `splice_start <= successor_end`.
+///
+/// The splice is derived by comparison ([`StrandSplice::between`]), never
+/// attested by a caller: a backend can always recompute it from the two row
+/// vectors it holds, and a wrong descriptor is structurally inexpressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandSplice {
+    /// Logical row count of the superseded strand.
+    pub strand_len: u64,
+    /// First index at which the two strands differ.
+    pub splice_start: u64,
+    /// End (exclusive, in superseded-strand indices) of the replaced span.
+    pub splice_end: u64,
+    /// End (exclusive, in successor indices) of the replacement span.
+    pub successor_end: u64,
+}
+
+impl StrandSplice {
+    /// Derive the minimal splice between a superseded strand's rows and its
+    /// successor's rows by longest common prefix + longest common suffix.
+    ///
+    /// Comparison is on whatever row identity `T` provides; backends pass
+    /// the exact persisted bytes so "shared" means byte-identical, never
+    /// merely digest-equivalent.
+    pub fn between<T: PartialEq>(strand_rows: &[T], successor_rows: &[T]) -> Self {
+        let overlap = strand_rows.len().min(successor_rows.len());
+        let mut prefix = 0usize;
+        while prefix < overlap && strand_rows[prefix] == successor_rows[prefix] {
+            prefix += 1;
+        }
+        let mut suffix = 0usize;
+        while suffix < overlap - prefix
+            && strand_rows[strand_rows.len() - 1 - suffix]
+                == successor_rows[successor_rows.len() - 1 - suffix]
+        {
+            suffix += 1;
+        }
+        Self {
+            strand_len: strand_rows.len() as u64,
+            splice_start: prefix as u64,
+            splice_end: (strand_rows.len() - suffix) as u64,
+            successor_end: (successor_rows.len() - suffix) as u64,
+        }
+    }
+
+    /// Structural well-formedness of a descriptor read back from storage.
+    pub fn is_well_formed(&self) -> bool {
+        self.splice_start <= self.splice_end
+            && self.splice_end <= self.strand_len
+            && self.splice_start <= self.successor_end
+    }
+
+    /// Rows the superseded strand must physically retain.
+    pub fn retained_span(&self) -> std::ops::Range<u64> {
+        self.splice_start..self.splice_end
+    }
+
+    /// Number of rows the superseded strand must physically retain.
+    pub fn retained_rows(&self) -> u64 {
+        self.splice_end.saturating_sub(self.splice_start)
+    }
+
+    /// Logical row count the successor must serve for this splice to
+    /// resolve.
+    pub fn successor_len(&self) -> u64 {
+        self.successor_end
+            .saturating_add(self.strand_len.saturating_sub(self.splice_end))
+    }
+
+    /// Whether the splice actually shares rows. A full-transcript
+    /// compaction shares nothing (`retained_rows() == strand_len`): the
+    /// superseded strand genuinely IS its own retained delta, and no
+    /// encoding can shrink it.
+    pub fn shares_rows(&self) -> bool {
+        self.retained_rows() < self.strand_len
+    }
+
+    /// Resolve one superseded-strand index; `None` past `strand_len`.
+    pub fn source(&self, index: u64) -> Option<StrandRowSource> {
+        if index >= self.strand_len {
+            return None;
+        }
+        if index < self.splice_start {
+            return Some(StrandRowSource::Successor(index));
+        }
+        if index < self.splice_end {
+            return Some(StrandRowSource::Retained(index));
+        }
+        Some(StrandRowSource::Successor(
+            index - self.splice_end + self.successor_end,
+        ))
+    }
+
+    /// The (at most three) contiguous segments covering `range`, in order.
+    ///
+    /// `range` must already be within `0..strand_len`; out-of-range reads
+    /// are the caller's fail-closed decision, not silently clamped content.
+    pub fn segments(&self, range: std::ops::Range<u64>) -> impl Iterator<Item = StrandSegment> {
+        let start = range.start.min(self.strand_len);
+        let end = range.end.clamp(start, self.strand_len);
+        let mut spans: [Option<StrandSegment>; 3] = [None, None, None];
+        let lead_end = end.min(self.splice_start);
+        if start < lead_end {
+            spans[0] = Some(StrandSegment::Successor(start..lead_end));
+        }
+        let own_start = start.max(self.splice_start);
+        let own_end = end.min(self.splice_end);
+        if own_start < own_end {
+            spans[1] = Some(StrandSegment::Retained(own_start..own_end));
+        }
+        let tail_start = start.max(self.splice_end);
+        if tail_start < end {
+            spans[2] = Some(StrandSegment::Successor(
+                (tail_start - self.splice_end + self.successor_end)
+                    ..(end - self.splice_end + self.successor_end),
+            ));
+        }
+        spans.into_iter().flatten()
+    }
 }
 
 #[cfg(test)]
@@ -5895,5 +6083,212 @@ mod tests {
             .expect("head strand")
             .1;
         assert_eq!(head_rows.len(), compacted.messages().len());
+    }
+
+    // ---------------------------------------------------------------------
+    // StrandSplice: the pure delta math behind bounded strand storage.
+    // ---------------------------------------------------------------------
+
+    /// Every index of `strand` must resolve to the row `expected` holds
+    /// there, sourcing from `strand`'s retained span or from `successor`.
+    #[allow(clippy::expect_used)]
+    fn assert_splice_reconstructs(strand: &[&str], successor: &[&str]) -> StrandSplice {
+        let splice = StrandSplice::between(strand, successor);
+        assert!(
+            splice.is_well_formed(),
+            "derived splice must be well formed: {splice:?}"
+        );
+        assert_eq!(
+            splice.successor_len(),
+            successor.len() as u64,
+            "splice must imply the successor's true length: {splice:?}"
+        );
+        for (index, expected) in strand.iter().enumerate() {
+            let source = splice
+                .source(index as u64)
+                .expect("in-range index must resolve");
+            let actual = match source {
+                StrandRowSource::Retained(at) => {
+                    assert!(
+                        splice.retained_span().contains(&at),
+                        "retained source {at} must fall inside {:?}",
+                        splice.retained_span()
+                    );
+                    strand[at as usize]
+                }
+                StrandRowSource::Successor(at) => successor[at as usize],
+            };
+            assert_eq!(actual, *expected, "row {index} resolved to the wrong body");
+        }
+        assert!(
+            splice.source(strand.len() as u64).is_none(),
+            "past-the-end index must not resolve"
+        );
+
+        // Every sub-range must segment to exactly the same rows, in order.
+        for start in 0..=strand.len() as u64 {
+            for end in start..=strand.len() as u64 {
+                let mut served: Vec<&str> = Vec::new();
+                for segment in splice.segments(start..end) {
+                    match segment {
+                        StrandSegment::Retained(range) => {
+                            assert!(
+                                range.start >= splice.splice_start
+                                    && range.end <= splice.splice_end,
+                                "retained segment {range:?} escaped the retained span"
+                            );
+                            served.extend(strand[range.start as usize..range.end as usize].iter());
+                        }
+                        StrandSegment::Successor(range) => {
+                            served
+                                .extend(successor[range.start as usize..range.end as usize].iter());
+                        }
+                    }
+                }
+                assert_eq!(
+                    served,
+                    strand[start as usize..end as usize].to_vec(),
+                    "segments of {start}..{end} must serve the superseded strand exactly"
+                );
+            }
+        }
+        splice
+    }
+
+    #[test]
+    fn strand_splice_shares_the_prefix_when_only_the_tail_changed() {
+        let splice = assert_splice_reconstructs(&["a", "b", "c"], &["a", "b", "z", "y"]);
+        assert_eq!(splice.splice_start, 2);
+        assert_eq!(splice.splice_end, 3);
+        assert_eq!(splice.retained_rows(), 1);
+        assert!(splice.shares_rows());
+    }
+
+    /// The production shape: a one-message edit at index 0 of a long
+    /// transcript must retain exactly one row, not a whole copy.
+    #[test]
+    fn strand_splice_leading_edit_retains_one_row_of_a_long_transcript() {
+        let old: Vec<String> = (0..64).map(|i| format!("m{i}")).collect();
+        let mut new = old.clone();
+        new[0] = "system refreshed".to_string();
+        let splice = StrandSplice::between(&old, &new);
+        assert_eq!(splice.splice_start, 0);
+        assert_eq!(splice.splice_end, 1);
+        assert_eq!(splice.successor_end, 1);
+        assert_eq!(
+            splice.retained_rows(),
+            1,
+            "a one-message leading edit must retain exactly one row"
+        );
+        assert_eq!(splice.successor_len(), 64);
+        let borrowed: Vec<&str> = old.iter().map(String::as_str).collect();
+        let borrowed_new: Vec<&str> = new.iter().map(String::as_str).collect();
+        assert_splice_reconstructs(&borrowed, &borrowed_new);
+    }
+
+    #[test]
+    fn strand_splice_shares_the_suffix_when_the_head_changed() {
+        let splice = assert_splice_reconstructs(&["a", "b", "c"], &["x", "b", "c"]);
+        assert_eq!(splice.splice_start, 0);
+        assert_eq!(splice.splice_end, 1);
+        assert_eq!(splice.successor_end, 1);
+        assert_eq!(splice.retained_rows(), 1);
+    }
+
+    #[test]
+    fn strand_splice_over_a_pure_append_retains_nothing() {
+        let splice = assert_splice_reconstructs(&["a", "b"], &["a", "b", "c"]);
+        assert_eq!(splice.retained_rows(), 0);
+        assert_eq!(splice.splice_start, 2);
+        assert_eq!(splice.splice_end, 2);
+        assert_eq!(splice.successor_end, 3);
+        assert!(splice.shares_rows());
+    }
+
+    #[test]
+    fn strand_splice_over_a_truncation_retains_the_dropped_tail() {
+        let splice = assert_splice_reconstructs(&["a", "b", "c"], &["a"]);
+        assert_eq!(splice.retained_span(), 1..3);
+        assert_eq!(splice.successor_end, 1);
+    }
+
+    /// A full-transcript compaction shares nothing: the splice must say so
+    /// rather than claim a false overlap, and backends must keep the strand
+    /// materialized.
+    #[test]
+    fn strand_splice_over_a_full_replacement_shares_nothing() {
+        let splice = assert_splice_reconstructs(&["a", "b", "c"], &["summary"]);
+        assert_eq!(splice.retained_span(), 0..3);
+        assert_eq!(splice.retained_rows(), 3);
+        assert!(!splice.shares_rows());
+    }
+
+    #[test]
+    fn strand_splice_between_identical_strands_retains_nothing() {
+        let splice = assert_splice_reconstructs(&["a", "b"], &["a", "b"]);
+        assert_eq!(splice.retained_rows(), 0);
+        assert_eq!(splice.splice_start, 2);
+        assert_eq!(splice.successor_end, 2);
+    }
+
+    /// Repeated rows must not let the prefix and suffix scans overlap and
+    /// double-count a shared row.
+    #[test]
+    fn strand_splice_does_not_overlap_prefix_and_suffix_on_repeated_rows() {
+        let splice = assert_splice_reconstructs(&["a", "a", "a"], &["a", "a"]);
+        assert_eq!(splice.splice_start, 2);
+        assert_eq!(splice.splice_end, 3);
+        assert_eq!(splice.successor_end, 2);
+        assert_eq!(splice.retained_rows(), 1);
+    }
+
+    #[test]
+    fn strand_splice_over_an_empty_successor_retains_everything() {
+        let splice = assert_splice_reconstructs(&["a", "b"], &[]);
+        assert_eq!(splice.retained_span(), 0..2);
+        assert_eq!(splice.successor_len(), 0);
+        assert!(!splice.shares_rows());
+    }
+
+    #[test]
+    fn strand_splice_over_an_empty_strand_is_inert() {
+        let splice = assert_splice_reconstructs(&[], &["a"]);
+        assert_eq!(splice.strand_len, 0);
+        assert_eq!(splice.retained_rows(), 0);
+        assert!(!splice.shares_rows());
+    }
+
+    #[test]
+    fn malformed_persisted_splices_are_detectable() {
+        assert!(
+            !StrandSplice {
+                strand_len: 4,
+                splice_start: 3,
+                splice_end: 2,
+                successor_end: 3,
+            }
+            .is_well_formed(),
+            "an inverted span must not pass well-formedness"
+        );
+        assert!(
+            !StrandSplice {
+                strand_len: 4,
+                splice_start: 1,
+                splice_end: 9,
+                successor_end: 1,
+            }
+            .is_well_formed(),
+            "a span past strand_len must not pass well-formedness"
+        );
+        assert!(
+            !StrandSplice {
+                strand_len: 4,
+                splice_start: 2,
+                splice_end: 3,
+                successor_end: 1,
+            }
+            .is_well_formed(),
+            "a replacement ending before the shared prefix must not pass"
+        );
     }
 }

@@ -49,7 +49,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -87,7 +87,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
         "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
@@ -130,7 +130,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -190,7 +190,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "auth_binding_no_string_form",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -249,7 +249,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "decode_memo_producer_seeding",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -259,6 +259,67 @@ rust_test(
     ],
     size = "small",
     data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "document_cost_probe_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "document_cost_probe",
+    crate_root = "tests/document_cost_probe.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = [
+        "tests/document_cost_probe.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.10",
+        "CARGO_BIN_NAME": "document_cost_probe",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },
@@ -308,7 +369,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "durable_tail_classification",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -367,7 +428,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "fork_at_rotates_session_id",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -428,7 +489,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "framed_checkpoint_digest",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -489,7 +550,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "hooks_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -554,7 +615,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "image_generation_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -613,7 +674,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "mcp_config_crossproc",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -672,7 +733,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "ops_lifecycle_integration",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -730,7 +791,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "rct_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -791,7 +852,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "realm_connection_config",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -800,6 +861,64 @@ rust_test(
         "fast",
     ],
     size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "runtime_snapshot_read_source_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_snapshot_read_source",
+    crate_root = "tests/runtime_snapshot_read_source.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = [
+        "tests/runtime_snapshot_read_source.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.10",
+        "CARGO_BIN_NAME": "runtime_snapshot_read_source",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "snapshot",
+    ],
     data = [],
     env = {
         "RUST_MIN_STACK": "16777216",
@@ -850,7 +969,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "runtime_turn_metadata_typed_round_trip",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -909,7 +1028,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "source_identity_resolve_enforces_lifecycle",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -968,8 +1087,67 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "tool_notice_projection",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "transcript_delta_retention_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "transcript_delta_retention",
+    crate_root = "tests/transcript_delta_retention.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = [
+        "tests/transcript_delta_retention.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.10",
+        "CARGO_BIN_NAME": "transcript_delta_retention",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -1027,7 +1205,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "transcript_digest_budget",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1086,7 +1264,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.9",
+        "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "witness_v3_migration",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1122,6 +1300,7 @@ test_suite(
     tests = [
         ":auth_binding_no_string_form_test",
         ":decode_memo_producer_seeding_test",
+        ":document_cost_probe_test",
         ":durable_tail_classification_test",
         ":fork_at_rotates_session_id_test",
         ":framed_checkpoint_digest_test",
@@ -1134,6 +1313,7 @@ test_suite(
         ":runtime_turn_metadata_typed_round_trip_test",
         ":source_identity_resolve_enforces_lifecycle_test",
         ":tool_notice_projection_test",
+        ":transcript_delta_retention_test",
         ":transcript_digest_budget_test",
         ":witness_v3_migration_test",
     ],

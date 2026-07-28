@@ -30,18 +30,21 @@
 //! non-terminal, content-carrying input is reported to the machine as
 //! unattributable evidence, and the machine holds the recovery intact.
 //!
-//! The one machine-owned exception is the LEGACY-ERA retain-inputs commit: a
-//! pre-witness-v3 writer persisted staged run bindings only inside the
-//! boundary commit, so its lost boundary routinely leaves the executed
-//! turn's own input durably unbound — holding that shape wedges every
-//! upgraded legacy session forever. For a clean COMPLETED candidate with
-//! pre-witness-v3 stamp evidence the machine commits the digest-proven
-//! transcript and terminalizes NOTHING: the unbound input stays in its own
-//! lifecycle and redelivers normally (the legacy fleet's own restart
-//! semantics — a possible duplicate turn, never a dropped input, never
-//! fabricated consumption; content-matching a row as "consumed" could mark a
-//! genuinely new identical prompt consumed, which silently drops user input
-//! and is strictly worse than one duplicate reply).
+//! The one machine-owned exception is the retain-inputs commit: for a clean
+//! COMPLETED candidate with an unbound content input the machine commits the
+//! digest-proven transcript and RETAINS the unbound row in its own lifecycle
+//! for ordinary redelivery, terminalizing only the rows the observation
+//! proved bound to the recovered run. That is safe in BOTH writer eras, for
+//! different reasons: a pre-0.8.9 writer persisted staged run bindings only
+//! inside the boundary commit, so its lost boundary routinely leaves the
+//! executed turn's own input unbound — retaining it costs at most one
+//! duplicate turn, the legacy fleet's own restart semantics; a 0.8.9+ writer
+//! fences staged bindings durable BEFORE execution, so an unbound content
+//! row never started and redelivering it is simply correct. Holding instead
+//! wedges the session forever (no repair verb exists), and content-matching
+//! a row as "consumed" could mark a genuinely new identical prompt consumed,
+//! which silently drops user input and is strictly worse than one duplicate
+//! reply. Never a dropped input, never fabricated consumption.
 
 use std::collections::BTreeSet;
 
@@ -59,9 +62,7 @@ use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::types::SessionId;
 
-pub use mm_dsl::{
-    DurableRecoveryWriterEra, DurableTailRecoveryClass, DurableTailRecoveryDisposition,
-};
+pub use mm_dsl::{DurableTailRecoveryClass, DurableTailRecoveryDisposition};
 
 /// One sealed recovery commit request.
 ///
@@ -88,13 +89,6 @@ pub struct DurableTailRecoveryRequest {
     conversation_digest: String,
     /// Message count of the recovered transcript, for the receipt.
     message_count: usize,
-    /// Stamp-schema era of the candidate head row's fully re-verified stamp,
-    /// observed by the classifier shell under the recovery fence. Selects
-    /// whether an unbound content input holds the commit (modern writers
-    /// persist staged run bindings before execution) or is retained for
-    /// ordinary redelivery (legacy writers bound inputs only inside the
-    /// boundary commit this candidate lost).
-    writer_era: DurableRecoveryWriterEra,
 }
 
 impl DurableTailRecoveryRequest {
@@ -109,7 +103,6 @@ impl DurableTailRecoveryRequest {
     /// bytes — the effect carries no content digest. Closing that requires the
     /// classification effect itself to carry the head digest the classifier
     /// judged.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_classification(
         verdict: &meerkat_core::session_document::SessionDocumentEffect,
         session_id: SessionId,
@@ -117,7 +110,6 @@ impl DurableTailRecoveryRequest {
         recovered_snapshot: Vec<u8>,
         conversation_digest: String,
         message_count: usize,
-        writer_era: DurableRecoveryWriterEra,
     ) -> Result<Self, DurableTailRecoveryError> {
         use meerkat_core::session_document::{
             DurableTailRecoveryClass as ClassifiedClass, SessionDocumentEffect,
@@ -156,7 +148,6 @@ impl DurableTailRecoveryRequest {
             recovered_snapshot,
             conversation_digest,
             message_count,
-            writer_era,
         })
     }
 
@@ -417,7 +408,6 @@ pub async fn authorize_and_commit_durable_tail_recovery(
             last_committed_sequence,
             prior_commit,
             input_evidence: inputs.evidence,
-            writer_era: request.writer_era,
         },
     )
     .map_err(|error| DurableTailRecoveryError::Authority(error.to_string()))?;
@@ -452,7 +442,6 @@ pub async fn authorize_and_commit_durable_tail_recovery(
                 class = ?request.class,
                 ?prior_commit,
                 input_evidence = ?inputs.evidence,
-                writer_era = ?request.writer_era,
                 "durable-tail recovery held intact by machine verdict"
             );
             return Ok(DurableTailRecoveryOutcome::Held);
@@ -565,8 +554,10 @@ pub async fn authorize_and_commit_durable_tail_recovery(
 struct CandidateInputObservation {
     evidence: mm_dsl::DurableRecoveryInputEvidence,
     /// Non-terminal rows durable identity attributed to the candidate run,
-    /// each paired with the row digest the commit fences on. Empty unless the
-    /// evidence class is `AllBoundOrInert`.
+    /// each paired with the row digest the commit fences on. Populated
+    /// whenever the rows could be scanned — including under
+    /// `UnboundContentInput`, where the retain-inputs commit still
+    /// terminalizes exactly these proven-bound rows.
     attributed: Vec<(StoredInputState, String)>,
 }
 

@@ -2851,33 +2851,31 @@ fn checkpoint_stamp_names_exact_authority(
 /// this shell — decides what a pre-witness-v3 stamp means; callers with no
 /// verified stamp feed the fail-closed default (`WitnessV3OrNewer`) instead.
 ///
+/// This evidence gates the IDENTITY-LESS legacy admissions only: the
+/// SessionDocumentMachine's `ClassifyDurableTailLegacyCompleted` arm, its
+/// legacy read-source routing (an unbound-execution intra-turn descendant
+/// recovers instead of quarantining only under pre-witness-v3 evidence),
+/// and the deterministic legacy run-id mint below. The retain-inputs
+/// recovery commit is deliberately NOT era-gated: retaining an unbound
+/// content input is safe under both writer generations (see the
+/// `AuthorizeDurableTailRecoveryCommitLegacyRetainInputs` arm in the
+/// MeerkatMachine DSL for the two-era argument), so the authorizer no
+/// longer consumes this observation.
+///
 /// PRECISION, STATED HONESTLY. Sub-v3 schema is not a *proof* of a pre-0.8.9
 /// writer. Schema is `max(provenance floor, witness floor)` and the witness
 /// floor is 1 for a document carrying no transcript-history graph, so a
 /// MODERN binary still mints schema-1 stamps for every graph-less session.
 /// The predicate therefore admits one shape beyond the strictly-legacy set:
-/// a modern graph-less row whose COLD durable head is a verified strict
-/// descendant while a content input sits unbound. (Tightening it to `sub-v3
-/// AND graph-bearing` would be exact — a 0.8.9+ graph-bearing mint always
-/// folds the format-3 witness, so that conjunction is unforgeable by this
-/// binary — and that same unforgeability is why the tightened form can only
-/// be exercised against real pre-0.8.9 bytes.)
-///
-/// The wider admission is correct, not merely tolerable. Everything this
-/// evidence gates is: commit the digest-proven boundary and RETAIN the
-/// unbound input for ordinary redelivery. For the extra shape both halves
-/// are the right answer — on a modern writer an unbound content input is one
-/// that never staged (`persist_staged_input_bindings` fences before
-/// execution), so redelivery is correct; and the tail is digest-proven
-/// content that the alternative — an unrecoverable
-/// `DurableTailHeldForRecovery` — would strand forever. The extra shape is
-/// the same wedge this release exists to clear, so admitting it is the fix
-/// reaching a population that equally deserves it.
-///
-/// This is also exactly why retention beat attributing the input to the
-/// recovered run: under attribution the identical imprecision would consume
-/// a genuinely new input, turning a naming gap into silent data loss.
-/// Nothing here consumes, drops, or fabricates.
+/// an identity-less clean tail on a modern GRAPH-LESS row adopts as legacy
+/// instead of quarantining. That admission is tolerable because everything
+/// it can authorize is the adoption of digest-proven byte-exact
+/// continuations under a deterministic domain-separated run identity —
+/// nothing is consumed, dropped, or fabricated on the strength of the era
+/// evidence, and the alternative is a permanent quarantine over proven
+/// bytes. (Tightening the predicate to `sub-v3 AND graph-bearing` would be
+/// exact — a 0.8.9+ graph-bearing mint always folds the format-3 witness,
+/// so that conjunction is unforgeable by this binary.)
 fn durable_head_stamp_era(stamp: &meerkat_core::SessionCheckpointStamp) -> DurableHeadStampEra {
     if stamp.schema_version() < meerkat_core::SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3 {
         DurableHeadStampEra::PreWitnessV3
@@ -4946,17 +4944,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // Input terminalization inside the commit is identity-evidence only
         // (persisted run bindings and committed receipts); recovery observes
         // the persisted machine lifecycle itself. Text content is never
-        // consumption identity — see `meerkat_runtime::recovery`. The writer
-        // era is the same fully re-verified stamp observation the classifier
-        // judged, mirrored 1:1 into the authorizer's bridging vocabulary.
-        let writer_era = match head_stamp_era {
-            DurableHeadStampEra::PreWitnessV3 => {
-                meerkat_runtime::recovery::DurableRecoveryWriterEra::PreWitnessV3
-            }
-            DurableHeadStampEra::WitnessV3OrNewer => {
-                meerkat_runtime::recovery::DurableRecoveryWriterEra::WitnessV3OrNewer
-            }
-        };
+        // consumption identity — see `meerkat_runtime::recovery`.
         let request = meerkat_runtime::recovery::DurableTailRecoveryRequest::from_classification(
             verdict,
             id.clone(),
@@ -4964,7 +4952,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             recovered_snapshot,
             conversation_digest,
             recovered.messages().len(),
-            writer_era,
         )
         .map_err(|error| recovery_error(error.to_string()))?;
         let outcome = meerkat_runtime::recovery::authorize_and_commit_durable_tail_recovery(
@@ -31989,14 +31976,19 @@ mod tests {
         );
     }
 
-    /// Behavior-preservation negative: the SAME shape under MODERN
-    /// (witness-v3) stamp evidence keeps today's fail-closed input-evidence
-    /// hold exactly. The modern writer persists staged run bindings before
-    /// execution, so an unbound content input coexisting with a clean tail
-    /// is contradictory under modern evidence; only the pre-witness-v3
-    /// writer era admits the retain-inputs adoption.
+    /// The 0.8.10 modern-era positive: the SAME retain-inputs adoption under
+    /// MODERN (witness-v3, graph-bearing) stamp evidence. A modern writer
+    /// fences staged run bindings durable BEFORE execution
+    /// (`persist_staged_input_bindings`), so an unbound content input
+    /// coexisting with a clean completed tail is an input that never
+    /// started — redelivering it is CORRECT, and the shape is ordinary (an
+    /// intra-turn checkpoint one turn ahead of the runtime snapshot plus a
+    /// queued, never-staged input). Before the retain arm was widened, this
+    /// exact fixture wedged forever: every load returned
+    /// `DurableTailHeldForRecovery`, and no repair verb exists — a session
+    /// 0.8.10 wrote that 0.8.10 could never read again.
     #[tokio::test]
-    async fn modern_stamped_bound_tail_with_unbound_input_keeps_the_hold() {
+    async fn modern_stamped_bound_tail_with_unbound_input_commits_and_retains() {
         use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -32084,10 +32076,378 @@ mod tests {
         );
         store.save(&head).await.expect("seed durable store head");
 
+        // Cold load: adoption, not the input-evidence wedge.
+        let recovered = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("a modern-era unbound content input must adopt, not wedge")
+            .expect("session exists");
+        assert_eq!(recovered.messages().len(), head.messages().len());
+        assert_eq!(
+            verified_checkpoint_stamp(&recovered).provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+            "a run-bound modern tail adopts under the ordinary recovered-boundary provenance"
+        );
+
+        // The receipt binds the REAL tail run and honestly names no
+        // contributing inputs — nothing was terminalized.
+        let receipt = runtime_store
+            .load_boundary_receipt(&runtime_id, &tail_run, 1)
+            .await
+            .expect("receipt read succeeds")
+            .expect("the adopted boundary must commit a receipt under the tail's run id");
+        assert_eq!(receipt.message_count, head.messages().len());
+        assert!(
+            receipt.contributing_input_ids.is_empty(),
+            "the retain-inputs commit must not claim any input as consumed"
+        );
+
+        // The never-staged prompt row is retained in its own lifecycle:
+        // still non-terminal, still unbound — the delivery layer redelivers
+        // it, which under a modern writer is exactly right.
+        let rows = runtime_store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("input rows must remain readable after adoption");
+        let row = rows
+            .iter()
+            .find(|bundle| bundle.state.input_id == input_id)
+            .expect("the unbound prompt row must survive adoption");
+        assert!(
+            !matches!(
+                row.seed.phase,
+                InputLifecycleState::Consumed
+                    | InputLifecycleState::Superseded
+                    | InputLifecycleState::Coalesced
+                    | InputLifecycleState::Abandoned
+            ),
+            "the unbound prompt must stay non-terminal for redelivery, got {:?}",
+            row.seed.phase
+        );
+        assert_eq!(
+            row.seed.last_run_id, None,
+            "adoption must not fabricate a run binding on the unbound prompt"
+        );
+
+        // Idempotence: the next load serves the adopted authority without a
+        // second recovery commit.
+        let again = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("post-adoption load succeeds")
+            .expect("session exists");
+        assert_eq!(again.messages().len(), head.messages().len());
+        assert!(
+            runtime_store
+                .load_boundary_receipt(&runtime_id, &tail_run, 2)
+                .await
+                .expect("receipt read succeeds")
+                .is_none(),
+            "a repeated load must not mint a second adoption receipt"
+        );
+    }
+
+    /// A staged-and-bound prompt row: the MODERN writer's pre-execution
+    /// staging fence (`persist_staged_input_bindings`) made the run binding
+    /// durable before the boundary commit was lost.
+    async fn seed_bound_durable_prompt(
+        runtime_store: &InMemoryRuntimeStore,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        text: &str,
+        run_id: &meerkat_core::RunId,
+    ) -> InputId {
+        let input_id = InputId::new();
+        let mut input_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        input_state.durability = Some(meerkat_runtime::InputDurability::Durable);
+        let mut prompt = meerkat_runtime::PromptInput::new(text, None);
+        prompt.header.id = input_id.clone();
+        let prompt = meerkat_runtime::Input::Prompt(prompt);
+        input_state.runtime_semantics = Some(
+            meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &prompt, true,
+            )
+            .expect("seeded prompt should receive generated runtime semantics"),
+        );
+        input_state.persisted_input = Some(prompt);
+        let mut seed = meerkat_runtime::input_state::InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Staged;
+        seed.last_run_id = Some(run_id.clone());
+        let stored = StoredInputState {
+            state: input_state,
+            seed,
+        };
+        let stored = recovered_input_persistence_record(runtime_id, stored);
+        runtime_store
+            .persist_input_state(runtime_id, &stored)
+            .await
+            .expect("seed the bound durable prompt row");
+        input_id
+    }
+
+    /// Attribution pin under the retain-inputs commit: a row the observation
+    /// PROVED bound to the recovered run (the modern staging fence persisted
+    /// the binding before the boundary was lost) is terminalized by the
+    /// realize pass — the adopted tail consumed it — while the genuinely
+    /// unbound row is retained for redelivery. Clearing attribution
+    /// wholesale would strand the proven-consumed row non-terminal, and the
+    /// input lifecycle would then requeue and re-execute an
+    /// already-committed turn.
+    #[tokio::test]
+    async fn retain_inputs_commit_terminalizes_proven_bound_rows_and_retains_unbound() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // Graph-bearing base: every stamp minted over it advertises the
+        // witness-v3 schema (modern writer evidence).
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        snapshot.push(Message::User(UserMessage::text(
+            "to be rewritten".to_string(),
+        )));
+        store
+            .save(&snapshot)
+            .await
+            .expect("seed the graph-less base as the store's first save");
+        let rewrite_commit = snapshot
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(UserMessage::text(
+                    "audited replacement".to_string(),
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("retain-attribution-pin"),
+                Some("retain-attribution-pin".to_string()),
+                None,
+            )
+            .expect("audited rewrite retains the transcript graph");
+        store
+            .save_transcript_rewrite(&snapshot, &rewrite_commit)
+            .await
+            .expect("persist the audited rewrite through the store's audit path");
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        let tail_run = meerkat_core::RunId::new();
+        let bound_input_id = seed_bound_durable_prompt(
+            &runtime_store,
+            &runtime_id,
+            "reply with the single word ACK",
+            &tail_run,
+        )
+        .await;
+        let unbound_input_id = seed_unbound_durable_prompt(
+            &runtime_store,
+            &runtime_id,
+            "a genuinely different queued prompt",
+        )
+        .await;
+
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run.clone());
+        head.push(Message::BlockAssistant(assistant));
+        let (head, head_stamp) = with_checkpoint_successor(
+            head,
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        assert_eq!(
+            head_stamp.schema_version(),
+            meerkat_core::SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3,
+            "the head row must carry modern stamp evidence"
+        );
+        store.save(&head).await.expect("seed durable store head");
+
+        let recovered = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("the mixed bound/unbound shape must adopt, not wedge")
+            .expect("session exists");
+        assert_eq!(recovered.messages().len(), head.messages().len());
+
+        // The receipt names exactly the proven-bound row as contributing.
+        let receipt = runtime_store
+            .load_boundary_receipt(&runtime_id, &tail_run, 1)
+            .await
+            .expect("receipt read succeeds")
+            .expect("the adopted boundary must commit a receipt under the tail's run id");
+        assert_eq!(
+            receipt.contributing_input_ids,
+            vec![bound_input_id.clone()],
+            "the commit must claim exactly the proven-bound row as consumed"
+        );
+
+        let rows = runtime_store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("input rows must remain readable after adoption");
+        let bound_row = rows
+            .iter()
+            .find(|bundle| bundle.state.input_id == bound_input_id)
+            .expect("the bound prompt row must survive adoption");
+        assert_eq!(
+            bound_row.seed.phase,
+            InputLifecycleState::Consumed,
+            "the proven-bound row was consumed by the adopted tail and must be terminalized"
+        );
+        assert_eq!(bound_row.seed.last_run_id, Some(tail_run.clone()));
+        assert_eq!(
+            bound_row.seed.last_boundary_sequence,
+            Some(receipt.sequence),
+            "terminalization must record the machine-minted recovery boundary"
+        );
+        let unbound_row = rows
+            .iter()
+            .find(|bundle| bundle.state.input_id == unbound_input_id)
+            .expect("the unbound prompt row must survive adoption");
+        assert!(
+            !matches!(
+                unbound_row.seed.phase,
+                InputLifecycleState::Consumed
+                    | InputLifecycleState::Superseded
+                    | InputLifecycleState::Coalesced
+                    | InputLifecycleState::Abandoned
+            ),
+            "the unbound prompt must stay non-terminal for redelivery, got {:?}",
+            unbound_row.seed.phase
+        );
+        assert_eq!(
+            unbound_row.seed.last_run_id, None,
+            "adoption must not fabricate a run binding on the unbound prompt"
+        );
+    }
+
+    /// Behavior-preservation negative: the widening is COMPLETED-shape only.
+    /// An INTERRUPTED modern tail (run-bound, stopped at ToolUse) with an
+    /// unbound content input keeps the fail-closed input-evidence hold: a
+    /// repaired interrupted boundary explicitly does not requeue the
+    /// interrupted run's input, so the unbound row can neither be safely
+    /// retained for redelivery nor proven consumed.
+    #[tokio::test]
+    async fn modern_interrupted_tail_with_unbound_input_keeps_the_hold() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // Graph-bearing base: every stamp minted over it advertises the
+        // witness-v3 schema (modern writer evidence).
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        snapshot.push(Message::User(UserMessage::text(
+            "to be rewritten".to_string(),
+        )));
+        store
+            .save(&snapshot)
+            .await
+            .expect("seed the graph-less base as the store's first save");
+        let rewrite_commit = snapshot
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(UserMessage::text(
+                    "audited replacement".to_string(),
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("interrupted-hold-negative"),
+                Some("interrupted-hold-negative".to_string()),
+                None,
+            )
+            .expect("audited rewrite retains the transcript graph");
+        store
+            .save_transcript_rewrite(&snapshot, &rewrite_commit)
+            .await
+            .expect("persist the audited rewrite through the store's audit path");
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        let input_id = seed_unbound_durable_prompt(
+            &runtime_store,
+            &runtime_id,
+            "reply with the single word ACK",
+        )
+        .await;
+
+        // Interrupted shape: run-bound assistant stopped at ToolUse with no
+        // issued calls — the InterruptedRepairableCandidate class.
+        let tail_run = meerkat_core::RunId::new();
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "let me think".to_string(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run.clone());
+        head.push(Message::BlockAssistant(assistant));
+        let (head, head_stamp) = with_checkpoint_successor(
+            head,
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        assert_eq!(
+            head_stamp.schema_version(),
+            meerkat_core::SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_WITNESS_V3,
+            "the head row must carry modern stamp evidence for this negative"
+        );
+        store.save(&head).await.expect("seed durable store head");
+
         let error = service
             .load_authoritative_session(&id)
             .await
-            .expect_err("a modern-era unbound content input must keep today's hold");
+            .expect_err("an interrupted tail with an unbound content input must stay held");
         assert!(
             matches!(error, SessionError::DurableTailHeldForRecovery { id: ref held } if *held == id),
             "expected the typed durable-tail hold, got {error:?}"
@@ -32116,7 +32476,7 @@ mod tests {
             .expect("the queued prompt row must survive the hold");
         assert!(
             row.seed.last_run_id.is_none(),
-            "a modern-era hold must not fabricate a run binding on the queued prompt"
+            "a hold must not fabricate a run binding on the queued prompt"
         );
     }
 
@@ -32325,8 +32685,8 @@ mod tests {
             "the predicate is the stamp's own schema floor: sub-v3 reads as \
              pre-witness-v3 evidence regardless of whether the document \
              carries a graph (see durable_head_stamp_era's precision note — \
-             the wider admission is safe because the arm it gates only ever \
-             commits proven content and RETAINS the input)"
+             the wider admission only ever gates the adoption of \
+             digest-proven bytes under the identity-less legacy paths)"
         );
 
         // Only the conjunction is sound: 0.8.9+ always folds the format-3
@@ -33545,6 +33905,138 @@ mod tests {
         assert_eq!(
             input_row.seed.last_run_id, None,
             "the migration must not fabricate a run binding on the queued prompt"
+        );
+    }
+
+    /// One-property pin for the parent-1 (EXACT head/row) resume: the
+    /// machine-owned read-source arbitration serves the committed RUNTIME
+    /// SNAPSHOT — the pre-0.8.9 INLINE document — not the durable store's
+    /// slim materialization. `ResolveRuntimeSnapshotReadSourceSnapshot`
+    /// (meerkat-machine-schema session_document.rs, the AbsentOrExact arm)
+    /// is the authority for this verdict. This fact is load-bearing for the
+    /// upgrade-boundary composition: because the SERVED document keeps the
+    /// graph inline, a boundary save that is meant to perform the one-time
+    /// inline-to-slim row migration must be built from the store's slim
+    /// materialization (`store.load`), exactly as
+    /// `legacy_inline_row_with_stale_queued_input_redelivers_and_migrates_on_first_save`
+    /// does. "Fixing" this read to return the slim projection would change
+    /// which write performs the migration; do that only by moving the
+    /// machine's verdict, not the shell.
+    #[tokio::test]
+    async fn exact_head_row_resume_serves_the_inline_runtime_snapshot() {
+        let (_memory_store, store, runtime_store, service) = incremental_service_fixture();
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let parent = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        let parent = mutate_with_test_checkpoint(
+            parent,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+            |parent| {
+                parent.push(user_message("turn-0 question"));
+                parent.push(user_message("turn-0 answer"));
+            },
+        );
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&parent)
+                        .expect("serialize parent runtime snapshot"),
+                },
+            )
+            .await
+            .expect("parent runtime snapshot commit");
+        service
+            .save_normalized_session(parent.clone())
+            .await
+            .expect("parent boundary persist");
+        let parent_revision = parent.transcript_revision().expect("parent revision");
+        let compacted = mutate_with_test_checkpoint(
+            parent.clone(),
+            meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
+            |compacted| {
+                compacted
+                    .commit_transcript_rewrite(
+                        TranscriptRewriteSelection::MessageRange {
+                            start: 0,
+                            end: parent.messages().len(),
+                        },
+                        vec![user_message("[Context compacted] singleton summary")],
+                        TranscriptRewriteReason::new("compaction"),
+                        Some("meerkat-core".to_string()),
+                        Some(parent_revision),
+                    )
+                    .expect("compaction rewrite should commit");
+            },
+        );
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&compacted)
+                        .expect("serialize compacted runtime snapshot"),
+                },
+            )
+            .await
+            .expect("compacted runtime snapshot commit (inline, the 0.8.8 shape)");
+        service
+            .save_normalized_session(compacted.clone())
+            .await
+            .expect("compacted boundary persist");
+
+        // Preconditions: the row carries the graph inline while the store
+        // materializes the SAME document slim — the two representations the
+        // read-source verdict chooses between.
+        let row: Session = serde_json::from_slice(
+            &runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load runtime snapshot")
+                .expect("runtime snapshot present"),
+        )
+        .expect("runtime snapshot deserializes");
+        assert!(
+            row.metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "precondition: the pre-upgrade runtime row must carry the graph inline"
+        );
+        assert!(
+            !store
+                .load(&created.session_id)
+                .await
+                .expect("load slim materialization")
+                .expect("slim materialization present")
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "precondition: the durable store must materialize the same document slim"
+        );
+
+        // The pinned property: an EXACT relation serves the runtime snapshot,
+        // inline representation and all.
+        let served = service
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("the exact head/row pair must be served")
+            .expect("session exists");
+        assert!(
+            served
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "an exact head/row pair serves the committed runtime snapshot — the INLINE \
+             document, not the store's slim materialization"
+        );
+        assert_eq!(
+            verified_checkpoint_stamp(&served).digest(),
+            verified_checkpoint_stamp(&row).digest(),
+            "the served document is the committed runtime authority itself"
         );
     }
 

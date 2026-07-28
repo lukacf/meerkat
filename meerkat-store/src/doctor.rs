@@ -1339,6 +1339,14 @@ struct SessionFootprint {
     inline_revisions: u64,
     /// Legacy inline document only: rewrite commits in that graph.
     inline_commits: u64,
+    /// `session_strand_messages` rows whose session has no usable
+    /// `session_heads` row. `append_messages` lands strand rows and
+    /// `save_head` mints the head row in a separate transaction
+    /// (`meerkat-store/src/sqlite_store.rs`), so this is a legitimate
+    /// durable state, not corruption — but without the head key the rows'
+    /// live-or-retained split is unknowable. The strand pool counts the
+    /// same rows in its unclassified bucket.
+    headless_strand_rows: u64,
     /// Some durable part of this session could not be measured, so it is
     /// excluded from every ratio finding (reported unknown, never healthy).
     unmeasured: bool,
@@ -1390,13 +1398,31 @@ impl SessionFootprint {
         }
     }
 
+    /// A session holding strand rows with no usable head row. Its strand
+    /// bytes have an unknowable live-or-retained split — the head save that
+    /// would classify them has not landed (or did not read back) — so every
+    /// ratio finding must fail closed and exclude it: reading it as a
+    /// legacy inline document would claim bytes live in
+    /// `sessions.session_json` for a session that may have no row there at
+    /// all, and firing the mass-alone arm would treat "live is unknown" as
+    /// "live is zero".
+    fn split_unclassifiable(&self) -> bool {
+        !self.head_canonical() && self.headless_strand_rows > 0
+    }
+
     /// Warn-worthy: fully measured, at least [the floor] of reclaimable
-    /// bytes, and past the ratio. A session with no live transcript at all
-    /// cannot have a ratio, so mass alone decides there.
+    /// bytes, and past the ratio. A session with a KNOWN-empty live
+    /// transcript cannot have a ratio, so mass alone decides there; a
+    /// session whose live bytes are unknowable ([`split_unclassifiable`])
+    /// is excluded outright rather than guessed at.
     ///
     /// [the floor]: STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES
+    /// [`split_unclassifiable`]: SessionFootprint::split_unclassifiable
     fn is_oversized(&self) -> bool {
-        if self.unmeasured || self.reclaimable_bytes() < STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES {
+        if self.unmeasured
+            || self.split_unclassifiable()
+            || self.reclaimable_bytes() < STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES
+        {
             return false;
         }
         let live = self.live_bytes();
@@ -1444,6 +1470,13 @@ struct CensusGaps {
     /// Legacy inline documents whose JSON did not parse far enough to split
     /// live transcript from retained history.
     documents: u64,
+    /// Sessions holding `session_strand_messages` rows but no usable
+    /// `session_heads` row ([`SessionFootprint::split_unclassifiable`]):
+    /// their live-or-retained split is unknowable, so the ratio findings
+    /// exclude them and this census says so instead of certifying them
+    /// healthy. The strand pool's unclassified bucket carries the same
+    /// rows' bytes.
+    headless_strand_sessions: u64,
     /// Pools whose census query failed outright (each also reported as
     /// [`FINDING_DATABASE_UNREADABLE`]).
     pools: Vec<&'static str>,
@@ -1451,7 +1484,10 @@ struct CensusGaps {
 
 impl CensusGaps {
     fn is_empty(&self) -> bool {
-        self.rows == 0 && self.documents == 0 && self.pools.is_empty()
+        self.rows == 0
+            && self.documents == 0
+            && self.headless_strand_sessions == 0
+            && self.pools.is_empty()
     }
 
     /// Record a pool the census could not query at all, and report it with
@@ -1483,11 +1519,12 @@ impl CensusGaps {
             return String::new();
         }
         format!(
-            " — partial census: {} unmeasurable row(s), {} unmeasurable document(s) and {} \
-             unreadable pool(s) are excluded from these numbers (see \
-             `{FINDING_STORAGE_CENSUS_UNMEASURED}`)",
+            " — partial census: {} unmeasurable row(s), {} unmeasurable document(s), {} \
+             head-less strand session(s) and {} unreadable pool(s) are excluded from these \
+             numbers (see `{FINDING_STORAGE_CENSUS_UNMEASURED}`)",
             self.rows,
             self.documents,
+            self.headless_strand_sessions,
             self.pools.len()
         )
     }
@@ -1557,6 +1594,13 @@ fn census_storage_footprint(
     if let Err(error) = census_blob_rows(conn, &mut sessions, &mut archives, &mut gaps) {
         gaps.pool_unreadable("sessions", &error, db_path, realm, diagnosis);
     }
+    // Classification, not measurement, is what failed for these sessions —
+    // but the consequence is the same: their footprint is unknown, and every
+    // finding below must carry that instead of certifying them healthy.
+    gaps.headless_strand_sessions = sessions
+        .values()
+        .filter(|footprint| footprint.split_unclassifiable())
+        .count() as u64;
 
     report_oversized_sessions(&sessions, &gaps, db_path, realm, diagnosis);
     report_strand_pool(&strand_pool, &gaps, db_path, realm, diagnosis);
@@ -1666,6 +1710,7 @@ fn census_strand_rows(
                 pool.retained_bytes = pool.retained_bytes.saturating_add(bytes);
             }
             None => {
+                footprint.headless_strand_rows += 1;
                 pool.unclassified_rows += 1;
                 pool.unclassified_bytes = pool.unclassified_bytes.saturating_add(bytes);
             }
@@ -1935,7 +1980,12 @@ fn report_oversized_sessions(
         );
     }
 
-    let measured = sessions.values().filter(|f| !f.unmeasured);
+    // Head-less strand sessions are excluded exactly like unmeasured ones:
+    // folding their bytes in with zero live would publish a database-wide
+    // ratio built on a guess (the exclusion note carries them instead).
+    let measured = sessions
+        .values()
+        .filter(|f| !f.unmeasured && !f.split_unclassifiable());
     let (measured_sessions, document_bytes, live_bytes) =
         measured.fold((0u64, 0u64, 0u64), |(count, documents, live), footprint| {
             (
@@ -2088,6 +2138,15 @@ fn report_census_gaps(
     if gaps.is_empty() {
         return;
     }
+    let headless = if gaps.headless_strand_sessions == 0 {
+        String::new()
+    } else {
+        format!(
+            ", and could not classify {} session(s) holding strand rows with no \
+             `session_heads` row (head save not yet landed; live-or-retained split unknowable)",
+            gaps.headless_strand_sessions,
+        )
+    };
     let pools = if gaps.pools.is_empty() {
         String::new()
     } else {
@@ -2099,8 +2158,8 @@ fn report_census_gaps(
             FINDING_STORAGE_CENSUS_UNMEASURED,
             format!(
                 "storage census could not measure {} durable row(s) and {} session \
-                 document(s){pools}; the footprint findings exclude them, so this database's \
-                 storage footprint is UNKNOWN rather than certified healthy",
+                 document(s){headless}{pools}; the footprint findings exclude them, so this \
+                 database's storage footprint is UNKNOWN rather than certified healthy",
                 gaps.rows, gaps.documents,
             ),
         )
@@ -3584,6 +3643,134 @@ mod tests {
         assert!(pool.message.contains("partial census"), "{}", pool.message);
         // The undecodable document is still reported by the blob sweep.
         assert!(codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE));
+    }
+
+    #[tokio::test]
+    async fn headless_strand_rows_are_not_misread_as_inline_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "midmint", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        // `append_messages` lands strand rows in one transaction and
+        // `save_head` mints the head row in a later one
+        // (meerkat-store/src/sqlite_store.rs), so a session legitimately
+        // holds strand rows and no head row — and no `sessions.session_json`
+        // row at all. Enough mass that the old mass-alone arm would have
+        // fired.
+        let headless_id = Session::new().id().clone();
+        let headless_message = strand_message(512 * 1024);
+        // A genuinely oversized head-canonical neighbour: the head-less
+        // session must not dilute or join its ratio findings.
+        let oversized_id = Session::new().id().clone();
+        let oversized_message = strand_message(64 * 1024);
+        {
+            let conn = head_canonical_db(&db_path);
+            for seq in 0..4 {
+                insert_strand_row(&conn, &headless_id, "root", seq, &headless_message);
+            }
+            insert_head(&conn, &oversized_id, "root", 4);
+            for seq in 0..4 {
+                insert_strand_row(&conn, &oversized_id, "root", seq, &oversized_message);
+            }
+            for revision in 0..6u64 {
+                for seq in 0..4 {
+                    insert_strand_row(
+                        &conn,
+                        &oversized_id,
+                        &format!("rewrite:{revision}"),
+                        seq,
+                        &oversized_message,
+                    );
+                }
+            }
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        // The head-less session's bytes live in `session_strand_messages`;
+        // no finding may place them — or anything else — in an inline
+        // document it does not have.
+        assert!(
+            !diagnosis
+                .findings
+                .iter()
+                .any(|f| f.message.contains("inline in sessions.session_json")),
+            "{diagnosis:?}"
+        );
+        assert!(
+            !diagnosis.findings.iter().any(|f| {
+                f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED
+                    && f.message.contains(&headless_id.to_string())
+            }),
+            "an unknowable live-or-retained split must not be reported as a \
+             measured ratio: {diagnosis:?}"
+        );
+
+        // The genuinely oversized neighbour still warns, in its real
+        // location, and the summary counts the head-less session as
+        // excluded rather than measured-and-healthy.
+        let per_session = diagnosis
+            .findings
+            .iter()
+            .find(|f| {
+                f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED
+                    && f.message.contains(&oversized_id.to_string())
+            })
+            .expect("head-canonical footprint finding");
+        assert!(
+            per_session
+                .message
+                .contains("session_strand_messages + session_rewrites"),
+            "{}",
+            per_session.message
+        );
+        let summary = diagnosis
+            .findings
+            .iter()
+            .find(|f| {
+                f.code == FINDING_TRANSCRIPT_HISTORY_OVERSIZED
+                    && f.message.contains("measured session(s) exceed")
+            })
+            .expect("database-wide summary finding");
+        assert!(
+            summary.message.contains("1 of 1 measured session(s)"),
+            "{}",
+            summary.message
+        );
+        assert!(
+            summary.message.contains("1 head-less strand session(s)"),
+            "{}",
+            summary.message
+        );
+
+        // Not silently healthy either: the strand pool carries the rows as
+        // unclassified, and the census says the footprint is unknown.
+        let pool = finding(&diagnosis, FINDING_STRAND_DUPLICATION_RECLAIMABLE)
+            .expect("strand pool finding");
+        let unclassified_clause = format!(
+            "4 row(s) / {} belong to sessions with no usable `session_heads` row",
+            format_bytes(4 * headless_message.len() as u64)
+        );
+        assert!(
+            pool.message.contains(&unclassified_clause),
+            "{}",
+            pool.message
+        );
+        let unmeasured =
+            finding(&diagnosis, FINDING_STORAGE_CENSUS_UNMEASURED).expect("census gap finding");
+        assert!(
+            unmeasured
+                .message
+                .contains("could not classify 1 session(s) holding strand rows"),
+            "{}",
+            unmeasured.message
+        );
+        assert!(
+            unmeasured.message.contains("UNKNOWN"),
+            "{}",
+            unmeasured.message
+        );
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
     }
 
     #[tokio::test]

@@ -15,6 +15,60 @@ via cargo-semver-checks against the published baselines).
 
 ## [0.8.10] - 2026-07-28
 
+### Breaking
+
+- **Durable transcript-history retention is now anchor + splice deltas.** The
+  durable encoding of `session_transcript_history_state_v1.revisions` changed:
+  entry 0 is the chain anchor carrying full `messages`, and every later entry
+  carries `rebase {base, at, removed, insert}` — a minimal splice with the
+  shared prefix *and* suffix elided. Decode materializes front-to-back in one
+  pass, and full-body entries are still accepted on decode. **Documents
+  written by 0.8.10 cannot be read by earlier releases.** The in-memory
+  `TranscriptHistoryState` / `TranscriptRevisionBody` types are unchanged, so
+  no consumer code moves and no published wire schema changed
+  (`TranscriptRevisionBody`'s own serialization is untouched; regenerating the
+  schema artifacts produces a version-only diff).
+  Motivation, measured on a production fleet: retention was `N × document`,
+  because every rewrite retained the full transcript twice — 490.6 MB of
+  durable documents carrying 6.55 MB of conversation (74.9×; worst identity
+  118×) across 1687 retained revisions. Retention is now `one document + Σ
+  edits`: ~82 MB of history metadata on the measured session becomes ~1.4 MB.
+  Content addressing is unchanged — every retained body is still hashed after
+  materialization, so a splice that reconstructs the wrong messages fails
+  exactly the check it always did — and both transcript-history witness
+  formats are byte-identical, so checkpoint digests and stamps are unaffected.
+- **Session-store schema ledger v1 → v2** (`strand-supersession-links`). A
+  0.8.9 binary opening a v2 file refuses it wholesale as
+  `SchemaFromTheFuture`. Strand rows previously had no collection path at all,
+  and a rewrite at message 0 — the per-resume prompt-refresh shape — shares no
+  prefix, so each one wrote a complete new transcript of rows that nothing
+  ever reclaimed. A session now keeps at most ONE materialized strand (the
+  live head); superseded strands retain only their spliced span and resolve
+  the rest through their successor, with supersession derived by comparing
+  persisted bytes so it can never claim sharing that does not exist.
+- **Public API additions that are breaking under `cargo-semver-checks`:**
+  `SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit` and
+  `DurableTailRecoveryClass::LegacyCompletedCandidate` are new enum variants;
+  `SessionDocumentInput::ResolveRuntimeSnapshotReadSource` and
+  `::ClassifyDurableTail` gained a required field, and the corresponding
+  generated `resolve_runtime_snapshot_read_source` / `classify_durable_tail`
+  functions gained a parameter.
+
+### Added
+
+- **Storage doctor census (read-only).** Four findings so this class of defect
+  cannot run unobserved again: `transcript-history-oversized` (warns past a
+  4.0× document-to-conversation ratio — the production shape was 74.9×),
+  `strand-duplication-reclaimable` (2.0×; the production shape was ~88×),
+  `frozen-blob-archive-reclaimable`, and `storage-census-unmeasured` so data
+  the census cannot read is reported unknown rather than healthy. A 1 MiB
+  floor keeps small sessions quiet. The 490 MB above accumulated over weeks
+  precisely because nothing measured the ratio.
+- **Store conformance: `chained_prefix_rewrites`.** Pins reconstruction
+  fidelity across rewrites that share no prefix with their parent. It
+  deliberately does not encode any one storage strategy — a backend that keeps
+  whole revisions materialized still passes.
+
 ### Fixed
 
 - **0.8.8 → 0.8.9 upgrade boundary: legacy durable-tail adoption.** A clean

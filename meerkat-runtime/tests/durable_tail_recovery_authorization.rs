@@ -18,11 +18,16 @@
 //!   cross-process duplicate-recovery phantom);
 //! - input rows durable identity cannot attribute, or blocking rows the store
 //!   cannot fence: `HoldIntact` — minted HERE, never by the shell — EXCEPT a
-//!   clean COMPLETED candidate under PRE-WITNESS-V3 writer-era evidence with
-//!   an unbound content input, which commits `CommitLegacyCompletedRetainInputs`
-//!   (terminalize nothing; the unbound input redelivers — the legacy fleet's
-//!   own restart semantics: a possible duplicate turn, never a dropped
-//!   input, never fabricated consumption);
+//!   clean COMPLETED candidate with an unbound content input, which commits
+//!   `CommitLegacyCompletedRetainInputs` (terminalize only proven-bound
+//!   rows; the unbound input redelivers). That commit is deliberately NOT
+//!   era-gated: a pre-0.8.9 writer's lost boundary routinely leaves the
+//!   executed turn's own input unbound, so redelivery costs at most one
+//!   duplicate turn (the legacy fleet's own restart semantics), while a
+//!   0.8.9+ writer fences staged bindings durable before execution, so an
+//!   unbound content row never started and redelivery is simply correct.
+//!   Never a dropped input, never fabricated consumption; interrupted
+//!   shapes and unfenceable rows hold in every era;
 //! - conflicting in-process run facts (live run, or the candidate's run
 //!   already produced the retained turn terminal witness): `RefuseRecovery`;
 //! - conflicting PERSISTED facts (non-quiescent or undecodable lifecycle
@@ -78,7 +83,6 @@ fn recovery_input(
     last_committed_sequence: u64,
     prior_commit: mm_dsl::DurableRecoveryPriorCommit,
     input_evidence: mm_dsl::DurableRecoveryInputEvidence,
-    writer_era: mm_dsl::DurableRecoveryWriterEra,
 ) -> mm_dsl::MeerkatMachineInput {
     mm_dsl::MeerkatMachineInput::AuthorizeDurableTailRecovery {
         session_id: mm_dsl::SessionId("session-recovery".to_string()),
@@ -90,7 +94,6 @@ fn recovery_input(
         last_committed_sequence,
         prior_commit,
         input_evidence,
-        writer_era,
     }
 }
 
@@ -103,7 +106,7 @@ enum Verdict {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn authorize_with_era(
+fn authorize(
     authority: &mut mm_dsl::MeerkatMachineAuthority,
     candidate_id: &str,
     candidate_run_id: &str,
@@ -113,7 +116,6 @@ fn authorize_with_era(
     last_committed_sequence: u64,
     prior_commit: mm_dsl::DurableRecoveryPriorCommit,
     input_evidence: mm_dsl::DurableRecoveryInputEvidence,
-    writer_era: mm_dsl::DurableRecoveryWriterEra,
 ) -> (String, Verdict) {
     let transition = mm_dsl::MeerkatMachineMutator::apply(
         authority,
@@ -126,7 +128,6 @@ fn authorize_with_era(
             last_committed_sequence,
             prior_commit,
             input_evidence,
-            writer_era,
         ),
     )
     .expect("AuthorizeDurableTailRecovery must be total over machine phases");
@@ -156,34 +157,6 @@ fn authorize_with_era(
         "authorization must emit exactly one recovery verdict effect"
     );
     first
-}
-
-/// Authorize under the MODERN writer era — the fail-closed default every
-/// pre-existing disposition-table row was stated under.
-#[allow(clippy::too_many_arguments)]
-fn authorize(
-    authority: &mut mm_dsl::MeerkatMachineAuthority,
-    candidate_id: &str,
-    candidate_run_id: &str,
-    class: mm_dsl::DurableTailRecoveryClass,
-    observed_lifecycle: mm_dsl::DurableRecoveryObservedLifecycle,
-    observed_current_run: mm_dsl::DurableRecoveryObservedRun,
-    last_committed_sequence: u64,
-    prior_commit: mm_dsl::DurableRecoveryPriorCommit,
-    input_evidence: mm_dsl::DurableRecoveryInputEvidence,
-) -> (String, Verdict) {
-    authorize_with_era(
-        authority,
-        candidate_id,
-        candidate_run_id,
-        class,
-        observed_lifecycle,
-        observed_current_run,
-        last_committed_sequence,
-        prior_commit,
-        input_evidence,
-        mm_dsl::DurableRecoveryWriterEra::WitnessV3OrNewer,
-    )
 }
 
 fn authorize_quiescent(
@@ -439,60 +412,73 @@ fn diverging_prior_commit_refuses_recovery() {
     );
 }
 
-/// Input evidence the machine — not the shell — turns into a hold: an
-/// unattributable redeliverable input, or blocking rows the store cannot
-/// fence. Both commit-seeking classes hold, and no commit authorization is
-/// emitted, so no shell can be handed a commit verdict it then downgrades.
+/// Input evidence the machine — not the shell — turns into a hold: blocking
+/// rows the store cannot fence hold for every commit-seeking class, and an
+/// unattributable redeliverable input holds for the INTERRUPTED shape. No
+/// commit authorization is emitted on any hold, so no shell can be handed a
+/// commit verdict it then downgrades. (The COMPLETED shapes under
+/// `UnboundContentInput` belong to the retain-inputs commit, pinned below.)
 #[test]
 fn unattributable_input_evidence_holds_intact() {
-    for evidence in [
-        mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
-        mm_dsl::DurableRecoveryInputEvidence::Unfenceable,
-    ] {
-        for class in [
+    let cases = [
+        (
+            mm_dsl::DurableRecoveryInputEvidence::Unfenceable,
             mm_dsl::DurableTailRecoveryClass::CompletedCandidate,
+        ),
+        (
+            mm_dsl::DurableRecoveryInputEvidence::Unfenceable,
             mm_dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
+        ),
+        (
+            mm_dsl::DurableRecoveryInputEvidence::Unfenceable,
             mm_dsl::DurableTailRecoveryClass::LegacyCompletedCandidate,
-        ] {
-            let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(
-                quiescent_state(mm_dsl::MeerkatPhase::Idle),
-            )
-            .expect("idle quiescent state must be recoverable");
-            let (lifecycle, run) = quiescent_observation();
-            let (candidate_id, verdict) = authorize(
-                &mut authority,
-                "candidate-inputs",
-                "run-inputs",
-                class,
-                lifecycle,
-                run,
-                0,
-                mm_dsl::DurableRecoveryPriorCommit::NoPriorCommit,
-                evidence,
-            );
-            assert_eq!(candidate_id, "candidate-inputs");
-            assert_eq!(
-                verdict,
-                Verdict::NonCommit(mm_dsl::DurableTailRecoveryDisposition::HoldIntact),
-                "{evidence:?} with class {class:?} must hold intact"
-            );
-            assert_eq!(
-                authority.state().turn_terminal_run_id,
-                None,
-                "a hold must not record the candidate run as terminalized"
-            );
-        }
+        ),
+        (
+            mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
+            mm_dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
+        ),
+    ];
+    for (evidence, class) in cases {
+        let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(quiescent_state(
+            mm_dsl::MeerkatPhase::Idle,
+        ))
+        .expect("idle quiescent state must be recoverable");
+        let (lifecycle, run) = quiescent_observation();
+        let (candidate_id, verdict) = authorize(
+            &mut authority,
+            "candidate-inputs",
+            "run-inputs",
+            class,
+            lifecycle,
+            run,
+            0,
+            mm_dsl::DurableRecoveryPriorCommit::NoPriorCommit,
+            evidence,
+        );
+        assert_eq!(candidate_id, "candidate-inputs");
+        assert_eq!(
+            verdict,
+            Verdict::NonCommit(mm_dsl::DurableTailRecoveryDisposition::HoldIntact),
+            "{evidence:?} with class {class:?} must hold intact"
+        );
+        assert_eq!(
+            authority.state().turn_terminal_run_id,
+            None,
+            "a hold must not record the candidate run as terminalized"
+        );
     }
 }
 
-/// The legacy-era retain-inputs commit (the HomeCore parent-2 upgrade wedge):
-/// a clean COMPLETED candidate on a pre-witness-v3 head row with an unbound
-/// content input commits WITHOUT terminalizing anything — the legacy writer
-/// bound inputs only inside the boundary commit this candidate lost, so the
-/// unbound row is retained for ordinary redelivery instead of wedging the
-/// session forever.
+/// The retain-inputs commit: a clean COMPLETED candidate with an unbound
+/// content input commits WITHOUT terminalizing the unbound row — it is
+/// retained for ordinary redelivery instead of wedging the session forever.
+/// The arm carries no writer-era guard: a pre-0.8.9 writer's lost boundary
+/// routinely leaves the executed turn's own input unbound (redelivery costs
+/// at most one duplicate turn — the legacy fleet's own restart semantics),
+/// and a 0.8.9+ writer fences staged bindings durable before execution, so
+/// an unbound content row never started and redelivery is simply correct.
 #[test]
-fn legacy_era_unbound_content_input_commits_retaining_inputs() {
+fn unbound_content_input_with_completed_shape_commits_retaining_inputs() {
     for class in [
         mm_dsl::DurableTailRecoveryClass::CompletedCandidate,
         mm_dsl::DurableTailRecoveryClass::LegacyCompletedCandidate,
@@ -502,66 +488,65 @@ fn legacy_era_unbound_content_input_commits_retaining_inputs() {
         ))
         .expect("idle quiescent state must be recoverable");
         let (lifecycle, run) = quiescent_observation();
-        let (candidate_id, verdict) = authorize_with_era(
+        let (candidate_id, verdict) = authorize(
             &mut authority,
-            "candidate-legacy-inputs",
-            "run-legacy-bound",
+            "candidate-retain-inputs",
+            "run-retain-bound",
             class,
             lifecycle,
             run,
             0,
             mm_dsl::DurableRecoveryPriorCommit::NoPriorCommit,
             mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
-            mm_dsl::DurableRecoveryWriterEra::PreWitnessV3,
         );
-        assert_eq!(candidate_id, "candidate-legacy-inputs");
+        assert_eq!(candidate_id, "candidate-retain-inputs");
         assert_eq!(
             verdict,
             Verdict::Commit(
                 mm_dsl::DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs,
                 1
             ),
-            "class {class:?}: legacy-era unbound content input must commit retaining inputs"
+            "class {class:?}: an unbound content input on a completed shape must \
+             commit retaining inputs"
         );
         assert_eq!(
             authority.state().turn_terminal_run_id,
-            Some(mm_dsl::RunId("run-legacy-bound".to_string())),
+            Some(mm_dsl::RunId("run-retain-bound".to_string())),
             "the retain-inputs commit still records the candidate run as the turn terminal"
         );
     }
 }
 
 /// The retain-inputs arm is exactly as narrow as the evidence allows: an
-/// interrupted legacy shape stays held, unfenceable rows stay held in every
-/// era, and a prior-commit conflict refuses before the evidence cut is ever
+/// interrupted shape stays held, unfenceable rows stay held for every class,
+/// and a prior-commit conflict refuses before the evidence cut is ever
 /// consulted.
 #[test]
-fn legacy_era_retain_inputs_arm_stays_fail_closed_everywhere_else() {
-    // Interrupted legacy shape: held.
+fn retain_inputs_arm_stays_fail_closed_everywhere_else() {
+    // Interrupted shape: held.
     let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(quiescent_state(
         mm_dsl::MeerkatPhase::Idle,
     ))
     .expect("idle quiescent state must be recoverable");
     let (lifecycle, run) = quiescent_observation();
-    let (_, verdict) = authorize_with_era(
+    let (_, verdict) = authorize(
         &mut authority,
-        "candidate-legacy-interrupted",
-        "run-legacy-interrupted",
+        "candidate-retain-interrupted",
+        "run-retain-interrupted",
         mm_dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
         lifecycle,
         run,
         0,
         mm_dsl::DurableRecoveryPriorCommit::NoPriorCommit,
         mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
-        mm_dsl::DurableRecoveryWriterEra::PreWitnessV3,
     );
     assert_eq!(
         verdict,
         Verdict::NonCommit(mm_dsl::DurableTailRecoveryDisposition::HoldIntact),
-        "an interrupted legacy tail with an unbound input must stay held"
+        "an interrupted tail with an unbound input must stay held"
     );
 
-    // Unfenceable rows: held in every era for every commit-seeking class.
+    // Unfenceable rows: held for every commit-seeking class.
     for class in [
         mm_dsl::DurableTailRecoveryClass::CompletedCandidate,
         mm_dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
@@ -572,22 +557,21 @@ fn legacy_era_retain_inputs_arm_stays_fail_closed_everywhere_else() {
         ))
         .expect("idle quiescent state must be recoverable");
         let (lifecycle, run) = quiescent_observation();
-        let (_, verdict) = authorize_with_era(
+        let (_, verdict) = authorize(
             &mut authority,
-            "candidate-legacy-unfenceable",
-            "run-legacy-unfenceable",
+            "candidate-retain-unfenceable",
+            "run-retain-unfenceable",
             class,
             lifecycle,
             run,
             0,
             mm_dsl::DurableRecoveryPriorCommit::NoPriorCommit,
             mm_dsl::DurableRecoveryInputEvidence::Unfenceable,
-            mm_dsl::DurableRecoveryWriterEra::PreWitnessV3,
         );
         assert_eq!(
             verdict,
             Verdict::NonCommit(mm_dsl::DurableTailRecoveryDisposition::HoldIntact),
-            "class {class:?}: unfenceable rows must hold even under legacy evidence"
+            "class {class:?}: unfenceable rows must hold"
         );
     }
 
@@ -597,22 +581,21 @@ fn legacy_era_retain_inputs_arm_stays_fail_closed_everywhere_else() {
     ))
     .expect("idle quiescent state must be recoverable");
     let (lifecycle, run) = quiescent_observation();
-    let (_, verdict) = authorize_with_era(
+    let (_, verdict) = authorize(
         &mut authority,
-        "candidate-legacy-duplicate",
-        "run-legacy-duplicate",
+        "candidate-retain-duplicate",
+        "run-retain-duplicate",
         mm_dsl::DurableTailRecoveryClass::CompletedCandidate,
         lifecycle,
         run,
         4,
         mm_dsl::DurableRecoveryPriorCommit::MatchesCandidate,
         mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput,
-        mm_dsl::DurableRecoveryWriterEra::PreWitnessV3,
     );
     assert_eq!(
         verdict,
         Verdict::NonCommit(mm_dsl::DurableTailRecoveryDisposition::RefuseRecovery),
-        "an already-landed recovery must refuse even under legacy evidence"
+        "an already-landed recovery must refuse before the input-evidence cut"
     );
 }
 

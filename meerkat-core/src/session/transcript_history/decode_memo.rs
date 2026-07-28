@@ -386,29 +386,63 @@ pub(super) fn record_validated_transcript_graph(key: String, state: Arc<Transcri
 
 /// What an `Arc`-retained graph costs in MEMORY, from what it costs on disk.
 ///
-/// The durable form stores one anchor transcript plus a chain of inverse
-/// splices, but the retained value materializes every body in full — so the
-/// serialized size understates retention by roughly the number of retained
-/// revisions, and a budget fed the durable size would hold ~N times more
-/// graphs than it thinks. Scale by the message count across all bodies
-/// against the anchor's: the anchor dominates the durable bytes, so the
-/// ratio recovers the materialized size in O(retained revisions) instead of
-/// re-serializing every body in full — the exact pass delta retention
-/// exists to remove. A budget estimate, never an integrity input.
+/// The durable form stores one full anchor plus a chain of inverse splices
+/// (`encode_revision_chain` in `graph.rs`), so `durable_bytes` carries every
+/// distinct message roughly once — but the retained value materializes every
+/// body in full, paying for a message once per retained body it appears in.
+/// The memory cost is therefore the durable bytes plus a per-message rate
+/// times the ADDITIONAL message slots the splices materialize beyond the
+/// anchor. (Adding on top of `durable_bytes` counts each spliced-in message
+/// one extra time — a bounded over-count, in the safe direction for a
+/// memory budget.)
+///
+/// The rate is sampled from the two bodies that bracket the chain: the
+/// anchor and the head. Sampling only the anchor would let a chain whose
+/// later messages dwarf the anchor's (a tiny seed followed by splices full
+/// of tool results) under-count by up to the number of retained revisions —
+/// the direction that lets the budget hold more than it thinks. Taking the
+/// larger of the two rates errs toward over-counting, which only costs memo
+/// coverage, never budget truth. Scaling the TOTAL durable size by
+/// materialized/anchor messages — the previous formula — over-counted by
+/// that same ratio once splices carry most of the durable bytes: a
+/// 3-message anchor followed by 98 splices multiplied the whole document by
+/// thousands, pushed every production delta-shaped graph past the entry
+/// cap, and silently priced the memo out of exactly the shape delta
+/// retention produces.
+///
+/// Cost: two single-body sizing passes (anchor + head), each no larger than
+/// the durable serialize the caller just paid, plus an O(retained
+/// revisions) count walk — never a sizing pass over every retained body,
+/// which is the exact pass delta retention exists to remove. A budget
+/// estimate, never an integrity input: a wrong figure here mis-sizes an LRU
+/// budget, it can never bless or reject content.
 fn retained_graph_bytes(state: &TranscriptHistoryState, durable_bytes: usize) -> usize {
-    let Some(anchor) = state
+    let anchor_messages = state
         .revisions
         .first()
-        .map(|body| body.messages.len())
-        .filter(|anchor| *anchor > 0)
-    else {
-        return durable_bytes;
-    };
+        .map_or(0, |body| body.messages.len());
     let materialized: usize = state.revisions.iter().map(|body| body.messages.len()).sum();
-    durable_bytes
-        .saturating_mul(materialized)
-        .saturating_div(anchor)
-        .max(durable_bytes)
+    let additional = materialized.saturating_sub(anchor_messages);
+    if additional == 0 {
+        return durable_bytes;
+    }
+    // A sampled body is contained in the durable document, so its measured
+    // bytes are capped at `durable_bytes`: one producer seam sizes the
+    // document with `approximate_json_bytes` while the sampling here is
+    // exact, and the cap keeps that disagreement from inflating the rate
+    // beyond the document that contains the body.
+    let per_message_rate = [state.revisions.first(), state.revisions.last()]
+        .into_iter()
+        .flatten()
+        .filter(|body| !body.messages.is_empty())
+        .filter_map(|body| {
+            let bytes = approximate_serialized_bytes(&body.messages)?.min(durable_bytes);
+            Some(bytes.div_ceil(body.messages.len()))
+        })
+        .max();
+    per_message_rate.map_or(durable_bytes, |rate| {
+        durable_bytes.saturating_add(rate.saturating_mul(additional))
+    })
 }
 
 /// Admit a graph a PRODUCER just proved (or extended under a typed inductive
@@ -522,8 +556,9 @@ mod tests {
     use crate::types::{Message, UserMessage};
 
     /// A graph carrying `counts` messages per retained body, built directly:
-    /// the estimator under test reads message COUNTS and nothing else, so
-    /// digests, lineage, and content are deliberately irrelevant here.
+    /// the estimator under test reads message counts and samples the anchor
+    /// and head bodies' serialized sizes, so digests and lineage are
+    /// deliberately irrelevant here (each message is a short text turn).
     fn graph_with_body_message_counts(counts: &[usize]) -> TranscriptHistoryState {
         TranscriptHistoryState {
             head: String::new(),
@@ -551,7 +586,9 @@ mod tests {
     /// durable bytes would let a graph with N equal-length bodies claim a
     /// single body's cost and hold N times more graphs than the budget
     /// allows — the failure mode the byte budget replaced an entry-COUNT
-    /// bound to avoid.
+    /// bound to avoid. The synthetic durable size (1 000) is smaller than
+    /// the bodies really serialize to, so the sampled per-message rate
+    /// clamps to durable/anchor and equal bodies scale exactly.
     #[test]
     fn retained_bytes_scale_with_the_bodies_the_graph_materializes() {
         let one = graph_with_body_message_counts(&[40]);
@@ -565,21 +602,108 @@ mod tests {
         );
     }
 
-    /// Unequal bodies scale by their message share, and the estimate never
-    /// drops below the durable bytes it started from.
+    /// Unequal bodies price their additional slots at the larger of the
+    /// anchor and head per-message rates, and the estimate never drops
+    /// below the durable bytes it started from.
     #[test]
     fn retained_bytes_never_undercut_the_durable_size() {
         let growing = graph_with_body_message_counts(&[40, 60, 100]);
         assert_eq!(retained_graph_bytes(&growing, 1_000), 5_000);
 
+        // The head body holds ONE message, so its sampled rate is that
+        // message's own serialized size — larger than the anchor's clamped
+        // rate of 10, and exactly what the one additional slot costs. The
+        // head sample is the guard against under-counting a chain whose
+        // later messages dwarf the anchor's.
         let shrinking = graph_with_body_message_counts(&[100, 1]);
+        let head_message_bytes = approximate_serialized_bytes(&shrinking.revisions[1].messages)
+            .expect("head body serializes")
+            .min(1_000);
+        assert!(head_message_bytes > 10, "head rate must beat the anchor's");
         assert_eq!(
             retained_graph_bytes(&shrinking, 1_000),
-            1_010,
-            "a graph whose anchor dominates still costs at least its anchor"
+            1_000 + head_message_bytes,
+            "one extra one-message body costs one message on top of the \
+             durable size, not a rescaled document"
         );
 
         let empty = graph_with_body_message_counts(&[]);
         assert_eq!(retained_graph_bytes(&empty, 1_000), 1_000);
+    }
+
+    /// The production delta shape: a small anchor followed by many splices,
+    /// each materializing a larger transcript. The retired formula scaled
+    /// the WHOLE durable size by materialized/anchor messages — thousands,
+    /// for this shape — so the estimate blew past the entry cap and the
+    /// memo silently refused exactly the graphs delta retention produces,
+    /// re-paying full validation on every decode. The estimate must land
+    /// within a small factor of the true materialized size, on the
+    /// over-counting side, and the memo must ADMIT the graph.
+    #[test]
+    fn production_delta_shape_is_estimated_near_truth_and_admitted() {
+        // A 3-message anchor followed by 148 splices, each revision growing
+        // the transcript by 3 messages. Bodies share their common prefix by
+        // cloning from ONE message pool — exactly how real revisions retain
+        // `self.messages()` — so `minimal_splice` provably elides the shared
+        // prefix and the durable form is one anchor plus append-only
+        // splices. (The count-based helper mints fresh per-message
+        // timestamps, which would break cross-body equality.)
+        let pool: Vec<Message> = (0..447)
+            .map(|message| Message::User(UserMessage::text(format!("message {message}"))))
+            .collect();
+        let graph = TranscriptHistoryState {
+            head: String::new(),
+            commits: Vec::new(),
+            revisions: (1..=149)
+                .map(|revision| TranscriptRevisionBody {
+                    revision: format!("sha256:body-{revision}"),
+                    parent_revision: None,
+                    messages: pool[..revision * 3].to_vec(),
+                    created_at: UNIX_EPOCH,
+                })
+                .collect(),
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        };
+        let durable_bytes = approximate_serialized_bytes(&graph).expect("graph serializes");
+        let materialized_bytes: usize = graph
+            .revisions
+            .iter()
+            .map(|body| approximate_serialized_bytes(&body.messages).expect("body serializes"))
+            .sum();
+        // Fixture guard: if the encoding ever stops delta-compressing this
+        // chain, the shape under test is gone and this must fail loudly
+        // rather than pass against a fixture that no longer reproduces it.
+        assert!(
+            durable_bytes.saturating_mul(4) < materialized_bytes,
+            "durable {durable_bytes} is not deltas over materialized {materialized_bytes}"
+        );
+
+        let estimate = retained_graph_bytes(&graph, durable_bytes);
+        assert!(
+            estimate >= materialized_bytes,
+            "the budget must never hold more memory than it thinks: \
+             estimate {estimate} under materialized {materialized_bytes}"
+        );
+        assert!(
+            estimate <= materialized_bytes.saturating_mul(4),
+            "estimate {estimate} strays more than 4x over materialized \
+             {materialized_bytes}"
+        );
+        assert!(
+            estimate <= TRANSCRIPT_GRAPH_VALIDATED_MEMO_ENTRY_CAP,
+            "estimate {estimate} exceeds the entry cap \
+             {TRANSCRIPT_GRAPH_VALIDATED_MEMO_ENTRY_CAP}; the memo would \
+             silently price out the production shape"
+        );
+
+        let mut memo = ByteBudgetedTranscriptGraphMemo::new(
+            TRANSCRIPT_GRAPH_VALIDATED_MEMO_BYTE_BUDGET,
+            TRANSCRIPT_GRAPH_VALIDATED_MEMO_ENTRY_CAP,
+        );
+        memo.record("production-shape".to_string(), Arc::new(graph), estimate);
+        assert!(
+            memo.get("production-shape").is_some(),
+            "the validated memo must admit the production delta shape"
+        );
     }
 }

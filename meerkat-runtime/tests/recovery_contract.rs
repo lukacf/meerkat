@@ -237,6 +237,24 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     }
 }
 
+/// A durably accepted content row never bound to any run: the shape a lost
+/// boundary leaves behind under a pre-0.8.9 writer (which persisted staged
+/// run bindings only inside the boundary commit itself), and the shape of a
+/// never-started input under a modern writer.
+fn accepted_unbound_state(input: &Input) -> StoredInputState {
+    let mut state = InputState::new_accepted(input.id().clone());
+    state.persisted_input = Some(input.clone());
+    state.durability = Some(InputDurability::Durable);
+    stamp_runtime_metadata(&mut state, input);
+    StoredInputState {
+        state,
+        seed: InputStateSeed {
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
+            ..InputStateSeed::new_accepted()
+        },
+    }
+}
+
 fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
     let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("persistence-record"));
     driver
@@ -990,5 +1008,263 @@ async fn atomic_apply_recovery_boundary_is_all_or_nothing() {
             "{name}: the rejected boundary's input row must not be visible"
         );
         assert_eq!(rows[0].state.input_id, recovered_input);
+    }
+}
+
+/// Level 3 — the retain-inputs recovery commit terminalizes exactly the rows
+/// durable evidence proved the adopted tail consumed, while retaining the
+/// genuinely unbound content row for ordinary redelivery.
+///
+/// This pins the duplicate-turn regression fixed in
+/// `observe_candidate_run_inputs`: the observation used to EARLY-RETURN on
+/// the first unbound content row with an empty attribution, discarding rows
+/// the same scan had already proven bound to the candidate run — a durable
+/// staging binding (`seed.last_run_id`) or a committed boundary receipt
+/// naming the row. Those proven-consumed rows then stayed non-terminal, the
+/// input lifecycle rolled them back to Queued and re-admitted them, and the
+/// turn the recovered boundary had just committed RE-EXECUTED: a duplicate
+/// provider call with re-fired tool side effects. If the early return is
+/// restored, the boundary still commits (the evidence class is unchanged),
+/// but the "proven-bound row must be terminalized" assertions below fail —
+/// the rows stay in their pre-recovery phases — and the recovered receipt's
+/// `contributing_input_ids` collapses to empty.
+#[tokio::test]
+async fn retain_inputs_recovery_terminalizes_proven_bound_rows_and_retains_unbound_row() {
+    use meerkat_core::session_document::{
+        DurableTailRecoveryClass as ClassifiedTailRecoveryClass, SessionDocumentEffect,
+    };
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome, DurableTailRecoveryRequest,
+        authorize_and_commit_durable_tail_recovery,
+    };
+
+    for harness in supported_store_harnesses() {
+        let name = harness.name;
+        let candidate_run = RunId::new();
+
+        // Committed authority head at revision N. The recovery request is
+        // keyed by the session id, so the rows must live under the
+        // session-derived runtime identity the production shell computes.
+        let mut committed = meerkat_core::Session::new();
+        committed.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let session_id = committed.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        let committed_snapshot = serde_json::to_vec(&committed).unwrap();
+
+        // One input row per attribution class:
+        // - staged_prompt: proven consumed via its durable staging binding
+        //   (`seed.last_run_id` names the candidate run);
+        // - receipt_prompt: unbound on its own row, proven consumed because
+        //   a durably committed mid-run boundary receipt for the candidate
+        //   run names it in `contributing_input_ids`;
+        // - retained_prompt: genuinely unbound redeliverable content — the
+        //   row that sets the UnboundContentInput evidence class and must
+        //   survive the commit untouched.
+        let staged_prompt = make_prompt("staged for the candidate run");
+        let receipt_prompt = make_prompt("named by the committed mid-run receipt");
+        let retained_prompt = make_prompt("genuinely unbound retained input");
+        let staged_id = staged_prompt.id().clone();
+        let receipt_id = receipt_prompt.id().clone();
+        let retained_id = retained_prompt.id().clone();
+        harness
+            .store
+            .persist_input_state(
+                &runtime_id,
+                &persistable(applied_pending_state(&staged_prompt, &candidate_run, 1)),
+            )
+            .await
+            .unwrap();
+        harness
+            .store
+            .persist_input_state(
+                &runtime_id,
+                &persistable(accepted_unbound_state(&receipt_prompt)),
+            )
+            .await
+            .unwrap();
+        harness
+            .store
+            .persist_input_state(
+                &runtime_id,
+                &persistable(accepted_unbound_state(&retained_prompt)),
+            )
+            .await
+            .unwrap();
+
+        // Commit the head plus the candidate run's mid-run boundary receipt:
+        // it names receipt_prompt as a contributor, records strictly less
+        // content than the candidate (an ancestor, not a prior recovery),
+        // and advances the last committed sequence the machine mints past.
+        harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: committed_snapshot,
+                }),
+                make_receipt(candidate_run.clone(), vec![receipt_id.clone()], 1),
+                vec![],
+                Some(session_id.clone()),
+            )
+            .await
+            .unwrap();
+
+        let retained_before = harness
+            .store
+            .load_input_state(&runtime_id, &retained_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The durable tail: revision N+1 content, a completed turn whose
+        // boundary commit lost the race with shutdown.
+        let mut recovered = committed.clone();
+        recovered.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "durable tail reply".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        }));
+        let recovered_snapshot = serde_json::to_vec(&recovered).unwrap();
+        let conversation_digest = recovered.transcript_content_digest().unwrap();
+
+        // The one path to a request is the classifier's own verdict; an
+        // unbound content input routes a COMPLETED-shape candidate into the
+        // retain-inputs commit (in every writer era) instead of a hold.
+        let verdict = SessionDocumentEffect::DurableTailClassified {
+            candidate_id: format!("{name}-retain-inputs-candidate"),
+            class: ClassifiedTailRecoveryClass::CompletedCandidate,
+        };
+        let request = DurableTailRecoveryRequest::from_classification(
+            &verdict,
+            session_id.clone(),
+            candidate_run.clone(),
+            recovered_snapshot.clone(),
+            conversation_digest.clone(),
+            recovered.messages().len(),
+        )
+        .unwrap();
+
+        let outcome = authorize_and_commit_durable_tail_recovery(harness.store.as_ref(), request)
+            .await
+            .unwrap_or_else(|err| panic!("{name}: retain-inputs recovery must commit: {err}"));
+        assert_eq!(
+            outcome,
+            DurableTailRecoveryOutcome::Committed {
+                disposition: DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs,
+                boundary_sequence: 2,
+            },
+            "{name}: an unbound content row on a completed-shape candidate must commit \
+             retain-inputs, minted one past the committed mid-run receipt"
+        );
+
+        // THE regression catch: both proven-bound rows must be closed out by
+        // the commit. Restoring the early return leaves them in their
+        // pre-recovery non-terminal phases, and redelivery then re-executes
+        // the turn this boundary just committed.
+        for (label, input_id) in [
+            ("staging-bound", &staged_id),
+            ("receipt-bound", &receipt_id),
+        ] {
+            let stored = harness
+                .store
+                .load_input_state(&runtime_id, input_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.seed.phase,
+                InputLifecycleState::Consumed,
+                "{name}: the {label} row was proven consumed by the adopted tail and must be \
+                 terminalized by the recovery commit"
+            );
+            assert_eq!(
+                stored.seed.terminal_outcome,
+                Some(InputTerminalOutcome::Consumed),
+                "{name}: the {label} row must close with a consumed terminal outcome"
+            );
+            assert_eq!(
+                stored.seed.last_run_id,
+                Some(candidate_run.clone()),
+                "{name}: the {label} row must end bound to the candidate run"
+            );
+            assert_eq!(
+                stored.seed.last_boundary_sequence,
+                Some(2),
+                "{name}: the {label} row must record the recovered boundary sequence"
+            );
+        }
+
+        // The genuinely unbound row is RETAINED for ordinary redelivery:
+        // still non-terminal, still unbound, exactly the seed the
+        // observation read.
+        let retained_after = harness
+            .store
+            .load_input_state(&runtime_id, &retained_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained_after.seed, retained_before.seed,
+            "{name}: the unbound content row must survive the commit untouched"
+        );
+        assert_eq!(
+            retained_after.seed.last_run_id, None,
+            "{name}: the retained row must stay unbound — recovery never fabricates consumption"
+        );
+        assert_eq!(
+            retained_after.seed.terminal_outcome, None,
+            "{name}: the retained row must stay non-terminal for ordinary redelivery"
+        );
+
+        // The recovered receipt names exactly the proven-bound contributors.
+        let recovered_receipt = harness
+            .store
+            .load_boundary_receipt(&runtime_id, &candidate_run, 2)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}: the recovered boundary receipt must be durable"));
+        assert_eq!(
+            sorted_id_strings(recovered_receipt.contributing_input_ids.clone()),
+            sorted_id_strings(vec![staged_id.clone(), receipt_id.clone()]),
+            "{name}: the recovered receipt must name exactly the proven-bound rows it consumed"
+        );
+        assert_eq!(
+            recovered_receipt.conversation_digest,
+            Some(conversation_digest),
+            "{name}: the recovered receipt must carry the candidate's transcript digest"
+        );
+        assert_eq!(
+            recovered_receipt.message_count,
+            recovered.messages().len(),
+            "{name}: the recovered receipt must carry the candidate's message count"
+        );
+
+        // The boundary itself committed: the recovered snapshot is the
+        // durable head and the re-asserted lifecycle is quiescent Idle.
+        assert_eq!(
+            harness
+                .store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap(),
+            Some(recovered_snapshot),
+            "{name}: the recovered snapshot must be the durable head"
+        );
+        assert_eq!(
+            load_runtime_state(harness.store.as_ref(), &runtime_id)
+                .await
+                .unwrap(),
+            Some(RuntimeState::Idle),
+            "{name}: the recovery boundary must re-assert a quiescent Idle lifecycle"
+        );
     }
 }

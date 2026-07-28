@@ -120,30 +120,6 @@ pub enum DurableRecoveryInputEvidence {
     AllBoundOrInert,
 }
 
-/// Which stamp-schema era the candidate head row's VERIFIED checkpoint stamp
-/// advertises, observed by the shell from the fully re-verified stamp under
-/// the recovery fence. Mirrors the SessionDocumentMachine's
-/// `DurableHeadStampEra` vocabulary (same wire strings; each machine carries
-/// its own bridging type per DSL convention).
-///
-/// Evidence, not decision: a pre-witness-v3 stamp names a writer generation
-/// that persisted input-staging run bindings ONLY at the boundary commit, so
-/// a lost boundary routinely leaves the executed turn's own input durably
-/// unbound. Modern writers persist staged bindings BEFORE the run executes
-/// (fail-closed at run start), so under a modern writer an unbound content
-/// input coexisting with a clean completed tail is a genuinely different,
-/// never-staged input. The guards use this era evidence to decide whether an
-/// unbound content input blocks a commit: under a legacy writer the row is
-/// RETAINED for ordinary redelivery (never consumed, never dropped) while
-/// the digest-proven boundary commits; under a modern writer it holds.
-/// Fail-closed default: modern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DurableRecoveryWriterEra {
-    #[default]
-    WitnessV3OrNewer,
-    PreWitnessV3,
-}
-
 /// Typed comparison of the HIGHEST durably committed boundary receipt for the
 /// candidate run against the candidate transcript itself (message count, and
 /// the receipt digest when one was recorded). This is the only observation
@@ -3672,14 +3648,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // terminalization only on a commit verdict; it never
                 // downgrades a commit to a hold on its own.
                 input_evidence: Enum<DurableRecoveryInputEvidence>,
-                // Stamp-schema era of the candidate head row's fully
-                // re-verified stamp, observed under the recovery fence. A
-                // pre-witness-v3 writer persisted staged run bindings only
-                // at the boundary commit, so its lost boundary routinely
-                // leaves the executed turn's own input durably unbound; the
-                // era gates whether a commit may proceed past an unbound
-                // content input (retaining the row for redelivery).
-                writer_era: Enum<DurableRecoveryWriterEra>,
             },
             PrepareTerminalSupervisorCleanupBindings { session_id: SessionId },
             // Two-phase unregister (D1): BeginUnregisterSession opens the
@@ -6512,14 +6480,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         //   3. class != Ambiguous && prior_commit in
         //      {NoPriorCommit, PrecedesCandidate} && input_evidence ==
         //      Unfenceable -> `...HoldInputEvidence`; input_evidence ==
-        //      UnboundContentInput splits on the writer era:
-        //      writer_era == PreWitnessV3 with a COMPLETED shape
-        //      (CompletedCandidate or LegacyCompletedCandidate)
+        //      UnboundContentInput splits on the tail shape:
+        //      a COMPLETED shape (CompletedCandidate or
+        //      LegacyCompletedCandidate)
         //      -> `...CommitLegacyRetainInputs` (commit the digest-proven
         //      boundary; RETAIN the unbound row for ordinary redelivery —
-        //      terminalize nothing);
-        //      everything else (modern era or an Interrupted shape)
-        //      -> `...HoldInputEvidence`.
+        //      terminalize nothing that was not proven bound; safe in
+        //      every writer era, see the arm's own comment);
+        //      an Interrupted shape -> `...HoldInputEvidence`.
         //   4. the same as 3 with input_evidence == AllBoundOrInert
         //      -> `...Commit` (CompletedCandidate) xor `...Repair`
         //      (InterruptedRepairableCandidate) xor `...CommitLegacy`
@@ -6540,8 +6508,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6592,8 +6559,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6651,8 +6617,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6688,33 +6653,37 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Legacy-era retain-inputs commit: the HomeCore parent-2 wedge. A
-        // COMPLETED candidate (bound run or identity-less legacy) whose head
-        // row carries PRE-WITNESS-V3 stamp evidence, with an unbound content
-        // input row present. A legacy writer persisted staged run bindings
-        // only inside the boundary commit, so its lost boundary routinely
-        // leaves the executed turn's OWN input durably unbound — the
-        // ordinary input-evidence hold would wedge every such session
-        // forever on upgrade. The commit adopts the digest-proven transcript
-        // and RETAINS the unbound row for ordinary redelivery: nothing is
-        // terminalized, no consumption is fabricated, no input can ever be
-        // dropped. The worst case is one duplicate redelivered turn — the
-        // legacy fleet's own restart semantics. Interrupted shapes and
-        // unfenceable rows hold exactly as before.
+        // Retain-inputs commit: a COMPLETED candidate (bound run or
+        // identity-less legacy) with an unbound content input row present.
+        // The ordinary input-evidence hold would wedge such a session
+        // FOREVER: every load re-observes the same durable facts and
+        // re-mints the same hold, and no repair verb exists. The commit
+        // instead adopts the digest-proven transcript and RETAINS the
+        // unbound row for ordinary redelivery: nothing is terminalized that
+        // the observation did not PROVE bound to the recovered run, no
+        // consumption is fabricated, no input can ever be dropped.
         //
-        // ERA PRECISION, STATED PLAINLY: `writer_era` comes from the head
-        // stamp's schema floor, and a MODERN binary still mints sub-v3
-        // stamps for graph-less sessions, so this arm also admits a modern
-        // graph-less row whose cold tail is a verified strict descendant.
-        // That admission is correct rather than merely tolerated: under a
-        // modern writer an unbound content row is one that never staged
-        // (staging bindings are fenced before execution), so redelivering it
-        // is right, while the rows the observation PROVED bound to the
-        // recovered run are terminalized by the realize pass — the adopted
-        // tail consumed them. The alternative for that shape is an
-        // unrecoverable hold over digest-proven content, which is the very
-        // wedge this arm exists to clear. What this arm never does, in any
-        // era, is claim an unattributed row as consumed.
+        // This arm carries no writer-era guard because retaining is safe in
+        // BOTH eras, for different but equally sound reasons:
+        //   - PRE-0.8.9 writer: staging bindings never reached disk, so the
+        //     unbound row is routinely the executed turn's OWN input
+        //     (the HomeCore parent-2 wedge). Retaining and redelivering it
+        //     costs at most ONE duplicate turn — exactly what a pre-upgrade
+        //     restart did anyway.
+        //   - 0.8.9+ writer: staged run bindings are fenced durable BEFORE
+        //     the run executes (fail-closed at run start), so an unbound
+        //     content row is one that never started; redelivering it is not
+        //     merely safe, it is CORRECT.
+        // Holding buys no integrity in either era: the rows the observation
+        // proved bound to the recovered run are terminalized by the realize
+        // pass, and an unattributed row is never claimed as consumed —
+        // content equality is not identity, and fabricating consumption
+        // could silently drop a genuinely new identical prompt, which is
+        // strictly worse than one duplicate reply. Interrupted shapes and
+        // unfenceable rows hold exactly as before, in every era.
+        // (The transition and disposition keep their original "Legacy"
+        // spellings: the arm was introduced for the legacy-era wedge and
+        // the generated vocabulary is stable.)
         transition AuthorizeDurableTailRecoveryCommitLegacyRetainInputs {
             per_phase [Idle, Retired]
             on input AuthorizeDurableTailRecovery {
@@ -6726,8 +6695,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6747,9 +6715,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "unbound_content_input" {
                 input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
-            }
-            guard "legacy_writer_era" {
-                writer_era == DurableRecoveryWriterEra::PreWitnessV3
             }
             guard "completed_shape_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
@@ -6778,8 +6743,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6831,8 +6795,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6880,8 +6843,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6904,15 +6866,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
                 || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
             }
-            // Unfenceable rows hold in every era; an unbound content input
-            // holds unless the legacy-era retain-inputs arm above owns it
-            // (COMPLETED shape + pre-witness-v3 writer evidence).
-            // Interrupted shapes keep the hold even under legacy evidence.
+            // Unfenceable rows hold for every shape; an unbound content
+            // input holds only for an Interrupted shape — a COMPLETED shape
+            // is owned by the retain-inputs arm above (commit the proven
+            // boundary, retain the unbound row for redelivery; see the
+            // two-era argument there). The Interrupted hold stays because a
+            // repaired interrupted boundary explicitly does NOT requeue the
+            // interrupted run's input: an unbound content row coexisting
+            // with it may BE that input (its turn's external effects may
+            // already have fired), so it can neither be safely retained for
+            // redelivery nor proven consumed.
             guard "inputs_not_retainable" {
                 input_evidence == DurableRecoveryInputEvidence::Unfenceable
                 || (input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
-                    && (writer_era != DurableRecoveryWriterEra::PreWitnessV3
-                        || class == DurableTailRecoveryClass::InterruptedRepairableCandidate))
+                    && class == DurableTailRecoveryClass::InterruptedRepairableCandidate)
             }
             update {}
             to Idle
@@ -6933,8 +6900,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "conflicting_run_facts" {
                 self.current_run_id != None
@@ -6964,8 +6930,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             guard "in_process_quiescent" {
                 self.current_run_id == None
@@ -6995,8 +6960,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence,
-                writer_era
+                input_evidence
             }
             update {}
             to Idle

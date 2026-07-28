@@ -37,7 +37,24 @@ fi
 # Breaks exist: they are allowed by policy, but only when loudly declared.
 # The pending release notes are the topmost section of CHANGELOG.md —
 # `## [Unreleased]` when populated, otherwise the topmost stamped release.
-pending_section="$(awk '/^## \[/{count++} count==1{print} count==2{exit}' CHANGELOG.md)"
+#
+# Stamping a release leaves an EMPTY `## [Unreleased]` stub above it, so
+# "topmost section" and "the section this release is declared in" stop being
+# the same thing at exactly the moment this gate runs. Reading the stub would
+# fail every stamped release no matter how loudly it declared its breaks,
+# which is a gate that cannot be satisfied rather than one that is hard to
+# satisfy. Skip a content-free pending section and read the one below it.
+pending_section="$(awk '
+    /^## \[/ { count++ }
+    count >= 1 && count <= 2 { section[count] = section[count] $0 "\n" }
+    count == 3 { exit }
+    END {
+        body = section[1]
+        sub(/^## \[[^\n]*\n/, "", body)
+        gsub(/[[:space:]]/, "", body)
+        printf "%s", (length(body) > 0 ? section[1] : section[2])
+    }
+' CHANGELOG.md)"
 if ! grep -q '^### Breaking' <<<"$pending_section"; then
     echo "semver-breaks: public-API breaks detected vs published baselines:" >&2
     echo >&2

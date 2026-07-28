@@ -1700,56 +1700,6 @@ impl std::fmt::Display for DurableRecoveryPriorCommit {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum DurableRecoveryWriterEra {
-    #[default]
-    #[serde(rename = "WitnessV3OrNewer")]
-    WitnessV3OrNewer,
-    #[serde(rename = "PreWitnessV3")]
-    PreWitnessV3,
-}
-impl DurableRecoveryWriterEra {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::WitnessV3OrNewer => "WitnessV3OrNewer",
-            Self::PreWitnessV3 => "PreWitnessV3",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for DurableRecoveryWriterEra {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "WitnessV3OrNewer" => Ok(Self::WitnessV3OrNewer),
-            "PreWitnessV3" => Ok(Self::PreWitnessV3),
-            other => Err(format!("invalid DurableRecoveryWriterEra value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for DurableRecoveryWriterEra {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for DurableRecoveryWriterEra {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum DurableTailRecoveryClass {
     #[default]
     #[serde(rename = "CompletedCandidate")]
@@ -11543,7 +11493,6 @@ pub mod inputs {
         pub last_committed_sequence: u64,
         pub prior_commit: DurableRecoveryPriorCommit,
         pub input_evidence: DurableRecoveryInputEvidence,
-        pub writer_era: DurableRecoveryWriterEra,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PrepareTerminalSupervisorCleanupBindings {

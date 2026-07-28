@@ -5480,6 +5480,16 @@ pub struct MeerkatMachineShared {
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
+    /// Evidence source for the one-time 0.8.8 -> 0.8.9 upgrade boundary:
+    /// the session store's incremental capability, wired by the host that
+    /// composes machine + session store (the `llm_reconfigure_host`
+    /// precedent: shell composition slot, not machine state). Persistent
+    /// drivers thread it into their boundary commits so the runtime store
+    /// can VERIFY that a slim snapshot over a legacy INLINE row preserves
+    /// the retained history. Absent ⇒ those commits keep today's
+    /// fail-closed refusal.
+    legacy_history_evidence_source:
+        StdRwLock<Option<Arc<dyn meerkat_core::session_store::IncrementalSessionStore>>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Machine-wide injected member-observation host (multi-host mobs
@@ -6478,6 +6488,7 @@ impl MeerkatMachine {
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 store: None,
                 blob_store: None,
+                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6536,6 +6547,7 @@ impl MeerkatMachine {
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 store: Some(store),
                 blob_store: Some(blob_store),
+                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6594,6 +6606,7 @@ impl MeerkatMachine {
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 store: Some(store),
                 blob_store: Some(Arc::new(UnavailableBlobStore)),
+                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6759,6 +6772,25 @@ impl MeerkatMachine {
         *slot = Some(dispatcher);
     }
 
+    /// Wire the evidence source for the one-time 0.8.8 -> 0.8.9 upgrade
+    /// boundary: the session store's incremental capability
+    /// (`SessionStore::as_incremental`). Hosts that compose this machine
+    /// with a persistent session store call this once at composition time;
+    /// persistent drivers created afterwards thread the source into their
+    /// boundary commits so the runtime store can VERIFY that a slim
+    /// snapshot over a legacy INLINE row preserves the retained history.
+    /// Without it, those commits keep today's fail-closed refusal.
+    pub fn set_legacy_history_evidence_source(
+        &self,
+        source: Arc<dyn meerkat_core::session_store::IncrementalSessionStore>,
+    ) {
+        let mut slot = self
+            .legacy_history_evidence_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(source);
+    }
+
     /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
     /// composition dispatcher against the session's shared DSL authority.
     ///
@@ -6822,13 +6854,22 @@ impl MeerkatMachine {
         ));
         match (&self.store, &self.blob_store) {
             (Some(store), Some(blob_store)) => {
-                DriverEntry::Persistent(PersistentRuntimeDriver::new_with_control(
+                let mut driver = PersistentRuntimeDriver::new_with_control(
                     runtime_id,
                     store.clone(),
                     blob_store.clone(),
                     control_projection,
                     dsl_authority,
-                ))
+                );
+                let legacy_history_evidence_source = self
+                    .legacy_history_evidence_source
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(source) = legacy_history_evidence_source {
+                    driver.set_legacy_history_evidence_source(source);
+                }
+                DriverEntry::Persistent(driver)
             }
             _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control_and_dsl(
                 runtime_id,

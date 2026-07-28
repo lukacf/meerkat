@@ -143,6 +143,56 @@ impl std::fmt::Display for DurableHeadRelation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DurableHeadStampEra {
+    #[default]
+    #[serde(rename = "WitnessV3OrNewer")]
+    WitnessV3OrNewer,
+    #[serde(rename = "PreWitnessV3")]
+    PreWitnessV3,
+}
+impl DurableHeadStampEra {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WitnessV3OrNewer => "WitnessV3OrNewer",
+            Self::PreWitnessV3 => "PreWitnessV3",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableHeadStampEra {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "WitnessV3OrNewer" => Ok(Self::WitnessV3OrNewer),
+            "PreWitnessV3" => Ok(Self::PreWitnessV3),
+            other => Err(format!("invalid DurableHeadStampEra value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableHeadStampEra {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableHeadStampEra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DurableTailExecutionEvidence {
     #[default]
     #[serde(rename = "NoExecutionContent")]
@@ -205,6 +255,8 @@ pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     #[serde(rename = "InterruptedRepairableCandidate")]
     InterruptedRepairableCandidate,
+    #[serde(rename = "LegacyCompletedCandidate")]
+    LegacyCompletedCandidate,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
 }
@@ -213,6 +265,7 @@ impl DurableTailRecoveryClass {
         match self {
             Self::CompletedCandidate => "CompletedCandidate",
             Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
+            Self::LegacyCompletedCandidate => "LegacyCompletedCandidate",
             Self::Ambiguous => "Ambiguous",
         }
     }
@@ -223,6 +276,7 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
         match value {
             "CompletedCandidate" => Ok(Self::CompletedCandidate),
             "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
+            "LegacyCompletedCandidate" => Ok(Self::LegacyCompletedCandidate),
             "Ambiguous" => Ok(Self::Ambiguous),
             other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
         }
@@ -2428,6 +2482,7 @@ pub mod inputs {
         pub store_provenance: CheckpointProvenanceClass,
         pub session_is_live: bool,
         pub tail_execution: DurableTailExecutionEvidence,
+        pub head_stamp_era: DurableHeadStampEra,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyDurableTail {
@@ -2439,6 +2494,7 @@ pub mod inputs {
         pub dangling_tool_use_count: u64,
         pub orphan_tool_result_count: u64,
         pub messages_after_terminal: bool,
+        pub head_stamp_era: DurableHeadStampEra,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
@@ -3006,9 +3062,11 @@ pub enum TransitionId {
     RecoverSessionFromStoreUnrecoverable,
     ResolveRuntimeSnapshotReadSourceCommittedHead,
     ResolveRuntimeSnapshotReadSourceRecoveryRequired,
+    ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired,
     ResolveRuntimeSnapshotReadSourceQuarantine,
     ResolveRuntimeSnapshotReadSourceSnapshot,
     ClassifyDurableTailCompleted,
+    ClassifyDurableTailLegacyCompleted,
     ClassifyDurableTailRepairable,
     ClassifyDurableTailAmbiguous,
     ResolveRuntimeProjectionConflictRetain,

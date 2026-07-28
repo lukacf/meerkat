@@ -313,6 +313,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeSnapshotReadSourceRecoveryRequired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeSnapshotReadSourceQuarantine`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -320,6 +323,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyDurableTailCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyDurableTailLegacyCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyDurableTailRepairable`

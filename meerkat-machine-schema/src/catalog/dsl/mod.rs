@@ -829,11 +829,19 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "DurableTailExecutionEvidence",
                 &["NoExecutionContent", "BoundExecution", "UnboundExecution"],
             ),
+            // Stamp-schema era of the head row's verified stamp — the
+            // corroborating legacy-writer evidence for identity-less tails.
+            // Fail-closed variant (modern) listed first.
+            NamedTypeBinding::string_enum(
+                "DurableHeadStampEra",
+                &["WitnessV3OrNewer", "PreWitnessV3"],
+            ),
             NamedTypeBinding::string_enum(
                 "DurableTailRecoveryClass",
                 &[
                     "CompletedCandidate",
                     "InterruptedRepairableCandidate",
+                    "LegacyCompletedCandidate",
                     "Ambiguous",
                 ],
             ),
@@ -1174,6 +1182,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "CompletedCandidate",
                     "InterruptedRepairableCandidate",
+                    "LegacyCompletedCandidate",
                     "Ambiguous",
                 ],
             ),
@@ -1183,8 +1192,17 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RefuseRecovery",
                     "CommitCompleted",
                     "RepairAndCommitInterrupted",
+                    "CommitLegacyCompleted",
+                    "CommitLegacyCompletedRetainInputs",
                     "HoldIntact",
                 ],
+            ),
+            // Stamp-schema era of the recovery candidate's head row — the
+            // legacy-writer evidence gating the retain-inputs commit. The
+            // fail-closed variant (modern) is listed first.
+            NamedTypeBinding::string_enum(
+                "DurableRecoveryWriterEra",
+                &["WitnessV3OrNewer", "PreWitnessV3"],
             ),
             // Typed projections of the persisted machine-lifecycle row and
             // its current-run fact, observed by the shell at recovery

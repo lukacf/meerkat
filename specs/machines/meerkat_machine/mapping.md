@@ -41,6 +41,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeDurableTailRecoveryRepairRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryCommitLegacyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryCommitLegacyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeDurableTailRecoveryHoldIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

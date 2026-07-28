@@ -1526,6 +1526,103 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             self.snapshot_byte_probe_bytes
                 .load(std::sync::atomic::Ordering::Relaxed)
         }
+
+        /// Shared body of the two snapshot-commit trait methods. `evidence`
+        /// is the caller-threaded evolved transcript graph for the one-time
+        /// legacy upgrade boundary; the guard consults it only when the
+        /// stored row still carries an inline graph and the incoming
+        /// snapshot is slim, and verifies it before trusting anything.
+        async fn commit_session_snapshot_with_optional_history_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            evidence: Option<meerkat_core::TranscriptHistoryState>,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            #[cfg(test)]
+            let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
+            tokio::task::spawn_blocking(move || {
+                let incoming: meerkat_core::Session =
+                    meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
+                // Byte equality requires equal lengths, and `length()` on a
+                // BLOB reads the record header, not the payload. Ordinary
+                // turns grow the document, so the unchanged-snapshot probe
+                // usually costs one integer compare instead of shipping the
+                // whole candidate blob into SQLite to hear "no".
+                let candidate_len = i64::try_from(session_delta.session_snapshot.len()).ok();
+                let stored_len = tx
+                    .query_row(
+                        "SELECT length(session_snapshot) FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .flatten();
+                let snapshot_is_unchanged = candidate_len.is_some()
+                    && stored_len == candidate_len
+                    && {
+                        #[cfg(test)]
+                        snapshot_byte_probe_bytes.fetch_add(
+                            session_delta.session_snapshot.len() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tx.query_row(
+                            "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1 AND session_snapshot = ?2",
+                            params![
+                                runtime_id_text(&runtime_id),
+                                session_delta.session_snapshot.as_slice()
+                            ],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                        .is_some()
+                    };
+                if snapshot_is_unchanged {
+                    // Incoming bytes already crossed typed Session validation
+                    // and compaction-intent authority. Exact identity means
+                    // there is no prior BLOB to allocate/parse and no snapshot
+                    // write. The self-guard preserves live-head coherence and
+                    // every fail-closed save invariant before the fast return.
+                    meerkat_core::session_store::run_boundary_snapshot_head_coherence_guard(
+                        &incoming,
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                    tx.commit()
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    return Ok(());
+                }
+                let previous = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .map(|bytes| deserialize_persisted_session(&bytes))
+                    .transpose()?;
+                meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+                    &incoming,
+                    previous.as_ref(),
+                    evidence.as_ref(),
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
     }
 
     #[async_trait::async_trait]
@@ -1806,89 +1903,26 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             runtime_id: &LogicalRuntimeId,
             session_delta: SessionDelta,
         ) -> Result<(), RuntimeStoreError> {
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            #[cfg(test)]
-            let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
-            tokio::task::spawn_blocking(move || {
-                let incoming: meerkat_core::Session =
-                    meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
-                // Byte equality requires equal lengths, and `length()` on a
-                // BLOB reads the record header, not the payload. Ordinary
-                // turns grow the document, so the unchanged-snapshot probe
-                // usually costs one integer compare instead of shipping the
-                // whole candidate blob into SQLite to hear "no".
-                let candidate_len = i64::try_from(session_delta.session_snapshot.len()).ok();
-                let stored_len = tx
-                    .query_row(
-                        "SELECT length(session_snapshot) FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                        params![runtime_id_text(&runtime_id)],
-                        |row| row.get::<_, Option<i64>>(0),
-                    )
-                    .optional()
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .flatten();
-                let snapshot_is_unchanged = candidate_len.is_some()
-                    && stored_len == candidate_len
-                    && {
-                        #[cfg(test)]
-                        snapshot_byte_probe_bytes.fetch_add(
-                            session_delta.session_snapshot.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        tx.query_row(
-                            "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1 AND session_snapshot = ?2",
-                            params![
-                                runtime_id_text(&runtime_id),
-                                session_delta.session_snapshot.as_slice()
-                            ],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .optional()
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                        .is_some()
-                    };
-                if snapshot_is_unchanged {
-                    // Incoming bytes already crossed typed Session validation
-                    // and compaction-intent authority. Exact identity means
-                    // there is no prior BLOB to allocate/parse and no snapshot
-                    // write. The self-guard preserves live-head coherence and
-                    // every fail-closed save invariant before the fast return.
-                    meerkat_core::session_store::run_boundary_snapshot_head_coherence_guard(
-                        &incoming,
-                    )
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                    clear_runtime_projection_quarantine(&tx, &runtime_id)?;
-                    tx.commit()
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                    return Ok(());
-                }
-                let previous = tx
-                    .query_row(
-                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                        params![runtime_id_text(&runtime_id)],
-                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                    )
-                    .optional()
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .map(|bytes| deserialize_persisted_session(&bytes))
-                    .transpose()?;
-                meerkat_core::session_store::run_boundary_snapshot_save_guard(
-                    &incoming,
-                    previous.as_ref(),
-                )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
-                tx.commit()
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                Ok(())
-            })
+            self.commit_session_snapshot_with_optional_history_evidence(
+                runtime_id,
+                session_delta,
+                None,
+            )
             .await
-            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn commit_session_snapshot_with_legacy_history_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            evidence: meerkat_core::TranscriptHistoryState,
+        ) -> Result<(), RuntimeStoreError> {
+            self.commit_session_snapshot_with_optional_history_evidence(
+                runtime_id,
+                session_delta,
+                Some(evidence),
+            )
+            .await
         }
 
         async fn commit_session_transcript_rewrite_snapshot(
@@ -1946,6 +1980,26 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
+            self.atomic_apply_with_legacy_history_evidence(
+                runtime_id,
+                session_delta,
+                receipt,
+                input_updates,
+                session_store_key,
+                None,
+            )
+            .await
+        }
+
+        async fn atomic_apply_with_legacy_history_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<SessionDelta>,
+            receipt: RunBoundaryReceipt,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<meerkat_core::types::SessionId>,
+            evidence: Option<meerkat_core::TranscriptHistoryState>,
+        ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let input_updates = input_updates
@@ -2002,10 +2056,13 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
                         .map(|bytes| deserialize_persisted_session(&bytes))
                         .transpose()?;
-                    if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
-                        session,
-                        previous.as_ref(),
-                    ) {
+                    if let Err(err) =
+                        meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+                            session,
+                            previous.as_ref(),
+                            evidence.as_ref(),
+                        )
+                    {
                         if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
                             persist_session_snapshot = true;
                         } else if previous.as_ref().is_some_and(|previous| {
@@ -2065,6 +2122,29 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: meerkat_core::types::SessionId,
         ) -> Result<(), RuntimeStoreError> {
+            self.atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
+                runtime_id,
+                session_delta,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+                None,
+            )
+            .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            receipt: RunBoundaryReceipt,
+            machine_lifecycle: MachineLifecycleCommit,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: meerkat_core::types::SessionId,
+            evidence: Option<meerkat_core::TranscriptHistoryState>,
+        ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let lifecycle_expected = machine_lifecycle.expected_version().cloned();
@@ -2104,10 +2184,13 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
                     .map(|bytes| deserialize_persisted_session(&bytes))
                     .transpose()?;
-                if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
-                    &session,
-                    previous.as_ref(),
-                ) {
+                if let Err(err) =
+                    meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+                        &session,
+                        previous.as_ref(),
+                        evidence.as_ref(),
+                    )
+                {
                     if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
                         // The generated snapshot replaces the placeholder in
                         // the same terminal transaction.
@@ -5945,6 +6028,205 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 message_count: 1,
                 sequence,
             }
+        }
+
+        /// Seed the 0.8.8 -> 0.8.9 upgrade shape: the runtime row holds an
+        /// INLINE one-rewrite session (adopted through the real first-save
+        /// branch), while the graph evolved by a resume-time rewrite the row
+        /// never saw. Returns the slim evolved boundary snapshot a machine
+        /// commit would carry plus the record-reconstructed evolved graph
+        /// (the caller-threaded evidence shape). SQLite twin of the
+        /// memory-store fixture.
+        async fn seed_legacy_upgrade_row(
+            store: &SqliteRuntimeStore,
+            rid: &LogicalRuntimeId,
+        ) -> (
+            meerkat_core::types::SessionId,
+            Vec<u8>,
+            meerkat_core::TranscriptHistoryState,
+        ) {
+            let mut previous = Session::new();
+            previous.push(Message::User(UserMessage::text(
+                "the codeword is birch seventeen".to_string(),
+            )));
+            let parent = previous.transcript_revision().unwrap();
+            previous
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                    vec![Message::User(UserMessage::text(
+                        "edited context".to_string(),
+                    ))],
+                    TranscriptRewriteReason::new("unit-test-edit"),
+                    Some("runtime-store-test".to_string()),
+                    Some(parent),
+                )
+                .unwrap();
+            store
+                .commit_session_snapshot(
+                    rid,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&previous).unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let mut evolved = previous.clone();
+            let parent = evolved.transcript_revision().unwrap();
+            evolved
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                    vec![Message::User(UserMessage::text(
+                        "resume-refreshed context".to_string(),
+                    ))],
+                    TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+                    Some("agent-factory/resume".to_string()),
+                    Some(parent),
+                )
+                .unwrap();
+            let state = evolved.transcript_history_state().unwrap().unwrap();
+            let head = meerkat_core::session_store::SessionHead::from_session(
+                &evolved,
+                meerkat_core::session_store::TranscriptStrandId::root(),
+                state.commits.len() as u64,
+            )
+            .unwrap();
+            let mut incoming = head.into_session(evolved.messages().to_vec()).unwrap();
+            incoming.push(Message::User(UserMessage::text(
+                "first post-upgrade question".to_string(),
+            )));
+            let mut records = Vec::new();
+            for commit in &state.commits {
+                let parent_body = evolved
+                    .transcript_revision_body(&commit.parent_revision)
+                    .unwrap()
+                    .unwrap();
+                let revision_body = evolved
+                    .transcript_revision_body(&commit.revision)
+                    .unwrap()
+                    .unwrap();
+                records.push(
+                    meerkat_core::TranscriptRewriteRecord::new(
+                        commit.clone(),
+                        parent_body,
+                        revision_body,
+                    )
+                    .unwrap(),
+                );
+            }
+            let evidence = meerkat_core::TranscriptHistoryState::from_rewrite_records(records)
+                .unwrap()
+                .unwrap();
+            (
+                incoming.id().clone(),
+                serde_json::to_vec(&incoming).unwrap(),
+                evidence,
+            )
+        }
+
+        /// SQLite twin of the memory-store pair: the plain atomic commit
+        /// refuses the slim evolved snapshot over the inline row; the
+        /// evidence variant verifies the caller-threaded graph inside the
+        /// same transaction and replaces the row with the slim
+        /// representation.
+        #[tokio::test]
+        async fn atomic_apply_with_legacy_history_evidence_migrates_inline_row() {
+            let (_dir, store) = temp_store();
+            let rid = runtime_id();
+            let (session_id, snapshot, evidence) = seed_legacy_upgrade_row(&store, &rid).await;
+
+            store
+                .atomic_apply(
+                    &rid,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    }),
+                    receipt_with_sequence(RunId::new(), 1),
+                    vec![],
+                    Some(session_id.clone()),
+                )
+                .await
+                .unwrap_err();
+
+            store
+                .atomic_apply_with_legacy_history_evidence(
+                    &rid,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    }),
+                    receipt_with_sequence(RunId::new(), 2),
+                    vec![],
+                    Some(session_id),
+                    Some(evidence),
+                )
+                .await
+                .unwrap();
+
+            let migrated: meerkat_core::Session =
+                serde_json::from_slice(&store.load_session_snapshot(&rid).await.unwrap().unwrap())
+                    .unwrap();
+            assert!(
+                !migrated
+                    .metadata()
+                    .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+                "the migrated runtime row must be the slim representation"
+            );
+        }
+
+        /// Machine-terminal SQLite twin of
+        /// `atomic_apply_with_legacy_history_evidence_migrates_inline_row`.
+        #[tokio::test]
+        async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence_migrates_inline_row()
+         {
+            let (_dir, store) = temp_store();
+            let rid = runtime_id();
+            let (session_id, snapshot, evidence) = seed_legacy_upgrade_row(&store, &rid).await;
+            let lifecycle = || {
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                )
+            };
+
+            store
+                .atomic_apply_with_machine_lifecycle(
+                    &rid,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                    receipt_with_sequence(RunId::new(), 1),
+                    lifecycle(),
+                    Vec::new(),
+                    session_id.clone(),
+                )
+                .await
+                .unwrap_err();
+
+            store
+                .atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
+                    &rid,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                    receipt_with_sequence(RunId::new(), 2),
+                    lifecycle(),
+                    Vec::new(),
+                    session_id,
+                    Some(evidence),
+                )
+                .await
+                .unwrap();
+
+            let migrated: meerkat_core::Session =
+                serde_json::from_slice(&store.load_session_snapshot(&rid).await.unwrap().unwrap())
+                    .unwrap();
+            assert!(
+                !migrated
+                    .metadata()
+                    .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+                "the migrated runtime row must be the slim representation"
+            );
         }
 
         #[tokio::test]

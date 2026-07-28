@@ -29,6 +29,19 @@
 //! two identical prompts are indistinguishable by text — so an unbound,
 //! non-terminal, content-carrying input is reported to the machine as
 //! unattributable evidence, and the machine holds the recovery intact.
+//!
+//! The one machine-owned exception is the LEGACY-ERA retain-inputs commit: a
+//! pre-witness-v3 writer persisted staged run bindings only inside the
+//! boundary commit, so its lost boundary routinely leaves the executed
+//! turn's own input durably unbound — holding that shape wedges every
+//! upgraded legacy session forever. For a clean COMPLETED candidate with
+//! pre-witness-v3 stamp evidence the machine commits the digest-proven
+//! transcript and terminalizes NOTHING: the unbound input stays in its own
+//! lifecycle and redelivers normally (the legacy fleet's own restart
+//! semantics — a possible duplicate turn, never a dropped input, never
+//! fabricated consumption; content-matching a row as "consumed" could mark a
+//! genuinely new identical prompt consumed, which silently drops user input
+//! and is strictly worse than one duplicate reply).
 
 use std::collections::BTreeSet;
 
@@ -46,7 +59,9 @@ use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::types::SessionId;
 
-pub use mm_dsl::{DurableTailRecoveryClass, DurableTailRecoveryDisposition};
+pub use mm_dsl::{
+    DurableRecoveryWriterEra, DurableTailRecoveryClass, DurableTailRecoveryDisposition,
+};
 
 /// One sealed recovery commit request.
 ///
@@ -73,6 +88,13 @@ pub struct DurableTailRecoveryRequest {
     conversation_digest: String,
     /// Message count of the recovered transcript, for the receipt.
     message_count: usize,
+    /// Stamp-schema era of the candidate head row's fully re-verified stamp,
+    /// observed by the classifier shell under the recovery fence. Selects
+    /// whether an unbound content input holds the commit (modern writers
+    /// persist staged run bindings before execution) or is retained for
+    /// ordinary redelivery (legacy writers bound inputs only inside the
+    /// boundary commit this candidate lost).
+    writer_era: DurableRecoveryWriterEra,
 }
 
 impl DurableTailRecoveryRequest {
@@ -87,6 +109,7 @@ impl DurableTailRecoveryRequest {
     /// bytes — the effect carries no content digest. Closing that requires the
     /// classification effect itself to carry the head digest the classifier
     /// judged.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_classification(
         verdict: &meerkat_core::session_document::SessionDocumentEffect,
         session_id: SessionId,
@@ -94,6 +117,7 @@ impl DurableTailRecoveryRequest {
         recovered_snapshot: Vec<u8>,
         conversation_digest: String,
         message_count: usize,
+        writer_era: DurableRecoveryWriterEra,
     ) -> Result<Self, DurableTailRecoveryError> {
         use meerkat_core::session_document::{
             DurableTailRecoveryClass as ClassifiedClass, SessionDocumentEffect,
@@ -115,6 +139,13 @@ impl DurableTailRecoveryRequest {
             ClassifiedClass::InterruptedRepairableCandidate => {
                 DurableTailRecoveryClass::InterruptedRepairableCandidate
             }
+            // Legacy adoption: the candidate run identity is the shell's
+            // domain-separated deterministic legacy run id (the tail itself
+            // carries none), judged by the machine under the same receipt
+            // and input-evidence guards as every other commit class.
+            ClassifiedClass::LegacyCompletedCandidate => {
+                DurableTailRecoveryClass::LegacyCompletedCandidate
+            }
             ClassifiedClass::Ambiguous => DurableTailRecoveryClass::Ambiguous,
         };
         Ok(Self {
@@ -125,6 +156,7 @@ impl DurableTailRecoveryRequest {
             recovered_snapshot,
             conversation_digest,
             message_count,
+            writer_era,
         })
     }
 
@@ -385,6 +417,7 @@ pub async fn authorize_and_commit_durable_tail_recovery(
             last_committed_sequence,
             prior_commit,
             input_evidence: inputs.evidence,
+            writer_era: request.writer_era,
         },
     )
     .map_err(|error| DurableTailRecoveryError::Authority(error.to_string()))?;
@@ -419,6 +452,7 @@ pub async fn authorize_and_commit_durable_tail_recovery(
                 class = ?request.class,
                 ?prior_commit,
                 input_evidence = ?inputs.evidence,
+                writer_era = ?request.writer_era,
                 "durable-tail recovery held intact by machine verdict"
             );
             return Ok(DurableTailRecoveryOutcome::Held);
@@ -441,12 +475,20 @@ pub async fn authorize_and_commit_durable_tail_recovery(
     };
 
     // Realize-only pass: the machine already judged this evidence class as
-    // fully attributable, so every observed row here is terminalized.
-    let input_updates = terminalize_attributed_inputs(
-        inputs.attributed,
-        &request.candidate_run_id,
-        boundary_sequence,
-    )?;
+    // fully attributable, so every observed row here is terminalized. The
+    // retain-inputs disposition terminalizes NOTHING by definition — its
+    // evidence class (UnboundContentInput) attributes no rows, and this
+    // mechanical guard keeps that true even if the observation contract
+    // drifts: an unbound input is retained for redelivery, never claimed as
+    // consumed.
+    let attributed =
+        if disposition == DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs {
+            Vec::new()
+        } else {
+            inputs.attributed
+        };
+    let input_updates =
+        terminalize_attributed_inputs(attributed, &request.candidate_run_id, boundary_sequence)?;
     let contributing_input_ids: Vec<InputId> = input_updates
         .iter()
         .map(|record| record.as_stored().state.input_id.clone())
@@ -479,6 +521,15 @@ pub async fn authorize_and_commit_durable_tail_recovery(
     )
     .with_expected_version(observed.expected_version);
 
+    // Legacy-upgrade note: this recovery commit never needs the
+    // caller-threaded history evidence of the one-time 0.8.8 -> 0.8.9
+    // boundary (`atomic_apply_with_machine_lifecycle_and_legacy_history_evidence`).
+    // The recovered document is BUILT FROM the committed runtime snapshot —
+    // the durable tail is pushed onto a clone of that snapshot through the
+    // session's own mutation seams (see `build_recovered` in
+    // meerkat-session's durable-tail recovery) — so it always carries the
+    // stored row's own transcript-history representation: inline over
+    // inline for a pre-0.8.9 row, slim over slim after migration.
     store
         .atomic_apply_with_machine_lifecycle(
             &runtime_id,

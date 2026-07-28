@@ -93,6 +93,7 @@ pub struct RunId(pub String);
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
+    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -105,7 +106,18 @@ pub enum DurableTailRecoveryDisposition {
     RefuseRecovery,
     CommitCompleted,
     RepairAndCommitInterrupted,
+    CommitLegacyCompleted,
+    CommitLegacyCompletedRetainInputs,
     HoldIntact,
+}
+
+/// Stamp-schema era of the recovery candidate's head row. Bridging copy of
+/// the catalog type (canonical semantics live in the catalog DSL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryWriterEra {
+    #[default]
+    WitnessV3OrNewer,
+    PreWitnessV3,
 }
 
 /// Typed projection of the PERSISTED machine-lifecycle row observed at

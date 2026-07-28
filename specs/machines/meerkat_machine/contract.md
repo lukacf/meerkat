@@ -363,7 +363,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`
 
 ## Runtime-Internal Inputs
-- `AuthorizeDurableTailRecovery`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
+- `AuthorizeDurableTailRecovery`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence, writer_era: DurableRecoveryWriterEra)
 - `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
 - `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `BeginUnregisterUnservedAttachment`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -1057,7 +1057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryCommitIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1071,7 +1071,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryCommitRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1085,7 +1085,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRepairIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1099,7 +1099,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRepairRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1111,9 +1111,67 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `DurableTailRecoveryCommitAuthorized`
 - To: `Retired`
 
+### `AuthorizeDurableTailRecoveryCommitLegacyIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `inputs_attributable`
+  - `legacy_completed_class`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryCommitLegacyRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `inputs_attributable`
+  - `legacy_completed_class`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `unbound_content_input`
+  - `legacy_writer_era`
+  - `completed_shape_class`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `unbound_content_input`
+  - `legacy_writer_era`
+  - `completed_shape_class`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Retired`
+
 ### `AuthorizeDurableTailRecoveryHoldIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1125,7 +1183,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryHoldRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1137,7 +1195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefusePriorCommitIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1150,7 +1208,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefusePriorCommitRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1163,7 +1221,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryHoldInputEvidenceIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1171,13 +1229,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `persisted_no_current_run`
   - `commit_seeking_class`
   - `prior_commit_admits_recovery`
-  - `inputs_not_attributable`
+  - `inputs_not_retainable`
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Idle`
 
 ### `AuthorizeDurableTailRecoveryHoldInputEvidenceRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `no_current_run`
   - `candidate_run_not_terminalized`
@@ -1185,13 +1243,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `persisted_no_current_run`
   - `commit_seeking_class`
   - `prior_commit_admits_recovery`
-  - `inputs_not_attributable`
+  - `inputs_not_retainable`
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Retired`
 
 ### `AuthorizeDurableTailRecoveryRefuseRunFactsIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `conflicting_run_facts`
 - Emits: `DurableTailRecoveryAuthorized`
@@ -1199,7 +1257,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefuseRunFactsRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `conflicting_run_facts`
 - Emits: `DurableTailRecoveryAuthorized`
@@ -1207,7 +1265,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefusePersistedFactsIdle`
 - From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `in_process_quiescent`
   - `persisted_facts_conflict`
@@ -1216,7 +1274,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefusePersistedFactsRetired`
 - From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Guards:
   - `in_process_quiescent`
   - `persisted_facts_conflict`
@@ -1225,31 +1283,31 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeDurableTailRecoveryRefuseNonQuiescentInitializing`
 - From: `Initializing`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Initializing`
 
 ### `AuthorizeDurableTailRecoveryRefuseNonQuiescentAttached`
 - From: `Attached`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Attached`
 
 ### `AuthorizeDurableTailRecoveryRefuseNonQuiescentRunning`
 - From: `Running`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Running`
 
 ### `AuthorizeDurableTailRecoveryRefuseNonQuiescentStopped`
 - From: `Stopped`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Stopped`
 
 ### `AuthorizeDurableTailRecoveryRefuseNonQuiescentDestroyed`
 - From: `Destroyed`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, writer_era)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Destroyed`
 

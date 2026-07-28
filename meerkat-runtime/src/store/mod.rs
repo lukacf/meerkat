@@ -2650,6 +2650,33 @@ pub trait RuntimeStore: Send + Sync {
         session_delta: SessionDelta,
     ) -> Result<(), RuntimeStoreError>;
 
+    /// [`commit_session_snapshot`] carrying caller-threaded transcript-history
+    /// evidence for the one-time legacy upgrade boundary.
+    ///
+    /// A pre-0.8.9 snapshot row carries the transcript graph inline; a 0.8.9
+    /// boundary snapshot is slim. When the graph evolved between the two, the
+    /// erase guard refuses the slim write unless the caller threads the
+    /// evolved graph so the store can verify ancestry
+    /// (`run_boundary_snapshot_save_guard_with_legacy_history_evidence`). The
+    /// accepted write replaces the row with the slim representation, so the
+    /// verification runs at most once per session.
+    ///
+    /// Default: ignore the evidence and run the plain boundary commit —
+    /// fail-closed, a store that predates this seam keeps refusing unproven
+    /// history evolution instead of trusting it.
+    ///
+    /// [`commit_session_snapshot`]: RuntimeStore::commit_session_snapshot
+    async fn commit_session_snapshot_with_legacy_history_evidence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        evidence: meerkat_core::TranscriptHistoryState,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = evidence;
+        self.commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     /// Atomically persist a same-session transcript rewrite snapshot.
     ///
     /// Store implementations that support transcript edits must compare the
@@ -2691,6 +2718,36 @@ pub trait RuntimeStore: Send + Sync {
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
+
+    /// [`atomic_apply`] carrying caller-threaded transcript-history evidence
+    /// for the one-time legacy upgrade boundary, verified inside the same
+    /// atomic transaction (see
+    /// [`commit_session_snapshot_with_legacy_history_evidence`] for the
+    /// evidence contract). Default: ignore the evidence and run the plain
+    /// boundary commit — fail-closed, a store that predates this seam keeps
+    /// refusing unproven history evolution.
+    ///
+    /// [`atomic_apply`]: RuntimeStore::atomic_apply
+    /// [`commit_session_snapshot_with_legacy_history_evidence`]: RuntimeStore::commit_session_snapshot_with_legacy_history_evidence
+    async fn atomic_apply_with_legacy_history_evidence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: Option<SessionDelta>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
+        evidence: Option<meerkat_core::TranscriptHistoryState>,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = evidence;
+        self.atomic_apply(
+            runtime_id,
+            session_delta,
+            receipt,
+            input_updates,
+            session_store_key,
+        )
+        .await
+    }
 
     /// Load exact compaction projection intents committed by atomic_apply but
     /// not yet acknowledged as finalized by the memory store.
@@ -2748,6 +2805,38 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "atomic_apply_with_machine_lifecycle".to_string(),
         ))
+    }
+
+    /// [`atomic_apply_with_machine_lifecycle`] carrying caller-threaded
+    /// transcript-history evidence for the one-time legacy upgrade boundary,
+    /// verified inside the same atomic transaction (see
+    /// [`commit_session_snapshot_with_legacy_history_evidence`] for the
+    /// evidence contract). Default: ignore the evidence and run the plain
+    /// machine-terminal commit — fail-closed.
+    ///
+    /// [`atomic_apply_with_machine_lifecycle`]: RuntimeStore::atomic_apply_with_machine_lifecycle
+    /// [`commit_session_snapshot_with_legacy_history_evidence`]: RuntimeStore::commit_session_snapshot_with_legacy_history_evidence
+    #[allow(clippy::too_many_arguments)]
+    async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+        evidence: Option<meerkat_core::TranscriptHistoryState>,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = evidence;
+        self.atomic_apply_with_machine_lifecycle(
+            runtime_id,
+            session_delta,
+            receipt,
+            machine_lifecycle,
+            input_updates,
+            session_store_key,
+        )
+        .await
     }
 
     /// Load all input states for a runtime, one row outcome per stored row.

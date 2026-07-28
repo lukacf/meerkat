@@ -313,22 +313,30 @@ fn incoming_carries_previous_history_witness(
     incoming: &Session,
     previous_state: &crate::TranscriptHistoryState,
 ) -> Result<bool, SessionStoreError> {
-    let carried = crate::checkpoint::session_transcript_history_checkpoint_digest(incoming)
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("incoming transcript history witness is malformed: {err}"),
+    let carried =
+        crate::checkpoint::session_transcript_history_witness(incoming).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("incoming transcript history witness is malformed: {err}"),
+            }
         })?;
     let Some(carried) = carried else {
         return Ok(false);
     };
-    let derived =
-        crate::checkpoint::transcript_history_checkpoint_digest(previous_state).map_err(|err| {
-            SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("previous transcript history witness is malformed: {err}"),
-            }
-        })?;
-    Ok(derived == carried)
+    // Derive the reference witness under the format the CARRIER declares:
+    // a v3 (revision-identity) carrier over the same graph must match the
+    // v3 derivation, not the v2 whole-graph hash it was never computed as.
+    // Unknown formats already refused typed at document ingress; deriving
+    // refuses them again rather than reducing them to a mismatch.
+    let derived = crate::checkpoint::transcript_history_checkpoint_digest_in_format(
+        previous_state,
+        carried.witness_format(),
+    )
+    .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+        id: incoming.id().clone(),
+        reason: format!("previous transcript history witness is malformed: {err}"),
+    })?;
+    Ok(derived == *carried.digest())
 }
 
 pub fn append_only_save_guard(
@@ -964,6 +972,320 @@ pub fn run_boundary_snapshot_save_guard(
             Ok(())
         }
     }
+}
+
+/// [`run_boundary_snapshot_save_guard`] accepting caller-threaded graph
+/// evidence for the one-time legacy upgrade boundary.
+///
+/// A pre-0.8.9 runtime snapshot row carries the transcript-history graph
+/// INLINE; a 0.8.9 boundary snapshot is slim and carries only the witness.
+/// When the graph evolved between the two (a resume reconciliation commit, a
+/// turn's compaction), the slim incoming's witness can never equal the
+/// witness derived from the previous inline graph, so the erase carve-out
+/// refuses every save and the session wedges. The caller — who holds durable
+/// access to the evolved graph — threads it here as `evidence`, and this
+/// guard verifies (never trusts) it:
+///
+/// 1. the evidence graph seals ([`ValidatedTranscriptHistory::seal_owned`]:
+///    every retained body digest-verified against its revision id, commit
+///    edit shapes, chain coherence);
+/// 2. the evidence is the exact graph the incoming document commits to: its
+///    witness, derived under the format the incoming CARRIER declares,
+///    equals the carried digest;
+/// 3. the previous inline graph is retained: its commits are a prefix of the
+///    evidence commits and every audited body is preserved
+///    ([`validate_rewrite_save_retains_previous_commits`] with the evidence
+///    standing in for the incoming's absent inline state);
+/// 4. the previous row's live transcript reaches the evidence head through
+///    digest-proved audited edges
+///    ([`find_transcript_rewrite_commit_chain_extending_session`] +
+///    [`transcript_rewrite_bridge_save_guard`] — the same validators the
+///    guard already runs when an incoming document carries its graph
+///    inline);
+/// 5. the incoming live transcript continues the evidence head by plain
+///    appends, proved by hashing the incoming prefix against the retained
+///    head body.
+///
+/// This is exactly the acceptance boundary the guard has for an inline
+/// incoming document, with the caller-threaded graph substituted for the
+/// absent inline state and step 2 binding that substitution to the incoming
+/// bytes. A fork — a graph whose prefix differs from the previous commits,
+/// or a live transcript with no digest-proved path from the previous head —
+/// fails the same validators it would fail inline.
+///
+/// Evidence is consulted ONLY when the unwitnessed guard refuses AND the
+/// previous row carries an inline graph AND the incoming is slim with a
+/// carried witness. Everything else — including every save against an
+/// already-slim previous row — returns the unwitnessed verdict untouched, so
+/// this path runs at most once per session: the accepted write replaces the
+/// row with the slim representation and the precondition can never hold
+/// again. Genuine erasure (no evidence, no witness, unprovable evolution)
+/// keeps today's refusal message; malformed evidence propagates as a typed
+/// error.
+/// The previous-history preservation obligation of the legacy-evidence path.
+///
+/// The commit log is compared STRICTLY — commits are the digest-carrying
+/// audit facts and round-trip exactly through every store — so the previous
+/// inline graph's commits must be a prefix of the evidence commits. Audited
+/// BODY preservation is proved at content level via
+/// [`audited_bodies_are_equivalent`], not by the byte-identical
+/// `created_at`/parent-pointer compare the inline path uses: the evidence is
+/// reconstructed from durable rewrite records
+/// ([`reconstruct_rewrite_record`] re-stamps bodies with `committed_at` and
+/// drops parent bookkeeping), which is exactly the "re-projected same
+/// conversation" shape that function documents as digest-equal but
+/// structurally different. Content is what erasure would lose; content is
+/// what this proves.
+fn validate_legacy_evidence_retains_previous_history(
+    incoming: &Session,
+    previous: &Session,
+    evidence: &ValidatedTranscriptHistory,
+) -> Result<(), SessionStoreError> {
+    let previous_state = previous.transcript_history_state_shared().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        }
+    })?;
+    let Some(previous_state) = previous_state else {
+        return Ok(());
+    };
+    let evidence_state = evidence.state();
+    if evidence_state.commits.len() < previous_state.commits.len()
+        || evidence_state.commits[..previous_state.commits.len()] != previous_state.commits
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason:
+                "legacy upgrade history evidence would drop retained transcript rewrite commits"
+                    .to_string(),
+        });
+    }
+    let mut audited_revisions = std::collections::BTreeSet::new();
+    for commit in &previous_state.commits {
+        audited_revisions.insert(commit.parent_revision.as_str());
+        audited_revisions.insert(commit.revision.as_str());
+    }
+    for revision in audited_revisions {
+        let previous_body = previous_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("previous transcript history omits audited body {revision}"),
+            })?;
+        let evidence_body = evidence_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("legacy upgrade history evidence drops audited body {revision}"),
+            })?;
+        if !audited_bodies_are_equivalent(&previous_body.messages, &evidence_body.messages)? {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!(
+                    "legacy upgrade history evidence changes audited transcript body {revision}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+    incoming: &Session,
+    previous: Option<&Session>,
+    evidence: Option<&TranscriptHistoryState>,
+) -> Result<(), SessionStoreError> {
+    let refusal = match run_boundary_snapshot_save_guard(incoming, previous) {
+        Ok(()) => return Ok(()),
+        Err(refusal) => refusal,
+    };
+    let (Some(evidence), Some(previous)) = (evidence, previous) else {
+        return Err(refusal);
+    };
+    legacy_inline_history_evolution_guard(incoming, previous, evidence, refusal)
+}
+
+fn legacy_inline_history_evolution_guard(
+    incoming: &Session,
+    previous: &Session,
+    evidence: &TranscriptHistoryState,
+    refusal: SessionStoreError,
+) -> Result<(), SessionStoreError> {
+    let _digest_site =
+        crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_BOUNDARY_GUARD);
+    // Reachability preconditions, all fail-closed to the unwitnessed verdict:
+    // previous must still be the legacy inline representation and incoming
+    // must be a slim projection carrying a witness to bind against.
+    let previous_carries_inline_graph = previous
+        .transcript_history_state_shared()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        })?
+        .is_some();
+    if !previous_carries_inline_graph {
+        return Err(refusal);
+    }
+    let incoming_carries_inline_graph = incoming
+        .transcript_history_state_shared()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?
+        .is_some();
+    if incoming_carries_inline_graph {
+        return Err(refusal);
+    }
+    let carried =
+        crate::checkpoint::session_transcript_history_witness(incoming).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("incoming transcript history witness is malformed: {err}"),
+            }
+        })?;
+    let Some(carried) = carried else {
+        return Err(refusal);
+    };
+
+    // 1. Whole-graph proof of the threaded evidence.
+    let sealed = ValidatedTranscriptHistory::seal_owned(evidence.clone()).map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("legacy upgrade history evidence is malformed: {err}"),
+        }
+    })?;
+    // 2. Bind the evidence to the incoming document's own carried witness,
+    // under the format that carrier declares.
+    let derived = crate::checkpoint::transcript_history_checkpoint_digest_in_format(
+        sealed.state(),
+        carried.witness_format(),
+    )
+    .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+        id: incoming.id().clone(),
+        reason: format!("legacy upgrade history evidence witness is malformed: {err}"),
+    })?;
+    if derived != *carried.digest() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "legacy upgrade history evidence witness {derived} does not match the witness {} carried by the incoming save",
+                carried.digest()
+            ),
+        });
+    }
+    // 3. The previous inline graph is retained by the evidence graph.
+    validate_legacy_evidence_retains_previous_history(incoming, previous, &sealed)?;
+    // 4. The previous live transcript reaches the evidence head through
+    // digest-proved audited edges.
+    let evidence_head = sealed.state().head.as_str();
+    let Some(chain) =
+        find_transcript_rewrite_commit_chain_extending_session(&sealed, previous, evidence_head)?
+    else {
+        return Err(refusal);
+    };
+    if let Some(commit) = chain.first() {
+        transcript_rewrite_bridge_save_guard(incoming, commit, &sealed, evidence_head)?;
+    }
+    // 5. The incoming live transcript continues the evidence head by plain
+    // appends: the retained head body's length names the prefix, the digest
+    // over the incoming's own messages proves it.
+    let incoming_revision = incoming
+        .transcript_content_digest()
+        .map_err(SessionStoreError::from)?;
+    if incoming_revision == evidence_head {
+        return Ok(());
+    }
+    let Some(head_body) = sealed
+        .state()
+        .revisions
+        .iter()
+        .find(|body| body.revision == evidence_head)
+    else {
+        return Err(refusal);
+    };
+    let head_len = head_body.messages.len();
+    if incoming.messages().len() < head_len {
+        return Err(refusal);
+    }
+    let incoming_prefix_revision = incoming
+        .transcript_prefix_digest(head_len)
+        .map_err(SessionStoreError::from)?;
+    if incoming_prefix_revision != evidence_head {
+        return Err(refusal);
+    }
+    Ok(())
+}
+
+/// Assemble the caller-threaded evolved-graph evidence for the one-time
+/// legacy upgrade boundary from an incremental store's durable records.
+///
+/// This is the CALLER half of
+/// [`run_boundary_snapshot_save_guard_with_legacy_history_evidence`]: rebuild
+/// the evolved graph from the store's append-only rewrite records
+/// ([`TranscriptHistoryState::from_rewrite_records`]) and, when the last
+/// pre-upgrade head write pinned a mechanical live-head body, extend the
+/// reconstruction to the durable head row so the graph names the same
+/// retained revisions the incoming document's witness was minted over. The
+/// extension body is loaded from the head's own strand rows and
+/// digest-verified by the guard when it seals the evidence, so nothing
+/// returned here is trusted — an imperfect reconstruction can only reproduce
+/// the existing refusal, never admit an unproven write.
+///
+/// Returns `Ok(None)` for every shape the plain guard already decides
+/// correctly: an incoming document carrying its graph inline, one carrying
+/// no witness, or a store with no adopted rewrites.
+pub async fn legacy_upgrade_history_evidence_from_incremental(
+    incremental: &dyn IncrementalSessionStore,
+    incoming: &Session,
+) -> Result<Option<TranscriptHistoryState>, SessionStoreError> {
+    if incoming
+        .metadata()
+        .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        || !incoming
+            .metadata()
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY)
+    {
+        return Ok(None);
+    }
+    let records = incremental.load_rewrites(incoming.id()).await?;
+    let Some(mut state) = TranscriptHistoryState::from_rewrite_records(records).map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("failed to rebuild transcript history for the upgrade boundary: {err}"),
+        }
+    })?
+    else {
+        return Ok(None);
+    };
+    let head = incremental.load_head(incoming.id()).await?;
+    if let Some(head) = head
+        && head.head_revision != state.head
+    {
+        if state
+            .revisions
+            .iter()
+            .any(|body| body.revision == head.head_revision)
+        {
+            state.head = head.head_revision;
+        } else {
+            let messages = incremental
+                .load_messages(incoming.id(), &head.strand, 0..head.message_count)
+                .await?;
+            state.revisions.push(TranscriptRevisionBody {
+                revision: head.head_revision.clone(),
+                parent_revision: Some(state.head.clone()),
+                messages,
+                created_at: head.updated_at,
+            });
+            state.head = head.head_revision;
+        }
+    }
+    Ok(Some(state))
 }
 
 /// Validate the invariant that a typed Session's live transcript matches its
@@ -2744,6 +3066,369 @@ mod tests {
             run_boundary_snapshot_head_coherence_guard(&forged),
             Err(SessionStoreError::InvalidTranscriptRewrite { .. })
         ));
+        Ok(())
+    }
+
+    /// The pre-0.8.9 upgrade pair: `previous` is the inline (0.8.8-shaped)
+    /// runtime row after one audited rewrite; `evolved` is that session after
+    /// a resume-time system-prompt rewrite (the "agent-factory/resume" shape
+    /// from the production defect).
+    fn legacy_upgrade_fixture() -> Result<(Session, Session), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::System(SystemMessage::new("member prompt v1")));
+        base.push(Message::User(UserMessage::text(
+            "the codeword is birch seventeen".to_string(),
+        )));
+        let mut previous = base;
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new("member prompt v2"))],
+            crate::TranscriptRewriteReason::new("unit-test-edit"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let mut evolved = previous.clone();
+        evolved.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new("member prompt v3"))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            None,
+        )?;
+        Ok((previous, evolved))
+    }
+
+    /// The slim 0.8.9 boundary materialization of `session`: no inline graph,
+    /// the storage-invariant witness under the reserved carrier key —
+    /// produced through the real head-projection seam, not hand-forged JSON.
+    fn slim_boundary_materialization(
+        session: &Session,
+    ) -> Result<Session, Box<dyn std::error::Error>> {
+        let rewrite_count = session
+            .transcript_history_state()?
+            .map(|state| state.commits.len() as u64)
+            .unwrap_or(0);
+        let head = SessionHead::from_session(session, TranscriptStrandId::root(), rewrite_count)?;
+        Ok(head.into_session(session.messages().to_vec())?)
+    }
+
+    /// The caller's evidence shape: rebuild the evolved graph from its own
+    /// append-only rewrite records (the incremental store's durable truth)
+    /// and extend the reconstruction to the pinned live head, exactly like
+    /// `legacy_upgrade_boundary_history_evidence` in meerkat-session.
+    #[allow(clippy::expect_used)]
+    fn rebuilt_history_evidence(
+        session: &Session,
+    ) -> Result<TranscriptHistoryState, Box<dyn std::error::Error>> {
+        let state = session
+            .transcript_history_state()?
+            .expect("evolved session retains history state");
+        let mut records = Vec::new();
+        for commit in &state.commits {
+            let parent_body = session
+                .transcript_revision_body(&commit.parent_revision)?
+                .expect("parent body retained");
+            let revision_body = session
+                .transcript_revision_body(&commit.revision)?
+                .expect("revision body retained");
+            records.push(TranscriptRewriteRecord::new(
+                commit.clone(),
+                parent_body,
+                revision_body,
+            )?);
+        }
+        let mut rebuilt = TranscriptHistoryState::from_rewrite_records(records)?
+            .expect("evolved session has adopted rewrites");
+        let live_revision = transcript_messages_digest(session.messages())?;
+        if rebuilt.head != live_revision {
+            if rebuilt
+                .revisions
+                .iter()
+                .any(|body| body.revision == live_revision)
+            {
+                rebuilt.head = live_revision;
+            } else {
+                let parent = rebuilt.head.clone();
+                rebuilt.revisions.push(TranscriptRevisionBody {
+                    revision: live_revision.clone(),
+                    parent_revision: Some(parent),
+                    messages: session.messages().to_vec(),
+                    created_at: SystemTime::now(),
+                });
+                rebuilt.head = live_revision;
+            }
+        }
+        Ok(rebuilt)
+    }
+
+    /// Pins the production defect: after the graph evolves (resume rewrite),
+    /// the slim boundary save is refused against the inline previous row —
+    /// and stays refused when no evidence is threaded (fail-closed).
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_upgrade_slim_save_refused_without_evidence() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (previous, evolved) = legacy_upgrade_fixture()?;
+        let incoming = slim_boundary_materialization(&evolved)?;
+        for verdict in [
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+                &incoming,
+                Some(&previous),
+                None,
+            ),
+        ] {
+            let error = verdict.expect_err("evolved slim save must be refused without evidence");
+            assert!(
+                error
+                    .to_string()
+                    .contains("incoming save would erase retained transcript history state"),
+                "unexpected refusal: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The fix: the same refused save is accepted once the caller threads the
+    /// evolved graph and the guard verifies binding + ancestry over it.
+    #[test]
+    fn legacy_upgrade_slim_save_accepts_verified_evolution_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, evolved) = legacy_upgrade_fixture()?;
+        let incoming = slim_boundary_materialization(&evolved)?;
+        let evidence = rebuilt_history_evidence(&evolved)?;
+        assert!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_err(),
+            "the unwitnessed guard must still refuse — the evidence path is the only admission"
+        );
+        run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&evidence),
+        )?;
+        Ok(())
+    }
+
+    /// The full production shape: an append between the audited rewrites, a
+    /// mechanical live-head pin after the last rewrite, and live appends
+    /// after the slim materialization (the first turn's messages). Exercises
+    /// the record-chain reconstruction, the head-row extension, and the
+    /// guard's digest-proved live continuation.
+    #[test]
+    fn legacy_upgrade_slim_save_accepts_evolution_with_appends()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, _) = legacy_upgrade_fixture()?;
+        let mut evolved = previous.clone();
+        evolved.push(Message::User(UserMessage::text(
+            "resume banner".to_string(),
+        )));
+        evolved.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new("member prompt v3"))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            None,
+        )?;
+        // A post-rewrite append pins a mechanical live-head body into the
+        // graph the slim materialization's witness names.
+        evolved.push(Message::User(UserMessage::text(
+            "post-rewrite note".to_string(),
+        )));
+        let mut incoming = slim_boundary_materialization(&evolved)?;
+        // The first turn appends past the pinned head before the boundary
+        // save; the carried witness still names the pinned graph.
+        incoming.push(Message::User(UserMessage::text(
+            "what was the codeword?".to_string(),
+        )));
+        incoming.push(Message::User(UserMessage::text(
+            "birch seventeen".to_string(),
+        )));
+        let evidence = rebuilt_history_evidence(&evolved)?;
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_err());
+        run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&evidence),
+        )?;
+        Ok(())
+    }
+
+    /// Fork safety: evidence over a graph whose commit prefix differs from
+    /// the previous inline graph is refused even though it is internally
+    /// consistent and matches the incoming's own carried witness.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_upgrade_slim_save_refuses_forked_evidence() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut base = Session::new();
+        base.push(Message::System(SystemMessage::new("member prompt v1")));
+        base.push(Message::User(UserMessage::text(
+            "the codeword is birch seventeen".to_string(),
+        )));
+        let mut previous = base.clone();
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new("member prompt v2"))],
+            crate::TranscriptRewriteReason::new("unit-test-edit"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let mut forked = base;
+        forked.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "forked prompt that never extended the audited history",
+            ))],
+            crate::TranscriptRewriteReason::new("unit-test-fork"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let incoming = slim_boundary_materialization(&forked)?;
+        let evidence = rebuilt_history_evidence(&forked)?;
+        let error = run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&evidence),
+        )
+        .expect_err("forked evidence must never be admitted");
+        assert!(
+            matches!(error, SessionStoreError::InvalidTranscriptRewrite { .. }),
+            "unexpected fork verdict: {error}"
+        );
+        Ok(())
+    }
+
+    /// Same-graph slim round-trips keep passing through the existing exact
+    /// witness carve-out, and evidence is never consulted for them: even
+    /// deliberately poisoned evidence cannot change the verdict.
+    #[test]
+    fn legacy_upgrade_same_graph_round_trip_still_accepted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, _) = legacy_upgrade_fixture()?;
+        let incoming = slim_boundary_materialization(&previous)?;
+        run_boundary_snapshot_save_guard(&incoming, Some(&previous))?;
+        let poisoned = TranscriptHistoryState {
+            head: "sha256:not-a-real-revision".to_string(),
+            commits: Vec::new(),
+            revisions: Vec::new(),
+            digest_format: 0,
+        };
+        run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&poisoned),
+        )?;
+        Ok(())
+    }
+
+    /// A v3 (revision-identity) carrier over the SAME graph must round-trip
+    /// against an inline previous row: the carve-out derives the reference
+    /// witness under the format the carrier declares instead of assuming v2.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_upgrade_same_graph_v3_carrier_round_trip_accepted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, _) = legacy_upgrade_fixture()?;
+        let mut incoming = slim_boundary_materialization(&previous)?;
+        let previous_state = previous
+            .transcript_history_state()?
+            .expect("previous retains history state");
+        let v3 =
+            crate::checkpoint::transcript_history_checkpoint_digest_in_format(&previous_state, 3)?;
+        incoming.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY,
+            serde_json::json!({
+                "witness_format": 3,
+                "revision_digest_format": 2,
+                "digest": v3.as_str(),
+            }),
+        );
+        run_boundary_snapshot_save_guard(&incoming, Some(&previous))?;
+        Ok(())
+    }
+
+    /// When the previous row is already slim, the legacy path is not
+    /// reachable at all: a plain append commits through the ordinary guard
+    /// and poisoned evidence is never read.
+    #[test]
+    fn legacy_upgrade_evidence_unreachable_when_previous_is_slim()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_, evolved) = legacy_upgrade_fixture()?;
+        let previous_slim = slim_boundary_materialization(&evolved)?;
+        let mut incoming = previous_slim.clone();
+        incoming.push(Message::User(UserMessage::text(
+            "next turn message".to_string(),
+        )));
+        let poisoned = TranscriptHistoryState {
+            head: "sha256:not-a-real-revision".to_string(),
+            commits: Vec::new(),
+            revisions: Vec::new(),
+            digest_format: 0,
+        };
+        run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous_slim),
+            Some(&poisoned),
+        )?;
+        Ok(())
+    }
+
+    /// A slim incoming with NO carried witness is genuine erasure: evidence
+    /// cannot bind to anything and the refusal keeps its exact message.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_upgrade_missing_witness_keeps_erasure_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, evolved) = legacy_upgrade_fixture()?;
+        let incoming = slim_boundary_materialization(&evolved)?;
+        let mut envelope = serde_json::to_value(&incoming)?;
+        envelope["metadata"]
+            .as_object_mut()
+            .expect("metadata object")
+            .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
+        let incoming: Session = serde_json::from_value(envelope)?;
+        let evidence = rebuilt_history_evidence(&evolved)?;
+        let error = run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&evidence),
+        )
+        .expect_err("a witnessless slim save is genuine erasure");
+        assert!(
+            error
+                .to_string()
+                .contains("incoming save would erase retained transcript history state"),
+            "unexpected refusal: {error}"
+        );
+        Ok(())
+    }
+
+    /// Malformed evidence propagates as a typed error instead of being
+    /// reduced to acceptance or to the generic erasure refusal.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_upgrade_malformed_evidence_propagates_typed_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (previous, evolved) = legacy_upgrade_fixture()?;
+        let incoming = slim_boundary_materialization(&evolved)?;
+        let mut evidence = rebuilt_history_evidence(&evolved)?;
+        evidence.revisions[0]
+            .messages
+            .push(Message::User(UserMessage::text(
+                "tampered body no longer matching its revision digest".to_string(),
+            )));
+        let error = run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+            &incoming,
+            Some(&previous),
+            Some(&evidence),
+        )
+        .expect_err("tampered evidence must refuse typed");
+        assert!(
+            error
+                .to_string()
+                .contains("legacy upgrade history evidence"),
+            "unexpected malformed-evidence verdict: {error}"
+        );
         Ok(())
     }
 

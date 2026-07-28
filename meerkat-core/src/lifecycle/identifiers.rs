@@ -23,6 +23,15 @@ impl RunId {
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
+
+    /// Deterministic run identity from caller-derived, domain-separated
+    /// evidence bytes (a truncated hash). Recovery seams that must mint the
+    /// SAME identity for the same durable evidence across processes use
+    /// this so a repeated attempt converges on the prior commit instead of
+    /// minting a second identity. Not time-ordered; never use for live runs.
+    pub fn from_recovery_evidence_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
+    }
 }
 
 impl Default for RunId {

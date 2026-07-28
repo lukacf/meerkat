@@ -256,6 +256,7 @@ pub enum DurableTailExecutionEvidence {
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
+    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -268,6 +269,13 @@ pub enum DurableHeadRelation {
     VerifiedStrictDescendant,
     Diverged,
     Unverifiable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableHeadStampEra {
+    #[default]
+    WitnessV3OrNewer,
+    PreWitnessV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -554,6 +562,7 @@ pub enum SessionDocumentInput {
         store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
         tail_execution: DurableTailExecutionEvidence,
+        head_stamp_era: DurableHeadStampEra,
     },
     ClassifyDurableTail {
         session_id: SessionDocumentKey,
@@ -564,6 +573,7 @@ pub enum SessionDocumentInput {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
+        head_stamp_era: DurableHeadStampEra,
     },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
@@ -854,9 +864,11 @@ enum SessionDocumentTransition {
     RecoverSessionFromStoreUnrecoverable,
     ResolveRuntimeSnapshotReadSourceCommittedHead,
     ResolveRuntimeSnapshotReadSourceRecoveryRequired,
+    ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired,
     ResolveRuntimeSnapshotReadSourceQuarantine,
     ResolveRuntimeSnapshotReadSourceSnapshot,
     ClassifyDurableTailCompleted,
+    ClassifyDurableTailLegacyCompleted,
     ClassifyDurableTailRepairable,
     ClassifyDurableTailAmbiguous,
     ResolveRuntimeProjectionConflictRetain,
@@ -3618,6 +3630,7 @@ impl SessionDocumentMachineAuthority {
                 store_provenance,
                 session_is_live,
                 tail_execution,
+                head_stamp_era,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -3639,13 +3652,24 @@ impl SessionDocumentMachineAuthority {
                     );
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (store_provenance == CheckpointProvenanceClass::IntraTurn)
+                        && (session_is_live == false)
+                        && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)
+                        && (head_stamp_era == DurableHeadStampEra::PreWitnessV3))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (((relation == DurableHeadRelation::Diverged)
                         && (store_provenance != CheckpointProvenanceClass::IntraTurn))
                         || (relation == DurableHeadRelation::Unverifiable)
                         || ((relation == DurableHeadRelation::VerifiedStrictDescendant)
                             && (store_provenance != CheckpointProvenanceClass::Committed)
                             && (session_is_live == false)
-                            && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)))
+                            && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)
+                            && ((store_provenance != CheckpointProvenanceClass::IntraTurn)
+                                || (head_stamp_era != DurableHeadStampEra::PreWitnessV3))))
                 {
                     matches.push(
                         SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine,
@@ -3670,39 +3694,34 @@ impl SessionDocumentMachineAuthority {
                     SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                disposition: RuntimeSnapshotReadDisposition::UseCommittedStoreHead,
-                            },
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::UseCommittedStoreHead, },
                         ])
                     }
                     SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                disposition: RuntimeSnapshotReadDisposition::RecoveryRequired,
-                            },
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::RecoveryRequired, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::RecoveryRequired, },
                         ])
                     }
                     SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                disposition: RuntimeSnapshotReadDisposition::Quarantine,
-                            },
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::Quarantine, },
                         ])
                     }
                     SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
-                                disposition: RuntimeSnapshotReadDisposition::UseRuntimeSnapshot,
-                            },
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::UseRuntimeSnapshot, },
                         ])
                     }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveRuntimeSnapshotReadSource_transition",
-                    }),
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRuntimeSnapshotReadSource_transition" }),
                 }
             }
             SessionDocumentInput::ClassifyDurableTail {
@@ -3714,6 +3733,7 @@ impl SessionDocumentMachineAuthority {
                 dangling_tool_use_count,
                 orphan_tool_result_count,
                 messages_after_terminal,
+                head_stamp_era,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -3728,6 +3748,17 @@ impl SessionDocumentMachineAuthority {
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        && (run_id_cardinality == RunIdCardinality::NoRunId)
+                        && (terminal_stop_reason == DurableTailStopReason::EndTurn)
+                        && (dangling_tool_use_count == 0)
+                        && (orphan_tool_result_count == 0)
+                        && (messages_after_terminal == false)
+                        && (head_stamp_era == DurableHeadStampEra::PreWitnessV3))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyDurableTailLegacyCompleted);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
                         && (run_id_cardinality == RunIdCardinality::SingleRunId)
                         && (dangling_tool_use_count == 0)
                         && (orphan_tool_result_count == 0)
@@ -3738,12 +3769,19 @@ impl SessionDocumentMachineAuthority {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailRepairable);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                    && (((relation != DurableHeadRelation::VerifiedStrictDescendant)
                         || (run_id_cardinality != RunIdCardinality::SingleRunId)
                         || (orphan_tool_result_count != 0)
                         || (messages_after_terminal == true)
                         || (terminal_stop_reason == DurableTailStopReason::Other)
                         || (dangling_tool_use_count != 0))
+                        && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                            || (run_id_cardinality != RunIdCardinality::NoRunId)
+                            || (terminal_stop_reason != DurableTailStopReason::EndTurn)
+                            || (dangling_tool_use_count != 0)
+                            || (orphan_tool_result_count != 0)
+                            || (messages_after_terminal == true)
+                            || (head_stamp_era != DurableHeadStampEra::PreWitnessV3)))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailAmbiguous);
                 }
@@ -3754,6 +3792,13 @@ impl SessionDocumentMachineAuthority {
                         Ok(vec![SessionDocumentEffect::DurableTailClassified {
                             candidate_id: candidate_id,
                             class: DurableTailRecoveryClass::CompletedCandidate,
+                        }])
+                    }
+                    SessionDocumentTransition::ClassifyDurableTailLegacyCompleted => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
+                            candidate_id: candidate_id,
+                            class: DurableTailRecoveryClass::LegacyCompletedCandidate,
                         }])
                     }
                     SessionDocumentTransition::ClassifyDurableTailRepairable => {
@@ -4513,6 +4558,7 @@ impl SessionDocumentMachineAuthority {
         store_provenance: CheckpointProvenanceClass,
         session_is_live: bool,
         tail_execution: DurableTailExecutionEvidence,
+        head_stamp_era: DurableHeadStampEra,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
             session_id,
@@ -4520,6 +4566,7 @@ impl SessionDocumentMachineAuthority {
             store_provenance,
             session_is_live,
             tail_execution,
+            head_stamp_era,
         })
     }
 
@@ -4533,6 +4580,7 @@ impl SessionDocumentMachineAuthority {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
+        head_stamp_era: DurableHeadStampEra,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ClassifyDurableTail {
             session_id,
@@ -4543,6 +4591,7 @@ impl SessionDocumentMachineAuthority {
             dangling_tool_use_count,
             orphan_tool_result_count,
             messages_after_terminal,
+            head_stamp_era,
         })
     }
 

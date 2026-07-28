@@ -23,7 +23,11 @@ pub const SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION: u32 = 1;
 /// Extended durable schema (v2): identical shape, provenance vocabulary
 /// extended with the recovered-boundary variants
 /// ([`SessionCheckpointProvenance::RecoveredRunBoundaryCommit`],
-/// [`SessionCheckpointProvenance::RecoveredInterruptedBoundary`]).
+/// [`SessionCheckpointProvenance::RecoveredInterruptedBoundary`], and — as
+/// of the legacy-tail adoption era —
+/// [`SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit`]; binaries
+/// that know v2 but predate a variant refuse it as an unknown-variant
+/// decode error, the same one-way door as the original v2 rollout).
 ///
 /// Version selection is PER RECORD: a stamp whose provenance fits the v1
 /// vocabulary is still written as v1, so ordinary sessions stay readable by
@@ -57,7 +61,8 @@ fn required_stamp_schema_version(provenance: SessionCheckpointProvenance) -> u32
         | SessionCheckpointProvenance::TranscriptRewrite
         | SessionCheckpointProvenance::RecoveryMigration => SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION,
         SessionCheckpointProvenance::RecoveredRunBoundaryCommit
-        | SessionCheckpointProvenance::RecoveredInterruptedBoundary => {
+        | SessionCheckpointProvenance::RecoveredInterruptedBoundary
+        | SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit => {
             SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED
         }
     }
@@ -242,6 +247,16 @@ pub enum SessionCheckpointProvenance {
     /// (synthetic interrupted tool results, typed recovery notice), the
     /// original run terminalized as interrupted — never requeued.
     RecoveredInterruptedBoundary,
+    /// A machine-authorized adoption of a COMPLETED durable tail written by
+    /// a pre-run-identity legacy writer: digest-proven strict continuation,
+    /// zero run identity anywhere in the tail (the bookkeeping did not exist
+    /// when it was written), pre-witness-v3 stamp evidence, clean EndTurn
+    /// shape. Committed under a domain-separated deterministic legacy run
+    /// identity; anchored to the last committed runtime snapshot like every
+    /// recovered boundary. Distinct from
+    /// [`SessionCheckpointProvenance::RecoveredRunBoundaryCommit`] so the
+    /// stamp never claims a modern run's boundary was recovered.
+    RecoveredLegacyBoundaryCommit,
 }
 
 /// Exact canonical authority from which a non-root checkpoint was derived.
@@ -462,6 +477,7 @@ impl SessionCheckpointStamp {
                 | SessionCheckpointProvenance::TranscriptRewrite
                 | SessionCheckpointProvenance::RecoveredRunBoundaryCommit
                 | SessionCheckpointProvenance::RecoveredInterruptedBoundary
+                | SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit
         ) {
             return Err(SessionCheckpointError::AuthorityBaseConflict(
                 "checkpoint successor provenance must be checkpoint, boundary, rewrite, \
@@ -657,6 +673,7 @@ impl SessionCheckpointStamp {
                         | SessionCheckpointProvenance::TranscriptRewrite
                         | SessionCheckpointProvenance::RecoveredRunBoundaryCommit
                         | SessionCheckpointProvenance::RecoveredInterruptedBoundary
+                        | SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit
                 ) {
                     return Err(SessionCheckpointError::AuthorityBaseConflict(
                         "typed authority base requires checkpoint, boundary, rewrite, or \
@@ -1780,6 +1797,25 @@ pub fn transcript_history_checkpoint_digest(
 ) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
     let value = serde_json::to_value(history)?;
     session_checkpoint_history_digest(&value)
+}
+
+/// [`transcript_history_checkpoint_digest`] under an explicit witness format.
+///
+/// Store guards that compare a graph against the witness an incoming slim
+/// document CARRIES must derive under the format that carrier declares —
+/// format 2 (sequential canonical whole-graph hash) or format 3
+/// (revision-identity digest). An unknown format refuses typed, the same
+/// verdict as the carrier ingress gate.
+pub(crate) fn transcript_history_checkpoint_digest_in_format(
+    history: &crate::TranscriptHistoryState,
+    witness_format: u32,
+) -> Result<SessionCheckpointDigest, SessionCheckpointError> {
+    let value = serde_json::to_value(history)?;
+    match witness_format {
+        2 => session_checkpoint_history_digest(&value),
+        3 => session_checkpoint_history_digest_v3(&value),
+        other => Err(SessionCheckpointError::UnsupportedTranscriptHistoryWitnessFormat(other)),
+    }
 }
 
 fn canonical_value_digest(

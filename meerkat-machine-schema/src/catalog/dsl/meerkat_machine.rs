@@ -45,6 +45,11 @@ pub struct RunId(pub String);
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
+    /// A complete legacy turn written before run-identity bookkeeping
+    /// existed: identity-less clean EndTurn tail on a pre-witness-v3
+    /// intra-turn row, adopted under a domain-separated deterministic
+    /// legacy run identity.
+    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -115,6 +120,30 @@ pub enum DurableRecoveryInputEvidence {
     AllBoundOrInert,
 }
 
+/// Which stamp-schema era the candidate head row's VERIFIED checkpoint stamp
+/// advertises, observed by the shell from the fully re-verified stamp under
+/// the recovery fence. Mirrors the SessionDocumentMachine's
+/// `DurableHeadStampEra` vocabulary (same wire strings; each machine carries
+/// its own bridging type per DSL convention).
+///
+/// Evidence, not decision: a pre-witness-v3 stamp names a writer generation
+/// that persisted input-staging run bindings ONLY at the boundary commit, so
+/// a lost boundary routinely leaves the executed turn's own input durably
+/// unbound. Modern writers persist staged bindings BEFORE the run executes
+/// (fail-closed at run start), so under a modern writer an unbound content
+/// input coexisting with a clean completed tail is a genuinely different,
+/// never-staged input. The guards use this era evidence to decide whether an
+/// unbound content input blocks a commit: under a legacy writer the row is
+/// RETAINED for ordinary redelivery (never consumed, never dropped) while
+/// the digest-proven boundary commits; under a modern writer it holds.
+/// Fail-closed default: modern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableRecoveryWriterEra {
+    #[default]
+    WitnessV3OrNewer,
+    PreWitnessV3,
+}
+
 /// Typed comparison of the HIGHEST durably committed boundary receipt for the
 /// candidate run against the candidate transcript itself (message count, and
 /// the receipt digest when one was recorded). This is the only observation
@@ -159,6 +188,21 @@ pub enum DurableTailRecoveryDisposition {
     /// Repair the interrupted tail (synthetic interrupted tool results, typed
     /// recovery notice) and commit it as a recovered interrupted boundary.
     RepairAndCommitInterrupted,
+    /// Commit the completed LEGACY tail (pre-run-identity writer) as a
+    /// recovered legacy boundary. Distinct from `CommitCompleted` so the
+    /// commit never claims a modern run boundary was found.
+    CommitLegacyCompleted,
+    /// Commit a completed candidate whose head row carries LEGACY-ERA stamp
+    /// evidence while an unbound content input exists: the digest-proven
+    /// boundary commits and the input row is RETAINED for ordinary
+    /// redelivery — terminalize nothing. A ≤0.8.8 writer persisted staged
+    /// run bindings only inside the boundary commit, so its lost boundary
+    /// routinely leaves the executed turn's own input durably unbound;
+    /// holding on that row would wedge every such session forever on
+    /// upgrade. Retention never fabricates consumption and never drops an
+    /// input — the worst case is one duplicate redelivered turn, the legacy
+    /// fleet's own restart semantics.
+    CommitLegacyCompletedRetainInputs,
     /// Ambiguous evidence: hold intact, block autonomous execution, clear only
     /// through reconciliation.
     HoldIntact,
@@ -3628,6 +3672,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // terminalization only on a commit verdict; it never
                 // downgrades a commit to a hold on its own.
                 input_evidence: Enum<DurableRecoveryInputEvidence>,
+                // Stamp-schema era of the candidate head row's fully
+                // re-verified stamp, observed under the recovery fence. A
+                // pre-witness-v3 writer persisted staged run bindings only
+                // at the boundary commit, so its lost boundary routinely
+                // leaves the executed turn's own input durably unbound; the
+                // era gates whether a commit may proceed past an unbound
+                // content input (retaining the row for redelivery).
+                writer_era: Enum<DurableRecoveryWriterEra>,
             },
             PrepareTerminalSupervisorCleanupBindings { session_id: SessionId },
             // Two-phase unregister (D1): BeginUnregisterSession opens the
@@ -6450,7 +6502,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // complement — its guard pair is the exact negation of
         // (persisted_quiescent && persisted_no_current_run) under
         // in-process quiescence.
-        // A itself is cut by the two durable observation dimensions:
+        // A itself is cut by the durable observation dimensions:
         //   1. class == Ambiguous -> `...Hold` (evidence-blind: an ambiguous
         //      tail holds whatever the receipts and input rows say, so it
         //      absorbs the whole Ambiguous slice).
@@ -6458,12 +6510,20 @@ macro_rules! meerkat_catalog_machine_dsl {
         //      {MatchesCandidate, DivergesFromCandidate}
         //      -> `...RefusePriorCommit`.
         //   3. class != Ambiguous && prior_commit in
-        //      {NoPriorCommit, PrecedesCandidate} && input_evidence in
-        //      {UnboundContentInput, Unfenceable}
+        //      {NoPriorCommit, PrecedesCandidate} && input_evidence ==
+        //      Unfenceable -> `...HoldInputEvidence`; input_evidence ==
+        //      UnboundContentInput splits on the writer era:
+        //      writer_era == PreWitnessV3 with a COMPLETED shape
+        //      (CompletedCandidate or LegacyCompletedCandidate)
+        //      -> `...CommitLegacyRetainInputs` (commit the digest-proven
+        //      boundary; RETAIN the unbound row for ordinary redelivery —
+        //      terminalize nothing);
+        //      everything else (modern era or an Interrupted shape)
         //      -> `...HoldInputEvidence`.
         //   4. the same as 3 with input_evidence == AllBoundOrInert
         //      -> `...Commit` (CompletedCandidate) xor `...Repair`
-        //      (InterruptedRepairableCandidate).
+        //      (InterruptedRepairableCandidate) xor `...CommitLegacy`
+        //      (LegacyCompletedCandidate).
         // Each dimension is split into complementary variant sets of a closed
         // enum, so cuts 2/3/4 cover A minus the Ambiguous slice exactly once.
         // Both hold-producing dispositions are minted HERE: no shell may
@@ -6480,7 +6540,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6531,7 +6592,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6567,6 +6629,133 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // Legacy adoption commit: same admissible core and durable-evidence
+        // guards as the completed commit, for the classifier's
+        // LegacyCompletedCandidate. The candidate run identity is the
+        // domain-separated deterministic legacy run id the shell minted for
+        // the identity-less tail; receipts and input rows are judged under
+        // exactly the same rules (a prior commit for the legacy run id
+        // refuses, unattributable content inputs hold — so a genuinely
+        // pending modern run's input row still blocks the adoption), and
+        // the distinct disposition keeps the commit honest: a recovered
+        // LEGACY boundary, never a claim that a modern run boundary was
+        // found.
+        transition AuthorizeDurableTailRecoveryCommitLegacy {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence,
+                writer_era
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            guard "prior_commit_admits_recovery" {
+                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
+                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
+            }
+            guard "inputs_attributable" {
+                input_evidence == DurableRecoveryInputEvidence::AllBoundOrInert
+            }
+            guard "legacy_completed_class" {
+                class == DurableTailRecoveryClass::LegacyCompletedCandidate
+            }
+            update {
+                self.recovered_boundary_sequence = last_committed_sequence + 1;
+                self.turn_terminal_run_id = Some(candidate_run_id);
+            }
+            to Idle
+            emit DurableTailRecoveryCommitAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::CommitLegacyCompleted,
+                boundary_sequence: self.recovered_boundary_sequence
+            }
+        }
+
+        // Legacy-era retain-inputs commit: the HomeCore parent-2 wedge. A
+        // COMPLETED candidate (bound run or identity-less legacy) whose head
+        // row carries PRE-WITNESS-V3 stamp evidence, with an unbound content
+        // input row present. A legacy writer persisted staged run bindings
+        // only inside the boundary commit, so its lost boundary routinely
+        // leaves the executed turn's OWN input durably unbound — the
+        // ordinary input-evidence hold would wedge every such session
+        // forever on upgrade. The commit adopts the digest-proven transcript
+        // and RETAINS the unbound row for ordinary redelivery: nothing is
+        // terminalized, no consumption is fabricated, no input can ever be
+        // dropped. The worst case is one duplicate redelivered turn — the
+        // legacy fleet's own restart semantics. Under a modern writer the
+        // staging invariant means an unbound row coexisting with a clean
+        // tail is a genuinely different never-staged input, so the modern
+        // era, interrupted shapes, and unfenceable rows all hold exactly as
+        // before.
+        transition AuthorizeDurableTailRecoveryCommitLegacyRetainInputs {
+            per_phase [Idle, Retired]
+            on input AuthorizeDurableTailRecovery {
+                session_id,
+                candidate_id,
+                candidate_run_id,
+                class,
+                observed_lifecycle,
+                observed_current_run,
+                last_committed_sequence,
+                prior_commit,
+                input_evidence,
+                writer_era
+            }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "candidate_run_not_terminalized" {
+                self.turn_terminal_run_id != Some(candidate_run_id)
+            }
+            guard "persisted_quiescent" {
+                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
+                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
+            }
+            guard "persisted_no_current_run" {
+                observed_current_run == DurableRecoveryObservedRun::NoRun
+            }
+            guard "prior_commit_admits_recovery" {
+                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
+                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
+            }
+            guard "unbound_content_input" {
+                input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
+            }
+            guard "legacy_writer_era" {
+                writer_era == DurableRecoveryWriterEra::PreWitnessV3
+            }
+            guard "completed_shape_class" {
+                class == DurableTailRecoveryClass::CompletedCandidate
+                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
+            }
+            update {
+                self.recovered_boundary_sequence = last_committed_sequence + 1;
+                self.turn_terminal_run_id = Some(candidate_run_id);
+            }
+            to Idle
+            emit DurableTailRecoveryCommitAuthorized {
+                candidate_id: candidate_id,
+                disposition: DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs,
+                boundary_sequence: self.recovered_boundary_sequence
+            }
+        }
+
         transition AuthorizeDurableTailRecoveryHold {
             per_phase [Idle, Retired]
             on input AuthorizeDurableTailRecovery {
@@ -6578,7 +6767,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6630,7 +6820,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6647,6 +6838,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "commit_seeking_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
                 || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
             }
             guard "prior_commit_conflict" {
                 prior_commit == DurableRecoveryPriorCommit::MatchesCandidate
@@ -6677,7 +6869,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "no_current_run" { self.current_run_id == None }
             guard "candidate_run_not_terminalized" {
@@ -6694,14 +6887,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "commit_seeking_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
                 || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
             }
             guard "prior_commit_admits_recovery" {
                 prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
                 || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
             }
-            guard "inputs_not_attributable" {
-                input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
-                || input_evidence == DurableRecoveryInputEvidence::Unfenceable
+            // Unfenceable rows hold in every era; an unbound content input
+            // holds unless the legacy-era retain-inputs arm above owns it
+            // (COMPLETED shape + pre-witness-v3 writer evidence).
+            // Interrupted shapes keep the hold even under legacy evidence.
+            guard "inputs_not_retainable" {
+                input_evidence == DurableRecoveryInputEvidence::Unfenceable
+                || (input_evidence == DurableRecoveryInputEvidence::UnboundContentInput
+                    && (writer_era != DurableRecoveryWriterEra::PreWitnessV3
+                        || class == DurableTailRecoveryClass::InterruptedRepairableCandidate))
             }
             update {}
             to Idle
@@ -6722,7 +6922,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "conflicting_run_facts" {
                 self.current_run_id != None
@@ -6752,7 +6953,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             guard "in_process_quiescent" {
                 self.current_run_id == None
@@ -6782,7 +6984,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observed_current_run,
                 last_committed_sequence,
                 prior_commit,
-                input_evidence
+                input_evidence,
+                writer_era
             }
             update {}
             to Idle

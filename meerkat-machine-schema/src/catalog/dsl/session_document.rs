@@ -536,9 +536,42 @@ pub enum DurableTailRecoveryClass {
     /// structurally coherent, but the turn never reached EndTurn (stopped at
     /// tool use or mid-stream).
     InterruptedRepairableCandidate,
+    /// The tail is one complete turn written by a PRE-RUN-IDENTITY legacy
+    /// writer: digest-proven strict continuation, ZERO run identity anywhere
+    /// in the tail, pre-witness-v3 stamp evidence on the head row, and the
+    /// clean completed shape (EndTurn terminal, no dangling calls, no orphan
+    /// results, nothing after the terminal). No run id can ever appear on
+    /// such a tail — the bookkeeping did not exist when it was written — so
+    /// holding it for a run identity is a permanent availability loss, not
+    /// caution. Adopted through a recovery boundary bound to a
+    /// domain-separated deterministic legacy run identity.
+    LegacyCompletedCandidate,
     /// Anything else. Held intact; never served, never discarded.
     #[default]
     Ambiguous,
+}
+
+/// Which stamp-schema era the durable head row's VERIFIED checkpoint stamp
+/// advertises, as observed mechanically by the shell.
+///
+/// Corroborating legacy-writer evidence for identity-less durable tails.
+/// Witness-v3 stamps (schema 3) ship with the same writer era as
+/// run-identity-era recovery bookkeeping: a 0.8.9+ mint over graph-bearing
+/// authority always advertises schema 3, and every in-run assistant append
+/// since v0.7.12 persists its run identity inside the same message bytes as
+/// the content (whole-document writes; a crash cannot strip identity from
+/// content it was appended with). A sub-v3 stamp is therefore necessary —
+/// never sufficient alone — evidence of a pre-modern writer; the machine
+/// combines it with intra-turn provenance, `NoRunId` cardinality, and the
+/// clean completed shape before admitting a legacy adoption.
+///
+/// Fail-closed default: an absent or unverifiable stamp reads as modern
+/// (`WitnessV3OrNewer`), which never widens any legacy arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableHeadStampEra {
+    #[default]
+    WitnessV3OrNewer,
+    PreWitnessV3,
 }
 
 /// How a durable store row relates to the committed runtime authority
@@ -1116,6 +1149,10 @@ machine! {
                 session_is_live: bool,
                 // What execution, if any, does the uncommitted tail record?
                 tail_execution: Enum<DurableTailExecutionEvidence>,
+                // Stamp-schema era of the head row's VERIFIED stamp; the
+                // fail-closed default (modern) is fed whenever no verified
+                // stamp exists to observe.
+                head_stamp_era: Enum<DurableHeadStampEra>,
             },
 
             // -----------------------------------------------------------
@@ -1137,6 +1174,11 @@ machine! {
                 dangling_tool_use_count: u64,
                 orphan_tool_result_count: u64,
                 messages_after_terminal: bool,
+                // Stamp-schema era of the head row's verified stamp — the
+                // corroborating legacy-writer evidence for the identity-less
+                // adoption arm. Fail-closed default (modern) when no
+                // verified stamp exists to observe.
+                head_stamp_era: Enum<DurableHeadStampEra>,
             },
 
             // -----------------------------------------------------------
@@ -4055,7 +4097,8 @@ machine! {
                 relation,
                 store_provenance,
                 session_is_live,
-                tail_execution
+                tail_execution,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4078,7 +4121,8 @@ machine! {
                 relation,
                 store_provenance,
                 session_is_live,
-                tail_execution
+                tail_execution,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4086,6 +4130,42 @@ machine! {
                 && store_provenance != CheckpointProvenanceClass::Committed
                 && session_is_live == false
                 && tail_execution == DurableTailExecutionEvidence::BoundExecution
+            }
+            update {}
+            to Ready
+            emit RuntimeSnapshotReadSourceResolved {
+                disposition: RuntimeSnapshotReadDisposition::RecoveryRequired
+            }
+        }
+
+        // A COLD intra-turn descendant whose assistant tail carries NO run
+        // identity, on a head row whose VERIFIED stamp predates the
+        // witness-v3 era, is the legacy lost-boundary shape: run-identity
+        // bookkeeping did not exist when the tail was written, so no run id
+        // can ever appear and no reconciliation verb can promote it — the
+        // quarantine below would be a permanent availability loss on bytes
+        // already digest-proven to be exact continuations. Recovery owns it:
+        // the classifier applies the full legacy gate (clean EndTurn shape,
+        // NoRunId cardinality, legacy stamp era) and anything less stays
+        // held. Intra-turn provenance is required explicitly — only the
+        // in-run checkpointer mints it, which is what makes the missing run
+        // identity evidence of writer era rather than of writer path.
+        transition ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired {
+            on input ResolveRuntimeSnapshotReadSource {
+                session_id,
+                relation,
+                store_provenance,
+                session_is_live,
+                tail_execution,
+                head_stamp_era
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && relation == DurableHeadRelation::VerifiedStrictDescendant
+                && store_provenance == CheckpointProvenanceClass::IntraTurn
+                && session_is_live == false
+                && tail_execution == DurableTailExecutionEvidence::UnboundExecution
+                && head_stamp_era == DurableHeadStampEra::PreWitnessV3
             }
             update {}
             to Ready
@@ -4102,7 +4182,8 @@ machine! {
                 relation,
                 store_provenance,
                 session_is_live,
-                tail_execution
+                tail_execution,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4113,12 +4194,17 @@ machine! {
                     // carries no run identity records execution that no
                     // recovery boundary can be anchored to and that the input
                     // lifecycle will not redeliver. Serving past it would
-                    // invite a later projection rebuild to discard it.
+                    // invite a later projection rebuild to discard it. The
+                    // one carve-out is the legacy shape (intra-turn row whose
+                    // verified stamp predates witness-v3): recovery owns
+                    // that, in the arm above.
                     || (relation == DurableHeadRelation::VerifiedStrictDescendant
                         && store_provenance != CheckpointProvenanceClass::Committed
                         && session_is_live == false
                         && tail_execution
-                            == DurableTailExecutionEvidence::UnboundExecution))
+                            == DurableTailExecutionEvidence::UnboundExecution
+                        && (store_provenance != CheckpointProvenanceClass::IntraTurn
+                            || head_stamp_era != DurableHeadStampEra::PreWitnessV3)))
             }
             update {}
             to Ready
@@ -4143,7 +4229,8 @@ machine! {
                 relation,
                 store_provenance,
                 session_is_live,
-                tail_execution
+                tail_execution,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4176,10 +4263,19 @@ machine! {
         //               execution: its external side effect may have fired
         //               before the crash, so no tail carrying one may be
         //               auto-closed and resumed.
+        //   Legacy:     verified descendant, ZERO run identity, EndTurn,
+        //               no dangling calls, no orphan results, nothing
+        //               after the terminal, AND pre-witness-v3 stamp
+        //               evidence on the head row. A pre-run-identity
+        //               writer wrote this tail; no run id can ever appear,
+        //               so it is adopted (never held for an identity that
+        //               cannot exist) under a domain-separated legacy run
+        //               identity.
         //   Ambiguous:  everything else (explicit negation of the above —
-        //               non-descendant relations, zero or multiple runs,
-        //               orphan results, content after the terminal, Other
-        //               stop shapes, ANY dangling tool_use call).
+        //               non-descendant relations, zero-without-legacy-
+        //               evidence or multiple runs, orphan results, content
+        //               after the terminal, Other stop shapes, ANY
+        //               dangling tool_use call, unclean legacy shapes).
         // No class authorizes discarding; Ambiguous is held intact. For a
         // dangling call that means held for reconciliation: readable, never
         // executed against, until an idempotency/reconciliation witness or
@@ -4195,7 +4291,8 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4214,6 +4311,47 @@ machine! {
             }
         }
 
+        // Legacy adoption: a digest-proven byte-exact continuation written by
+        // a pre-run-identity writer. Four independent evidence axes must
+        // agree: zero run identity anywhere in the tail (every in-run
+        // assistant append since v0.7.12 persists its run id inside the same
+        // message bytes as the content, so a modern in-run tail cannot lack
+        // one), pre-witness-v3 stamp evidence on the head row (a modern mint
+        // over graph-bearing authority always advertises schema 3), the
+        // clean COMPLETED shape, and the verified strict-descendant
+        // relation. Anything less — an interrupted legacy tail, a
+        // tool-racing shape, modern stamp evidence — stays Ambiguous and
+        // held exactly as before.
+        transition ClassifyDurableTailLegacyCompleted {
+            on input ClassifyDurableTail {
+                session_id,
+                candidate_id,
+                relation,
+                run_id_cardinality,
+                terminal_stop_reason,
+                dangling_tool_use_count,
+                orphan_tool_result_count,
+                messages_after_terminal,
+                head_stamp_era
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && relation == DurableHeadRelation::VerifiedStrictDescendant
+                && run_id_cardinality == RunIdCardinality::NoRunId
+                && terminal_stop_reason == DurableTailStopReason::EndTurn
+                && dangling_tool_use_count == 0
+                && orphan_tool_result_count == 0
+                && messages_after_terminal == false
+                && head_stamp_era == DurableHeadStampEra::PreWitnessV3
+            }
+            update {}
+            to Ready
+            emit DurableTailClassified {
+                candidate_id: candidate_id,
+                class: DurableTailRecoveryClass::LegacyCompletedCandidate
+            }
+        }
+
         transition ClassifyDurableTailRepairable {
             on input ClassifyDurableTail {
                 session_id,
@@ -4223,7 +4361,8 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4252,7 +4391,8 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                head_stamp_era
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4262,6 +4402,16 @@ machine! {
                     || messages_after_terminal == true
                     || terminal_stop_reason == DurableTailStopReason::Other
                     || dangling_tool_use_count != 0)
+                // Exact complement of the legacy adoption arm: an
+                // identity-less tail stays Ambiguous unless EVERY legacy
+                // conjunct holds.
+                && (relation != DurableHeadRelation::VerifiedStrictDescendant
+                    || run_id_cardinality != RunIdCardinality::NoRunId
+                    || terminal_stop_reason != DurableTailStopReason::EndTurn
+                    || dangling_tool_use_count != 0
+                    || orphan_tool_result_count != 0
+                    || messages_after_terminal == true
+                    || head_stamp_era != DurableHeadStampEra::PreWitnessV3)
             }
             update {}
             to Ready

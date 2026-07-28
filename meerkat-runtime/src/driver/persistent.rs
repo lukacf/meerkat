@@ -39,6 +39,21 @@ pub struct PersistentRuntimeDriver {
     blob_store: Arc<dyn BlobStore>,
     /// Runtime ID for store operations.
     runtime_id: LogicalRuntimeId,
+    /// Evidence source for the one-time 0.8.8 -> 0.8.9 upgrade boundary:
+    /// the session store's incremental capability, wired by the host that
+    /// composes machine + session store
+    /// (`MeerkatMachine::set_legacy_history_evidence_source`). When absent,
+    /// every boundary commit keeps today's fail-closed refusal against a
+    /// legacy inline snapshot row.
+    legacy_history_evidence_source:
+        Option<Arc<dyn meerkat_core::session_store::IncrementalSessionStore>>,
+    /// Once-per-driver hint: whether the stored runtime snapshot row still
+    /// carries the transcript-history graph INLINE (the pre-0.8.9
+    /// representation). `None` = not probed yet; probed lazily on the first
+    /// snapshot-carrying boundary commit and cleared to `Some(false)` by any
+    /// successful snapshot commit. A hint, never authority: it only gates
+    /// whether evidence is assembled; the store guard verifies everything.
+    legacy_inline_row_hint: Option<bool>,
     /// Test-only fault injection: forces the input-state snapshot step of
     /// [`Self::commit_lifecycle_with_rollback`] to fail so tests can pin the
     /// checkpoint-restore contract for that arm.
@@ -181,8 +196,89 @@ impl PersistentRuntimeDriver {
             store,
             blob_store,
             runtime_id,
+            legacy_history_evidence_source: None,
+            legacy_inline_row_hint: None,
             #[cfg(test)]
             force_input_snapshot_failure_for_test: false,
+        }
+    }
+
+    /// Wire the evidence source for the one-time 0.8.8 -> 0.8.9 upgrade
+    /// boundary. See the field docs; absent = today's fail-closed behavior.
+    pub(crate) fn set_legacy_history_evidence_source(
+        &mut self,
+        source: Arc<dyn meerkat_core::session_store::IncrementalSessionStore>,
+    ) {
+        self.legacy_history_evidence_source = Some(source);
+    }
+
+    /// Lazily probed once-per-driver hint that the stored runtime snapshot
+    /// row still carries the transcript-history graph INLINE. A cheap byte
+    /// scan for the reserved metadata key, never a parse: false positives
+    /// only arm one round of evidence assembly (cleared by the next
+    /// successful commit); false negatives cannot occur for a real reserved
+    /// key in a serialized document.
+    async fn runtime_row_may_carry_inline_history(&mut self) -> bool {
+        if self.legacy_history_evidence_source.is_none() {
+            return false;
+        }
+        if let Some(hint) = self.legacy_inline_row_hint {
+            return hint;
+        }
+        let needle = format!("\"{}\"", meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        let hint = match self.store.load_session_snapshot(&self.runtime_id).await {
+            Ok(Some(bytes)) => bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes()),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    runtime_id = %self.runtime_id,
+                    %error,
+                    "legacy upgrade hint probe failed to load the runtime snapshot row"
+                );
+                false
+            }
+        };
+        self.legacy_inline_row_hint = Some(hint);
+        hint
+    }
+
+    /// Assemble store-verified upgrade evidence for a boundary commit whose
+    /// snapshot is the slim 0.8.9 representation. Returns `None` (keeping
+    /// the plain fail-closed commit) when no source is wired, the snapshot
+    /// is not the slim-with-witness shape, or assembly fails.
+    async fn legacy_history_evidence_for_commit(
+        &self,
+        session_snapshot: &[u8],
+    ) -> Option<meerkat_core::TranscriptHistoryState> {
+        let source = self.legacy_history_evidence_source.as_ref()?;
+        let incoming = match meerkat_core::Session::from_persisted_bytes(session_snapshot) {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                tracing::warn!(
+                    runtime_id = %self.runtime_id,
+                    %error,
+                    "legacy upgrade evidence probe could not decode the boundary snapshot"
+                );
+                return None;
+            }
+        };
+        match meerkat_core::session_store::legacy_upgrade_history_evidence_from_incremental(
+            source.as_ref(),
+            &incoming,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                tracing::warn!(
+                    runtime_id = %self.runtime_id,
+                    %error,
+                    "legacy upgrade history evidence assembly failed"
+                );
+                None
+            }
         }
     }
 
@@ -320,6 +416,15 @@ impl PersistentRuntimeDriver {
         &self,
         session_snapshot: Vec<u8>,
     ) -> Result<(), RuntimeDriverError> {
+        // Legacy-upgrade note: this commit never needs the caller-threaded
+        // history evidence of the one-time 0.8.8 -> 0.8.9 boundary
+        // (`commit_session_snapshot_with_legacy_history_evidence`). Its
+        // incoming document is DERIVED FROM the currently stored snapshot
+        // (`load_compaction_checkpoint_snapshot` -> intent-metadata cleanup ->
+        // re-serialize), so it always matches the stored row's own
+        // transcript-history representation — inline over inline for a
+        // pre-0.8.9 row, slim over slim after migration — with an unchanged
+        // transcript, which the plain boundary guard already accepts.
         self.store
             .commit_session_snapshot(
                 &self.runtime_id,
@@ -589,15 +694,28 @@ impl PersistentRuntimeDriver {
                 commit.runtime_state()
             )));
         }
+        // One-time 0.8.8 -> 0.8.9 upgrade boundary: when the stored snapshot
+        // row still carries the transcript graph INLINE and this boundary
+        // document is slim, thread store-verified history evidence into the
+        // SAME atomic transaction — snapshot, receipt, lifecycle, and input
+        // writes stay all-or-nothing, so there is no migration/receipt split
+        // and no crash window beyond the ordinary atomic-apply contract.
+        let legacy_history_evidence = if self.runtime_row_may_carry_inline_history().await {
+            self.legacy_history_evidence_for_commit(&session_snapshot)
+                .await
+        } else {
+            None
+        };
         if let Err(error) = self
             .store
-            .atomic_apply_with_machine_lifecycle(
+            .atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
                 &self.runtime_id,
                 crate::store::SessionDelta { session_snapshot },
                 receipt,
                 commit,
                 Vec::new(),
                 owner_session_id,
+                legacy_history_evidence,
             )
             .await
         {
@@ -606,6 +724,7 @@ impl PersistentRuntimeDriver {
                 "service turn terminal receipt persist failed: {error}"
             )));
         }
+        self.legacy_inline_row_hint = Some(false);
         self.inner.sync_control_projection_from_dsl_authority();
         Ok(())
     }
@@ -1273,15 +1392,26 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
+        // One-time 0.8.8 -> 0.8.9 upgrade boundary: evidence rides the SAME
+        // atomic transaction (snapshot + receipt + input writes stay
+        // all-or-nothing), so no migration/receipt split exists at this site.
+        let commits_snapshot = session_snapshot.is_some();
+        let legacy_history_evidence = match session_snapshot.as_deref() {
+            Some(bytes) if self.runtime_row_may_carry_inline_history().await => {
+                self.legacy_history_evidence_for_commit(bytes).await
+            }
+            _ => None,
+        };
         if let Err(err) = self
             .store
-            .atomic_apply(
+            .atomic_apply_with_legacy_history_evidence(
                 &self.runtime_id,
                 session_snapshot
                     .map(|session_snapshot| crate::store::SessionDelta { session_snapshot }),
                 receipt.clone(),
                 input_updates,
                 Some(owner_session_id.clone()),
+                legacy_history_evidence,
             )
             .await
         {
@@ -1289,6 +1419,9 @@ impl PersistentRuntimeDriver {
             return Err(RuntimeDriverError::Internal(format!(
                 "runtime live-boundary context commit failed: {err}"
             )));
+        }
+        if commits_snapshot {
+            self.legacy_inline_row_hint = Some(false);
         }
         Ok(())
     }
@@ -1300,21 +1433,37 @@ impl PersistentRuntimeDriver {
         owner_session_id: &meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeDriverError> {
         let input_updates = self.inner.authorized_stored_input_states_snapshot()?;
+        // One-time 0.8.8 -> 0.8.9 upgrade boundary (the queued-input run
+        // shape): evidence rides the SAME atomic transaction — snapshot,
+        // receipt, and input terminalization stay all-or-nothing, so no
+        // migration/receipt split and no half-terminalized input window.
+        let commits_snapshot = session_snapshot.is_some();
+        let legacy_history_evidence = match session_snapshot.as_deref() {
+            Some(bytes) if self.runtime_row_may_carry_inline_history().await => {
+                self.legacy_history_evidence_for_commit(bytes).await
+            }
+            _ => None,
+        };
         self.store
-            .atomic_apply(
+            .atomic_apply_with_legacy_history_evidence(
                 &self.runtime_id,
                 session_snapshot
                     .map(|session_snapshot| crate::store::SessionDelta { session_snapshot }),
                 receipt.clone(),
                 input_updates,
                 Some(owner_session_id.clone()),
+                legacy_history_evidence,
             )
             .await
             .map_err(|e| {
                 RuntimeDriverError::Internal(format!(
                     "runtime completed-boundary commit failed: {e}"
                 ))
-            })
+            })?;
+        if commits_snapshot {
+            self.legacy_inline_row_hint = Some(false);
+        }
+        Ok(())
     }
 
     /// Persist a failed-run realization whose generated input transitions and
@@ -1348,6 +1497,7 @@ impl PersistentRuntimeDriver {
         );
         let (checkpoint, input_states, commit) = self
             .lifecycle_persistence_payload_with_rollback(checkpoint, "failed-run terminal event")?;
+        let mut committed_snapshot = false;
         let persist_result = if let Some(applied_commit) = applied_commit {
             let session = match serde_json::from_slice::<meerkat_core::Session>(
                 &applied_commit.session_snapshot,
@@ -1368,8 +1518,20 @@ impl PersistentRuntimeDriver {
                     session.id()
                 )));
             }
+            // One-time 0.8.8 -> 0.8.9 upgrade boundary (failed-but-applied
+            // run shape): evidence rides the SAME atomic machine-terminal
+            // transaction — snapshot, receipt, lifecycle record, and input
+            // writes stay all-or-nothing, so no migration/receipt split and
+            // no half-terminalized input window.
+            let legacy_history_evidence = if self.runtime_row_may_carry_inline_history().await {
+                self.legacy_history_evidence_for_commit(&applied_commit.session_snapshot)
+                    .await
+            } else {
+                None
+            };
+            committed_snapshot = true;
             self.store
-                .atomic_apply_with_machine_lifecycle(
+                .atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
                     &self.runtime_id,
                     crate::store::SessionDelta {
                         session_snapshot: applied_commit.session_snapshot,
@@ -1378,6 +1540,7 @@ impl PersistentRuntimeDriver {
                     commit,
                     input_states,
                     applied_commit.owner_session_id,
+                    legacy_history_evidence,
                 )
                 .await
         } else {
@@ -1390,6 +1553,9 @@ impl PersistentRuntimeDriver {
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal event persist failed: {err}"
             )));
+        }
+        if committed_snapshot {
+            self.legacy_inline_row_hint = Some(false);
         }
         Ok(())
     }
@@ -1524,6 +1690,175 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
+    }
+
+    fn boundary_receipt(sequence: u64, message_count: usize) -> RunBoundaryReceipt {
+        RunBoundaryReceipt {
+            run_id: RunId::new(),
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![],
+            conversation_digest: None,
+            message_count,
+            sequence,
+        }
+    }
+
+    /// One-time 0.8.8 -> 0.8.9 upgrade boundary at the queued-input machine
+    /// commit: with the evidence source wired, the completed-boundary commit
+    /// verifies the slim replacement of the legacy INLINE snapshot row
+    /// inside ONE atomic transaction (snapshot + receipt together — no
+    /// migration/receipt split); without the source it keeps today's
+    /// fail-closed refusal. Also pins the once-per-driver hint lifecycle.
+    #[tokio::test]
+    async fn completed_boundary_commit_migrates_legacy_inline_row_with_wired_evidence() {
+        use meerkat_core::session_store::SessionStore;
+        use meerkat_core::types::{Message, UserMessage};
+
+        let runtime_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("legacy-upgrade-queued-boundary");
+
+        // The 0.8.8-shaped runtime row: an INLINE one-rewrite session,
+        // adopted through the real first-save branch of the boundary guard.
+        // The durable session store carries the same lineage (base save,
+        // then rewrite adoptions through the trait's rewrite path).
+        let mut base = meerkat_core::Session::new();
+        base.push(Message::User(UserMessage::text(
+            "the codeword is birch seventeen".to_string(),
+        )));
+        let session_store = Arc::new(meerkat_store::MemoryStore::new());
+        session_store.save(&base).await.unwrap();
+
+        let mut previous = base.clone();
+        let parent = previous.transcript_revision().unwrap();
+        previous
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "edited context".to_string(),
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("unit-test-edit"),
+                Some("driver-test".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        let first_commit = previous
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .cloned()
+            .unwrap();
+        session_store
+            .save_transcript_rewrite(&previous, &first_commit)
+            .await
+            .unwrap();
+        runtime_store
+            .commit_session_snapshot(
+                &rid,
+                crate::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&previous).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // The durable store adopts a resume-time rewrite the runtime row
+        // never sees — the production lag.
+        let mut evolved = previous.clone();
+        let parent = evolved.transcript_revision().unwrap();
+        evolved
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "resume-refreshed context".to_string(),
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+                Some("agent-factory/resume".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        let resume_commit = evolved
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .cloned()
+            .unwrap();
+        session_store
+            .save_transcript_rewrite(&evolved, &resume_commit)
+            .await
+            .unwrap();
+
+        // The slim 0.8.9 boundary snapshot the queued-input run would commit.
+        let state = evolved.transcript_history_state().unwrap().unwrap();
+        let head = meerkat_core::session_store::SessionHead::from_session(
+            &evolved,
+            meerkat_core::session_store::TranscriptStrandId::root(),
+            state.commits.len() as u64,
+        )
+        .unwrap();
+        let mut incoming = head.into_session(evolved.messages().to_vec()).unwrap();
+        incoming.push(Message::User(UserMessage::text(
+            "first post-upgrade question".to_string(),
+        )));
+        let owner = incoming.id().clone();
+        let snapshot = serde_json::to_vec(&incoming).unwrap();
+
+        // Without the wired source: today's fail-closed refusal.
+        let mut unwired = PersistentRuntimeDriver::new(
+            rid.clone(),
+            Arc::clone(&runtime_store),
+            Arc::clone(&blob_store),
+        );
+        unwired
+            .machine_commit_completed_boundary_snapshot(
+                &boundary_receipt(1, incoming.messages().len()),
+                Some(snapshot.clone()),
+                &owner,
+            )
+            .await
+            .unwrap_err();
+
+        // With the source: the verified slim replacement commits atomically.
+        let mut driver =
+            PersistentRuntimeDriver::new(rid.clone(), Arc::clone(&runtime_store), blob_store);
+        driver.set_legacy_history_evidence_source(
+            Arc::clone(&session_store)
+                .as_incremental()
+                .expect("memory store exposes the incremental capability"),
+        );
+        driver
+            .machine_commit_completed_boundary_snapshot(
+                &boundary_receipt(2, incoming.messages().len()),
+                Some(snapshot.clone()),
+                &owner,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            driver.legacy_inline_row_hint,
+            Some(false),
+            "a successful snapshot commit must clear the once-per-driver hint"
+        );
+
+        let migrated: meerkat_core::Session = serde_json::from_slice(
+            &runtime_store
+                .load_session_snapshot(&rid)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !migrated
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "the migrated runtime row must be the slim representation"
+        );
     }
 
     /// Dogma K11 (Persistent destroy / driver-side shadow truth): every

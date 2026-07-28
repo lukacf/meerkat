@@ -9,6 +9,10 @@
 //!   + 0 orphans + nothing-after-terminal -> `CompletedCandidate`.
 //! - Repairable: descendant + SingleRunId + coherent + 0 dangling +
 //!   (ToolUse | Absent) -> `InterruptedRepairableCandidate`.
+//! - Legacy: descendant + NoRunId + EndTurn + 0 dangling + 0 orphans +
+//!   nothing-after-terminal + PRE-WITNESS-V3 stamp era ->
+//!   `LegacyCompletedCandidate` (a pre-run-identity writer wrote the tail;
+//!   no run id can ever appear, so the clean completed shape is adopted).
 //! - Everything else — INCLUDING any tail carrying a dangling tool_use ->
 //!   `Ambiguous` (fail-closed: hold, never discard, never auto-close).
 //!
@@ -26,8 +30,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_core::session_document::{
-    DurableHeadRelation, DurableTailRecoveryClass, DurableTailStopReason, RunIdCardinality,
-    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
+    DurableHeadRelation, DurableHeadStampEra, DurableTailRecoveryClass, DurableTailStopReason,
+    RunIdCardinality, SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
 };
 
 /// Drive one `ClassifyDurableTail` input through a fresh generated authority
@@ -41,6 +45,7 @@ fn classify_with_candidate(
     dangling_tool_use_count: u64,
     orphan_tool_result_count: u64,
     messages_after_terminal: bool,
+    head_stamp_era: DurableHeadStampEra,
 ) -> (String, DurableTailRecoveryClass) {
     let mut authority = SessionDocumentMachineAuthority::new();
     let effects = authority
@@ -53,6 +58,7 @@ fn classify_with_candidate(
             dangling_tool_use_count,
             orphan_tool_result_count,
             messages_after_terminal,
+            head_stamp_era,
         )
         .expect("ClassifyDurableTail must be total over the input domain");
     let mut classified = effects.into_iter().filter_map(|effect| match effect {
@@ -72,6 +78,8 @@ fn classify_with_candidate(
     first
 }
 
+/// Classify under the MODERN stamp era — the fail-closed default every
+/// pre-existing truth-table row was stated under.
 fn classify(
     relation: DurableHeadRelation,
     run_id_cardinality: RunIdCardinality,
@@ -79,6 +87,26 @@ fn classify(
     dangling_tool_use_count: u64,
     orphan_tool_result_count: u64,
     messages_after_terminal: bool,
+) -> DurableTailRecoveryClass {
+    classify_with_era(
+        relation,
+        run_id_cardinality,
+        terminal_stop_reason,
+        dangling_tool_use_count,
+        orphan_tool_result_count,
+        messages_after_terminal,
+        DurableHeadStampEra::WitnessV3OrNewer,
+    )
+}
+
+fn classify_with_era(
+    relation: DurableHeadRelation,
+    run_id_cardinality: RunIdCardinality,
+    terminal_stop_reason: DurableTailStopReason,
+    dangling_tool_use_count: u64,
+    orphan_tool_result_count: u64,
+    messages_after_terminal: bool,
+    head_stamp_era: DurableHeadStampEra,
 ) -> DurableTailRecoveryClass {
     classify_with_candidate(
         "candidate-under-test",
@@ -88,6 +116,7 @@ fn classify(
         dangling_tool_use_count,
         orphan_tool_result_count,
         messages_after_terminal,
+        head_stamp_era,
     )
     .1
 }
@@ -239,7 +268,10 @@ fn non_descendant_relation_is_ambiguous() {
     }
 }
 
-/// A tail with no run identity cannot bind to machine run facts: Ambiguous.
+/// A tail with no run identity on a MODERN-era row cannot bind to machine
+/// run facts: Ambiguous. (Modern writers persist run identity inside the
+/// same message bytes as in-run assistant content, so an identity-less
+/// modern tail is contradictory evidence, not a legacy shape.)
 #[test]
 fn no_run_id_is_ambiguous() {
     assert_eq!(
@@ -250,6 +282,129 @@ fn no_run_id_is_ambiguous() {
             0,
             0,
             false,
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Legacy adoption row
+// ---------------------------------------------------------------------------
+
+/// Legacy adoption: an identity-less clean completed tail on a
+/// PRE-WITNESS-V3 row classifies `LegacyCompletedCandidate` — the writer
+/// predates run-identity bookkeeping, so no run id can ever appear and
+/// holding for one is a permanent availability loss.
+#[test]
+fn legacy_era_no_run_id_clean_end_turn_is_legacy_completed_candidate() {
+    assert_eq!(
+        classify_with_era(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::NoRunId,
+            DurableTailStopReason::EndTurn,
+            0,
+            0,
+            false,
+            DurableHeadStampEra::PreWitnessV3,
+        ),
+        DurableTailRecoveryClass::LegacyCompletedCandidate
+    );
+}
+
+/// The legacy arm requires EVERY conjunct: flipping any single axis off the
+/// clean completed legacy shape falls back to the fail-closed class that
+/// axis previously produced.
+#[test]
+fn legacy_adoption_requires_every_conjunct() {
+    // A run id present -> the EXISTING completed path, never the legacy arm.
+    assert_eq!(
+        classify_with_era(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::EndTurn,
+            0,
+            0,
+            false,
+            DurableHeadStampEra::PreWitnessV3,
+        ),
+        DurableTailRecoveryClass::CompletedCandidate,
+        "a run-id-bearing tail on a legacy-era row takes the modern completed path"
+    );
+    // Modern stamp era -> held exactly as before the legacy arm existed.
+    assert_eq!(
+        classify_with_era(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::NoRunId,
+            DurableTailStopReason::EndTurn,
+            0,
+            0,
+            false,
+            DurableHeadStampEra::WitnessV3OrNewer,
+        ),
+        DurableTailRecoveryClass::Ambiguous,
+        "an identity-less tail without legacy stamp evidence stays held"
+    );
+    // Interrupted legacy shapes stay held: no repairable arm exists for a
+    // tail that cannot bind a run identity.
+    for stop in [
+        DurableTailStopReason::ToolUse,
+        DurableTailStopReason::Absent,
+        DurableTailStopReason::Other,
+    ] {
+        assert_eq!(
+            classify_with_era(
+                DurableHeadRelation::VerifiedStrictDescendant,
+                RunIdCardinality::NoRunId,
+                stop,
+                0,
+                0,
+                false,
+                DurableHeadStampEra::PreWitnessV3,
+            ),
+            DurableTailRecoveryClass::Ambiguous,
+            "an interrupted legacy tail (stop {stop:?}) must stay held"
+        );
+    }
+    // Tool-racing or trailing shapes stay held.
+    for (dangling, orphans, after) in [(1u64, 0u64, false), (0, 1, false), (0, 0, true)] {
+        assert_eq!(
+            classify_with_era(
+                DurableHeadRelation::VerifiedStrictDescendant,
+                RunIdCardinality::NoRunId,
+                DurableTailStopReason::EndTurn,
+                dangling,
+                orphans,
+                after,
+                DurableHeadStampEra::PreWitnessV3,
+            ),
+            DurableTailRecoveryClass::Ambiguous,
+            "unclean legacy shape (dangling={dangling} orphans={orphans} after={after}) \
+             must stay held"
+        );
+    }
+    // Multiple runs never adopt, whatever the era.
+    assert_eq!(
+        classify_with_era(
+            DurableHeadRelation::VerifiedStrictDescendant,
+            RunIdCardinality::MultipleRunIds,
+            DurableTailStopReason::EndTurn,
+            0,
+            0,
+            false,
+            DurableHeadStampEra::PreWitnessV3,
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
+    // Non-descendant relations never adopt, whatever the era.
+    assert_eq!(
+        classify_with_era(
+            DurableHeadRelation::Diverged,
+            RunIdCardinality::NoRunId,
+            DurableTailStopReason::EndTurn,
+            0,
+            0,
+            false,
+            DurableHeadStampEra::PreWitnessV3,
         ),
         DurableTailRecoveryClass::Ambiguous
     );
@@ -363,6 +518,7 @@ fn effect_carries_exact_candidate_id() {
         0,
         0,
         false,
+        DurableHeadStampEra::WitnessV3OrNewer,
     );
     assert_eq!(echoed, candidate);
     assert_eq!(class, DurableTailRecoveryClass::CompletedCandidate);
@@ -376,9 +532,24 @@ fn effect_carries_exact_candidate_id() {
         0,
         0,
         false,
+        DurableHeadStampEra::WitnessV3OrNewer,
     );
     assert_eq!(echoed, candidate);
     assert_eq!(class, DurableTailRecoveryClass::Ambiguous);
+
+    // And on the legacy adoption arm.
+    let (echoed, class) = classify_with_candidate(
+        candidate,
+        DurableHeadRelation::VerifiedStrictDescendant,
+        RunIdCardinality::NoRunId,
+        DurableTailStopReason::EndTurn,
+        0,
+        0,
+        false,
+        DurableHeadStampEra::PreWitnessV3,
+    );
+    assert_eq!(echoed, candidate);
+    assert_eq!(class, DurableTailRecoveryClass::LegacyCompletedCandidate);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,50 +581,72 @@ fn classification_is_total_disjoint_and_matches_the_truth_table() {
         DurableTailStopReason::Other,
     ];
 
+    let eras = [
+        DurableHeadStampEra::WitnessV3OrNewer,
+        DurableHeadStampEra::PreWitnessV3,
+    ];
+
     for relation in relations {
         for cardinality in cardinalities {
             for stop in stops {
                 for dangling in [0u64, 1, 3] {
                     for orphans in [0u64, 1] {
                         for after_terminal in [false, true] {
-                            let got = classify(
-                                relation,
-                                cardinality,
-                                stop,
-                                dangling,
-                                orphans,
-                                after_terminal,
-                            );
-                            let coherent = relation
-                                == DurableHeadRelation::VerifiedStrictDescendant
-                                && cardinality == RunIdCardinality::SingleRunId
-                                && orphans == 0
-                                && !after_terminal;
-                            // A dangling tool_use disqualifies BOTH commit
-                            // classes: unknown external effects are held.
-                            let expected = if coherent && dangling == 0 {
-                                match stop {
-                                    DurableTailStopReason::EndTurn => {
-                                        DurableTailRecoveryClass::CompletedCandidate
+                            for era in eras {
+                                let got = classify_with_era(
+                                    relation,
+                                    cardinality,
+                                    stop,
+                                    dangling,
+                                    orphans,
+                                    after_terminal,
+                                    era,
+                                );
+                                let coherent = relation
+                                    == DurableHeadRelation::VerifiedStrictDescendant
+                                    && cardinality == RunIdCardinality::SingleRunId
+                                    && orphans == 0
+                                    && !after_terminal;
+                                // The legacy adoption arm: identity-less
+                                // clean COMPLETED shape with legacy stamp
+                                // evidence. Stated independently of the
+                                // modern-coherence predicate above.
+                                let legacy = relation
+                                    == DurableHeadRelation::VerifiedStrictDescendant
+                                    && cardinality == RunIdCardinality::NoRunId
+                                    && stop == DurableTailStopReason::EndTurn
+                                    && dangling == 0
+                                    && orphans == 0
+                                    && !after_terminal
+                                    && era == DurableHeadStampEra::PreWitnessV3;
+                                // A dangling tool_use disqualifies BOTH commit
+                                // classes: unknown external effects are held.
+                                let expected = if coherent && dangling == 0 {
+                                    match stop {
+                                        DurableTailStopReason::EndTurn => {
+                                            DurableTailRecoveryClass::CompletedCandidate
+                                        }
+                                        DurableTailStopReason::ToolUse
+                                        | DurableTailStopReason::Absent => {
+                                            DurableTailRecoveryClass::InterruptedRepairableCandidate
+                                        }
+                                        DurableTailStopReason::Other => {
+                                            DurableTailRecoveryClass::Ambiguous
+                                        }
                                     }
-                                    DurableTailStopReason::ToolUse
-                                    | DurableTailStopReason::Absent => {
-                                        DurableTailRecoveryClass::InterruptedRepairableCandidate
-                                    }
-                                    DurableTailStopReason::Other => {
-                                        DurableTailRecoveryClass::Ambiguous
-                                    }
-                                }
-                            } else {
-                                DurableTailRecoveryClass::Ambiguous
-                            };
-                            assert_eq!(
-                                got, expected,
-                                "truth-table mismatch at relation={relation:?} \
-                                 cardinality={cardinality:?} stop={stop:?} \
-                                 dangling={dangling} orphans={orphans} \
-                                 after_terminal={after_terminal}"
-                            );
+                                } else if legacy {
+                                    DurableTailRecoveryClass::LegacyCompletedCandidate
+                                } else {
+                                    DurableTailRecoveryClass::Ambiguous
+                                };
+                                assert_eq!(
+                                    got, expected,
+                                    "truth-table mismatch at relation={relation:?} \
+                                     cardinality={cardinality:?} stop={stop:?} \
+                                     dangling={dangling} orphans={orphans} \
+                                     after_terminal={after_terminal} era={era:?}"
+                                );
+                            }
                         }
                     }
                 }

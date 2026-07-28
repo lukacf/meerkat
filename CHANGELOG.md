@@ -13,6 +13,56 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Fixed
+
+- **0.8.8 → 0.8.9 upgrade boundary: legacy durable-tail adoption.** A clean
+  ≤0.8.8 shutdown routinely leaves a session whose durable head is one
+  committed turn ahead of the runtime snapshot (`intra_turn_checkpoint`
+  stamp over a `run_boundary_commit` base) with the turn's own input row
+  still queued — ≤0.8.8 persisted staged run bindings only inside the
+  boundary commit. 0.8.9 held such sessions forever
+  (`DurableTailHeldForRecovery`). The recovery machine now has a
+  machine-authorized legacy arm: a digest-proven completed tail whose head
+  row carries pre-witness-v3 stamp evidence commits as a recovered boundary
+  and RETAINS the unbound input row for ordinary redelivery — nothing is
+  terminalized, no consumption is fabricated, no input can be dropped; the
+  worst case is one duplicate redelivered turn, matching the legacy fleet's
+  own restart semantics. Identity-less tails written by pre-v0.7.12
+  binaries adopt through a distinct
+  `SessionCheckpointProvenance::RecoveredLegacyBoundaryCommit` (note:
+  sessions adopted under this provenance are unreadable by 0.8.9-or-older
+  binaries — same one-way door class as the v2 recovered stamps). Modern
+  (witness-v3-stamped) shapes keep the fail-closed hold byte-for-byte.
+- **0.8.8 → 0.8.9 upgrade boundary: first-boundary-save refusal over
+  inline-graph runtime rows.** The transcript-history erase guard derived
+  its reference witness for a previous INLINE graph always in format 2, so
+  a 0.8.9 slim boundary save (v3 witness carrier) could never match — even
+  a same-graph round trip refused, and any post-resume save (whose graph
+  legitimately evolved) wedged the session on its first post-upgrade turn.
+  Affects any 0.8.8-written session with a transcript graph (compacted or
+  prompt-rewritten), plain `rkat` included. The carve-out is now
+  format-aware, and legitimate evolution is accepted through caller-proved,
+  store-verified evidence: the evolved graph is sealed (every retained body
+  digest-verified), bound to the incoming document's own witness, checked
+  as a strict-prefix descendant of the previous inline graph, and the
+  accepted write replaces the row with the slim representation — a one-time
+  O(graph) migration per session, O(1) on every later turn. Evidence is
+  threaded through every boundary-commit seam, including the queued-input
+  machine boundary paths and `atomic_apply` (snapshot, receipt,
+  machine-lifecycle record, and input terminalization stay one
+  all-or-nothing transaction; the migration adds no crash window).
+
+### Upgrade notes
+
+- Identities with an in-flight input at shutdown replay it once after
+  upgrade — the same behavior as a pre-upgrade restart. Expect one
+  duplicate reply per such identity on upgrade day.
+
+## [0.8.9] - 2026-07-27
+
+*(Consolidated section: entries below accumulated across 0.8.0–0.8.9;
+per-release stamping was not performed at release time.)*
+
 ### Breaking
 
 - **Checkpoint stamp schema v3 — the witness-v3 one-way door.** A session

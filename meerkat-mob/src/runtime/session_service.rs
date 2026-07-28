@@ -1246,14 +1246,24 @@ where
         {
             let key = std::ptr::from_ref(self) as usize;
             let store = self.runtime_store();
+            let legacy_history_evidence_source = self.incremental_store();
             Some(cached_runtime_adapter(
                 persistent_runtime_adapter_cache(),
                 key,
                 || {
-                    Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+                    let machine = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
                         store,
                         self.blob_store(),
-                    ))
+                    ));
+                    // Wire the one-time 0.8.8 -> 0.8.9 upgrade-boundary
+                    // evidence source: machine-owned queued-input boundary
+                    // commits verify the slim replacement of a legacy inline
+                    // runtime snapshot row against the session store's own
+                    // durable rewrite records.
+                    if let Some(source) = legacy_history_evidence_source {
+                        machine.set_legacy_history_evidence_source(source);
+                    }
+                    machine
                 },
             ))
         }

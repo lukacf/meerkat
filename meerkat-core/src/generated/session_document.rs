@@ -315,6 +315,13 @@ pub enum LegacyCheckpointMigrationDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LegacyCheckpointLifecycleMerge {
+    #[default]
+    CarryArchived,
+    CarryElected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionDocumentLifecycle {
     #[default]
     Active,
@@ -556,6 +563,11 @@ pub enum SessionDocumentInput {
         store_row_legacy: bool,
         transcript_relation: LegacyCheckpointTranscriptRelation,
     },
+    ResolveLegacyCheckpointMigrationLifecycle {
+        session_id: SessionDocumentKey,
+        runtime_copy_archived: bool,
+        store_row_archived: bool,
+    },
     ResolveRuntimeSnapshotReadSource {
         session_id: SessionDocumentKey,
         relation: DurableHeadRelation,
@@ -701,6 +713,9 @@ pub enum SessionDocumentEffect {
     },
     LegacyCheckpointMigrationResolved {
         disposition: LegacyCheckpointMigrationDisposition,
+    },
+    LegacyCheckpointMigrationLifecycleResolved {
+        merge: LegacyCheckpointLifecycleMerge,
     },
     RuntimeSnapshotReadSourceResolved {
         disposition: RuntimeSnapshotReadDisposition,
@@ -888,6 +903,8 @@ enum SessionDocumentTransition {
     ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
     ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
     ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
+    ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing,
+    ResolveLegacyCheckpointMigrationLifecycleElected,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -3624,6 +3641,42 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveLegacyCheckpointMigration_transition" }),
                 }
             }
+            SessionDocumentInput::ResolveLegacyCheckpointMigrationLifecycle {
+                session_id,
+                runtime_copy_archived,
+                store_row_archived,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_copy_archived == true) || (store_row_archived == true))
+                {
+                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((runtime_copy_archived == false) && (store_row_archived == false))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleElected,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveLegacyCheckpointMigrationLifecycle")?;
+                match transition {
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationLifecycleResolved { merge: LegacyCheckpointLifecycleMerge::CarryArchived, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleElected => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LegacyCheckpointMigrationLifecycleResolved { merge: LegacyCheckpointLifecycleMerge::CarryElected, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveLegacyCheckpointMigrationLifecycle_transition" }),
+                }
+            }
             SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
                 session_id,
                 relation,
@@ -4549,6 +4602,21 @@ impl SessionDocumentMachineAuthority {
             store_row_legacy,
             transcript_relation,
         })
+    }
+
+    pub fn resolve_legacy_checkpoint_migration_lifecycle(
+        &mut self,
+        session_id: SessionDocumentKey,
+        runtime_copy_archived: bool,
+        store_row_archived: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::ResolveLegacyCheckpointMigrationLifecycle {
+                session_id,
+                runtime_copy_archived,
+                store_row_archived,
+            },
+        )
     }
 
     pub fn resolve_runtime_snapshot_read_source(

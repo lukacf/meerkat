@@ -716,6 +716,24 @@ pub enum LegacyCheckpointMigrationDisposition {
     ConvergeSnapshotOntoTypedProjection,
 }
 
+/// Machine-owned lifecycle merge for the one-time legacy-checkpoint
+/// recovery migration.
+///
+/// The lifecycle terminal merges by AUTHORITY OWNER, never by transcript
+/// election: `Archived` is an absorbing field-level fact, so when EITHER
+/// observed copy of one session document carries the Archived terminal
+/// (for example the documented archive partial state — session-store row
+/// Archived, runtime snapshot still Active after a failed second step),
+/// the migrated/elected result must carry it too. `CarryArchived` is the
+/// fail-closed default; `CarryElected` (no observed Archived terminal)
+/// leaves the elected copy's lifecycle untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LegacyCheckpointLifecycleMerge {
+    #[default]
+    CarryArchived,
+    CarryElected,
+}
+
 // ---------------------------------------------------------------------------
 // Transcript-edit region (folded from the meerkat-session persistent.rs
 // `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
@@ -1119,6 +1137,22 @@ machine! {
             },
 
             // -----------------------------------------------------------
+            // Post-election lifecycle merge for the legacy-checkpoint
+            // recovery migration. Transcript election picks the CONTENT
+            // copy; the lifecycle terminal is a separately-owned absorbing
+            // fact that must never ride that election (an Active runtime
+            // snapshot elected over an Archived store row would resurrect
+            // the archived session on write-back). The shell observes each
+            // copy's lifecycle terminal mechanically and THIS machine owns
+            // the merge: any observed Archived is absorbing.
+            // -----------------------------------------------------------
+            ResolveLegacyCheckpointMigrationLifecycle {
+                session_id: SessionId,
+                runtime_copy_archived: bool,
+                store_row_archived: bool,
+            },
+
+            // -----------------------------------------------------------
             // Runtime-snapshot read-source region. On load, the committed
             // runtime session snapshot normally leads the durable store head
             // (it commits at the run boundary). A torn shutdown can freeze it
@@ -1390,6 +1424,18 @@ machine! {
             // fail-closed refusal; it never chooses a copy itself.
             LegacyCheckpointMigrationResolved {
                 disposition: Enum<LegacyCheckpointMigrationDisposition>,
+            },
+
+            // Post-election lifecycle-merge verdict for the legacy-checkpoint
+            // recovery migration. The shell mirrors this exactly:
+            // CarryArchived stamps the Archived terminal onto the migrated
+            // result before write-back (or refuses fail-closed when the
+            // elected copy is typed authority whose stamped bytes cannot be
+            // repaired); CarryElected leaves the elected copy's lifecycle
+            // untouched. Total over the observation, so it is emitted on
+            // both branches.
+            LegacyCheckpointMigrationLifecycleResolved {
+                merge: Enum<LegacyCheckpointLifecycleMerge>,
             },
 
             // Runtime-snapshot read-source verdict. The shell mirrors
@@ -1673,6 +1719,7 @@ machine! {
         disposition RuntimeProjectionConflictResolved => local seam NoOwnerRealization,
         disposition RuntimeCheckpointProjectionResolved => local seam NoOwnerRealization,
         disposition LegacyCheckpointMigrationResolved => local seam NoOwnerRealization,
+        disposition LegacyCheckpointMigrationLifecycleResolved => local seam NoOwnerRealization,
         disposition RuntimeSnapshotReadSourceResolved => local seam NoOwnerRealization,
         disposition DurableTailClassified => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
@@ -4544,9 +4591,11 @@ machine! {
         // already typed — the partial-adoption rebuild — or typed with the
         // legacy snapshot related by prefix — the sanctioned-adoption
         // convergence), or the runtime snapshot is absent and the
-        // session-store row is the sole legacy copy. Content custody is
-        // lifecycle-independent: migration stamps the exact observed
-        // conversation and never alters the document's lifecycle terminal.
+        // session-store row is the sole legacy copy. Content custody rides
+        // this transcript election; the lifecycle terminal does NOT — it
+        // merges through the post-election
+        // ResolveLegacyCheckpointMigrationLifecycle input below, where an
+        // observed Archived terminal on either copy is absorbing.
         // ===============================================================
 
         transition ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection {
@@ -4829,6 +4878,50 @@ machine! {
             to Ready
             emit LegacyCheckpointMigrationResolved {
                 disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
+            }
+        }
+
+        // ===============================================================
+        // Post-election lifecycle merge for the legacy-checkpoint recovery
+        // migration. Total over the two observed lifecycle facts: Archived
+        // on EITHER copy is absorbing (the elected result must carry it);
+        // only when neither copy is archived does the elected copy's own
+        // lifecycle stand. The shell mirrors the verdict and decides
+        // nothing.
+        // ===============================================================
+
+        transition ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing {
+            on input ResolveLegacyCheckpointMigrationLifecycle {
+                session_id,
+                runtime_copy_archived,
+                store_row_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (runtime_copy_archived == true || store_row_archived == true)
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationLifecycleResolved {
+                merge: LegacyCheckpointLifecycleMerge::CarryArchived
+            }
+        }
+
+        transition ResolveLegacyCheckpointMigrationLifecycleElected {
+            on input ResolveLegacyCheckpointMigrationLifecycle {
+                session_id,
+                runtime_copy_archived,
+                store_row_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && runtime_copy_archived == false
+                && store_row_archived == false
+            }
+            update {}
+            to Ready
+            emit LegacyCheckpointMigrationLifecycleResolved {
+                merge: LegacyCheckpointLifecycleMerge::CarryElected
             }
         }
 

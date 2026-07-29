@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, CheckpointProvenanceClassValues, DurableHeadRelationValues, DurableHeadStampEraValues, DurableTailExecutionEvidenceValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LegacyCheckpointMigrationDispositionValues, LegacyCheckpointTranscriptRelationValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, RuntimeProjectionConflictDispositionValues, RuntimeSnapshotReadDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
+CONSTANTS BooleanValues, CheckpointProvenanceClassValues, DurableHeadRelationValues, DurableHeadStampEraValues, DurableTailExecutionEvidenceValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LegacyCheckpointLifecycleMergeValues, LegacyCheckpointMigrationDispositionValues, LegacyCheckpointTranscriptRelationValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, RuntimeProjectionConflictDispositionValues, RuntimeSnapshotReadDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1046,6 +1046,22 @@ ResolveLegacyCheckpointMigrationTypedProjectionNotComparable(session_id, runtime
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
+ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing(session_id, runtime_copy_archived, store_row_archived) ==
+    /\ phase = "Ready"
+    /\ (IF (runtime_copy_archived = TRUE) THEN TRUE ELSE (store_row_archived = TRUE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+ResolveLegacyCheckpointMigrationLifecycleElected(session_id, runtime_copy_archived, store_row_archived) ==
+    /\ phase = "Ready"
+    /\ ((runtime_copy_archived = FALSE) /\ (store_row_archived = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
 ApplyPendingToolResults(session_id, result_count) ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
@@ -1236,6 +1252,8 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationDivergentFromTypedProjection(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
     \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationTypedProjectionNotComparable(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
+    \/ \E session_id \in SessionIdValues : \E runtime_copy_archived \in BOOLEAN : \E store_row_archived \in BOOLEAN : ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing(session_id, runtime_copy_archived, store_row_archived)
+    \/ \E session_id \in SessionIdValues : ResolveLegacyCheckpointMigrationLifecycleElected(session_id, FALSE, FALSE)
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditRewrite(session_id, fork_or_rewrite_directive)

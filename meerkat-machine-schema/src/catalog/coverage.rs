@@ -1459,6 +1459,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection",
                         "ResolveLegacyCheckpointMigrationDivergentFromTypedProjection",
                         "ResolveLegacyCheckpointMigrationTypedProjectionNotComparable",
+                        "ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing",
+                        "ResolveLegacyCheckpointMigrationLifecycleElected",
                     ])
                     .effects(&[
                         "SessionFirstTurnPhaseResolved",
@@ -1480,6 +1482,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "SystemPromptMutationAuthorized",
                         "RuntimeCheckpointProjectionResolved",
                         "LegacyCheckpointMigrationResolved",
+                        "LegacyCheckpointMigrationLifecycleResolved",
                     ]),
             )],
             &[

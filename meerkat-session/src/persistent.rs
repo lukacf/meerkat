@@ -61,9 +61,9 @@ use meerkat_core::service::{
 use meerkat_core::session_document::{
     CheckpointProvenanceClass, DurableHeadRelation, DurableHeadStampEra,
     DurableTailExecutionEvidence, DurableTailRecoveryClass, DurableTailStopReason,
-    LegacyCheckpointMigrationDisposition, LegacyCheckpointTranscriptRelation,
-    LiveSessionAuthorityKind, LiveSessionAuthorityReason, RunIdCardinality,
-    RuntimeCheckpointProjectionDisposition, RuntimeProjectionConflictDisposition,
+    LegacyCheckpointLifecycleMerge, LegacyCheckpointMigrationDisposition,
+    LegacyCheckpointTranscriptRelation, LiveSessionAuthorityKind, LiveSessionAuthorityReason,
+    RunIdCardinality, RuntimeCheckpointProjectionDisposition, RuntimeProjectionConflictDisposition,
     RuntimeSnapshotReadDisposition, SessionArchiveDisposition, SessionArchiveRuntimeObservation,
     SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
@@ -1169,6 +1169,51 @@ fn machine_transcript_relation(
             LegacyCheckpointTranscriptRelation::Divergent
         }
     }
+}
+
+/// Mechanical observation of one migration copy's lifecycle terminal for the
+/// machine-owned post-election lifecycle merge. Pure carrier extraction: the
+/// shell reports the fact and decides nothing; a corrupt typed terminal fails
+/// closed instead of reading as not-archived.
+fn observed_copy_archived(
+    session: &Session,
+    session_id: &SessionId,
+    side: &str,
+) -> Result<bool, SessionError> {
+    session
+        .try_lifecycle_terminal()
+        .map(|terminal| terminal == Some(SessionLifecycleTerminal::Archived))
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "corrupt lifecycle-terminal fact on the {side} for session {session_id} \
+                 during legacy checkpoint migration: {error}"
+            )))
+        })
+}
+
+/// Realize the machine's `CarryArchived` lifecycle merge on a pre-typed
+/// (legacy) migration source: stamp the absorbing Archived terminal onto the
+/// elected copy and serialize the repaired document. This is the sanctioned
+/// metadata-repair window of [`meerkat_core::adopt_legacy_session`] — the
+/// migration stamp binds byte custody to exactly these final bytes.
+fn repaired_archived_migration_source(
+    session: &Session,
+    session_id: &SessionId,
+) -> Result<Vec<u8>, SessionError> {
+    let mut repaired = session.clone();
+    repaired
+        .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to stamp the absorbing Archived terminal onto the legacy \
+                 migration source for session {session_id}: {error}"
+            )))
+        })?;
+    serde_json::to_vec(&repaired).map_err(|error| {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "failed to serialize legacy migration source for session {session_id}: {error}"
+        )))
+    })
 }
 
 /// Diagnostic call counter for [`session_materialized_at_transcript_revision`].
@@ -8650,6 +8695,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// whose transcript the typed authority does NOT contain is refused
     /// fail-closed, because the unverified copy is the only witness of the
     /// extra content.
+    ///
+    /// Lifecycle terminal: the transcript election never carries it. The
+    /// machine's post-election lifecycle merge
+    /// (`ResolveLegacyCheckpointMigrationLifecycle`) treats an observed
+    /// Archived terminal on EITHER copy as absorbing: a legacy elected copy
+    /// is repaired to Archived before adoption, while an elected typed copy
+    /// that would have to be repaired refuses fail-closed (typed authority
+    /// bytes are never re-stamped here). Without this merge, the archive
+    /// protocol's documented partial state {runtime snapshot Active,
+    /// session-store row Archived} would resurrect the archived session on
+    /// identical transcripts.
     async fn migrate_legacy_checkpoint_authority(
         &self,
         id: &SessionId,
@@ -8721,6 +8777,50 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
 
+        // Post-election lifecycle merge (machine-owned): the lifecycle
+        // terminal must never ride the transcript election, because the
+        // archive protocol legitimately leaves {runtime snapshot Active,
+        // session-store row Archived} behind a failed second step and
+        // Archived is an absorbing terminal. The shell observes each copy's
+        // terminal mechanically; the machine owns the merge.
+        let runtime_copy_archived = match &runtime_copy {
+            CommittedCheckpointCopy::Absent => false,
+            CommittedCheckpointCopy::Verified(verified) => {
+                observed_copy_archived(&verified.session, id, "committed runtime snapshot")?
+            }
+            CommittedCheckpointCopy::Legacy { session, .. } => {
+                observed_copy_archived(session, id, "committed runtime snapshot")?
+            }
+        };
+        let store_row_archived = match store_row.as_ref() {
+            Some(row) => observed_copy_archived(row, id, "session-store projection")?,
+            None => false,
+        };
+        let lifecycle_merge = authority
+            .resolve_legacy_checkpoint_migration_lifecycle(
+                SessionDocumentKey::new(id.to_string()),
+                runtime_copy_archived,
+                store_row_archived,
+            )
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected legacy checkpoint migration lifecycle resolution for session {id}: {error}"
+                )))
+            })?
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::LegacyCheckpointMigrationLifecycleResolved { merge } => {
+                    Some(*merge)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no legacy checkpoint migration lifecycle merge for session {id}"
+                )))
+            })?;
+        let carry_archived = lifecycle_merge == LegacyCheckpointLifecycleMerge::CarryArchived;
+
         if disposition == LegacyCheckpointMigrationDisposition::RefuseDivergent {
             // Name the refused shape honestly: the two shapes carry
             // different evidence and different remediation. The operator
@@ -8768,6 +8868,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // runtime-snapshot commit the stamping dispositions use, so a
             // concurrent writer that already advanced the snapshot is never
             // overwritten.
+            if carry_archived && !store_row_archived {
+                // The machine's lifecycle merge carries Archived (from the
+                // legacy snapshot) but the elected copy is verified typed
+                // authority whose stamped bytes migration must not repair
+                // (nothing is re-stamped here). Overwriting the snapshot
+                // with the typed Active bytes would erase an Archived
+                // terminal, so the merge refuses fail-closed.
+                tracing::warn!(
+                    session_id = %id,
+                    role,
+                    runtime_copy_archived,
+                    store_row_archived,
+                    "legacy checkpoint migration refused: converging the archived \
+                     legacy snapshot onto the non-archived typed store row would \
+                     erase the absorbing Archived terminal"
+                );
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare {role} for session {id}: the committed legacy \
+                     runtime snapshot carries the absorbing Archived lifecycle \
+                     terminal while the verified typed session-store row does not; \
+                     migration cannot repair typed authority bytes, so converging \
+                     the snapshot onto the row would un-archive it and is refused \
+                     fail-closed"
+                ))));
+            }
             let CommittedCheckpointCopy::Legacy {
                 serialized: observed_snapshot_bytes,
                 ..
@@ -8812,6 +8937,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // only the projection row is still legacy. Nothing is
             // re-stamped; the projection converges onto the verified
             // authority through the same CAS-guarded write.
+            if carry_archived && !runtime_copy_archived {
+                // The machine's lifecycle merge carries Archived (from the
+                // legacy projection row) but the elected copy is verified
+                // typed authority whose stamped bytes migration must not
+                // repair. Rebuilding the row from the typed Active snapshot
+                // would resurrect the archived session, so the merge
+                // refuses fail-closed.
+                tracing::warn!(
+                    session_id = %id,
+                    role,
+                    runtime_copy_archived,
+                    store_row_archived,
+                    "legacy checkpoint migration refused: rebuilding the archived \
+                     legacy projection row from the non-archived typed runtime \
+                     snapshot would erase the absorbing Archived terminal"
+                );
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "cannot prepare {role} for session {id}: the legacy session-store \
+                     row carries the absorbing Archived lifecycle terminal while the \
+                     verified typed runtime snapshot does not; migration cannot repair \
+                     typed authority bytes, so rebuilding the projection from the \
+                     snapshot would resurrect the archived session and is refused \
+                     fail-closed"
+                ))));
+            }
             let CommittedCheckpointCopy::Verified(authority) = runtime_copy else {
                 return Err(SessionError::Agent(AgentError::InternalError(format!(
                     "generated session document authority resolved a projection rebuild \
@@ -8837,13 +8987,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
         let (source_blob, write_runtime_snapshot, disposition_label) = match disposition {
             LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot => {
-                // Custody binds to the exact bytes the runtime store held.
-                let blob = observed_runtime_bytes.clone().ok_or_else(|| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "generated session document authority named an absent legacy \
-                         snapshot while migrating session {id}"
-                    )))
-                })?;
+                // Custody binds to the exact bytes the runtime store held —
+                // unless the machine's lifecycle merge carries Archived from
+                // the OTHER copy, in which case the elected copy's lifecycle
+                // terminal is repaired BEFORE adoption (the sanctioned
+                // metadata-repair window of `adopt_legacy_session`, which
+                // binds custody to the final repaired bytes), so migration
+                // can never resurrect an archived session.
+                let blob = if carry_archived && !runtime_copy_archived {
+                    let CommittedCheckpointCopy::Legacy { session, .. } = &runtime_copy else {
+                        return Err(SessionError::Agent(AgentError::InternalError(format!(
+                            "generated session document authority named an absent legacy \
+                             snapshot while migrating session {id}"
+                        ))));
+                    };
+                    repaired_archived_migration_source(session, id)?
+                } else {
+                    observed_runtime_bytes.clone().ok_or_else(|| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "generated session document authority named an absent legacy \
+                             snapshot while migrating session {id}"
+                        )))
+                    })?
+                };
                 (blob, true, "migrate_canonical_snapshot")
             }
             LegacyCheckpointMigrationDisposition::AdoptProjectionExtension
@@ -8857,12 +9023,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 // `SessionStore::load` yields the decoded document, not raw
                 // row bytes, so custody binds to this exact serialization —
                 // which the migration then writes to both stores, making it
-                // the stored bytes everywhere.
-                let blob = serde_json::to_vec(row).map_err(|error| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "failed to serialize legacy migration source for session {id}: {error}"
-                    )))
-                })?;
+                // the stored bytes everywhere. The machine's lifecycle merge
+                // repairs the elected copy's terminal first when the OTHER
+                // copy carries the absorbing Archived fact.
+                let blob = if carry_archived && !store_row_archived {
+                    repaired_archived_migration_source(row, id)?
+                } else {
+                    serde_json::to_vec(row).map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to serialize legacy migration source for session {id}: {error}"
+                        )))
+                    })?
+                };
                 let write_runtime =
                     disposition == LegacyCheckpointMigrationDisposition::AdoptProjectionExtension;
                 let label = if write_runtime {
@@ -8909,6 +9081,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             disposition = disposition_label,
             source_bytes = source_blob.len(),
             wrote_runtime_snapshot = write_runtime_snapshot,
+            carried_archived_terminal = carry_archived,
             "one-time legacy checkpoint recovery migration stamped a pre-typed session document"
         );
         VerifiedCheckpointAuthority::from_session_with_serialized(
@@ -38232,6 +38405,156 @@ mod tests {
             .expect("verified authority load should succeed")
             .expect("verified authority should exist");
         assert_eq!(again.stamp, authority.stamp);
+    }
+
+    /// P1 regression: the archive protocol legitimately leaves
+    /// {runtime snapshot Active, session-store row Archived} behind a failed
+    /// second step, with IDENTICAL transcripts on both copies. Transcript
+    /// election picks the runtime snapshot's content — but the lifecycle
+    /// terminal merges by authority owner (the machine's post-election
+    /// lifecycle merge), so migration carries the absorbing Archived
+    /// terminal everywhere instead of resurrecting the session.
+    #[tokio::test]
+    async fn legacy_migration_carries_archived_terminal_instead_of_resurrecting() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let active = with_legacy_checkpoint_marker(
+            &legacy_session_with_texts(&["turn one", "turn two"]),
+            true,
+        );
+        let id = active.id().clone();
+        let mut archived_row = active.clone();
+        archived_row
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("archived terminal should stamp");
+        seed_legacy_runtime_snapshot(&runtime_store, &active).await;
+        store
+            .save(&archived_row)
+            .await
+            .expect("archived legacy row should save");
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+            .expect("archived-partial-state migration should succeed")
+            .expect("migrated authority should exist");
+        assert_eq!(
+            authority.session.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "the migrated authority must carry the absorbing Archived terminal"
+        );
+
+        // Archived everywhere: both durable copies carry the terminal and
+        // both converge on the same verified typed authority.
+        let snapshot_bytes = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let snapshot: Session =
+            serde_json::from_slice(&snapshot_bytes).expect("runtime snapshot should decode");
+        assert_eq!(
+            snapshot.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "the migrated runtime snapshot must carry the Archived terminal"
+        );
+        let row = store
+            .load(&id)
+            .await
+            .expect("store row load should succeed")
+            .expect("store row should exist");
+        assert_eq!(
+            row.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "the migrated store row must keep the Archived terminal"
+        );
+        let snapshot_stamp = verified_runtime_snapshot(&runtime_store, &id).await;
+        assert_eq!(snapshot_stamp, authority.stamp);
+        let row_stamp = verified_store_row(&store, &id).await;
+        assert_eq!(row_stamp, authority.stamp);
+
+        // A subsequent resume attempt keeps getting the archived rejection
+        // instead of a resurrected live session.
+        let resume_error = service
+            .create_session(resume_request(row))
+            .await
+            .expect_err("resume of the migrated archived session must reject");
+        assert!(
+            matches!(resume_error, SessionError::NotFound { id: ref rejected } if *rejected == id),
+            "archived resume must reject with the typed archived/NotFound contract: {resume_error:?}"
+        );
+    }
+
+    /// Refusal sibling: partial adoption left a typed ACTIVE runtime
+    /// snapshot over a legacy ARCHIVED projection row. Migration never
+    /// repairs typed authority bytes, so rebuilding the row from the Active
+    /// snapshot would resurrect the archived session — the machine's
+    /// lifecycle merge refuses fail-closed and mutates nothing.
+    #[tokio::test]
+    async fn partial_adoption_over_archived_legacy_row_refuses_fail_closed() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = legacy_migration_service(&store, &runtime_store);
+
+        let legacy = legacy_session_with_texts(&["turn one", "turn two"]);
+        let id = legacy.id().clone();
+        let legacy_bytes = serde_json::to_vec(&legacy).expect("legacy session should serialize");
+        let adopted = meerkat_core::adopt_legacy_session(
+            &legacy_bytes,
+            meerkat_core::SessionGeneration::INITIAL,
+            meerkat_core::SessionCheckpointRevision::INITIAL,
+        )
+        .expect("legacy session should adopt");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                SessionDelta {
+                    session_snapshot: adopted.serialized.clone(),
+                },
+            )
+            .await
+            .expect("typed runtime snapshot should commit");
+        let mut archived_row = legacy.clone();
+        archived_row
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("archived terminal should stamp");
+        store
+            .save(&archived_row)
+            .await
+            .expect("archived legacy row should save");
+
+        let error = match service
+            .load_committed_checkpoint_authority(&id, "legacy migration test")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("archived legacy row under a typed Active snapshot must refuse"),
+        };
+        assert!(
+            error.to_string().contains("resurrect"),
+            "refusal must name the resurrection hazard: {error}"
+        );
+
+        // Fail-closed: the archived legacy row was not mutated.
+        let row = store
+            .load(&id)
+            .await
+            .expect("store row load should succeed")
+            .expect("store row should exist");
+        assert!(matches!(
+            row.try_checkpoint_state()
+                .expect("checkpoint state should decode"),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. }
+        ));
+        assert_eq!(
+            row.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "the archived terminal must survive the refusal untouched"
+        );
     }
 
     #[tokio::test]

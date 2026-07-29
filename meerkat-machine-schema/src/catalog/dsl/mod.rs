@@ -892,6 +892,13 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "ConvergeSnapshotOntoTypedProjection",
                 ],
             ),
+            // Post-election lifecycle merge for the legacy-checkpoint
+            // recovery migration: Archived on either observed copy is
+            // absorbing (CarryArchived is the fail-closed default).
+            NamedTypeBinding::string_enum(
+                "LegacyCheckpointLifecycleMerge",
+                &["CarryArchived", "CarryElected"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveSessionAuthorityReason",
                 &[

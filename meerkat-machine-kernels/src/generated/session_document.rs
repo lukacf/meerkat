@@ -365,6 +365,58 @@ impl std::fmt::Display for DurableTailStopReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LegacyCheckpointLifecycleMerge {
+    #[default]
+    #[serde(rename = "CarryArchived")]
+    CarryArchived,
+    #[serde(rename = "CarryElected")]
+    CarryElected,
+}
+impl LegacyCheckpointLifecycleMerge {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CarryArchived => "CarryArchived",
+            Self::CarryElected => "CarryElected",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LegacyCheckpointLifecycleMerge {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CarryArchived" => Ok(Self::CarryArchived),
+            "CarryElected" => Ok(Self::CarryElected),
+            other => Err(format!(
+                "invalid LegacyCheckpointLifecycleMerge value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LegacyCheckpointLifecycleMerge {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LegacyCheckpointLifecycleMerge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LegacyCheckpointMigrationDisposition {
     #[default]
     #[serde(rename = "RefuseDivergent")]
@@ -2476,6 +2528,12 @@ pub mod inputs {
         pub transcript_relation: LegacyCheckpointTranscriptRelation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLegacyCheckpointMigrationLifecycle {
+        pub session_id: SessionId,
+        pub runtime_copy_archived: bool,
+        pub store_row_archived: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeSnapshotReadSource {
         pub session_id: SessionId,
         pub relation: DurableHeadRelation,
@@ -2564,6 +2622,7 @@ pub enum Input {
     ResolveRuntimeProjectionConflict(inputs::ResolveRuntimeProjectionConflict),
     ResolveRuntimeCheckpointProjection(inputs::ResolveRuntimeCheckpointProjection),
     ResolveLegacyCheckpointMigration(inputs::ResolveLegacyCheckpointMigration),
+    ResolveLegacyCheckpointMigrationLifecycle(inputs::ResolveLegacyCheckpointMigrationLifecycle),
     ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
     ClassifyDurableTail(inputs::ClassifyDurableTail),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
@@ -2647,6 +2706,9 @@ impl Input {
             Self::ResolveLegacyCheckpointMigration(_) => {
                 InputKind::ResolveLegacyCheckpointMigration
             }
+            Self::ResolveLegacyCheckpointMigrationLifecycle(_) => {
+                InputKind::ResolveLegacyCheckpointMigrationLifecycle
+            }
             Self::ResolveRuntimeSnapshotReadSource(_) => {
                 InputKind::ResolveRuntimeSnapshotReadSource
             }
@@ -2699,6 +2761,7 @@ pub enum InputKind {
     ResolveRuntimeProjectionConflict,
     ResolveRuntimeCheckpointProjection,
     ResolveLegacyCheckpointMigration,
+    ResolveLegacyCheckpointMigrationLifecycle,
     ResolveRuntimeSnapshotReadSource,
     ClassifyDurableTail,
     ApplyPendingToolResults,
@@ -2845,6 +2908,10 @@ pub mod effects {
         pub disposition: LegacyCheckpointMigrationDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LegacyCheckpointMigrationLifecycleResolved {
+        pub merge: LegacyCheckpointLifecycleMerge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeSnapshotReadSourceResolved {
         pub disposition: RuntimeSnapshotReadDisposition,
     }
@@ -2912,6 +2979,7 @@ pub enum Effect {
     RuntimeProjectionConflictResolved(effects::RuntimeProjectionConflictResolved),
     RuntimeCheckpointProjectionResolved(effects::RuntimeCheckpointProjectionResolved),
     LegacyCheckpointMigrationResolved(effects::LegacyCheckpointMigrationResolved),
+    LegacyCheckpointMigrationLifecycleResolved(effects::LegacyCheckpointMigrationLifecycleResolved),
     RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
     DurableTailClassified(effects::DurableTailClassified),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
@@ -2953,6 +3021,7 @@ pub enum EffectKind {
     RuntimeProjectionConflictResolved,
     RuntimeCheckpointProjectionResolved,
     LegacyCheckpointMigrationResolved,
+    LegacyCheckpointMigrationLifecycleResolved,
     RuntimeSnapshotReadSourceResolved,
     DurableTailClassified,
     SessionToolResultsApplied,
@@ -3086,6 +3155,8 @@ pub enum TransitionId {
     ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
     ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
     ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
+    ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing,
+    ResolveLegacyCheckpointMigrationLifecycleElected,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

@@ -51,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRuntimeProjectionConflict`(session_id: SessionId, relation: DurableHeadRelation, row_provenance: CheckpointProvenanceClass, authority_supersedes_row: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
 - `ResolveLegacyCheckpointMigration`(session_id: SessionId, runtime_snapshot_present: Bool, runtime_snapshot_legacy: Bool, store_row_present: Bool, store_row_legacy: Bool, transcript_relation: LegacyCheckpointTranscriptRelation)
+- `ResolveLegacyCheckpointMigrationLifecycle`(session_id: SessionId, runtime_copy_archived: Bool, store_row_archived: Bool)
 - `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, relation: DurableHeadRelation, store_provenance: CheckpointProvenanceClass, session_is_live: Bool, tail_execution: DurableTailExecutionEvidence, head_stamp_era: DurableHeadStampEra)
 - `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool, head_stamp_era: DurableHeadStampEra)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
@@ -93,6 +94,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeProjectionConflictResolved`(disposition: RuntimeProjectionConflictDisposition)
 - `RuntimeCheckpointProjectionResolved`(disposition: RuntimeCheckpointProjectionDisposition)
 - `LegacyCheckpointMigrationResolved`(disposition: LegacyCheckpointMigrationDisposition)
+- `LegacyCheckpointMigrationLifecycleResolved`(merge: LegacyCheckpointLifecycleMerge)
 - `RuntimeSnapshotReadSourceResolved`(disposition: RuntimeSnapshotReadDisposition)
 - `DurableTailClassified`(candidate_id: RecoveryCandidateId, class: DurableTailRecoveryClass)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
@@ -1089,6 +1091,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `LegacyCheckpointMigrationResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigrationLifecycle`(session_id, runtime_copy_archived, store_row_archived)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationLifecycleResolved`
+- To: `Ready`
+
+### `ResolveLegacyCheckpointMigrationLifecycleElected`
+- From: `Ready`
+- On: `ResolveLegacyCheckpointMigrationLifecycle`(session_id, runtime_copy_archived, store_row_archived)
+- Guards:
+  - ``
+- Emits: `LegacyCheckpointMigrationLifecycleResolved`
 - To: `Ready`
 
 ### `ApplyPendingToolResults`

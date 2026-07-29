@@ -385,6 +385,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLegacyCheckpointMigrationTypedProjectionNotComparable`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `ResolveLegacyCheckpointMigrationLifecycleElected`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
 - `ApplyPendingToolResults`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
@@ -502,6 +508,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `LegacyCheckpointMigrationResolved`
+  - anchors: `session_document_authority`
+  - scenarios: (unclaimed)
+- `LegacyCheckpointMigrationLifecycleResolved`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
 - `RuntimeSnapshotReadSourceResolved`

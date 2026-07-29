@@ -5251,7 +5251,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
         "mob-turn-latency" => Some(&Spec {
             id: None,
             lane: Lane::Smoke,
-            title: "Mob turn-latency instrument gate (flatness recorded, not asserted)",
+            title: "Mob turn digest-preimage flatness gate",
             // Each smoke scenario builds in its own isolated target dir, so
             // this scenario cold-compiles the smoke_mob_turn_latency test
             // binary first. The test boots a persistent 3-member mob against
@@ -5259,13 +5259,15 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             // transcript, and drives identical one-word turns at a ~256KB
             // member and at the ~10MB member. ASSERTED: fixture validity,
             // the calibrated small-side hashed-bytes band (instrument
-            // honesty), and per-fixture boundary-serialization envelopes
-            // (repeated-reserialize backstop). RECORDED ONLY: the
-            // large/small flatness ratio — size-independent turn-boundary
-            // work is gated on the witness-v3 migration and its assertion
-            // lives in `mob_turn_flatness_red_by_design`, deliberately
-            // outside every lane until that lands. No live provider:
-            // members run against a scripted LLM client.
+            // honesty), per-fixture boundary-serialization envelopes
+            // (repeated-reserialize backstop), and the large/small
+            // digest-preimage byte ratio (canonical bytes fed to the
+            // content-digest hasher per turn must be document-size
+            // independent). The gate observes ONLY digest-preimage bytes;
+            // the work it deliberately does not measure (copies, memo-hit
+            // decodes, store reads, WAL bytes, encode volume, CPU/wall) is
+            // listed on the gate's doc comment. No live provider: members
+            // run against a scripted LLM client.
             timeout_secs: 1200,
             required_env: &[],
             required_bins: &["cargo"],
@@ -5276,7 +5278,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             command: CommandSpec::CargoTest {
                 package: "meerkat-mob",
                 test_target: "smoke_mob_turn_latency",
-                test_name: "e2e_smoke_mob_turn_latency_gate",
+                test_name: "e2e_smoke_mob_turn_digest_preimage_flatness_gate",
                 features: &["integration-real-tests"],
                 all_features: false,
             },

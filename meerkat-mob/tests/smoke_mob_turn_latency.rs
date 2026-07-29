@@ -15,10 +15,12 @@
 //! a threshold calibrated against today's cost rots, and "2x faster" still
 //! scales. Two members are grown to very different transcript sizes in the
 //! SAME process on the SAME machine, both are driven through N identical
-//! tiny turns, and the per-turn cost of the large member must stay within a
-//! small constant factor of the small member's. Any O(document) pass left
-//! on the turn boundary makes the large member's per-turn cost track its
-//! document size and trips the ratio.
+//! tiny turns, and the per-turn digest-preimage byte count of the large
+//! member must stay within a small constant factor of the small member's.
+//! An O(document) pass left on the turn boundary trips the ratio if (and
+//! only if) it feeds the canonical content-digest hasher; the gate doc on
+//! `e2e_smoke_mob_turn_digest_preimage_flatness_gate` lists the work this
+//! lane deliberately does NOT measure.
 //!
 //! The ASSERTED signal is canonical bytes hashed per turn
 //! (`meerkat_core::global_session_content_digest_bytes`, a process-wide
@@ -595,8 +597,8 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     // axis (SessionDelta-style incremental persistence is tracked
     // separately). The envelope catches the pathological class on top of
     // that — per-message reserialize loops, repeated whole-document
-    // persists. DIGEST flatness is asserted by the ratio gate in
-    // `e2e_smoke_mob_turn_latency_gate`.
+    // persists. DIGEST-PREIMAGE flatness is asserted by the ratio gate in
+    // `e2e_smoke_mob_turn_digest_preimage_flatness_gate`.
     let small_doc_bytes = SMALL_SEED_INPUT_BYTES as u64;
     let large_doc_bytes = (LARGE_TURN_INPUT_BYTES * LARGE_SESSION_TURNS) as u64;
     for (label, cost, doc_bytes) in [
@@ -624,36 +626,57 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
 }
 
 /// Smoke-lane gate: fixture validity, instrument honesty (small-side band),
-/// the repeated-reserialize envelope, AND the flatness contract itself — an
-/// identical tiny turn must hash the same bytes whether the accumulated
-/// document is ~256 KB or ~10 MB. Any O(document) pass left on the ordinary
-/// turn boundary (whole-document canonical serialize, whole-document digest,
-/// full-snapshot decode, whole-blob rewrite) makes the large side track its
-/// document size and trips the ratio. Armed in-lane with the 0.8.9
-/// flat-curve work (witness-v3 revision-identity witness, producer-seeded
-/// decode memo, seal-retyped save guards, framed checkpoint midstate,
-/// compaction-commit digest reuse); the former `mob_turn_flatness_red_by_design`
-/// out-of-lane split is retired.
+/// the repeated-reserialize envelope, AND digest-preimage flatness — an
+/// identical tiny turn must feed the canonical content-digest hasher
+/// (`global_session_content_digest_bytes`) a document-size-independent byte
+/// volume whether the accumulated document is ~256 KB or ~10 MB. Only
+/// O(document) passes that reach that hasher (whole-document canonical
+/// serialize-and-digest on the turn boundary) trip the ratio.
+///
+/// Deliberately NOT measured — a regression confined to any of these does
+/// not trip this gate:
+/// - non-canonical hashing (e.g. raw byte-bound memo keys over serialized
+///   bytes) and plain buffer copies/clones;
+/// - snapshot/graph decodes served by the process-global validated-graph
+///   decode memo (a true cross-process cold decode re-validates and WOULD
+///   hash; this same-process harness may memo-hit instead);
+/// - session/runtime store READ volume and BLOB equality comparisons;
+/// - WAL/disk write bytes;
+/// - boundary ENCODE bytes: whole-document serialization per boundary
+///   commit is explicitly permitted O(document) and only bounded by the
+///   per-fixture repeated-reserialize envelope in the shared harness;
+/// - CPU and wall time (printed as diagnostics, never asserted).
+///
+/// Armed in-lane with the 0.8.9 flat-curve work (witness-v3
+/// revision-identity witness, producer-seeded decode memo, seal-retyped
+/// save guards, framed checkpoint midstate, compaction-commit digest
+/// reuse); the former `mob_turn_flatness_red_by_design` out-of-lane split
+/// is retired.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "lane:e2e-smoke"]
-async fn e2e_smoke_mob_turn_latency_gate() {
+async fn e2e_smoke_mob_turn_digest_preimage_flatness_gate() {
     let (small, large) = run_turn_latency_harness().await;
     let bytes_ratio =
         large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
-    let flatness_budget = small
+    let digest_preimage_flatness_budget = small
         .digest_bytes_per_turn
         .saturating_mul(MAX_LARGE_TO_SMALL_BYTES_RATIO)
         .saturating_add(LARGE_DIGEST_FIXED_ALLOWANCE_BYTES);
     assert!(
-        large.digest_bytes_per_turn <= flatness_budget,
-        "turn-boundary hashing scales with document size: {} bytes hashed \
-         per turn at the ~10 MB member vs {} bytes at the ~256 KB member \
-         ({bytes_ratio:.1}x; budget {MAX_LARGE_TO_SMALL_BYTES_RATIO}x + \
-         {LARGE_DIGEST_FIXED_ALLOWANCE_BYTES} = {flatness_budget}; \
-         diagnostics: CPU {:?} vs {:?}, wall {:?} vs {:?}). Turn-boundary \
-         work must be O(delta), not O(document): a one-word reply on a large \
-         session may not re-serialize, re-digest, or re-persist the whole \
-         accumulated document",
+        large.digest_bytes_per_turn <= digest_preimage_flatness_budget,
+        "canonical digest-preimage bytes per turn scale with document size: \
+         {} bytes hashed per turn at the ~10 MB member vs {} bytes at the \
+         ~256 KB member ({bytes_ratio:.1}x; budget \
+         {MAX_LARGE_TO_SMALL_BYTES_RATIO}x + \
+         {LARGE_DIGEST_FIXED_ALLOWANCE_BYTES} = \
+         {digest_preimage_flatness_budget}; diagnostics: CPU {:?} vs {:?}, \
+         wall {:?} vs {:?}). The pinned contract is exactly this: an \
+         identical tiny turn must feed the canonical content-digest hasher \
+         a document-size-independent byte volume — some O(document) \
+         serialize-and-digest pass is back on the turn boundary (use the \
+         per-site split printed above to name it). This gate observes ONLY \
+         digest-preimage bytes; work it deliberately does not measure is \
+         listed in the gate doc comment",
         large.digest_bytes_per_turn,
         small.digest_bytes_per_turn,
         large.cpu_per_turn,

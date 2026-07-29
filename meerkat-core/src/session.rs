@@ -254,6 +254,15 @@ pub enum ResumedSystemPromptReconciliation {
     /// transcript was left untouched, so the resumed projection digests to
     /// the persisted revision.
     PreservedContinuation,
+    /// The assembled base differs from the persisted System message ONLY
+    /// inside caller-declared volatile spans ([`SYSTEM_PROMPT_VOLATILE_OPEN`]
+    /// / [`SYSTEM_PROMPT_VOLATILE_CLOSE`]). The transcript was left untouched
+    /// and NO audit revision was minted — semantically nothing changed — but
+    /// the fresh prompt is armed as a request-time overlay
+    /// ([`Session::messages_for_model_boundary`]) so the model sees current
+    /// volatile content. Guards the 2026-07-29 resume-mint incident (~127
+    /// rewrites per boot when only an opening timestamp differed).
+    PreservedVolatileRefresh,
     /// The assembled base prompt diverged from the persisted System message;
     /// the replacement was committed as a typed transcript rewrite so the
     /// first post-resume persist proves a graph edge from the persisted head.
@@ -780,6 +789,20 @@ pub struct Session {
     transcript_history_metadata_validation: TranscriptHistoryMetadataValidation,
     /// Cumulative token usage across all LLM calls in this session
     usage: Usage,
+    /// Request-time overlay carrying a volatile-only refreshed base prompt
+    /// armed by [`Session::reconcile_resumed_system_prompt`].
+    ///
+    /// NEVER persisted and never part of any digest preimage (it is absent
+    /// from [`SessionSerdeRef`]): the transcript keeps the persisted bytes so
+    /// the resumed projection digests to the persisted revision, while the
+    /// model boundary substitutes the fresh bytes. Guards the 2026-07-29
+    /// resume-mint incident: prompts opening with a wall-clock timestamp
+    /// minted one full rewrite revision per identity per boot (~127/boot on
+    /// one production fleet), and each legacy-spelled mint retained a full
+    /// document copy on graph-carrying stores. Boxed so the always-`None`
+    /// common case costs one pointer (`Session` size is stack-budgeted, see
+    /// [`SessionHistoryCaches`]).
+    volatile_prompt_overlay: Option<Box<VolatilePromptOverlay>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,6 +982,7 @@ impl<'de> Deserialize<'de> for Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: serde_repr.usage,
+            volatile_prompt_overlay: None,
         };
         // Seed the per-instance shared parse with the graph this decode just
         // proved and installed. Without this, the first consumer after every
@@ -1100,6 +1124,7 @@ impl Session {
             metadata,
             history_caches: Box::default(),
             usage,
+            volatile_prompt_overlay: None,
         })
     }
 
@@ -1310,6 +1335,7 @@ impl Session {
             metadata,
             history_caches: Box::default(),
             usage,
+            volatile_prompt_overlay: None,
         })
     }
 }
@@ -1368,6 +1394,115 @@ pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
+
+/// Opening marker of a caller-declared volatile span inside an assembled
+/// system prompt.
+///
+/// Hosts whose prompts embed content that legitimately changes on every
+/// assembly (wall-clock time, boot counters) wrap exactly that content in
+/// [`SYSTEM_PROMPT_VOLATILE_OPEN`]/[`SYSTEM_PROMPT_VOLATILE_CLOSE`].
+/// [`Session::reconcile_resumed_system_prompt`] then treats a resume whose
+/// rebuilt base differs from the persisted prompt ONLY inside such spans as
+/// semantically unchanged: no audit revision is minted, and the fresh bytes
+/// reach the model through a request-time overlay instead (the 2026-07-29
+/// resume-mint incident: one rewrite revision per identity per boot when only
+/// an opening timestamp differed). Volatility is exclusively this
+/// declaration — reconciliation never infers it by diffing. The markers stay
+/// in the prompt the model sees; spans do not nest.
+pub const SYSTEM_PROMPT_VOLATILE_OPEN: &str = "<rkat:volatile>";
+
+/// Closing marker of a caller-declared volatile span; see
+/// [`SYSTEM_PROMPT_VOLATILE_OPEN`].
+pub const SYSTEM_PROMPT_VOLATILE_CLOSE: &str = "</rkat:volatile>";
+
+/// Render `prompt` with the content of every well-formed caller-declared
+/// volatile span blanked, keeping the markers themselves (so span structure
+/// still has to match byte-wise across prompts).
+///
+/// Returns `None` when the prompt declares no volatile span, or when a
+/// declaration is malformed (an opening marker without a matching closing
+/// marker): with no well-formed declaration there is nothing to exclude, and
+/// a malformed one must fail closed into the byte-wise comparison (minting a
+/// rewrite, today's behavior) rather than silently widen the excluded region.
+fn stable_prompt_projection(prompt: &str) -> Option<String> {
+    let mut remaining = prompt;
+    let mut projected = String::with_capacity(prompt.len());
+    let mut declared = false;
+    loop {
+        let Some(open_idx) = remaining.find(SYSTEM_PROMPT_VOLATILE_OPEN) else {
+            if !declared {
+                return None;
+            }
+            projected.push_str(remaining);
+            return Some(projected);
+        };
+        let span_start = open_idx + SYSTEM_PROMPT_VOLATILE_OPEN.len();
+        let Some(close_idx) = remaining[span_start..].find(SYSTEM_PROMPT_VOLATILE_CLOSE) else {
+            // Unterminated declaration: fail closed (see doc above).
+            return None;
+        };
+        declared = true;
+        projected.push_str(&remaining[..span_start]);
+        projected.push_str(SYSTEM_PROMPT_VOLATILE_CLOSE);
+        remaining = &remaining[span_start + close_idx + SYSTEM_PROMPT_VOLATILE_CLOSE.len()..];
+    }
+}
+
+/// Decide whether `incoming` differs from `persisted` ONLY inside
+/// caller-declared volatile spans.
+///
+/// Declaration-only by construction: both prompts must carry at least one
+/// well-formed volatile span and their stable projections (volatile span
+/// content blanked, everything else byte-exact) must be equal. Byte-equal
+/// prompts return `false` — they need no refresh at all.
+fn prompts_differ_only_in_declared_volatile_spans(persisted: &str, incoming: &str) -> bool {
+    if persisted == incoming {
+        return false;
+    }
+    match (
+        stable_prompt_projection(persisted),
+        stable_prompt_projection(incoming),
+    ) {
+        (Some(persisted_stable), Some(incoming_stable)) => persisted_stable == incoming_stable,
+        _ => false,
+    }
+}
+
+/// Request-time System-prompt substitution armed by
+/// [`Session::reconcile_resumed_system_prompt`] when the freshly assembled
+/// base differs from the persisted prompt only inside caller-declared
+/// volatile spans.
+///
+/// The transcript keeps the persisted bytes (semantically nothing changed, so
+/// the audit graph records nothing and the resumed projection digests to the
+/// persisted revision); [`Session::messages_for_model_boundary`] substitutes
+/// the fresh bytes so the model sees current volatile content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VolatilePromptOverlay {
+    /// Exact persisted System content the overlay was armed against (base
+    /// plus any verified runtime-context tail at reconcile time).
+    persisted_prefix: String,
+    /// The freshly assembled replacement: identical stable bytes, fresh
+    /// declared-volatile spans.
+    live_prefix: String,
+}
+
+impl VolatilePromptOverlay {
+    /// Refresh `content` when it still is — or, via later runtime
+    /// system-context appends, still extends — the persisted prefix this
+    /// overlay was armed against. `None` self-invalidates the overlay: the
+    /// prompt was mutated through another seam after reconciliation, and the
+    /// actual transcript bytes win.
+    fn refreshed_content(&self, content: &str) -> Option<String> {
+        if content == self.persisted_prefix {
+            return Some(self.live_prefix.clone());
+        }
+        let appended = content.strip_prefix(self.persisted_prefix.as_str())?;
+        appended
+            .starts_with(SYSTEM_CONTEXT_SEPARATOR)
+            .then(|| format!("{}{appended}", self.live_prefix))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("metadata key `{key}` is reserved for session authority")]
@@ -4585,6 +4720,7 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: Usage::default(),
+            volatile_prompt_overlay: None,
         }
     }
 
@@ -5553,6 +5689,14 @@ impl Session {
     ///   appends — the transcript is left untouched (byte-for-byte, including
     ///   the typed `mutation_kind`), so the resumed projection digests to the
     ///   persisted revision.
+    /// - If the base differs ONLY inside caller-declared volatile spans
+    ///   ([`SYSTEM_PROMPT_VOLATILE_OPEN`] / [`SYSTEM_PROMPT_VOLATILE_CLOSE`]),
+    ///   the transcript is likewise left untouched and NO rewrite is minted;
+    ///   the fresh prompt is armed as a request-time overlay
+    ///   ([`Session::messages_for_model_boundary`]) so the model sees current
+    ///   volatile content while the audit graph records nothing (semantically
+    ///   nothing changed — 2026-07-29 resume-mint incident, ~127 rewrites per
+    ///   boot from a leading wall-clock timestamp).
     /// - If the base genuinely changed, the new System message (new base plus
     ///   the reconstructed runtime-append tail, when the persisted tail is
     ///   verifiable from the durable applied-append records) is committed
@@ -5564,6 +5708,10 @@ impl Session {
         assembled_base: String,
         actor: Option<String>,
     ) -> Result<ResumedSystemPromptReconciliation, TranscriptEditError> {
+        // Any overlay armed by an earlier reconciliation of this in-memory
+        // session is stale relative to this rebuild; every outcome below
+        // either preserves the persisted bytes as-is or re-arms a fresh one.
+        self.volatile_prompt_overlay = None;
         let migrated_terminal_context = self.migrate_legacy_peer_terminal_context(actor.clone())?;
         let persisted = match self.messages.first() {
             Some(Message::System(system)) => Some((system.content.clone(), system.mutation_kind)),
@@ -5610,6 +5758,17 @@ impl Session {
                     ResumedSystemPromptReconciliation::PreservedContinuation
                 });
             }
+            // A base that changed only inside caller-declared volatile spans
+            // is semantically unchanged: arm the request-time overlay instead
+            // of minting a rewrite (the tail bytes are identical on both
+            // sides, so the projection comparison sees only the base spans).
+            if prompts_differ_only_in_declared_volatile_spans(&persisted_content, &expected) {
+                return Ok(self.preserve_volatile_only_prompt_refresh(
+                    persisted_content,
+                    expected,
+                    migrated_terminal_context,
+                ));
+            }
             self.commit_resume_system_prompt_rewrite(expected, true, actor)?;
             return Ok(ResumedSystemPromptReconciliation::RewrittenBase);
         }
@@ -5631,6 +5790,20 @@ impl Session {
             } else {
                 ResumedSystemPromptReconciliation::PreservedContinuation
             });
+        }
+
+        // Volatile-only divergence with no reconstructible tail (rows whose
+        // recorded assembled base already drifted volatilely, or that never
+        // recorded one): still semantically unchanged, so arm the overlay
+        // instead of minting. A persisted prompt that carries an unverifiable
+        // context tail cannot compare volatile-equal (the tail bytes exist
+        // only on one side) and falls through to the rewrite, as today.
+        if prompts_differ_only_in_declared_volatile_spans(&persisted_content, &assembled_base) {
+            return Ok(self.preserve_volatile_only_prompt_refresh(
+                persisted_content,
+                assembled_base,
+                migrated_terminal_context,
+            ));
         }
 
         // The base diverged and the runtime-context tail is not
@@ -5656,6 +5829,52 @@ impl Session {
             self.clear_applied_system_prompt_context_records();
         }
         Ok(ResumedSystemPromptReconciliation::RewrittenBase)
+    }
+
+    /// Arm the request-time volatile overlay for a resume whose rebuilt
+    /// prompt differs from the persisted one only inside caller-declared
+    /// volatile spans, leaving the transcript untouched (no revision minted).
+    ///
+    /// When a legacy terminal-context migration already committed a rewrite
+    /// in this reconciliation, the honest outcome remains `RewrittenBase` —
+    /// the overlay is still armed so the model sees fresh volatile content.
+    fn preserve_volatile_only_prompt_refresh(
+        &mut self,
+        persisted_prefix: String,
+        live_prefix: String,
+        migrated_terminal_context: bool,
+    ) -> ResumedSystemPromptReconciliation {
+        self.volatile_prompt_overlay = Some(Box::new(VolatilePromptOverlay {
+            persisted_prefix,
+            live_prefix,
+        }));
+        if migrated_terminal_context {
+            ResumedSystemPromptReconciliation::RewrittenBase
+        } else {
+            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
+        }
+    }
+
+    /// Messages as the model boundary must see them: the persisted transcript
+    /// with the leading System content substituted by the volatile-refresh
+    /// overlay, when one is armed and the persisted prompt still matches (or
+    /// extends, via runtime system-context appends) the content it was armed
+    /// against. A prompt mutated through any other seam after reconciliation
+    /// wins as-is — the overlay self-invalidates instead of clobbering it.
+    ///
+    /// The substitution is request-local only. The `Session` document — the
+    /// digest preimage and checkpoint-authority input — is never touched, so
+    /// persists of a volatile-refreshed resume stay byte-identical to the
+    /// persisted revision.
+    pub fn messages_for_model_boundary(&self) -> Vec<Message> {
+        let mut messages = self.messages().to_vec();
+        if let Some(overlay) = self.volatile_prompt_overlay.as_deref()
+            && let Some(Message::System(system)) = messages.first_mut()
+            && let Some(refreshed) = overlay.refreshed_content(&system.content)
+        {
+            system.content = refreshed;
+        }
+        messages
     }
 
     /// Split the persisted System content into a VERIFIED runtime-appended
@@ -7756,6 +7975,9 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
+            // The fork keeps the source prefix (including the leading System
+            // message), so an armed volatile refresh stays valid for it.
+            volatile_prompt_overlay: self.volatile_prompt_overlay.clone(),
         }
     }
 
@@ -7877,6 +8099,9 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
+            // Shares the source transcript, so an armed volatile refresh
+            // stays valid for the fork.
+            volatile_prompt_overlay: self.volatile_prompt_overlay.clone(),
         }
     }
 }
@@ -14727,6 +14952,253 @@ mod tests {
             state.head,
             transcript_messages_digest(session.messages()).unwrap(),
             "the committed head must match the rewritten transcript"
+        );
+    }
+
+    fn volatile_prompt(timestamp: &str, stable_tail: &str) -> String {
+        format!(
+            "Current date and time: {SYSTEM_PROMPT_VOLATILE_OPEN}{timestamp}\
+             {SYSTEM_PROMPT_VOLATILE_CLOSE}\n{stable_tail}"
+        )
+    }
+
+    fn leading_model_boundary_system_content(session: &Session) -> String {
+        match session.messages_for_model_boundary().into_iter().next() {
+            Some(Message::System(system)) => system.content,
+            other => panic!("expected boundary system message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stable_prompt_projection_blanks_declared_spans_only() {
+        assert_eq!(stable_prompt_projection("no declaration"), None);
+        assert_eq!(
+            stable_prompt_projection(&format!(
+                "a {SYSTEM_PROMPT_VOLATILE_OPEN}x{SYSTEM_PROMPT_VOLATILE_CLOSE} b \
+                 {SYSTEM_PROMPT_VOLATILE_OPEN}y{SYSTEM_PROMPT_VOLATILE_CLOSE} c"
+            )),
+            Some(format!(
+                "a {SYSTEM_PROMPT_VOLATILE_OPEN}{SYSTEM_PROMPT_VOLATILE_CLOSE} b \
+                 {SYSTEM_PROMPT_VOLATILE_OPEN}{SYSTEM_PROMPT_VOLATILE_CLOSE} c"
+            ))
+        );
+        // Unterminated declaration fails closed: no projection, byte-wise
+        // comparison (and therefore the audited rewrite) decides.
+        assert_eq!(
+            stable_prompt_projection(&format!("a {SYSTEM_PROMPT_VOLATILE_OPEN}x")),
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_volatile_only_difference_preserves_transcript_without_mint() {
+        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted.clone());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        let digest_before = transcript_messages_digest(session.messages()).unwrap();
+        let document_before =
+            serde_json::to_vec(&session).expect("serialize pre-reconcile session document");
+
+        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
+        let outcome = session
+            .reconcile_resumed_system_prompt(fresh.clone(), None)
+            .expect("reconcile");
+
+        assert_eq!(
+            outcome,
+            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
+        );
+        assert!(
+            session
+                .transcript_history_state()
+                .expect("history state deserializes")
+                .is_none(),
+            "a volatile-only refresh must not mint a rewrite revision"
+        );
+        assert_eq!(
+            transcript_messages_digest(session.messages()).unwrap(),
+            digest_before,
+            "the persisted transcript revision must stay untouched"
+        );
+        // Digest-preimage proof: the serialized session document — including
+        // the armed overlay's carrier — is byte-identical to the persisted
+        // revision, so the first post-resume persist chains cleanly.
+        assert_eq!(
+            serde_json::to_vec(&session).expect("serialize post-reconcile session document"),
+            document_before,
+            "the overlay must never reach the persisted envelope"
+        );
+        assert_eq!(leading_system_content(&session), persisted);
+        assert_eq!(
+            leading_model_boundary_system_content(&session),
+            fresh,
+            "the model boundary must carry the FRESH prompt"
+        );
+    }
+
+    #[test]
+    fn reconcile_volatile_only_difference_refreshes_base_under_context_tail() {
+        let persisted_base = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = resumed_session_with_context_appended_prompt(&persisted_base);
+        let digest_before = transcript_messages_digest(session.messages()).unwrap();
+
+        let fresh_base = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
+        let outcome = session
+            .reconcile_resumed_system_prompt(fresh_base.clone(), None)
+            .expect("reconcile");
+
+        assert_eq!(
+            outcome,
+            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
+        );
+        assert_eq!(
+            transcript_messages_digest(session.messages()).unwrap(),
+            digest_before,
+            "volatile-only base drift under a runtime-context tail must not rewrite"
+        );
+        let boundary = leading_model_boundary_system_content(&session);
+        assert!(
+            boundary.starts_with(&fresh_base),
+            "the boundary prompt must carry the fresh base: {boundary}"
+        );
+        assert!(
+            boundary.contains("peer roster: lead-1, w-1"),
+            "the runtime-applied context tail must survive the refresh: {boundary}"
+        );
+    }
+
+    #[test]
+    fn reconcile_mixed_volatile_and_stable_difference_mints_rewrite() {
+        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted);
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat, now with tools.");
+        let outcome = session
+            .reconcile_resumed_system_prompt(fresh.clone(), None)
+            .expect("reconcile");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&session), fresh);
+        assert_eq!(
+            leading_model_boundary_system_content(&session),
+            fresh,
+            "a minted rewrite must not leave a stale overlay armed"
+        );
+        let state = session
+            .transcript_history_state()
+            .expect("history state deserializes")
+            .expect("a stable change must record transcript history");
+        assert_eq!(state.commits.len(), 1);
+        assert_eq!(
+            state.commits[0].reason.kind,
+            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
+        );
+    }
+
+    #[test]
+    fn reconcile_timestamp_drift_without_declaration_mints_rewrite() {
+        // Volatility is caller-declared ONLY: an undeclared timestamp change
+        // must keep today's byte-wise mint, never be inferred by diffing.
+        let mut session = Session::new();
+        session.set_system_prompt("Current date and time: 2026-07-28T08:00Z".to_string());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let fresh = "Current date and time: 2026-07-29T09:30Z".to_string();
+        let outcome = session
+            .reconcile_resumed_system_prompt(fresh.clone(), None)
+            .expect("reconcile");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&session), fresh);
+    }
+
+    #[test]
+    fn reconcile_unterminated_volatile_declaration_fails_closed_to_rewrite() {
+        let persisted = format!("time {SYSTEM_PROMPT_VOLATILE_OPEN}2026-07-28");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted);
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let fresh = format!("time {SYSTEM_PROMPT_VOLATILE_OPEN}2026-07-29");
+        let outcome = session
+            .reconcile_resumed_system_prompt(fresh.clone(), None)
+            .expect("reconcile");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert_eq!(leading_system_content(&session), fresh);
+    }
+
+    #[test]
+    fn volatile_overlay_survives_later_runtime_context_appends() {
+        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted.clone());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
+        session
+            .reconcile_resumed_system_prompt(fresh.clone(), None)
+            .expect("reconcile");
+        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
+
+        let boundary = leading_model_boundary_system_content(&session);
+        assert!(
+            boundary.starts_with(&fresh),
+            "appends after the refresh must extend the fresh base: {boundary}"
+        );
+        assert!(boundary.contains("peer roster: lead-1, w-1"));
+        assert!(
+            leading_system_content(&session).starts_with(&persisted),
+            "the persisted transcript must keep the persisted base bytes"
+        );
+    }
+
+    #[test]
+    fn volatile_overlay_self_invalidates_after_unrelated_prompt_mutation() {
+        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted);
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        session
+            .reconcile_resumed_system_prompt(
+                volatile_prompt("2026-07-29T09:30Z", "You are rkat."),
+                None,
+            )
+            .expect("reconcile");
+        session.set_system_prompt("replaced through another seam".to_string());
+
+        assert_eq!(
+            leading_model_boundary_system_content(&session),
+            "replaced through another seam",
+            "a prompt mutated through another seam must win over the overlay"
+        );
+    }
+
+    #[test]
+    fn volatile_overlay_does_not_survive_persistence_roundtrip() {
+        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
+        let mut session = Session::new();
+        session.set_system_prompt(persisted.clone());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
+        session
+            .reconcile_resumed_system_prompt(fresh, None)
+            .expect("reconcile");
+
+        let reloaded: Session = serde_json::from_slice(
+            &serde_json::to_vec(&session).expect("serialize refreshed session"),
+        )
+        .expect("deserialize refreshed session");
+
+        assert_eq!(
+            leading_model_boundary_system_content(&reloaded),
+            persisted,
+            "the overlay is request-local state and must not persist; the next \
+             resume re-arms it from a fresh reconciliation"
         );
     }
 

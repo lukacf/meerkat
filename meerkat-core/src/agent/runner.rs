@@ -1317,12 +1317,16 @@ where
         appends: &[PendingSystemContextAppend],
     ) -> Vec<Message> {
         if appends.is_empty() {
-            return self.session.messages().to_vec();
+            // Boundary projection, not the raw transcript: a resume whose
+            // rebuilt base differed only in caller-declared volatile spans
+            // carries its fresh prompt as a request-time overlay instead of
+            // a minted rewrite (2026-07-29 resume-mint incident).
+            return self.session.messages_for_model_boundary();
         }
 
         let mut session = self.session.clone();
         session.append_system_context_blocks(appends);
-        session.messages().to_vec()
+        session.messages_for_model_boundary()
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.

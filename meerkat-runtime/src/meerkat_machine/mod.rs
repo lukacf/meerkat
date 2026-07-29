@@ -5476,6 +5476,17 @@ pub struct MeerkatMachineShared {
     /// every new lookup prunes dead slots, so historical session ids cannot
     /// accumulate while overlapping transactions still rendezvous on one gate.
     registration_transaction_slots: StdRwLock<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
+    /// Tokio runtime handle captured when this machine was composed, used to
+    /// spawn long-lived per-session runtime-loop tasks. The owned
+    /// ensure-session saga runs on the process-singleton one-worker cleanup
+    /// runtime (cancellation safety); without this handle the loop task
+    /// spawned inside that saga inherits the same single worker, so one
+    /// misbehaving loop starves every session command in the process (the
+    /// 2026-07 "meerkat-machine-cleanup" hot-spin incident). `None` when the
+    /// machine is composed outside a tokio runtime; spawn sites then fall
+    /// back to their ambient runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    serving_runtime: Option<crate::tokio::runtime::Handle>,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
@@ -6464,6 +6475,19 @@ impl MeerkatMachine {
         self.store.is_some()
     }
 
+    /// Runtime handle for long-lived per-session runtime-loop tasks.
+    ///
+    /// Captured at machine composition. The loop spawn site uses this so a
+    /// loop task created inside the owned ensure-session saga (which runs on
+    /// the process-singleton one-worker cleanup runtime) does not inherit —
+    /// and monopolize — that single worker (2026-07 "meerkat-machine-cleanup"
+    /// hot-spin incident). `None` when the machine was composed outside a
+    /// tokio runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn serving_runtime_handle(&self) -> Option<crate::tokio::runtime::Handle> {
+        self.serving_runtime.clone()
+    }
+
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {
         match err {
             RuntimeDriverError::NotReady {
@@ -6486,6 +6510,8 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: None,
                 blob_store: None,
                 legacy_history_evidence_source: StdRwLock::new(None),
@@ -6545,6 +6571,8 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: Some(store),
                 blob_store: Some(blob_store),
                 legacy_history_evidence_source: StdRwLock::new(None),
@@ -6604,6 +6632,8 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: Some(store),
                 blob_store: Some(Arc::new(UnavailableBlobStore)),
                 legacy_history_evidence_source: StdRwLock::new(None),

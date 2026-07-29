@@ -33177,11 +33177,20 @@ async fn unserved_startup_failure_preserves_durable_projection_authority_for_rea
                     .expect("origin run must commit Candidate and compaction authority");
                 (machine, input_id, checkpoint_session, compaction_intent)
             });
-            // Post-commit projection reconciliation is still blocked. Shutting down its
-            // runtime cancels both loop and watcher, leaving the durable Run
-            // Candidate and compaction outbox for cold startup recovery.
-            drop(origin_runtime);
+            // Post-commit projection reconciliation is still blocked. Drop the
+            // machine authority FIRST so the retained-teardown watcher (which
+            // lives on the process-singleton cleanup runtime) cannot upgrade
+            // its weak machine and repair the durable outbox, THEN shut the
+            // origin runtime down to cancel the blocked loop task. Since the
+            // runtime-loop placement fix for the 2026-07 hot-spin incident,
+            // loop tasks live on the machine's serving runtime, so dropping
+            // the origin runtime genuinely cancels the loop (before that fix
+            // the loop was marooned on the cleanup runtime and simply leaked,
+            // blocked forever). This models cold process death: the durable
+            // Run Candidate and compaction outbox stay pending for startup
+            // recovery.
             drop(seeded.0);
+            drop(origin_runtime);
             (seeded.1, seeded.2, seeded.3)
         }
     })

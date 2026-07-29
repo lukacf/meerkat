@@ -3319,9 +3319,90 @@ impl RuntimeLoopAuthorityBinding {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeedWakeOutcome {
+    /// Nothing wake-worthy is being withheld: either the batch carried no
+    /// generated wake completion (the observed cursor advanced past it) or
+    /// there was no feed to consult.
     Noop,
+    /// A wake-worthy completion was deliberately left visible in the feed and
+    /// the observed cursor did NOT advance (fail-closed hold). Re-arming the
+    /// idle wake instantly at the unchanged cursor returns immediately and
+    /// hot-spins — the 2026-07 "meerkat-machine-cleanup" incident: one held
+    /// wake pegged the process-singleton one-worker cleanup runtime (which
+    /// also dispatches every session command) at ~100% CPU, silently, until
+    /// fleet provisioning degraded to 44+ minutes. Callers must re-arm
+    /// edge-triggered past the held watermark plus a bounded re-poll.
+    NoopHeld(FeedWakeHold),
     Injected,
     StaleAuthority,
+}
+
+/// Details of one fail-closed feed-wake hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FeedWakeHold {
+    reason: FeedWakeHoldReason,
+    /// Feed watermark at the instant the hold was taken. Completions newer
+    /// than this must still wake the loop edge-triggered.
+    held_watermark: meerkat_core::completion_feed::CompletionSeq,
+}
+
+/// Why a wake-worthy completion was left visible instead of injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedWakeHoldReason {
+    /// The session was not quiescent for a detached wake.
+    NonQuiescent,
+    /// Continuation injection failed; the completion stays visible for retry.
+    InjectionFailed,
+}
+
+/// Loop-local bookkeeping for an active feed-wake hold.
+struct FeedWakeHoldState {
+    reason: FeedWakeHoldReason,
+    /// Highest watermark already known to be held; only newer completions
+    /// re-arm the edge-triggered wake.
+    held_watermark: meerkat_core::completion_feed::CompletionSeq,
+    /// Current bounded re-poll delay (base 25ms, doubling, cap 1s — the same
+    /// ladder as the interaction-terminal recovery drain).
+    repoll_delay: std::time::Duration,
+}
+
+const FEED_HOLD_REPOLL_BASE: std::time::Duration = std::time::Duration::from_millis(25);
+const FEED_HOLD_REPOLL_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Record a fail-closed feed-wake hold on the loop-local hold state.
+///
+/// The warn fires once per (session, hold-reason) transition — not per
+/// iteration. A fail-closed hold must never be silent: the 2026-07 hot-spin
+/// incident was invisible at every log level, which cost three misattributions
+/// and a 42-minute-per-diagnosis field hunt. Repeated holds for the same
+/// reason stay quiet and grow the bounded re-poll ladder instead.
+fn note_feed_wake_hold(
+    hold_state: &mut Option<FeedWakeHoldState>,
+    session_id: &meerkat_core::types::SessionId,
+    hold: FeedWakeHold,
+) {
+    match hold_state {
+        Some(state) if state.reason == hold.reason => {
+            state.held_watermark = state.held_watermark.max(hold.held_watermark);
+            state.repoll_delay = state
+                .repoll_delay
+                .saturating_mul(2)
+                .min(FEED_HOLD_REPOLL_CAP);
+        }
+        _ => {
+            tracing::warn!(
+                session_id = %session_id,
+                reason = ?hold.reason,
+                held_watermark = hold.held_watermark,
+                "runtime loop is holding a wake-worthy completion visible in the feed \
+                 (fail-closed hold); re-polling with bounded backoff until the hold clears"
+            );
+            *hold_state = Some(FeedWakeHoldState {
+                reason: hold.reason,
+                held_watermark: hold.held_watermark,
+                repoll_delay: FEED_HOLD_REPOLL_BASE,
+            });
+        }
+    }
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
@@ -3359,6 +3440,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let (serving_release_sender, serving_release_receiver) = tokio::sync::oneshot::channel();
     let startup_guard = RuntimeLoopStartupGuard::new(std::sync::Arc::clone(&startup));
     let teardown_watcher_slot = std::sync::Arc::clone(&teardown_slot);
+    #[cfg(not(target_arch = "wasm32"))]
+    let loop_task_machine = machine_weak.clone();
     let teardown_machine = machine_weak;
     let teardown_session_id = session_id;
     tokio::spawn(async move {
@@ -3390,7 +3473,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let loop_teardown_slot = std::sync::Arc::clone(&teardown_slot);
     let loop_process_teardown_slot = std::sync::Arc::clone(&teardown_slot);
     let loop_handoff_guard = RuntimeLoopHandoffGuard::new(loop_teardown_slot, executor);
-    let loop_handle = tokio::spawn(async move {
+    let loop_body = async move {
         let mut loop_handoff_guard = loop_handoff_guard;
         let mut startup_guard = startup_guard;
         macro_rules! executor_or_return {
@@ -3577,14 +3660,41 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         loop_handoff_guard
             .set_fallback_disposition(RuntimeLoopTeardownDisposition::PreserveRegistration);
 
+        // Active fail-closed feed-wake hold, if any. While a wake-worthy
+        // completion is deliberately left visible (non-quiescent session or
+        // failed injection), the idle wake must NOT re-arm instantly at the
+        // unchanged observed cursor — that select! re-fires immediately and
+        // hot-spins forever (2026-07 "meerkat-machine-cleanup" incident:
+        // 9.94s/10s CPU on the one worker dispatching every session command).
+        let mut feed_hold: Option<FeedWakeHoldState> = None;
         loop {
             // Build a future for the idle wake. Backed by the completion feed
             // only when generated ops cursor authority is present; otherwise
             // pends forever because the feed watermark is not delivery
             // authority.
+            //
+            // Snapshot the hold parameters (Copy) before the async block so
+            // the select handlers below can mutate the hold state.
+            let feed_hold_arm = feed_hold
+                .as_ref()
+                .map(|hold| (hold.held_watermark, hold.repoll_delay));
             let idle_wake = async {
                 if let (Some(feed), Some(_)) = (completion_feed.as_ref(), ops_lifecycle.as_ref()) {
-                    feed.wait_for_advance(observed_seq).await;
+                    match feed_hold_arm {
+                        None => {
+                            feed.wait_for_advance(observed_seq).await;
+                        }
+                        // Held wake: re-arm edge-triggered so only completions
+                        // NEWER than the held batch wake the loop instantly,
+                        // plus a bounded re-poll so the hold-clearing condition
+                        // (quiescence flip, injection retry) is still observed.
+                        Some((held_watermark, repoll_delay)) => {
+                            tokio::select! {
+                                _ = feed.wait_for_advance(held_watermark) => {}
+                                () = tokio::time::sleep(repoll_delay) => {}
+                            }
+                        }
+                    }
                 } else {
                     std::future::pending::<()>().await;
                 }
@@ -3638,6 +3748,13 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             .await
                             {
                                 break;
+                            }
+                            // Effects can flip quiescence (e.g. a terminal run
+                            // effect). Re-poll a held completion promptly
+                            // instead of waiting out the current ladder step;
+                            // keep the hold episode (no re-warn).
+                            if let Some(hold) = feed_hold.as_mut() {
+                                hold.repoll_delay = FEED_HOLD_REPOLL_BASE;
                             }
                         }
                         None => {
@@ -3706,6 +3823,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             .await
                             {
                                 FeedWakeOutcome::Injected => {
+                                    feed_hold = None;
                                     if process_queue(
                                         &driver,
                                         executor_or_return!(),
@@ -3721,7 +3839,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     }
                                 }
                                 FeedWakeOutcome::StaleAuthority => break,
-                                FeedWakeOutcome::Noop => {}
+                                FeedWakeOutcome::Noop => {
+                                    feed_hold = None;
+                                }
+                                FeedWakeOutcome::NoopHeld(hold) => {
+                                    note_feed_wake_hold(
+                                        &mut feed_hold,
+                                        &authority_binding.session_id,
+                                        hold,
+                                    );
+                                }
                             }
                         }
                         None => {
@@ -3773,6 +3900,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                     .await
                     {
                         FeedWakeOutcome::Injected => {
+                            feed_hold = None;
                             if process_queue(
                                 &driver,
                                 executor_or_return!(),
@@ -3788,7 +3916,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             }
                         }
                         FeedWakeOutcome::StaleAuthority => break,
-                        FeedWakeOutcome::Noop => {}
+                        FeedWakeOutcome::Noop => {
+                            feed_hold = None;
+                        }
+                        FeedWakeOutcome::NoopHeld(hold) => {
+                            note_feed_wake_hold(
+                                &mut feed_hold,
+                                &authority_binding.session_id,
+                                hold,
+                            );
+                        }
                     }
                 }
             }
@@ -3801,7 +3938,29 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         if let Err(error) = loop_handoff_guard.publish(terminal_handoff) {
             tracing::error!(%error, "runtime loop failed to publish executor handoff");
         }
-    });
+    };
+    // The owned attach saga that calls this function runs on the
+    // process-singleton one-worker cleanup runtime (cancellation safety for
+    // the saga itself). A bare `tokio::spawn` here inherits that runtime and
+    // pins EVERY per-session runtime loop onto its single worker — the same
+    // worker that dispatches every ingress command. The 2026-07
+    // "meerkat-machine-cleanup" incident (one held-wake spin starving a
+    // 17-member fleet's provisioning for 44+ minutes) was amplified exactly
+    // this way. Spawn the long-lived loop task onto the machine's serving
+    // runtime instead; the attach saga stays where it is. Detached test loops
+    // (no machine) and machines composed outside a runtime keep the ambient
+    // runtime. Abort safety is unchanged: `RuntimeLoopHandoffGuard` and
+    // `RuntimeLoopStartupGuard` publish on drop even if the task never polls.
+    #[cfg(not(target_arch = "wasm32"))]
+    let loop_handle = match loop_task_machine
+        .upgrade()
+        .and_then(|machine| machine.serving_runtime_handle())
+    {
+        Some(serving_runtime) => serving_runtime.spawn(loop_body),
+        None => tokio::spawn(loop_body),
+    };
+    #[cfg(target_arch = "wasm32")]
+    let loop_handle = tokio::spawn(loop_body);
     let spawned = SpawnedRuntimeLoop {
         loop_handle,
         teardown_slot,
@@ -3994,7 +4153,15 @@ async fn maybe_inject_feed_wake(
     if !d.is_quiescent_for_detached_wake() {
         // Non-quiescent: do NOT advance observed_seq. The completion
         // stays visible for the next wake so it's not permanently lost.
-        return FeedWakeOutcome::Noop;
+        // This is a HOLD, not a caught-up cursor: re-arming the idle wake
+        // instantly at the unchanged cursor spins (2026-07
+        // "meerkat-machine-cleanup" incident), so the caller must re-arm
+        // edge-triggered past this batch plus a bounded re-poll for the
+        // quiescence flip.
+        return FeedWakeOutcome::NoopHeld(FeedWakeHold {
+            reason: FeedWakeHoldReason::NonQuiescent,
+            held_watermark: batch.watermark,
+        });
     }
     drop(d);
 
@@ -4011,8 +4178,14 @@ async fn maybe_inject_feed_wake(
             // non-quiescent branch above and leave the completion visible so
             // the next wake re-presents it for retry instead of laundering the
             // failed injection into a watermark advance that hides the
-            // completion.
-            FeedWakeOutcome::Noop
+            // completion. Held, not caught up: the failure cause is external,
+            // so the caller retries on a bounded re-poll ladder rather than
+            // re-arming instantly at the same cursor (2026-07 hot-spin
+            // incident).
+            FeedWakeOutcome::NoopHeld(FeedWakeHold {
+                reason: FeedWakeHoldReason::InjectionFailed,
+                held_watermark: batch.watermark,
+            })
         }
         DetachedWakeCursorPlan::AdvanceInjectedAndObserved => {
             // Injection succeeded: advance both the injected and observed
@@ -8433,6 +8606,330 @@ mod tests {
             "stale runtime loop must not advance observed cursor truth"
         );
         assert_eq!(last_injected_seq, 0);
+    }
+
+    /// Fail-closed hold semantics for the 2026-07 "meerkat-machine-cleanup"
+    /// hot-spin incident: a wake-worthy completion visible while the session
+    /// is non-quiescent must be reported as a HOLD (`NoopHeld`), leaving the
+    /// observed cursor untouched and the completion visible — and once
+    /// quiescence obtains, the same feed and cursors must consume that held
+    /// completion exactly once.
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_non_quiescent_holds_completion_then_injects_after_quiescence()
+    {
+        let driver = make_shared_ephemeral_driver("feed-held-non-quiescent");
+        {
+            let mut guard = driver.lock().await;
+            assert!(
+                guard
+                    .as_driver_mut()
+                    .accept_input(make_prompt("block quiescence"))
+                    .await
+                    .is_ok(),
+                "staged input should be accepted"
+            );
+            assert!(
+                !guard.is_quiescent_for_detached_wake(),
+                "a staged non-terminal input must block quiescence"
+            );
+        }
+
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("feed-held-non-quiescent");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+        let binding = RuntimeLoopAuthorityBinding::detached_for_test();
+
+        let outcome = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            Some(&registry),
+            &binding,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            FeedWakeOutcome::NoopHeld(FeedWakeHold {
+                reason: FeedWakeHoldReason::NonQuiescent,
+                held_watermark: feed.watermark(),
+            }),
+            "non-quiescent session must HOLD the wake, not report a caught-up cursor"
+        );
+        assert_eq!(
+            observed_seq, 0,
+            "held wake must not advance the observed cursor"
+        );
+        assert_eq!(last_injected_seq, 0);
+        assert!(
+            !feed.list_since(observed_seq).entries.is_empty(),
+            "held completion must remain visible in the feed"
+        );
+        {
+            let guard = driver.lock().await;
+            assert_eq!(
+                guard.as_driver().active_input_ids().len(),
+                1,
+                "held wake must not enqueue a continuation"
+            );
+        }
+
+        // The hold clears (quiescence obtains): the SAME feed and cursors
+        // against a quiescent driver consume the held completion exactly once.
+        let quiescent_driver = make_shared_ephemeral_driver("feed-held-now-quiescent");
+        let outcome = maybe_inject_feed_wake(
+            &quiescent_driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            Some(&registry),
+            &binding,
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            FeedWakeOutcome::Injected,
+            "the held completion must be consumed once the hold clears"
+        );
+        assert_eq!(observed_seq, feed.watermark());
+        assert_eq!(last_injected_seq, feed.watermark());
+        let mut guard = quiescent_driver.lock().await;
+        let crate::meerkat_machine::DriverEntry::Ephemeral(ephemeral) = &mut *guard else {
+            panic!("test uses an ephemeral driver");
+        };
+        let (_input_id, input) = ephemeral
+            .dequeue_next()
+            .expect("held completion must inject a continuation once the hold clears");
+        match input {
+            Input::Continuation(continuation) => {
+                assert_eq!(continuation.reason, "detached_background_op_completed");
+            }
+            other => panic!("expected continuation injection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn feed_wake_hold_backoff_doubles_caps_and_resets_per_episode() {
+        let session_id = SessionId::new();
+        let mut hold_state: Option<FeedWakeHoldState> = None;
+
+        note_feed_wake_hold(
+            &mut hold_state,
+            &session_id,
+            FeedWakeHold {
+                reason: FeedWakeHoldReason::NonQuiescent,
+                held_watermark: 3,
+            },
+        );
+        {
+            let state = hold_state.as_ref().unwrap();
+            assert_eq!(state.repoll_delay, FEED_HOLD_REPOLL_BASE);
+            assert_eq!(state.held_watermark, 3);
+        }
+
+        // Same reason: the ladder doubles and the held watermark tracks the
+        // newest held batch.
+        note_feed_wake_hold(
+            &mut hold_state,
+            &session_id,
+            FeedWakeHold {
+                reason: FeedWakeHoldReason::NonQuiescent,
+                held_watermark: 5,
+            },
+        );
+        {
+            let state = hold_state.as_ref().unwrap();
+            assert_eq!(state.repoll_delay, FEED_HOLD_REPOLL_BASE * 2);
+            assert_eq!(state.held_watermark, 5);
+        }
+
+        // The ladder is capped at 1s.
+        for _ in 0..10 {
+            note_feed_wake_hold(
+                &mut hold_state,
+                &session_id,
+                FeedWakeHold {
+                    reason: FeedWakeHoldReason::NonQuiescent,
+                    held_watermark: 5,
+                },
+            );
+        }
+        assert_eq!(
+            hold_state.as_ref().unwrap().repoll_delay,
+            FEED_HOLD_REPOLL_CAP
+        );
+
+        // A different hold reason is a new episode: the ladder resets (and
+        // the transition warns again).
+        note_feed_wake_hold(
+            &mut hold_state,
+            &session_id,
+            FeedWakeHold {
+                reason: FeedWakeHoldReason::InjectionFailed,
+                held_watermark: 5,
+            },
+        );
+        let state = hold_state.as_ref().unwrap();
+        assert_eq!(state.reason, FeedWakeHoldReason::InjectionFailed);
+        assert_eq!(state.repoll_delay, FEED_HOLD_REPOLL_BASE);
+    }
+
+    /// Counts `list_since` calls so the bounded-wakeup regression below can
+    /// observe how often the runtime loop re-polls a held completion.
+    #[derive(Debug)]
+    struct CountingCompletionFeed {
+        inner: Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
+        list_since_calls: Arc<AtomicUsize>,
+    }
+
+    impl meerkat_core::completion_feed::CompletionFeed for CountingCompletionFeed {
+        fn watermark(&self) -> meerkat_core::completion_feed::CompletionSeq {
+            self.inner.watermark()
+        }
+
+        fn list_since(
+            &self,
+            after_seq: meerkat_core::completion_feed::CompletionSeq,
+        ) -> meerkat_core::completion_feed::CompletionBatch {
+            self.list_since_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.list_since(after_seq)
+        }
+
+        fn wait_for_advance(
+            &self,
+            after_seq: meerkat_core::completion_feed::CompletionSeq,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = meerkat_core::completion_feed::CompletionSeq>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.inner.wait_for_advance(after_seq)
+        }
+    }
+
+    /// Idle-CPU regression for the 2026-07 field incident: a wake-worthy
+    /// completion held behind a non-quiescent session re-armed the idle wake
+    /// instantly at the unchanged observed cursor, hot-spinning the loop at
+    /// ~100% CPU with zero log output ("meerkat-machine-cleanup" thread,
+    /// 1001/1001 spindump samples in one blocking-pool task harness). A held
+    /// wake must re-poll on a bounded backoff ladder instead: over a 500ms
+    /// paused-time window the loop performs a handful of feed polls — not
+    /// thousands — while the held completion stays visible and the observed
+    /// cursor stays put.
+    #[tokio::test(start_paused = true)]
+    async fn runtime_loop_held_feed_wake_repolls_bounded_instead_of_hot_spinning() {
+        let driver = make_shared_ephemeral_driver("held-wake-bounded");
+        {
+            let mut guard = driver.lock().await;
+            assert!(
+                guard
+                    .as_driver_mut()
+                    .accept_input(make_prompt("hold quiescence"))
+                    .await
+                    .is_ok(),
+                "staged input should be accepted"
+            );
+            assert!(
+                !guard.is_quiescent_for_detached_wake(),
+                "a staged non-terminal input must block quiescence"
+            );
+        }
+
+        let registry = Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+        let spec = background_spec("held-wake-bounded");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+        let inner_feed = registry.completion_feed_handle();
+        let feed_watermark = inner_feed.watermark();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counting_feed: Arc<dyn meerkat_core::completion_feed::CompletionFeed> =
+            Arc::new(CountingCompletionFeed {
+                inner: Arc::clone(&inner_feed),
+                list_since_calls: Arc::clone(&polls),
+            });
+
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            Some(counting_feed),
+            Some(
+                Arc::clone(&registry) as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
+            ),
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+            false,
+        );
+
+        // Paused-time window: the bounded ladder polls at 0, 25, 75, 175 and
+        // 375ms. The pre-fix spin re-polled without ever sleeping.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let observed_polls = polls.load(Ordering::SeqCst);
+        assert!(
+            observed_polls >= 2,
+            "the held completion must be re-polled (got {observed_polls} feed polls)"
+        );
+        assert!(
+            observed_polls <= 12,
+            "a held wake-worthy completion must re-poll on a bounded ladder, not \
+             hot-spin: got {observed_polls} feed polls in a 500ms window"
+        );
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            0,
+            "no continuation may be injected while the session is non-quiescent"
+        );
+
+        // Fail-closed invariant: the held completion is still visible and the
+        // observed cursor has not advanced past it.
+        assert!(
+            !inner_feed.list_since(0).entries.is_empty(),
+            "held completion must remain visible in the feed"
+        );
+        let observed_cursor = registry
+            .completion_cursor(meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved)
+            .unwrap()
+            .unwrap_or(0);
+        assert!(
+            observed_cursor < feed_watermark,
+            "observed cursor must not advance past a held completion"
+        );
+
+        drop((wake_tx, effect_tx));
+        tokio::time::timeout(Duration::from_secs(1), handle.loop_handle)
+            .await
+            .expect("runtime loop must exit after channel closure")
+            .expect("runtime loop task should not panic");
     }
 
     /// Regression for #182: a detached wake whose continuation injection fails

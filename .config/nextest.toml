@@ -1,7 +1,8 @@
 # Nextest configuration for meerkat-0.6-cleanups.
 #
-# Retry policy is scoped narrowly: the two known pre-existing flakes are
-# retried once, everything else runs to completion without retries.
+# Retry policy is scoped narrowly: the known pre-existing flakes and the
+# heavy-runtime live-smoke cohort are retried; everything else runs to
+# completion without retries.
 
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
@@ -14,6 +15,16 @@ default-filter = 'not binary(e2e_auth_lane) and not binary(e2e_build_lane) and n
 # envelope opens a fresh TCP connection. This group restores the intended
 # serialization for only that network cohort; unrelated tests stay parallel.
 [test-groups.mob-real-comms-macos]
+max-threads = 1
+
+# The e2e-smoke turbo-s shard cohort (aggregate-load starvation family): the
+# smoke-lane scenarios/suites and the mob flow-runtime smoke tests each spawn
+# real binaries, live provider turns, and multi-agent runtimes. Every shard
+# passes 1/1 in isolation — the observed failures only appear when several of
+# them run beside each other and starve each other's turn/liveness budgets.
+# Serialize the cohort so no two heavy shards share the machine, and keep one
+# retry to absorb residual starvation from unrelated tests outside the group.
+[test-groups.heavy-runtime]
 max-threads = 1
 
 [[profile.fast.overrides]]
@@ -84,6 +95,17 @@ threads-required = "num-cpus"
 # the wrapper binary serializes scenarios through a process-local lock.
 filter = 'binary(e2e_system_lane)'
 threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+# Turbo-s shard membership for the heavy-runtime group (see the group's
+# comment above). `e2e_smoke_lane` carries the smoke scenarios/suites the
+# turbo-s shards select from; `smoke_mob_flow_runtime` is the flow-runtime
+# shard binary. Load-flaky under an aggregate run, passes 1/1 isolated, so a
+# single retry — the group serialization removes intra-cohort contention and
+# the retry absorbs starvation from tests outside the group.
+filter = 'binary(e2e_smoke_lane) or binary(smoke_mob_flow_runtime)'
+test-group = 'heavy-runtime'
+retries = 1
 
 [[profile.default.overrides]]
 # D4 / issue #260: provider_tool_use_boundary race. Reduced from ~20% to ~10%

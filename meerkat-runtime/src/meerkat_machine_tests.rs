@@ -24954,6 +24954,8 @@ struct RuntimeCommitAtomicityStore {
     commit_machine_lifecycle_calls: AtomicUsize,
     unregister_finalization_calls: AtomicUsize,
     delete_ops_lifecycle_calls: AtomicUsize,
+    session_snapshot_loads: AtomicUsize,
+    session_snapshot_commits: AtomicUsize,
     successful_unregister_progress: std::sync::Mutex<Vec<Option<(bool, bool, bool)>>>,
 }
 
@@ -24983,6 +24985,8 @@ impl RuntimeCommitAtomicityStore {
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             unregister_finalization_calls: AtomicUsize::new(0),
             delete_ops_lifecycle_calls: AtomicUsize::new(0),
+            session_snapshot_loads: AtomicUsize::new(0),
+            session_snapshot_commits: AtomicUsize::new(0),
             successful_unregister_progress: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -25131,6 +25135,14 @@ impl RuntimeCommitAtomicityStore {
     fn delete_ops_lifecycle_calls(&self) -> usize {
         self.delete_ops_lifecycle_calls.load(Ordering::SeqCst)
     }
+
+    fn session_snapshot_loads(&self) -> usize {
+        self.session_snapshot_loads.load(Ordering::SeqCst)
+    }
+
+    fn session_snapshot_commits(&self) -> usize {
+        self.session_snapshot_commits.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
@@ -25144,6 +25156,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: crate::store::SessionDelta,
     ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.session_snapshot_commits.fetch_add(1, Ordering::SeqCst);
         self.inner
             .commit_session_snapshot(runtime_id, session_delta)
             .await
@@ -25234,6 +25247,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+        self.session_snapshot_loads.fetch_add(1, Ordering::SeqCst);
         self.inner.load_session_snapshot(runtime_id).await
     }
 
@@ -40092,4 +40106,165 @@ mod prepared_materialization_transactions {
         .expect("retained unregister retry should complete cleanly");
         assert!(!machine.contains_session(&session_id).await);
     }
+}
+
+/// After EVERY successful persisted turn the runtime loop reconciles the
+/// compaction projection outbox — and an EMPTY outbox used to reload the
+/// committed snapshot, copy it unchanged
+/// (`compatibility_checkpoint_after_compaction_finalize` is the identity for
+/// an empty intent set), recommit the identical bytes, and re-project them:
+/// a second full-document cycle per turn, for nothing. The per-turn form
+/// must skip that identity cycle with ZERO additional snapshot loads and
+/// commits while preserving the two obligations the cycle carried: the
+/// executor reconciliation still receives the exact empty authority set
+/// (crash-stage abort), and the SessionStore compatibility projection is
+/// still refreshed — by the caller's own fallback over the in-memory
+/// committed bytes, which `None` routes it onto. The recovery form must keep
+/// the full reload/recommit/re-project heal cycle, because its callers
+/// discard the returned checkpoint and a crash between the runtime commit
+/// and its projection leaves a stale row only that refresh heals.
+#[tokio::test]
+async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commit() {
+    struct RecordingCompactionExecutor {
+        reconcile_intent_counts: Vec<usize>,
+        checkpoint_calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingCompactionExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Internal(
+                "outbox reconciliation never applies a primitive".to_string(),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls += 1;
+            Ok(())
+        }
+
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), CoreExecutorError> {
+            self.reconcile_intent_counts.push(intents.len());
+            Ok(())
+        }
+    }
+
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let runtime_id = LogicalRuntimeId::for_session(&SessionId::new());
+    // Seed a committed snapshot straight into the inner store (bypassing the
+    // counters) so the recovery form below has a document to reload.
+    let seeded =
+        serde_json::to_vec(&meerkat_core::Session::new()).expect("empty session serializes");
+    crate::store::RuntimeStore::commit_session_snapshot(
+        inner.as_ref(),
+        &runtime_id,
+        crate::store::SessionDelta {
+            session_snapshot: seeded.clone(),
+        },
+    )
+    .await
+    .expect("seed snapshot commits");
+
+    let driver: crate::meerkat_machine::SharedDriver = Arc::new(Mutex::new(
+        DriverEntry::Persistent(PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )),
+    ));
+    let mut executor = RecordingCompactionExecutor {
+        reconcile_intent_counts: Vec::new(),
+        checkpoint_calls: 0,
+    };
+
+    // Per-turn form: an empty outbox performs ZERO additional snapshot loads
+    // and commits.
+    let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+        &driver,
+        &mut executor,
+        Vec::new(),
+        crate::runtime_loop::EmptyOutboxCheckpoint::SkipIdentityRefresh,
+    )
+    .await
+    .expect("empty-outbox reconciliation succeeds");
+    assert_eq!(
+        checkpoint, None,
+        "None routes the per-turn caller onto its own in-memory \
+         committed-snapshot projection (the (None, Some) fallback arm)"
+    );
+    assert_eq!(
+        executor.reconcile_intent_counts,
+        vec![0],
+        "PRESERVED OBLIGATION 1: the executor reconciliation still runs with \
+         the exact empty authority set, which durable memory stores use to \
+         abort stages left by a crash before RuntimeStore::atomic_apply"
+    );
+    assert_eq!(
+        executor.checkpoint_calls, 0,
+        "the skip performs no projection of its own; the caller's fallback \
+         projects the exact bytes this run just committed"
+    );
+    assert_eq!(
+        store.session_snapshot_loads(),
+        0,
+        "a persisted turn with an empty outbox must not reload the snapshot \
+         it just committed"
+    );
+    assert_eq!(
+        store.session_snapshot_commits(),
+        0,
+        "a persisted turn with an empty outbox must not recommit the \
+         identical snapshot bytes"
+    );
+
+    // Recovery form, pinned: even an empty outbox reloads, recommits, and
+    // re-projects the authoritative snapshot (the stale-row heal).
+    let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+        &driver,
+        &mut executor,
+        Vec::new(),
+        crate::runtime_loop::EmptyOutboxCheckpoint::RefreshFromStore,
+    )
+    .await
+    .expect("recovery-form reconciliation succeeds");
+    assert_eq!(
+        checkpoint.as_deref(),
+        Some(seeded.as_slice()),
+        "recovery returns the reloaded authoritative snapshot"
+    );
+    assert_eq!(executor.reconcile_intent_counts, vec![0, 0]);
+    assert_eq!(
+        executor.checkpoint_calls, 1,
+        "PRESERVED OBLIGATION 2 (recovery): the reloaded snapshot is \
+         re-projected onto the SessionStore compatibility row"
+    );
+    assert_eq!(store.session_snapshot_loads(), 1);
+    assert_eq!(store.session_snapshot_commits(), 1);
 }

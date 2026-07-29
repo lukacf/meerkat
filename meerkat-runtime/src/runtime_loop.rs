@@ -399,21 +399,49 @@ async fn resolve_runtime_completion_waiters(
     }
 }
 
+/// What an EMPTY compaction outbox obliges the checkpoint refresh to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyOutboxCheckpoint {
+    /// Per-turn boundary path: the caller holds the exact snapshot bytes the
+    /// run just committed and projects them itself when this reconciliation
+    /// returns `None` (the `checkpoint_committed_session_snapshot` fallback),
+    /// so reloading and recommitting the byte-identical document here was a
+    /// second full-document cycle after EVERY successful persisted turn, for
+    /// nothing. Two obligations are still preserved on this path:
+    /// - the executor reconciliation still runs with the exact empty
+    ///   authority set — the durable memory store uses it to abort stages
+    ///   left by a crash before `RuntimeStore::atomic_apply`;
+    /// - the SessionStore compatibility projection is still refreshed, by
+    ///   the caller's own fallback over the in-memory committed bytes, which
+    ///   are exactly what a reload would return under the turn's held driver
+    ///   authority.
+    SkipIdentityRefresh,
+    /// Recovery paths (startup projection recovery, teardown): even an empty
+    /// outbox reloads, recommits, and re-projects the authoritative
+    /// snapshot. A crash between the runtime commit and its SessionStore
+    /// projection leaves a stale compatibility row that only this refresh
+    /// heals, and these callers discard the returned checkpoint, so no
+    /// fallback would project it.
+    RefreshFromStore,
+}
+
 async fn reconcile_compaction_projection_outbox(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    empty_outbox: EmptyOutboxCheckpoint,
 ) -> Result<Option<Vec<u8>>, crate::RuntimeDriverError> {
     let intents = {
         let driver = driver.lock().await;
         driver.load_pending_compaction_projections().await?
     };
-    reconcile_loaded_compaction_projection_outbox(driver, executor, intents).await
+    reconcile_loaded_compaction_projection_outbox(driver, executor, intents, empty_outbox).await
 }
 
-async fn reconcile_loaded_compaction_projection_outbox(
+pub(crate) async fn reconcile_loaded_compaction_projection_outbox(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    empty_outbox: EmptyOutboxCheckpoint,
 ) -> Result<Option<Vec<u8>>, crate::RuntimeDriverError> {
     // Always invoke the executor, including for an empty outbox: the durable
     // memory store uses the exact empty authority set to abort stages left by
@@ -426,6 +454,17 @@ async fn reconcile_loaded_compaction_projection_outbox(
                 "compaction projection reconciliation failed: {error}"
             ))
         })?;
+    if intents.is_empty() && empty_outbox == EmptyOutboxCheckpoint::SkipIdentityRefresh {
+        // Nothing was finalized, so the checkpoint refresh below would load
+        // the committed snapshot, copy it unchanged
+        // (`compatibility_checkpoint_after_compaction_finalize` is the
+        // identity for an empty intent set), recommit the identical bytes,
+        // and re-project them. `None` routes the caller onto its own
+        // in-memory fallback projection instead; see
+        // [`EmptyOutboxCheckpoint::SkipIdentityRefresh`] for the two
+        // obligations this path keeps.
+        return Ok(None);
+    }
     let authoritative_snapshot = {
         let driver = driver.lock().await;
         driver.load_compaction_checkpoint_snapshot().await?
@@ -1486,7 +1525,12 @@ async fn recover_committed_runtime_projections_before_teardown(
     // actor, and asking again after discard turns successful cleanup into an
     // unrecoverable `NotFound`/unsupported failure.
     if !rejected_run_projection_abort_completed {
-        reconcile_compaction_projection_outbox(driver, executor).await?;
+        reconcile_compaction_projection_outbox(
+            driver,
+            executor,
+            EmptyOutboxCheckpoint::RefreshFromStore,
+        )
+        .await?;
     }
 
     // A mixed failed batch has two disjoint public recipient sets: durable
@@ -3613,8 +3657,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 return;
             }
         };
-        let compaction_recovery =
-            reconcile_compaction_projection_outbox(&driver, executor_or_return!()).await;
+        let compaction_recovery = reconcile_compaction_projection_outbox(
+            &driver,
+            executor_or_return!(),
+            EmptyOutboxCheckpoint::RefreshFromStore,
+        )
+        .await;
         if let Err(error) = compaction_recovery {
             drop(startup_authority_guard);
             drop(startup_turn_finalization_guard);
@@ -5023,7 +5071,9 @@ async fn process_queue(
                         }
 
                         let authoritative_checkpoint = match reconcile_compaction_projection_outbox(
-                            driver, executor,
+                            driver,
+                            executor,
+                            EmptyOutboxCheckpoint::SkipIdentityRefresh,
                         )
                         .await
                         {

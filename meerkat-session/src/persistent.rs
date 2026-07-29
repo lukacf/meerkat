@@ -1138,10 +1138,49 @@ fn machine_transcript_relation(
     }
 }
 
+/// Diagnostic call counter for [`session_materialized_at_transcript_revision`].
+///
+/// Named because a field crawl (HomeCore, 2026-07-29: 40+ minutes at 99% of one
+/// core inside this function, zero file I/O, no durable accumulation) could not
+/// be attributed from stacks alone: one sample says WHERE the time goes, not how
+/// many times the caller re-entered. Three armchair mechanisms were proposed and
+/// all three were refuted by measurement, so this counts instead of theorising.
+/// Inert unless `MEERKAT_TRACE_REWRITE_MATERIALIZE` is set.
+static REWRITE_MATERIALIZE_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the rewrite-materialization diagnostic is armed.
+fn rewrite_materialize_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MEERKAT_TRACE_REWRITE_MATERIALIZE").is_some())
+}
+
 fn session_materialized_at_transcript_revision(
     session: &Session,
     revision: &str,
 ) -> Result<Session, SessionError> {
+    if rewrite_materialize_trace_enabled() {
+        // Emitted BEFORE the clone below, so a run that never returns still
+        // shows how far it got and whether the state is growing pass over pass.
+        let calls = REWRITE_MATERIALIZE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        let (revisions, commits) = session
+            .transcript_history_state()
+            .ok()
+            .flatten()
+            .map(|state| (state.revisions.len(), state.commits.len()))
+            .unwrap_or_default();
+        tracing::info!(
+            session_id = %session.id(),
+            target_revision = %revision,
+            call_count = calls,
+            state_revisions = revisions,
+            state_commits = commits,
+            messages = session.messages().len(),
+            "rewrite-materialize: cloning transcript history state"
+        );
+    }
     let mut state = session
         .transcript_history_state()
         .map_err(|err| {
@@ -6138,6 +6177,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Session, SessionError> {
         if commits.is_empty() {
             return Ok(session);
+        }
+        if rewrite_materialize_trace_enabled() {
+            // The decisive split for the field crawl: entered ONCE per member
+            // (a cost problem, bounded by commits x document) or thousands of
+            // times (a re-entry problem, and the driver is the caller). One
+            // instrumented run answers it; stacks alone could not.
+            tracing::info!(
+                session_id = %session.id(),
+                commits = commits.len(),
+                converge_live,
+                materialize_calls_so_far =
+                    REWRITE_MATERIALIZE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                "rewrite-chain: entering normalized rewrite-chain persistence"
+            );
         }
         let previous_authority = load_verified_runtime_checkpoint_authority(
             self.runtime_store.as_ref(),

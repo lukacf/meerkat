@@ -1396,6 +1396,13 @@ impl LlmClient for AnthropicClient {
                             let error = match error_type {
                                 "overloaded_error" => LlmError::ServerOverloaded,
                                 "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
+                                // Anthropic's typed request-size rejection
+                                // (2026-07-29 incident: an over-cap transcript
+                                // fails every turn); the constructor attaches
+                                // the curator-compaction recovery hint.
+                                "request_too_large" => {
+                                    LlmError::request_too_large(error_msg.to_string())
+                                }
                                 "api_error" => LlmError::ServerError {
                                     status: 500,
                                     message: error_msg.to_string(),

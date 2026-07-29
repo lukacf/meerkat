@@ -1538,6 +1538,14 @@ fn model_aware_compaction_config(
     build_threshold_override: Option<std::num::NonZeroU64>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
+    // Arm the byte-aware trigger before any token-threshold early return: the
+    // 2026-07-29 incident (byte-heavy transcript over Anthropic's request cap,
+    // every turn failing request_too_large) is orthogonal to how the token
+    // threshold was resolved. An explicit config cap wins; otherwise the
+    // catalog's approximate per-provider cap applies.
+    if compaction.max_request_bytes.is_none() {
+        compaction.max_request_bytes = meerkat_models::approximate_request_byte_cap(provider);
+    }
     // The per-build override (e.g. a mob profile's `auto_compact_threshold`)
     // wins over the global config knob and model-aware scaling.
     if let Some(threshold) = build_threshold_override {
@@ -7139,6 +7147,64 @@ mod tests {
             model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
 
         assert_eq!(compaction.auto_compact_threshold, 840_000);
+    }
+
+    #[test]
+    fn default_compaction_byte_cap_comes_from_the_provider_catalog() {
+        // With no config knob, the byte-aware trigger is armed from the
+        // catalog's approximate per-provider request-size cap — including on
+        // the early-return paths (explicit token threshold, per-build
+        // override), because the 2026-07-29 request_too_large incident is
+        // orthogonal to how the token threshold was resolved.
+        let config = Config::default();
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::Anthropic,
+            "claude-fable-5",
+            None,
+        );
+        assert_eq!(
+            compaction.max_request_bytes,
+            meerkat_models::approximate_request_byte_cap(Provider::Anthropic)
+        );
+
+        let overridden = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::Anthropic,
+            "claude-fable-5",
+            Some(std::num::NonZeroU64::new(1_234).expect("non-zero")),
+        );
+        assert_eq!(overridden.auto_compact_threshold, 1_234);
+        assert_eq!(
+            overridden.max_request_bytes,
+            meerkat_models::approximate_request_byte_cap(Provider::Anthropic),
+            "the per-build token-threshold override must not disarm the byte trigger"
+        );
+    }
+
+    #[test]
+    fn explicit_compaction_byte_cap_config_wins_over_catalog() {
+        let mut config = Config::default();
+        config.compaction.max_request_bytes = Some(4_000_000);
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::Anthropic,
+            "claude-fable-5",
+            None,
+        );
+
+        assert_eq!(compaction.max_request_bytes, Some(4_000_000));
     }
 
     #[test]

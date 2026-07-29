@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // short demo. In production you'd use a much higher value (e.g. 100_000).
     let compaction_config = CompactionConfig {
         auto_compact_threshold: 2000,
+        max_request_bytes: None,
         recent_turn_budget: 2,
         max_summary_tokens: 1024,
         min_turns_between_compactions: 2,

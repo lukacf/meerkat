@@ -5656,9 +5656,9 @@ mod tests {
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{
-        COMPACTION_SUMMARY_PREFIX, CompactionContext, CompactionCurator, CompactionCuratorError,
-        CompactionDiscard, CompactionResult, CompactionRetained, CompactionSummary,
-        CompactionWindow, Compactor, CuratedCompactionSummary,
+        COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionCurator,
+        CompactionCuratorError, CompactionDiscard, CompactionResult, CompactionRetained,
+        CompactionSummary, CompactionWindow, Compactor, CuratedCompactionSummary,
     };
     use crate::error::{
         AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind, ToolError,
@@ -6562,6 +6562,45 @@ mod tests {
                     })
                     .collect(),
             }
+        }
+    }
+
+    /// Test compactor whose trigger is the BYTE threshold only, evaluated
+    /// through the production-owned `request_byte_trigger_threshold`
+    /// arithmetic (4/5 of the cap) — the same expression `DefaultCompactor`
+    /// uses. History rebuild delegates to [`DiscardingCompactor`].
+    struct ByteCapCompactor {
+        config: CompactionConfig,
+    }
+
+    impl ByteCapCompactor {
+        fn new(max_request_bytes: u64) -> Self {
+            Self {
+                config: CompactionConfig {
+                    max_request_bytes: Some(max_request_bytes),
+                    ..CompactionConfig::default()
+                },
+            }
+        }
+    }
+
+    impl Compactor for ByteCapCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.config
+                .request_byte_trigger_threshold()
+                .is_some_and(|threshold| ctx.estimated_request_bytes >= threshold)
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            DiscardingCompactor::new(0).rebuild_history(messages, summary)
         }
     }
 
@@ -9787,6 +9826,87 @@ mod tests {
                 .iter()
                 .any(|message| message.as_indexable_text().contains("first")),
             "an empty curated summary must leave the original history untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn byte_triggered_curator_compaction_rescues_over_cap_session() {
+        // End-to-end no-LLM rescue for the 2026-07-29 request_too_large
+        // incident class: the seeded transcript's estimated serialized size
+        // exceeds a tiny request-byte cap (while the token thresholds are
+        // nowhere near), the byte-aware trigger fires, and the curator
+        // produces the summary with NO LLM call — the failing client proves
+        // an already-over-cap session never has to fit a summarization
+        // request under the very cap it exceeds.
+        const TEST_CAP_BYTES: u64 = 50_000;
+
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "A".repeat(64_000),
+                },
+            },
+        ])));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        assert!(
+            crate::agent::compact::estimate_request_bytes(session.messages()).unwrap()
+                > TEST_CAP_BYTES,
+            "fixture transcript must start above the test request-byte cap"
+        );
+
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(ByteCapCompactor::new(TEST_CAP_BYTES)))
+            .compaction_curator(curator.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("turn after byte-heavy history".into(), tx)
+            .await
+            .expect("byte-triggered curated compaction should commit and continue the turn");
+
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. })),
+            "the byte trigger must drive compaction to completion"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec!["turn after byte-heavy history".to_string()],
+            "no summarization LLM call may be attempted for an over-cap session"
+        );
+        assert_eq!(
+            curator.seen_windows().len(),
+            1,
+            "the curator should be invoked exactly once for the byte-triggered compaction"
+        );
+        let rebuilt_bytes =
+            crate::agent::compact::estimate_request_bytes(agent.session().messages()).unwrap();
+        assert!(
+            rebuilt_bytes < TEST_CAP_BYTES,
+            "the rescued transcript must fit under the cap, got {rebuilt_bytes} bytes"
+        );
+        assert!(
+            agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user)
+                    if user.transcript_role.is_compaction_summary()
+                        && user.text_content().contains("curated summary")
+            )),
+            "the committed history must carry the curated summary as a typed compaction-summary message"
         );
     }
 

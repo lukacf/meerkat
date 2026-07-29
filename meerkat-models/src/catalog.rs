@@ -242,6 +242,36 @@ pub fn infer_provider(model: &str) -> Option<Provider> {
     canonical().infer_provider(model)
 }
 
+/// Approximate per-provider HTTP request-size cap in bytes.
+///
+/// This is an API-ENDPOINT property, not a per-model capability: every model
+/// behind a provider's messages endpoint shares the same request-body cap,
+/// which is why the value lives here as provider data rather than duplicated
+/// across the per-model capability rows. It arms the byte-aware compaction
+/// trigger (fires at 4/5 of the cap) so a byte-heavy transcript compacts
+/// BEFORE the provider starts rejecting every turn — the 2026-07-29
+/// household incident grew an inline-media transcript past Anthropic's cap
+/// and failed terminally with `request_too_large` while the token trigger
+/// never came close.
+///
+/// All values are APPROXIMATE and deliberately conservative: providers do
+/// not contractually pin these limits, and the config knob
+/// (`compaction.max_request_bytes`) overrides them.
+///
+/// - Anthropic: the Messages API rejects requests in the ~9-10 MB class
+///   (observed in the incident); 9 MB is the conservative bound.
+/// - OpenAI: the vision/Responses guidance documents a ~50 MB total payload
+///   limit per request.
+/// - Gemini: the API documents a ~20 MB total request size for inline data.
+pub fn approximate_request_byte_cap(provider: Provider) -> Option<u64> {
+    match provider {
+        Provider::Anthropic => Some(9_000_000),
+        Provider::OpenAI => Some(50_000_000),
+        Provider::Gemini => Some(20_000_000),
+        Provider::SelfHosted | Provider::Other => None,
+    }
+}
+
 /// Return provider-grouped catalog data with default model IDs.
 ///
 /// Built once via `OnceLock`, returned as a `&'static` slice.
@@ -288,4 +318,30 @@ pub fn global_default_model() -> &'static str {
 /// API keys are present) consults this order instead of hand-coding its own.
 pub fn provider_priority() -> &'static [Provider] {
     PROVIDER_PRIORITY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approximate_request_byte_caps_cover_the_major_providers() {
+        // Every cataloged provider must have an armed byte cap; providers
+        // outside the catalog (self-hosted endpoints have operator-defined
+        // limits) must stay None so the byte trigger remains opt-in there.
+        for &provider in CATALOG_PROVIDERS {
+            assert!(
+                approximate_request_byte_cap(provider).is_some(),
+                "cataloged provider {provider:?} must carry a request-byte cap"
+            );
+        }
+        assert_eq!(approximate_request_byte_cap(Provider::SelfHosted), None);
+        assert_eq!(approximate_request_byte_cap(Provider::Other), None);
+        // Pin the incident-class value: Anthropic's cap is the one the
+        // 2026-07-29 household transcript crossed.
+        assert_eq!(
+            approximate_request_byte_cap(Provider::Anthropic),
+            Some(9_000_000)
+        );
+    }
 }

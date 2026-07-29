@@ -29,9 +29,10 @@ pub use meerkat_core::model_profile::catalog::{
 
 pub use capabilities::{all_capabilities, capabilities_for};
 pub use catalog::{
-    allowed_models, canonical, catalog, catalog_providers, default_image_generation_model,
-    default_model, entry_for, global_default_model, image_generation_model,
-    image_generation_provider_defaults, image_generation_provider_for_model, infer_provider,
-    provider_defaults, provider_names, provider_priority,
+    allowed_models, approximate_request_byte_cap, canonical, catalog, catalog_providers,
+    default_image_generation_model, default_model, entry_for, global_default_model,
+    image_generation_model, image_generation_provider_defaults,
+    image_generation_provider_for_model, infer_provider, provider_defaults, provider_names,
+    provider_priority,
 };
 pub use profile::{inline_video_support_for, profile_for};

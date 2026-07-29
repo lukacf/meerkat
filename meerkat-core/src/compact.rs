@@ -34,6 +34,18 @@ pub struct CompactionContext {
     pub message_count: usize,
     /// Estimated history tokens (JSON bytes / 4).
     pub estimated_history_tokens: u64,
+    /// Estimated serialized size in bytes of the transcript as an LLM
+    /// request (content byte lengths, inline media payloads included, times
+    /// a documented safety factor — see
+    /// `crate::agent::compact::estimate_request_bytes`).
+    ///
+    /// Providers cap requests in BYTES, not tokens. A byte-heavy/token-light
+    /// transcript (2026-07-29 household incident: inline media pushed a
+    /// transcript past Anthropic's request-size cap, failing every turn with
+    /// `request_too_large` while the token trigger stayed far below its
+    /// threshold) must be visible to trigger decisions in the same unit the
+    /// provider enforces.
+    pub estimated_request_bytes: u64,
     /// Session-scoped pre-LLM boundary index used by the cadence guard.
     ///
     /// This is the latest successful compaction boundary or failed compaction
@@ -153,11 +165,29 @@ impl CompactionRetained {
     }
 }
 
+/// Fraction of `CompactionConfig::max_request_bytes` at which the byte-aware
+/// trigger fires, mirroring the model-aware token default (4/5 of the model
+/// context window). The remaining 1/5 is headroom for the active turn's new
+/// content plus request components the estimate cannot see (tool schemas,
+/// provider parameters).
+const REQUEST_BYTE_TRIGGER_NUMERATOR: u64 = 4;
+const REQUEST_BYTE_TRIGGER_DENOMINATOR: u64 = 5;
+
 /// Configuration for the default compactor implementation.
 #[derive(Debug, Clone)]
 pub struct CompactionConfig {
     /// Compaction triggers when `last_input_tokens >= auto_compact_threshold`.
     pub auto_compact_threshold: u64,
+    /// Provider request-size cap in bytes, when known.
+    ///
+    /// `None` disables the byte-aware trigger (pre-incident behavior). When
+    /// set, compaction also triggers when the estimated serialized request
+    /// size crosses [`CompactionConfig::request_byte_trigger_threshold`]
+    /// (4/5 of this cap). The token trigger alone missed the 2026-07-29
+    /// household incident: providers cap requests in bytes, and byte-heavy /
+    /// token-light content (inline media) crosses the byte cap first, after
+    /// which every turn fails terminally with `request_too_large`.
+    pub max_request_bytes: Option<u64>,
     /// Number of recent complete turns to retain after compaction.
     pub recent_turn_budget: usize,
     /// Maximum tokens for the compaction summary LLM response.
@@ -166,10 +196,24 @@ pub struct CompactionConfig {
     pub min_turns_between_compactions: u32,
 }
 
+impl CompactionConfig {
+    /// Effective byte-trigger threshold: 4/5 of `max_request_bytes`, or
+    /// `None` when no request-size cap is configured.
+    ///
+    /// This is the one owner of the byte-trigger arithmetic so every
+    /// compactor evaluates the same fraction of the same cap.
+    pub fn request_byte_trigger_threshold(&self) -> Option<u64> {
+        self.max_request_bytes.map(|cap| {
+            cap.saturating_mul(REQUEST_BYTE_TRIGGER_NUMERATOR) / REQUEST_BYTE_TRIGGER_DENOMINATOR
+        })
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             auto_compact_threshold: 100_000,
+            max_request_bytes: None,
             recent_turn_budget: 4,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
@@ -324,5 +368,20 @@ mod tests {
         let summary = CuratedCompactionSummary::new("curated summary").unwrap();
         assert_eq!(summary.as_str(), "curated summary");
         assert_eq!(summary.into_string(), "curated summary");
+    }
+
+    #[test]
+    fn request_byte_trigger_threshold_is_four_fifths_of_the_cap() {
+        let config = CompactionConfig {
+            max_request_bytes: Some(10_000_000),
+            ..CompactionConfig::default()
+        };
+        assert_eq!(config.request_byte_trigger_threshold(), Some(8_000_000));
+
+        // Default None keeps the byte trigger disabled (pre-incident behavior).
+        assert_eq!(
+            CompactionConfig::default().request_byte_trigger_threshold(),
+            None
+        );
     }
 }

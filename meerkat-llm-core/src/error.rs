@@ -79,7 +79,42 @@ pub enum LlmError {
     IncompleteResponse { message: String },
 }
 
+/// Recovery hint appended to request-too-large provider rejections.
+///
+/// A transcript over the provider's request-size cap cannot self-rescue
+/// through the default LLM-backed compactor: the summarization call must fit
+/// under the same byte cap that is already being exceeded, so retrying the
+/// turn (or retrying compaction through the LLM) fails identically. The one
+/// recovery path that works is host-side: curator-driven compaction
+/// (`meerkat_core::CompactionCurator` substitutes summary production without
+/// any LLM call), plus arming `compaction.max_request_bytes` so the
+/// byte-aware trigger compacts before the cap next time. Learned from the
+/// 2026-07-29 household incident, where an identity failed every turn
+/// terminally with `request_too_large`.
+pub const REQUEST_TOO_LARGE_RECOVERY_HINT: &str = "request exceeds the provider request-size cap; \
+retries cannot succeed until the transcript shrinks. Recovery: run curator-driven compaction \
+(CompactionCurator produces the summary without an LLM call, so an already-over-cap session can \
+still compact), and set compaction.max_request_bytes so the byte-aware trigger compacts before \
+the cap";
+
 impl LlmError {
+    /// Construct the request-too-large class of `InvalidRequest`, carrying
+    /// the curator-compaction recovery hint in the message. The taxonomy is
+    /// deliberately unchanged (`InvalidRequest` already fits and feeds the
+    /// generated schemas); only the message is extended.
+    pub fn request_too_large(message: String) -> Self {
+        Self::InvalidRequest {
+            message: format!("{message} ({REQUEST_TOO_LARGE_RECOVERY_HINT})"),
+        }
+    }
+
+    /// Whether an error body advertises the request-too-large class even when
+    /// the HTTP status is not 413 (e.g. Anthropic's typed
+    /// `"type":"request_too_large"` error code).
+    fn body_signals_request_too_large(body: &str) -> bool {
+        body.contains("request_too_large")
+    }
+
     /// Whether this error should trigger a retry
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -106,10 +141,20 @@ impl LlmError {
             401 => Self::AuthenticationFailed { message },
             403 => Self::InvalidApiKey,
             404 => Self::ModelNotFound { model: message },
+            // 413 is the request-too-large class (2026-07-29 incident:
+            // an over-cap transcript fails every turn terminally); attach
+            // the curator-compaction recovery hint.
+            413 => Self::request_too_large(message),
             429 => Self::RateLimited { retry_after_ms },
             503 => Self::ServerOverloaded,
             s if s >= 500 => Self::ServerError { status: s, message },
-            s if s >= 400 => Self::InvalidRequest { message },
+            s if s >= 400 => {
+                if Self::body_signals_request_too_large(&message) {
+                    Self::request_too_large(message)
+                } else {
+                    Self::InvalidRequest { message }
+                }
+            }
             _ => Self::Unknown { message },
         }
     }
@@ -441,6 +486,55 @@ mod tests {
     fn test_from_http_status_non_429_ignores_retry_after() {
         let err = LlmError::from_http_status(500, "server error".to_string(), Some(5000));
         assert!(matches!(err, LlmError::ServerError { status: 500, .. }));
+    }
+
+    #[test]
+    fn test_http_413_maps_to_invalid_request_with_curator_recovery_hint() {
+        // The 2026-07-29 incident class: the typed error must stay
+        // InvalidRequest (non-retryable — retrying an over-cap request can
+        // never succeed) while the message names the recovery path.
+        let err = LlmError::from_http_status(413, "Request body too large".to_string(), None);
+        let LlmError::InvalidRequest { message } = &err else {
+            panic!("413 must map to InvalidRequest, got {err:?}");
+        };
+        assert!(message.contains("Request body too large"));
+        assert!(
+            message.contains("CompactionCurator"),
+            "request-too-large errors must carry the curator recovery hint: {message}"
+        );
+        assert!(!err.is_retryable());
+
+        let reason = err.failure_reason();
+        let LlmFailureReason::ProviderError(provider_error) = reason else {
+            panic!("expected provider error reason");
+        };
+        assert_eq!(provider_error.kind, LlmProviderErrorKind::InvalidRequest);
+        assert!(
+            provider_error.details["message"]
+                .as_str()
+                .expect("message detail")
+                .contains("CompactionCurator"),
+            "the hint must survive into the typed failure-reason details"
+        );
+    }
+
+    #[test]
+    fn test_request_too_large_body_marker_maps_hint_without_413_status() {
+        // Anthropic advertises the class as a typed error code in the body;
+        // the hint must attach even when the fronting status is a plain 400.
+        let body = r#"{"type":"error","error":{"type":"request_too_large","message":"Request body too large"}}"#;
+        let err = LlmError::from_http_status(400, body.to_string(), None);
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("CompactionCurator")),
+            "body-signaled request_too_large must carry the recovery hint: {err:?}"
+        );
+
+        // An ordinary 400 stays hint-free.
+        let plain = LlmError::from_http_status(400, "bad field".to_string(), None);
+        assert!(
+            matches!(&plain, LlmError::InvalidRequest { message } if !message.contains("CompactionCurator")),
+            "ordinary invalid requests must not claim the request-too-large recovery path"
+        );
     }
 
     #[test]

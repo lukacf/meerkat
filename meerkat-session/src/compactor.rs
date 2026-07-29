@@ -139,29 +139,41 @@ impl Compactor for DefaultCompactor {
             return false;
         }
 
-        // Trigger on either threshold. `last_input_tokens` is the
+        // Trigger on any crossing threshold. `last_input_tokens` is the
         // authoritative provider-reported cost of the last LLM call;
         // `estimated_history_tokens` is the fallback used when the provider
         // never reports usage (voice-only sessions can run for hours
         // without an agent-loop turn, so the fallback is what keeps history
-        // bounded). Both paths are traced so operators can see which branch
-        // fired in production.
+        // bounded). The byte trigger measures the transcript in the unit
+        // providers actually enforce: the 2026-07-29 household incident grew
+        // a byte-heavy/token-light transcript past Anthropic's request-size
+        // cap and failed every turn with `request_too_large` while both
+        // token triggers stayed far below threshold. All paths are traced so
+        // operators can see which branch fired in production.
         let input_trigger = ctx.last_input_tokens >= self.config.auto_compact_threshold;
         let history_trigger = ctx.estimated_history_tokens >= self.config.auto_compact_threshold;
-        if input_trigger || history_trigger {
+        let byte_trigger = self
+            .config
+            .request_byte_trigger_threshold()
+            .is_some_and(|threshold| ctx.estimated_request_bytes >= threshold);
+        if input_trigger || history_trigger || byte_trigger {
             tracing::trace!(
                 input_tokens = ctx.last_input_tokens,
                 estimated_history_tokens = ctx.estimated_history_tokens,
+                estimated_request_bytes = ctx.estimated_request_bytes,
                 threshold = self.config.auto_compact_threshold,
+                byte_threshold = self.config.request_byte_trigger_threshold(),
                 branch = if input_trigger {
                     "last_input_tokens"
-                } else {
+                } else if history_trigger {
                     "estimated_history_tokens_fallback"
+                } else {
+                    "estimated_request_bytes"
                 },
                 "compaction trigger fired",
             );
         }
-        input_trigger || history_trigger
+        input_trigger || history_trigger || byte_trigger
     }
 
     fn prepare_for_summarization(&self, messages: &[Message]) -> Vec<Message> {
@@ -302,6 +314,7 @@ mod tests {
     fn make_config() -> CompactionConfig {
         CompactionConfig {
             auto_compact_threshold: 100_000,
+            max_request_bytes: None,
             recent_turn_budget: 2,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
@@ -389,6 +402,7 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 0,
         };
@@ -402,6 +416,7 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 7, // Only 2 boundaries since last compaction, threshold is 3
         };
@@ -415,6 +430,7 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 1,
         };
@@ -430,6 +446,7 @@ mod tests {
             last_input_tokens: 100_000,
             message_count: 50,
             estimated_history_tokens: 50_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
         };
@@ -440,6 +457,7 @@ mod tests {
             last_input_tokens: 50_000,
             message_count: 50,
             estimated_history_tokens: 100_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
         };
@@ -458,6 +476,7 @@ mod tests {
             last_input_tokens: 0,
             message_count: 200,
             estimated_history_tokens: 150_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 42,
         };
@@ -479,10 +498,104 @@ mod tests {
             last_input_tokens: 50_000,
             message_count: 20,
             estimated_history_tokens: 50_000,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
         };
         assert!(!c.should_compact(&ctx));
+    }
+
+    #[test]
+    fn test_byte_trigger_fires_below_token_threshold_on_byte_heavy_transcript() {
+        // The 2026-07-29 incident shape: inline media dominates request BYTES
+        // while both token measures sit far below the token threshold. The
+        // byte trigger must fire at 4/5 of the configured cap.
+        let c = DefaultCompactor::new(CompactionConfig {
+            max_request_bytes: Some(9_000_000),
+            ..make_config()
+        });
+        let ctx = CompactionContext {
+            last_input_tokens: 10_000,
+            message_count: 40,
+            estimated_history_tokens: 12_000,
+            estimated_request_bytes: 7_200_000, // exactly 4/5 of the 9 MB cap
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
+        };
+        assert!(
+            c.should_compact(&ctx),
+            "byte trigger must fire on a byte-heavy transcript before any token threshold"
+        );
+
+        // One byte below the 4/5 threshold must not fire.
+        let below = CompactionContext {
+            estimated_request_bytes: 7_199_999,
+            ..ctx
+        };
+        assert!(!c.should_compact(&below));
+    }
+
+    #[test]
+    fn test_token_trigger_unchanged_when_byte_trigger_unset() {
+        // With max_request_bytes unset (the default), even an absurd byte
+        // estimate must not fire — pre-incident behavior is preserved.
+        let c = DefaultCompactor::new(make_config());
+        let ctx = CompactionContext {
+            last_input_tokens: 50_000,
+            message_count: 50,
+            estimated_history_tokens: 50_000,
+            estimated_request_bytes: u64::MAX,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
+        };
+        assert!(
+            !c.should_compact(&ctx),
+            "an unset byte cap must leave the trigger decision to the token thresholds"
+        );
+
+        // And the token trigger still fires exactly as before.
+        let token_crossing = CompactionContext {
+            last_input_tokens: 100_000,
+            ..ctx
+        };
+        assert!(c.should_compact(&token_crossing));
+    }
+
+    #[test]
+    fn test_both_triggers_set_first_crossing_wins() {
+        // With both thresholds armed, whichever crosses first fires — the
+        // triggers are independent, not conjunctive.
+        let c = DefaultCompactor::new(CompactionConfig {
+            max_request_bytes: Some(9_000_000),
+            ..make_config()
+        });
+        let neither = CompactionContext {
+            last_input_tokens: 50_000,
+            message_count: 50,
+            estimated_history_tokens: 50_000,
+            estimated_request_bytes: 1_000_000,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
+        };
+        assert!(!c.should_compact(&neither));
+
+        let bytes_first = CompactionContext {
+            estimated_request_bytes: 8_000_000,
+            ..neither.clone()
+        };
+        assert!(
+            c.should_compact(&bytes_first),
+            "byte crossing alone must fire when both triggers are armed"
+        );
+
+        let tokens_first = CompactionContext {
+            last_input_tokens: 100_000,
+            ..neither
+        };
+        assert!(
+            c.should_compact(&tokens_first),
+            "token crossing alone must fire when both triggers are armed"
+        );
     }
 
     #[test]

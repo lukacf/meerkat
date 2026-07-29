@@ -1078,7 +1078,8 @@ mod scenario_10_memory {
         // Low-threshold compactor to trigger compaction quickly
         let compactor_config = CompactionConfig {
             auto_compact_threshold: 100, // Very low: trigger after ~100 input tokens
-            recent_turn_budget: 1,       // Keep only 1 recent turn
+            max_request_bytes: None,
+            recent_turn_budget: 1, // Keep only 1 recent turn
             max_summary_tokens: 256,
             min_turns_between_compactions: 1,
         };

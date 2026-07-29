@@ -242,6 +242,32 @@ fn validate_compaction_rebuild(
 /// (which inflate the estimate by ~200x).
 const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
 
+/// Safety factor (numerator/denominator = 1.2×) applied to summed content
+/// bytes when estimating the serialized request size.
+///
+/// The exact request size is only known at provider request-build time (each
+/// provider crate shapes its own body), and re-serializing multi-megabyte
+/// inline media on every pre-LLM boundary would double the hot-path cost the
+/// estimator exists to avoid. Content lengths are therefore summed directly
+/// and inflated by 20% to cover the JSON envelope (keys, quoting, string
+/// escaping) plus request components outside the transcript (tool schemas,
+/// provider parameters). Base64 payloads never need JSON escaping, so on the
+/// media-dominated transcripts this estimate protects against (2026-07-29
+/// household incident: inline media crossed Anthropic's request-size cap and
+/// every turn failed with `request_too_large`) the raw sum is within a few
+/// percent of the wire size and the factor is pure margin.
+const REQUEST_BYTE_SAFETY_NUMERATOR: u64 = 6;
+const REQUEST_BYTE_SAFETY_DENOMINATOR: u64 = 5;
+
+/// Combined single-walk estimate of transcript pressure in both units the
+/// runtime triggers on: tokens (model context window) and serialized request
+/// bytes (provider request-size cap).
+struct TranscriptPressure {
+    tokens: u64,
+    /// Safety-adjusted serialized request size estimate.
+    request_bytes: u64,
+}
+
 fn estimate_inline_video_tokens(data: &str) -> u64 {
     let len = data.len() as u64;
     if len > 0 { (len / 4).max(1) } else { 0 }
@@ -252,20 +278,32 @@ fn estimate_video_duration_tokens(duration_ms: u64) -> u64 {
     duration_ms.saturating_mul(300).div_ceil(1000)
 }
 
-/// Estimate token count from message history.
+/// Estimate a content-block slice in both trigger units, returning
+/// `(tokens, content_bytes)`.
 ///
-/// Text content uses `json_bytes / 4` as a rough heuristic.
-/// Image blocks use a fixed per-image estimate instead of serializing
-/// the base64 payload (which would massively overcount).
-/// Estimate tokens for a content-block slice, using fixed image/video
-/// heuristics instead of counting raw base64 payload bytes (which would
-/// massively overcount). Text blocks use `text_projection().len() / 4`.
-fn estimate_content_block_tokens(blocks: &[crate::types::ContentBlock]) -> u64 {
+/// Tokens use fixed image/video heuristics instead of counting raw base64
+/// payload bytes (which would massively overcount); text blocks use
+/// `text_projection().len() / 4`. Content bytes count what actually rides the
+/// wire — inline media payloads at full base64 length (the byte-heavy /
+/// token-light content class from the 2026-07-29 request_too_large incident)
+/// and text projections for everything else. Blob-backed media count only
+/// their reference projection: the payload a later hydration pass inlines is
+/// not visible here without an async blob-store read.
+fn estimate_content_blocks(blocks: &[crate::types::ContentBlock]) -> (u64, u64) {
     let mut tokens: u64 = 0;
+    let mut content_bytes: u64 = 0;
     for block in blocks {
         match block {
+            crate::types::ContentBlock::Image {
+                data: crate::types::ImageData::Inline { data },
+                ..
+            } => {
+                tokens += IMAGE_TOKEN_ESTIMATE;
+                content_bytes += data.len() as u64;
+            }
             crate::types::ContentBlock::Image { .. } => {
                 tokens += IMAGE_TOKEN_ESTIMATE;
+                content_bytes += block.text_projection().len() as u64;
             }
             crate::types::ContentBlock::Video {
                 duration_ms,
@@ -274,29 +312,49 @@ fn estimate_content_block_tokens(blocks: &[crate::types::ContentBlock]) -> u64 {
             } => {
                 tokens += estimate_inline_video_tokens(data)
                     .max(estimate_video_duration_tokens(*duration_ms));
+                content_bytes += data.len() as u64;
             }
-            crate::types::ContentBlock::Video { duration_ms, .. } => {
+            crate::types::ContentBlock::Video {
+                duration_ms,
+                data: crate::types::VideoData::Uri { uri },
+                ..
+            } => {
                 tokens += estimate_video_duration_tokens(*duration_ms);
+                content_bytes += uri.len() as u64;
             }
             _ => {
                 let len = block.text_projection().len() as u64;
                 tokens += if len > 0 { (len / 4).max(1) } else { 0 };
+                content_bytes += len;
             }
         }
     }
-    tokens
+    (tokens, content_bytes)
 }
 
-pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
+/// Estimate transcript pressure in both trigger units with one walk.
+///
+/// Token and request-byte estimates share the same traversal (and the same
+/// per-message JSON serialization for assistant/system messages) so adding
+/// the byte estimate did not add a second full serialization pass to the
+/// per-boundary compaction check.
+fn estimate_transcript_pressure(
+    messages: &[Message],
+) -> Result<TranscriptPressure, CompactionError> {
     let mut tokens: u64 = 0;
+    let mut content_bytes: u64 = 0;
     for msg in messages {
         match msg {
             Message::User(u) => {
-                tokens += estimate_content_block_tokens(&u.content);
+                let (block_tokens, block_bytes) = estimate_content_blocks(&u.content);
+                tokens += block_tokens;
+                content_bytes += block_bytes;
             }
             Message::ToolResults { results, .. } => {
                 for r in results {
-                    tokens += estimate_content_block_tokens(&r.content);
+                    let (block_tokens, block_bytes) = estimate_content_blocks(&r.content);
+                    tokens += block_tokens;
+                    content_bytes += block_bytes;
                 }
             }
             // System notices can carry image/video content blocks inside
@@ -309,17 +367,21 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                 if let Some(body) = notice.body.as_deref() {
                     let len = body.len() as u64;
                     tokens += if len > 0 { (len / 4).max(1) } else { 0 };
+                    content_bytes += len;
                 }
                 for block in &notice.blocks {
                     match block {
                         crate::types::SystemNoticeBlock::Comms { content, .. }
                         | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
-                            tokens += estimate_content_block_tokens(content);
+                            let (block_tokens, block_bytes) = estimate_content_blocks(content);
+                            tokens += block_tokens;
+                            content_bytes += block_bytes;
                         }
                         other => {
                             let json = serde_json::to_string(other)
                                 .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
                             tokens += json.len() as u64 / 4;
+                            content_bytes += json.len() as u64;
                         }
                     }
                 }
@@ -329,10 +391,35 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                 let json = serde_json::to_string(other)
                     .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
                 tokens += json.len() as u64 / 4;
+                content_bytes += json.len() as u64;
             }
         }
     }
-    Ok(tokens)
+    Ok(TranscriptPressure {
+        tokens,
+        request_bytes: content_bytes.saturating_mul(REQUEST_BYTE_SAFETY_NUMERATOR)
+            / REQUEST_BYTE_SAFETY_DENOMINATOR,
+    })
+}
+
+/// Estimate token count from message history.
+///
+/// Text content uses `json_bytes / 4` as a rough heuristic.
+/// Image blocks use a fixed per-image estimate instead of serializing
+/// the base64 payload (which would massively overcount).
+pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
+    Ok(estimate_transcript_pressure(messages)?.tokens)
+}
+
+/// Estimate the serialized request size in bytes for this message history.
+///
+/// This is the byte-trigger counterpart of [`estimate_tokens`]: providers
+/// reject oversized requests in bytes (`request_too_large`), so the
+/// compaction check needs the transcript measured in the unit the provider
+/// enforces. The estimate sums content byte lengths — inline media at full
+/// base64 length — and applies the documented 1.2× envelope safety factor.
+pub fn estimate_request_bytes(messages: &[Message]) -> Result<u64, CompactionError> {
+    Ok(estimate_transcript_pressure(messages)?.request_bytes)
 }
 
 /// Build a `CompactionContext` from current agent state.
@@ -345,18 +432,20 @@ pub fn build_compaction_context(
     last_compaction_boundary_index: Option<u64>,
     session_boundary_index: u64,
 ) -> CompactionContext {
-    let estimated_history_tokens = match estimate_tokens(messages) {
-        Ok(tokens) => tokens,
-        Err(err) => {
-            tracing::warn!("failed to estimate history tokens for compaction context: {err}");
-            0
-        }
-    };
+    let (estimated_history_tokens, estimated_request_bytes) =
+        match estimate_transcript_pressure(messages) {
+            Ok(pressure) => (pressure.tokens, pressure.request_bytes),
+            Err(err) => {
+                tracing::warn!("failed to estimate history pressure for compaction context: {err}");
+                (0, 0)
+            }
+        };
 
     CompactionContext {
         last_input_tokens,
         message_count: messages.len(),
         estimated_history_tokens,
+        estimated_request_bytes,
         last_compaction_boundary_index,
         session_boundary_index,
     }
@@ -880,6 +969,41 @@ mod tests {
 
         // One inline image => IMAGE_TOKEN_ESTIMATE, not ~1M tokens from base64.
         assert_eq!(estimate_tokens(&messages).unwrap(), IMAGE_TOKEN_ESTIMATE);
+    }
+
+    #[test]
+    fn estimate_request_bytes_counts_inline_media_at_full_payload_length() {
+        use crate::types::ImageData;
+        // The 2026-07-29 incident class: byte-heavy, token-light. The token
+        // estimate must keep its fixed per-image heuristic while the byte
+        // estimate counts the full base64 payload (plus the 1.2x envelope
+        // safety factor), because the provider request cap is enforced on
+        // exactly those bytes.
+        let payload = "A".repeat(4_000_000);
+        let messages = vec![Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline { data: payload },
+            },
+        ]))];
+
+        assert_eq!(estimate_tokens(&messages).unwrap(), IMAGE_TOKEN_ESTIMATE);
+        assert_eq!(
+            estimate_request_bytes(&messages).unwrap(),
+            4_000_000 * REQUEST_BYTE_SAFETY_NUMERATOR / REQUEST_BYTE_SAFETY_DENOMINATOR
+        );
+    }
+
+    #[test]
+    fn build_compaction_context_populates_request_byte_estimate() {
+        let messages = vec![Message::User(UserMessage::text("hello bytes"))];
+        let ctx = build_compaction_context(&messages, 42, None, 7);
+        assert_eq!(
+            ctx.estimated_request_bytes,
+            estimate_request_bytes(&messages).unwrap(),
+            "the loop-facing context must carry the same byte estimate the estimator produces"
+        );
+        assert!(ctx.estimated_request_bytes > 0);
     }
 
     #[test]

@@ -650,6 +650,7 @@ impl SessionAgent for CompactionSessionAgent {
             last_input_tokens: 0,
             message_count: self.session.messages().len(),
             estimated_history_tokens: 0,
+            estimated_request_bytes: 0,
             last_compaction_boundary_index: None,
             session_boundary_index: self.boundary_index,
         };

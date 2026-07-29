@@ -3507,14 +3507,21 @@ impl MeerkatMachine {
         let persist_lifecycle_on_commit =
             staged_registration.revived_stopped_session() || pending_revival_lifecycle_persist;
         let prepublish = async {
-            let executor = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                executor_factory(witness.clone())
-            }))
-            .map_err(|_| {
-                RuntimeDriverError::Internal(format!(
-                    "executor factory panicked while attaching session {session_id}"
-                ))
-            })?;
+            // Panic boundary (see `crate::panic_boundary` for the 2026-07-29
+            // incident WHY): this factory runs the surface's agent/session
+            // build on the provisioning path — a swallowed payload here left
+            // a re-provision loop burning at 99% CPU with nothing in any log.
+            let executor = crate::panic_boundary::run_boundary_guarded(
+                &self.boundary_panic_log_gate,
+                "executor-factory",
+                &session_id,
+                |detail| {
+                    format!(
+                        "executor factory panicked while attaching session {session_id}: {detail}"
+                    )
+                },
+                || executor_factory(witness.clone()),
+            )?;
             let machine_managed_post_stop_unregister =
                 executor.machine_managed_post_stop_unregister();
             let post_stop_cleanup_handle = if machine_managed_post_stop_unregister {
@@ -4234,15 +4241,21 @@ impl MeerkatMachine {
                         witness.session_id()
                     )));
                 };
-                let publication = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    on_committed(witness)
-                }))
-                .map_err(|_| {
-                    RuntimeDriverError::Internal(format!(
-                        "surface activation panicked while committing attachment for session {}",
-                        witness.session_id()
-                    ))
-                })
+                // Panic boundary (see `crate::panic_boundary` for the
+                // 2026-07-29 incident WHY): recover + log the payload once
+                // per distinct payload and carry it in the typed error.
+                let publication = crate::panic_boundary::run_boundary_guarded(
+                    &self.boundary_panic_log_gate,
+                    "surface-activation",
+                    witness.session_id(),
+                    |detail| {
+                        format!(
+                            "surface activation panicked while committing attachment for session {}: {detail}",
+                            witness.session_id()
+                        )
+                    },
+                    || on_committed(witness),
+                )
                 .and_then(std::convert::identity);
                 if let Err(error) = publication {
                     attachment.serving_release = Some(serving_release);
@@ -4395,15 +4408,21 @@ impl MeerkatMachine {
                     witness.session_id()
                 )));
             };
-            let publication = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                on_committed(witness, session_mutation_gate)
-            }))
-            .map_err(|_| {
-                RuntimeDriverError::Internal(format!(
-                    "surface publication panicked for retained attachment {}",
-                    witness.session_id()
-                ))
-            })
+            // Panic boundary (see `crate::panic_boundary` for the 2026-07-29
+            // incident WHY): recover + log the payload once per distinct
+            // payload and carry it in the typed error.
+            let publication = crate::panic_boundary::run_boundary_guarded(
+                &self.boundary_panic_log_gate,
+                "surface-publication",
+                witness.session_id(),
+                |detail| {
+                    format!(
+                        "surface publication panicked for retained attachment {}: {detail}",
+                        witness.session_id()
+                    )
+                },
+                || on_committed(witness, session_mutation_gate),
+            )
             .and_then(std::convert::identity);
             if let Err(error) = publication {
                 // Publication failed before the serving token was consumed.

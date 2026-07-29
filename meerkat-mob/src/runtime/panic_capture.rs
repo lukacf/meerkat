@@ -34,20 +34,14 @@ use crate::MobId;
 use crate::error::MobError;
 use crate::ids::AgentIdentity;
 use futures::FutureExt;
-use std::collections::BTreeMap;
+use meerkat_core::panic_payload::PanicPayloadLogGate;
 use std::future::Future;
-use std::sync::Mutex;
 
-/// Best-effort human-readable panic payload: `&str` and `String` payloads
-/// (everything `panic!`/`assert!` produce) are recovered verbatim; anything
-/// else (a `panic_any` value) degrades to a fixed marker rather than
-/// disappearing.
+/// Best-effort human-readable panic payload; thin delegation to the shared
+/// [`meerkat_core::panic_payload`] helper (also used by the meerkat-runtime
+/// attachment boundaries in `meerkat-runtime/src/panic_boundary.rs`).
 pub(super) fn panic_payload_detail(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|value| (*value).to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "non-string panic payload".to_string())
+    meerkat_core::panic_payload::panic_payload_detail(payload)
 }
 
 /// Once-per-distinct-payload panic log gate, keyed by member identity.
@@ -61,33 +55,20 @@ pub(super) fn panic_payload_detail(payload: &(dyn std::any::Any + Send)) -> Stri
 /// the next distinct incident logs fresh.
 #[derive(Debug, Default)]
 pub(super) struct SpawnPanicLogLedger {
-    last_payload_by_identity: Mutex<BTreeMap<AgentIdentity, String>>,
+    gate: PanicPayloadLogGate,
 }
 
 impl SpawnPanicLogLedger {
     /// Record the payload for this identity; `true` when it differs from the
     /// previously recorded one (i.e. this transition should be logged).
     fn first_sighting(&self, identity: &AgentIdentity, detail: &str) -> bool {
-        let mut guard = self
-            .last_payload_by_identity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.get(identity) {
-            Some(previous) if previous == detail => false,
-            _ => {
-                guard.insert(identity.clone(), detail.to_string());
-                true
-            }
-        }
+        self.gate.first_sighting(identity.as_str(), detail)
     }
 
     /// Forget the identity's recorded payload (called on provision success)
     /// so a later recurrence of the same panic logs again as a new incident.
     fn clear(&self, identity: &AgentIdentity) {
-        self.last_payload_by_identity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(identity);
+        self.gate.clear(identity.as_str());
     }
 }
 
@@ -146,8 +127,8 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);

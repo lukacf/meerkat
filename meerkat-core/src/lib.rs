@@ -51,6 +51,7 @@ pub mod model_registry;
 pub mod oauth_identity;
 pub mod ops;
 pub mod ops_lifecycle;
+pub mod panic_payload;
 pub mod peer_correlation;
 pub mod peer_meta;
 pub use generated::approval_lifecycle;

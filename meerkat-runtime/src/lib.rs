@@ -68,6 +68,7 @@ pub mod member_observation;
 pub mod mob_adapter;
 pub mod mob_operator_authority;
 pub mod ops_lifecycle;
+pub(crate) mod panic_boundary;
 pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;

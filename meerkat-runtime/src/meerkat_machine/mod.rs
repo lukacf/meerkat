@@ -5471,6 +5471,13 @@ impl LiveChannelStatusAuthority {
 pub struct MeerkatMachineShared {
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
+    /// Once-per-distinct-payload panic log gate for the attachment
+    /// `catch_unwind` boundaries (executor factory, surface activation,
+    /// surface publication). See `crate::panic_boundary` for the 2026-07-29
+    /// incident WHY: provisioning retry loops may re-run a panicking
+    /// boundary indefinitely, so the recovered payload is logged on
+    /// transition, never per iteration.
+    boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate,
     /// Stable process-local serialization slots for session registration and
     /// final unregister publication. The index retains only weak references:
     /// every new lookup prunes dead slots, so historical session ids cannot
@@ -6509,6 +6516,8 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
+                boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
+                ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 #[cfg(not(target_arch = "wasm32"))]
                 serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
@@ -6570,6 +6579,8 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
+                boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
+                ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 #[cfg(not(target_arch = "wasm32"))]
                 serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
@@ -6631,6 +6642,8 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 sessions: RwLock::new(HashMap::new()),
+                boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
+                ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 #[cfg(not(target_arch = "wasm32"))]
                 serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),

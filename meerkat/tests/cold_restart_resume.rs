@@ -6,6 +6,22 @@
 //! intact. The first full-session persist after resume must be accepted by the
 //! append-only save guard — the resume projection is not allowed to diverge
 //! from the persisted session-store transcript.
+//!
+//! SAME-PROCESS CAVEAT: every "host lifetime" below is reconstructed inside
+//! ONE OS process, and "cold stop" means dropping the service/adapter handles
+//! — a graceful teardown whose Drop/shutdown paths may settle state a killed
+//! host never would. Process-global state also survives each "restart":
+//! the validated transcript-graph decode memo, the slim-materialization
+//! substitution memo, and the byte-bound digest-accumulator memo (all honor
+//! the `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` kill switch) can serve host 2
+//! proofs that host 1 minted in the same process. A defect confined to the
+//! true cold-start decode path (full graph validation, revision-body digest
+//! checks, accumulator reseeding) can therefore pass these tests while
+//! failing a real restart. The base contract is re-proven memo-free in a
+//! re-exec child process by
+//! `cold_restart_resume_continues_persisted_history_without_process_memos`;
+//! the kill switch cannot be set in-process because the env read is
+//! process-global and `std::env::set_var` races sibling test threads.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -631,6 +647,48 @@ mod tests {
 
     #[tokio::test]
     async fn cold_restart_resume_continues_persisted_history() {
+        assert_cold_restart_continues_persisted_history().await;
+    }
+
+    /// Memo-free re-exec probe: the process-global decode/materialization
+    /// memos and their kill-switch env read cannot be toggled safely
+    /// mid-process (see the module header), so the base cold-restart
+    /// contract is re-proven in a child process born with
+    /// `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` set — host 2's authoritative
+    /// load must then pay the full cold-decode validation a real restart
+    /// pays. Same idiom as `kill_switch_disables_producer_seeding` in
+    /// `meerkat-core/tests/decode_memo_producer_seeding.rs`.
+    #[test]
+    fn cold_restart_resume_continues_persisted_history_without_process_memos() {
+        let executable = std::env::current_exe().expect("test binary path");
+        let output = std::process::Command::new(executable)
+            .arg("--exact")
+            .arg("tests::cold_restart_resume_continues_persisted_history_memo_free_child")
+            .arg("--nocapture")
+            .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
+            .output()
+            .expect("spawn memo-free cold-restart probe");
+        assert!(
+            output.status.success(),
+            "memo-free cold-restart resume failed: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Runs only under the re-exec parent above: without the kill switch in
+    /// the process environment this is a no-op, because setting it here
+    /// would race sibling tests in the same process.
+    #[tokio::test]
+    async fn cold_restart_resume_continues_persisted_history_memo_free_child() {
+        if std::env::var_os("MEERKAT_DISABLE_GRAPH_DECODE_MEMO").is_none() {
+            return;
+        }
+        assert_cold_restart_continues_persisted_history().await;
+    }
+
+    async fn assert_cold_restart_continues_persisted_history() {
         let temp = tempfile::tempdir().expect("tempdir");
 
         // First host lifetime: create the session and run one turn.

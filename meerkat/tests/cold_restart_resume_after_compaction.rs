@@ -8,6 +8,25 @@
 //! sqlite stores, resumes via `materialize_session`, and runs another turn.
 //! Any `TranscriptContinuityViolation` / `MonotonicityViolation` /
 //! `InvalidTranscriptRewrite` in the resume or post-resume persist is the bug.
+//!
+//! SAME-PROCESS CAVEAT: every "host lifetime" in this file is reconstructed
+//! inside ONE OS process, and several first lifetimes deliberately settle
+//! state before "dying" (e.g. `wait_for_canonical_unregister_completion`
+//! joins the unregister saga a killed host would abandon mid-flight).
+//! Process-global state also survives each "restart": the validated
+//! transcript-graph decode memo, the slim-materialization substitution memo,
+//! and the byte-bound digest-accumulator memo (all honor
+//! `MEERKAT_DISABLE_GRAPH_DECODE_MEMO`) can serve host 2 proofs minted by
+//! host 1, so a defect confined to the true cold-start decode path (full
+//! graph validation, revision-body digest checks, accumulator reseeding) can
+//! pass here while failing a real restart. These lifetimes spawn no
+//! subprocess and the kill switch cannot be set in-process (the env read is
+//! process-global; `std::env::set_var` races sibling test threads).
+//! TODO(evidence): port the memo-free re-exec child idiom — see
+//! `cold_restart_resume_continues_persisted_history_without_process_memos`
+//! in `meerkat/tests/cold_restart_resume.rs` — to at least the
+//! compaction-rewrite resume contract here, so the post-compaction cold
+//! decode is also proven without process memos.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -1949,6 +1968,14 @@ mod tests {
     /// pre-compaction transcript. Resume must accept the rewrite chain against
     /// the lagged row and converge it — not fail closed with
     /// `TranscriptContinuityViolation`.
+    ///
+    /// Same-process caveats sharpen here (see the module header): the "kill"
+    /// is a fault-injected row-write failure plus a JOINED unregister saga
+    /// (`wait_for_canonical_unregister_completion`), not a process death, and
+    /// host 2's authoritative load can be served by process-global memos
+    /// seeded when host 1 committed the compacted snapshot — the lagged-row
+    /// convergence is proven, but the full cold re-validation of the rewrite
+    /// chain may be memo-absorbed in this harness.
     #[tokio::test]
     async fn cold_restart_resume_after_compaction_with_lagged_durable_row() {
         let temp = tempfile::tempdir().expect("tempdir");

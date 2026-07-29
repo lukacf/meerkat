@@ -1192,30 +1192,15 @@ fn session_materialized_at_transcript_revision(
     session: &Session,
     revision: &str,
 ) -> Result<Session, SessionError> {
-    if rewrite_materialize_trace_enabled() {
-        // Emitted BEFORE the clone below, so a run that never returns still
-        // shows how far it got and whether the state is growing pass over pass.
-        let calls = REWRITE_MATERIALIZE_CALLS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
-        let (revisions, commits) = session
-            .transcript_history_state()
-            .ok()
-            .flatten()
-            .map(|state| (state.revisions.len(), state.commits.len()))
-            .unwrap_or_default();
-        tracing::info!(
-            session_id = %session.id(),
-            target_revision = %revision,
-            call_count = calls,
-            state_revisions = revisions,
-            state_commits = commits,
-            messages = session.messages().len(),
-            "rewrite-materialize: cloning transcript history state"
-        );
-    }
-    let mut state = session
-        .transcript_history_state()
+    // Borrow the shared parsed graph for the revision WALK instead of taking
+    // a fresh owned parse plus a second whole-state deep clone. The walk only
+    // needs the revision graph (parents/commits/head); retained BODIES are
+    // cloned once below, and only for the revisions this projection keeps.
+    // The rewrite-chain persistence loop calls this 1-2 times PER COMMIT, so
+    // the previous shape (every retained body materialized twice per call)
+    // was the dominant per-commit cost of the 2026-07-29 latency incident.
+    let source = session
+        .transcript_history_state_shared()
         .map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to read transcript history for materialization: {err}"
@@ -1226,37 +1211,68 @@ fn session_materialized_at_transcript_revision(
                 "session has no transcript history state to materialize".to_string(),
             ))
         })?;
-    let original_state = state.clone();
-    state.head = revision.to_string();
+    if rewrite_materialize_trace_enabled() {
+        // Emitted BEFORE the retained-body clone below (the remaining
+        // expensive step now that the walk borrows the shared graph), so a
+        // run that never returns still shows how far it got and whether the
+        // state is growing pass over pass.
+        let calls = REWRITE_MATERIALIZE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        tracing::info!(
+            session_id = %session.id(),
+            target_revision = %revision,
+            call_count = calls,
+            state_revisions = source.revisions.len(),
+            state_commits = source.commits.len(),
+            messages = session.messages().len(),
+            "rewrite-materialize: projecting transcript history state"
+        );
+    }
     let mut retained_revisions = std::collections::BTreeSet::new();
     let mut cursor = Some(revision);
     while let Some(current) = cursor {
         retained_revisions.insert(current.to_string());
-        cursor = original_state
+        cursor = source
             .revisions
             .iter()
             .find(|body| body.revision == current)
             .and_then(|body| body.parent_revision.as_deref());
     }
-    let retain_commit_count = state
+    let retain_commit_count = source
         .commits
         .iter()
         .rposition(|commit| commit.revision == revision)
         .or_else(|| {
-            state.commits.iter().rposition(|commit| {
-                transcript_state_revision_extends(&original_state, revision, &commit.revision)
+            source.commits.iter().rposition(|commit| {
+                transcript_state_revision_extends(&source, revision, &commit.revision)
             })
         })
         .map(|index| index + 1)
         .unwrap_or_default();
-    state.commits.truncate(retain_commit_count);
-    for commit in &state.commits {
+    let commits = source.commits[..retain_commit_count].to_vec();
+    for commit in &commits {
         retained_revisions.insert(commit.parent_revision.clone());
         retained_revisions.insert(commit.revision.clone());
     }
-    state
-        .revisions
-        .retain(|body| retained_revisions.contains(&body.revision));
+    // Field-for-field the same projection the mutate-a-clone shape produced:
+    // the commit prefix and the retained bodies keep their original order and
+    // the mechanical fields (digest_format, replay_cursor) carry over
+    // unchanged, so the serialized preimage of the materialized document is
+    // byte-identical (pinned by
+    // `materialized_revision_projection_is_byte_identical_to_deep_clone_walk`).
+    let state = meerkat_core::TranscriptHistoryState {
+        head: revision.to_string(),
+        commits,
+        revisions: source
+            .revisions
+            .iter()
+            .filter(|body| retained_revisions.contains(&body.revision))
+            .cloned()
+            .collect(),
+        digest_format: source.digest_format,
+        replay_cursor: source.replay_cursor.clone(),
+    };
     let mut materialized = session.clone();
     if state.commits.is_empty() {
         materialized
@@ -6014,13 +6030,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     session.id()
                 )))
             })?;
-        let prepared = PreparedCheckpointDocument::successor(
+        // One copy for the store (it takes ownership); the sealed original
+        // stays behind for the fail-closed projection path below.
+        let PreparedCheckpointDocument {
+            session: prepared_session,
+            stamp: _,
+            serialized: runtime_session_snapshot,
+        } = PreparedCheckpointDocument::successor(
             session,
             &authority.stamp,
             meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
             "replayed transcript projection",
         )?;
-        let session = &prepared.session;
+        let session = &prepared_session;
         let expected_current_revision = self
             .store
             .load(session.id())
@@ -6030,7 +6052,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(meerkat_core::session_store::session_projection_cas_token)
             .transpose()
             .map_err(|err| SessionError::Store(Box::new(err)))?;
-        let runtime_session_snapshot = prepared.serialized.clone();
         self.runtime_store
             .commit_session_snapshot(
                 &Self::runtime_id_for_session(session.id()),
@@ -6303,17 +6324,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         &session,
                         &commit.parent_revision,
                     )?;
-                    let bridge = PreparedCheckpointDocument::successor(
+                    // Move the sealed bytes into the store instead of cloning
+                    // them: this loop runs per commit, and each stray copy
+                    // here is a whole-document memcpy (2026-07-29 incident).
+                    let PreparedCheckpointDocument {
+                        session: _,
+                        stamp: bridge_stamp,
+                        serialized: bridge_serialized,
+                    } = PreparedCheckpointDocument::successor(
                         bridge,
                         &checkpoint_authority,
                         meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
                         "bridged transcript rewrite snapshot",
                     )?;
-                    let session_snapshot = bridge.serialized.clone();
                     runtime_store
                         .commit_session_snapshot(
                             &Self::runtime_id_for_session(session.id()),
-                            SessionDelta { session_snapshot },
+                            SessionDelta {
+                                session_snapshot: bridge_serialized,
+                            },
                         )
                         .await
                         .map_err(|err| {
@@ -6321,17 +6350,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 format!("runtime bridged transcript rewrite snapshot persistence failed: {err}"),
                             ))
                         })?;
-                    checkpoint_authority = bridge.stamp;
+                    checkpoint_authority = bridge_stamp;
                 }
                 let rewritten =
                     session_materialized_at_transcript_revision(&session, &commit.revision)?;
-                let rewritten = PreparedCheckpointDocument::successor(
+                // Destructure the sealed document so its bytes are copied
+                // exactly once (for the store, which takes ownership); the
+                // original moves into the audited-rollback carriers below.
+                let PreparedCheckpointDocument {
+                    session: rewritten_session,
+                    stamp: rewritten_stamp,
+                    serialized: session_snapshot,
+                } = PreparedCheckpointDocument::successor(
                     rewritten,
                     &checkpoint_authority,
                     meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
                     "rewritten runtime session snapshot",
                 )?;
-                let session_snapshot = rewritten.serialized.clone();
                 runtime_store
                     .commit_session_transcript_rewrite_snapshot(
                         &Self::runtime_id_for_session(session.id()),
@@ -6441,9 +6476,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     }
                     return Err(error);
                 }
-                checkpoint_authority = rewritten.stamp.clone();
-                last_audited_snapshot = Some(rewritten.serialized.clone());
-                last_audited_projection = Some(rewritten.session);
+                checkpoint_authority = rewritten_stamp;
+                last_audited_snapshot = Some(session_snapshot);
+                last_audited_projection = Some(rewritten_session);
                 persisted_revision = Some(commit.revision.clone());
             }
             let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
@@ -6471,16 +6506,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 })?;
                 (final_session, latest_session_snapshot)
             } else {
-                let prepared = PreparedCheckpointDocument::successor(
+                // One copy for the store (it takes ownership); the sealed
+                // original stays behind for the fail-closed projection paths.
+                let PreparedCheckpointDocument {
+                    session: prepared_session,
+                    stamp: _,
+                    serialized: latest_session_snapshot,
+                } = PreparedCheckpointDocument::successor(
                     session,
                     &checkpoint_authority,
                     meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
                     "post-rewrite runtime session snapshot",
                 )?;
-                let latest_session_snapshot = prepared.serialized.clone();
                 runtime_store
                     .commit_session_snapshot(
-                        &Self::runtime_id_for_session(prepared.session.id()),
+                        &Self::runtime_id_for_session(prepared_session.id()),
                         SessionDelta {
                             session_snapshot: latest_session_snapshot.clone(),
                         },
@@ -6491,7 +6531,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             format!("runtime post-rewrite snapshot persistence failed: {err}"),
                         ))
                     })?;
-                (prepared.session, latest_session_snapshot)
+                (prepared_session, latest_session_snapshot)
             };
             if let Some(incremental) = self.incremental.clone() {
                 // Projection side: per-commit commit_rewrite -> adopt. The
@@ -9316,7 +9356,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .persist_normalized_transcript_rewrite_chain(session, &plan.commits, false)
                 .await;
         }
-        let prepared = self
+        // Destructure the sealed boundary document so exactly one copy of the
+        // whole-document bytes exists per boundary save: the store consumes
+        // an owned buffer, and the sealed original is retained only for the
+        // fail-closed projection paths (2026-07-29 incident: every extra
+        // whole-document copy scales with transcript size, per turn).
+        let PreparedCheckpointDocument {
+            session: prepared_session,
+            stamp: _,
+            serialized: prepared_serialized,
+        } = self
             .prepare_committed_checkpoint_document(
                 session,
                 root_provenance,
@@ -9324,7 +9373,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "run-boundary session snapshot",
             )
             .await?;
-        let session = &prepared.session;
+        let session = &prepared_session;
         {
             let runtime_store = &self.runtime_store;
             // The preflight validates continuity against the durable projection
@@ -9368,7 +9417,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     }
                 }
             };
-            let session_snapshot = prepared.serialized.clone();
+            let session_snapshot = prepared_serialized;
             // One-time 0.8.8 -> 0.8.9 upgrade boundary: the runtime row still
             // carries the transcript graph INLINE while this boundary document
             // is slim (witness-only). Thread the durable evolved graph so the
@@ -9444,7 +9493,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await);
             }
         }
-        Ok(prepared.session)
+        Ok(prepared_session)
     }
 
     /// Write the durable session-document lifecycle commit for an archive.
@@ -18484,6 +18533,633 @@ mod tests {
         committed_content_turn(&service, runtime_store.as_ref(), &session_id, "hello").await;
         committed_content_turn(&service, runtime_store.as_ref(), &session_id, "follow up").await;
         (service, store, runtime_store, session_id)
+    }
+
+    /// The deep-clone revision walk `session_materialized_at_transcript_revision`
+    /// shipped before the 2026-07-29 clone elimination: fresh owned parse of
+    /// the whole graph plus a second full `state.clone()` for the walk, then
+    /// mutate-in-place. Kept verbatim as the byte-identity reference for the
+    /// bodies-free walk that replaced it — the materialized documents feed
+    /// checkpoint digests and runtime snapshot rows, so the two shapes must
+    /// produce byte-identical serialized preimages.
+    fn deep_clone_walk_reference_materialization(session: &Session, revision: &str) -> Session {
+        let mut state = session
+            .transcript_history_state()
+            .expect("reference walk should parse transcript history")
+            .expect("reference walk needs transcript history state");
+        let original_state = state.clone();
+        state.head = revision.to_string();
+        let mut retained_revisions = std::collections::BTreeSet::new();
+        let mut cursor = Some(revision);
+        while let Some(current) = cursor {
+            retained_revisions.insert(current.to_string());
+            cursor = original_state
+                .revisions
+                .iter()
+                .find(|body| body.revision == current)
+                .and_then(|body| body.parent_revision.as_deref());
+        }
+        let retain_commit_count = state
+            .commits
+            .iter()
+            .rposition(|commit| commit.revision == revision)
+            .or_else(|| {
+                state.commits.iter().rposition(|commit| {
+                    transcript_state_revision_extends(&original_state, revision, &commit.revision)
+                })
+            })
+            .map(|index| index + 1)
+            .unwrap_or_default();
+        state.commits.truncate(retain_commit_count);
+        for commit in &state.commits {
+            retained_revisions.insert(commit.parent_revision.clone());
+            retained_revisions.insert(commit.revision.clone());
+        }
+        state
+            .revisions
+            .retain(|body| retained_revisions.contains(&body.revision));
+        let commits_empty = state.commits.is_empty();
+        let mut materialized = session.clone();
+        materialized
+            .apply_transcript_history_state(state)
+            .expect("reference materialization should apply");
+        if commits_empty {
+            materialized.clear_transcript_history_state();
+        }
+        materialized
+    }
+
+    /// Multi-revision fixture for the materialization equivalence proof:
+    /// several committed rewrites interleaved with plain appends, so the
+    /// graph carries bridged parents (commit anchored past the head), a
+    /// retained ancestry chain, and a live tail beyond the last commit.
+    fn multi_revision_history_session() -> Session {
+        let assistant = |text: &str| {
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("m1")));
+        session.push(assistant("a1"));
+        session.push(Message::User(UserMessage::text("m2")));
+        session.push(assistant("a2"));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 3 },
+                vec![assistant("edited once")],
+                TranscriptRewriteReason::new("edit-1"),
+                Some("test".to_string()),
+                None,
+            )
+            .expect("first rewrite should commit");
+        session.push(Message::User(UserMessage::text("m3")));
+        session.push(assistant("a3"));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 2, end: 4 },
+                vec![assistant("edited twice")],
+                TranscriptRewriteReason::new("edit-2"),
+                Some("test".to_string()),
+                None,
+            )
+            .expect("second rewrite should commit");
+        session.push(Message::User(UserMessage::text("m4")));
+        session
+    }
+
+    #[tokio::test]
+    async fn materialized_revision_projection_is_byte_identical_to_deep_clone_walk() {
+        let session = multi_revision_history_session();
+        let state = session
+            .transcript_history_state()
+            .expect("seeded history should parse")
+            .expect("seeded session should carry transcript history");
+        assert!(
+            state.commits.len() >= 2,
+            "fixture must retain a multi-commit graph"
+        );
+        let mut targets: Vec<String> = vec![state.head.clone()];
+        for commit in &state.commits {
+            targets.push(commit.parent_revision.clone());
+            targets.push(commit.revision.clone());
+        }
+        targets.dedup();
+
+        let document_value = |session: &Session| -> serde_json::Value {
+            serde_json::from_slice(
+                &session
+                    .to_persisted_bytes()
+                    .expect("materialized document should serialize"),
+            )
+            .expect("serialized document should parse back")
+        };
+        for revision in &targets {
+            let reference = deep_clone_walk_reference_materialization(&session, revision);
+            let started = std::time::Instant::now();
+            let materialized = session_materialized_at_transcript_revision(&session, revision)
+                .expect("bodies-free walk should materialize every retained revision");
+            let elapsed = started.elapsed();
+            let retains_commits = reference
+                .transcript_history_state()
+                .expect("reference history should parse")
+                .is_some();
+            let reference_bytes = reference
+                .to_persisted_bytes()
+                .expect("reference document should serialize");
+            let materialized_bytes = materialized
+                .to_persisted_bytes()
+                .expect("materialized document should serialize");
+            if retains_commits {
+                // Deterministic branch: `updated_at` derives from retained
+                // commit/body times, so old and new shapes must agree to the
+                // exact serialized byte and checkpoint digest.
+                assert_eq!(
+                    reference_bytes, materialized_bytes,
+                    "serialized preimage diverged for revision {revision}"
+                );
+                assert_eq!(
+                    meerkat_core::session_checkpoint_digest(&reference)
+                        .expect("reference checkpoint digest should compute"),
+                    meerkat_core::session_checkpoint_digest(&materialized)
+                        .expect("materialized checkpoint digest should compute"),
+                    "checkpoint digest diverged for revision {revision}"
+                );
+            } else {
+                // Commits-empty branch: `clear_transcript_history_state()`
+                // stamps `updated_at` from SystemTime::now() — PRE-EXISTING
+                // behavior the walk change does not touch, so the pre-change
+                // shape disagrees even with ITSELF across two invocations.
+                // Prove that (the nondeterminism witness), then prove old and
+                // new agree on every other byte of the document. The digest
+                // is a pure function of this document, so equality modulo
+                // the clock field carries over to it.
+                let reference_again = deep_clone_walk_reference_materialization(&session, revision);
+                let mut ref_doc = document_value(&reference);
+                let mut ref_again_doc = document_value(&reference_again);
+                let mut materialized_doc = document_value(&materialized);
+                for doc in [&mut ref_doc, &mut ref_again_doc, &mut materialized_doc] {
+                    assert!(
+                        doc.as_object_mut()
+                            .expect("session document should be an object")
+                            .remove("updated_at")
+                            .is_some(),
+                        "session document should carry updated_at"
+                    );
+                }
+                assert_eq!(
+                    ref_doc, ref_again_doc,
+                    "pre-change shape must agree with itself modulo the clock field"
+                );
+                assert_eq!(
+                    ref_doc, materialized_doc,
+                    "serialized preimage diverged beyond the pre-existing clock field \
+                     for revision {revision}"
+                );
+            }
+            println!(
+                "materialize {revision}: {} bytes in {:?} (bodies-free walk)",
+                materialized_bytes.len(),
+                elapsed
+            );
+        }
+
+        // The walk must be served from the shared parsed graph: repeated
+        // materializations of the SAME session instance (the rewrite-chain
+        // loop's shape) reuse one parse instead of re-materializing every
+        // retained body per call.
+        let first = session
+            .transcript_history_state_shared()
+            .expect("shared graph should parse")
+            .expect("shared graph should be present");
+        let _ = session_materialized_at_transcript_revision(&session, &state.head)
+            .expect("head materialization should succeed");
+        let second = session
+            .transcript_history_state_shared()
+            .expect("shared graph should still parse")
+            .expect("shared graph should still be present");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "materialization must not evict or re-parse the shared transcript graph"
+        );
+    }
+
+    /// Byte-accounting RuntimeStore: sums every whole-document snapshot
+    /// payload handed across the runtime-store write boundary, split by
+    /// producer seam. Regression gate for the 2026-07-29 boundary-write
+    /// audit: one committed turn is exactly ONE document-sized snapshot
+    /// payload (the atomic boundary apply), and one persisted rewrite commit
+    /// is exactly ONE document-sized rewrite snapshot — no duplicate
+    /// whole-document writes hiding in the chain.
+    struct CountingRuntimeStore {
+        inner: InMemoryRuntimeStore,
+        snapshot_commit_bytes: std::sync::atomic::AtomicU64,
+        snapshot_commits: AtomicUsize,
+        rewrite_snapshot_bytes: std::sync::atomic::AtomicU64,
+        rewrite_snapshot_commits: AtomicUsize,
+        boundary_apply_bytes: std::sync::atomic::AtomicU64,
+        boundary_apply_snapshots: AtomicUsize,
+    }
+
+    impl CountingRuntimeStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryRuntimeStore::new(),
+                snapshot_commit_bytes: std::sync::atomic::AtomicU64::new(0),
+                snapshot_commits: AtomicUsize::new(0),
+                rewrite_snapshot_bytes: std::sync::atomic::AtomicU64::new(0),
+                rewrite_snapshot_commits: AtomicUsize::new(0),
+                boundary_apply_bytes: std::sync::atomic::AtomicU64::new(0),
+                boundary_apply_snapshots: AtomicUsize::new(0),
+            }
+        }
+
+        fn reset(&self) {
+            self.snapshot_commit_bytes.store(0, Ordering::Release);
+            self.snapshot_commits.store(0, Ordering::Release);
+            self.rewrite_snapshot_bytes.store(0, Ordering::Release);
+            self.rewrite_snapshot_commits.store(0, Ordering::Release);
+            self.boundary_apply_bytes.store(0, Ordering::Release);
+            self.boundary_apply_snapshots.store(0, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for CountingRuntimeStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            self.inner.supports_compaction_projection_outbox()
+        }
+
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.snapshot_commits.fetch_add(1, Ordering::AcqRel);
+            self.snapshot_commit_bytes.fetch_add(
+                session_delta.session_snapshot.len() as u64,
+                Ordering::AcqRel,
+            );
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn commit_session_transcript_rewrite_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.rewrite_snapshot_commits.fetch_add(1, Ordering::AcqRel);
+            self.rewrite_snapshot_bytes.fetch_add(
+                session_delta.session_snapshot.len() as u64,
+                Ordering::AcqRel,
+            );
+            self.inner
+                .commit_session_transcript_rewrite_snapshot(runtime_id, session_delta, commit)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<meerkat_runtime::store::SessionDelta>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            if let Some(delta) = session_delta.as_ref() {
+                self.boundary_apply_snapshots.fetch_add(1, Ordering::AcqRel);
+                self.boundary_apply_bytes
+                    .fetch_add(delta.session_snapshot.len() as u64, Ordering::AcqRel);
+            }
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Vec<meerkat_core::CompactionProjectionIntent>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_pending_compaction_projections(runtime_id)
+                .await
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .mark_compaction_projection_finalized(runtime_id, projection)
+                .await
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
+        async fn is_runtime_projection_quarantined(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .is_runtime_projection_quarantined(runtime_id)
+                .await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &InputStatePersistenceRecord,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_machine_lifecycle_record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
+        }
+
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_unregister_finalization(runtime_id, finalization)
+                .await
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<
+            meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                .await
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.load_ops_lifecycle(runtime_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn boundary_and_rewrite_snapshot_writes_are_single_document_sized() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let counting = Arc::new(CountingRuntimeStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::clone(&counting) as Arc<dyn RuntimeStore>;
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        committed_content_turn(&service, runtime_store.as_ref(), &session_id, "hello").await;
+
+        // One committed turn = exactly one snapshot-carrying atomic boundary
+        // apply, whose payload is one whole serialized document, and NO
+        // additional whole-document snapshot commits on the side.
+        counting.reset();
+        let encode_before = meerkat_core::checkpoint::global_session_encode_bytes();
+        committed_content_turn(&service, runtime_store.as_ref(), &session_id, "follow up").await;
+        let boundary_doc = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("boundary snapshot should load")
+            .expect("boundary snapshot should exist");
+        assert_eq!(
+            counting.boundary_apply_snapshots.load(Ordering::Acquire),
+            1,
+            "one committed turn must carry exactly one boundary snapshot"
+        );
+        assert_eq!(
+            counting.boundary_apply_bytes.load(Ordering::Acquire),
+            boundary_doc.len() as u64,
+            "the boundary snapshot payload must be exactly one whole document"
+        );
+        assert_eq!(
+            counting.snapshot_commits.load(Ordering::Acquire),
+            0,
+            "a committed turn must not add side-channel whole-document snapshot commits"
+        );
+        assert_eq!(
+            counting.rewrite_snapshot_commits.load(Ordering::Acquire),
+            0,
+            "a committed turn must not write rewrite snapshots"
+        );
+        println!(
+            "boundary save: {} bytes to the runtime store, {} bytes encoded",
+            boundary_doc.len(),
+            meerkat_core::checkpoint::global_session_encode_bytes() - encode_before,
+        );
+
+        // One persisted rewrite commit = exactly one whole-document rewrite
+        // snapshot (the chain loop must not duplicate the document per
+        // commit: 2026-07-29 chain-persistence audit).
+        let parent_revision = store
+            .load(&session_id)
+            .await
+            .expect("load before rewrite")
+            .expect("session exists")
+            .transcript_revision()
+            .expect("parent revision");
+        counting.reset();
+        let encode_before = meerkat_core::checkpoint::global_session_encode_bytes();
+        let result = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 4 },
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage::new(
+                            vec![meerkat_core::AssistantBlock::Text {
+                                text: "compacted assistant trace".to_string(),
+                                meta: None,
+                            }],
+                            StopReason::EndTurn,
+                        ),
+                    )],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("test".to_string()),
+                    expected_parent_revision: Some(parent_revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("rewrite should commit");
+        assert_ne!(result.revision, result.parent_revision);
+        let rewrite_doc = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("rewrite snapshot should load")
+            .expect("rewrite snapshot should exist");
+        assert_eq!(
+            counting.rewrite_snapshot_commits.load(Ordering::Acquire),
+            1,
+            "one persisted rewrite commit must write exactly one rewrite snapshot"
+        );
+        assert_eq!(
+            counting.rewrite_snapshot_bytes.load(Ordering::Acquire),
+            rewrite_doc.len() as u64,
+            "the rewrite snapshot payload must be exactly one whole document"
+        );
+        assert_eq!(
+            counting.snapshot_commits.load(Ordering::Acquire),
+            0,
+            "an anchored single-commit rewrite must not write bridge or post-rewrite snapshots"
+        );
+        assert_eq!(
+            counting.boundary_apply_snapshots.load(Ordering::Acquire),
+            0,
+            "a rewrite must not masquerade as a boundary apply"
+        );
+        println!(
+            "rewrite-chain save: {} bytes to the runtime store, {} bytes encoded",
+            rewrite_doc.len(),
+            meerkat_core::checkpoint::global_session_encode_bytes() - encode_before,
+        );
     }
 
     #[tokio::test]

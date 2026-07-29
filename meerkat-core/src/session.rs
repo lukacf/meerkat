@@ -6938,7 +6938,12 @@ impl Session {
     /// [`Self::transcript_history_state`] served from the per-instance
     /// shared cache: one parse per graph value, shared by `Arc` thereafter.
     /// Every write to the history key clears the cache.
-    pub(crate) fn transcript_history_state_shared(
+    ///
+    /// Public for graph-walk consumers (the session-service rewrite-chain
+    /// persistence loop materializes 1-2 projections PER COMMIT; a fresh
+    /// owned parse per call re-materializes every retained body each time —
+    /// the 2026-07-29 per-turn latency incident's dominant clone).
+    pub fn transcript_history_state_shared(
         &self,
     ) -> Result<Option<std::sync::Arc<TranscriptHistoryState>>, serde_json::Error> {
         if let Some(state) = self.history_caches.shared_state.get() {

@@ -68,6 +68,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveTargetProbe`(outcome: OccurrenceTargetProbeOutcome, detail: Option<String>, at_utc_ms: u64)
 - `ResolveDueMisfire`(detail: Option<String>, at_utc_ms: u64)
 - `Supersede`(superseded_by_revision: u64, at_utc_ms: u64)
+- `RenewLease`(claim_token: ClaimToken, lease_expires_at_utc_ms: u64, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 - `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
 - `ClassifyTransitionFailure`(refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant)
@@ -93,6 +94,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CompletionSupersessionClassified`(disposition: CompletionSupersessionDisposition, superseded_by_revision: Option<u64>)
 - `DeliveryFailed`
 - `LeaseExpired`
+- `LeaseRenewed`
 - `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
 - `LateCompletionResolutionRecorded`(resolution: LateCompletionResolutionClass)
 - `StaleCompletionArrivalClassified`(phase: OccurrenceLifecycleState, trigger: OccurrenceLifecycleInputVariant)
@@ -1599,6 +1601,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LateCompletionResolutionRecorded`
 - To: `Superseded`
 
+### `RenewLeaseFromDispatching`
+- From: `Dispatching`
+- On: `RenewLease`(claim_token, lease_expires_at_utc_ms, at_utc_ms)
+- Guards:
+  - `claim_token_matches`
+  - `extension_is_monotonic`
+- Emits: `LeaseRenewed`
+- To: `Dispatching`
+
+### `RenewLeaseFromAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `RenewLease`(claim_token, lease_expires_at_utc_ms, at_utc_ms)
+- Guards:
+  - `claim_token_matches`
+  - `extension_is_monotonic`
+- Emits: `LeaseRenewed`
+- To: `AwaitingCompletion`
+
 ### `LeaseExpiredFromClaimed`
 - From: `Claimed`
 - On: `LeaseExpired`(at_utc_ms)
@@ -1648,4 +1668,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
 - `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
-- `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
+- `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, lease renewal by the live claim-token holder from dispatching or awaiting completion, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

@@ -526,6 +526,16 @@ impl SqliteScheduleStore {
                 };
                 match action {
                     Some(OccurrenceDueAction::MisfireRequired) => {
+                        // A live in-process waiter means the delivery is
+                        // still running; terminalizing it as misfired would
+                        // lie about a turn that is actually executing. Leave
+                        // the row for a later tick.
+                        if request
+                            .live_waiter_occurrence_ids
+                            .contains(&occurrence.occurrence_id)
+                        {
+                            continue;
+                        }
                         if let Some(fault) =
                             resolve_due_misfire_in_txn(&tx, &occurrence, store_now_utc)?
                         {
@@ -542,6 +552,20 @@ impl SqliteScheduleStore {
                         claimed.push(claimed_occurrence);
                     }
                     Some(OccurrenceDueAction::LeaseExpired) => {
+                        // A live in-process waiter means the deliverer is not
+                        // dead — only its lease renewal is late. Reclaiming
+                        // here would mint attempt N+1 while attempt N's turn
+                        // still runs (duplicate delivery) or, past the
+                        // misfire deadline, false-misfire it. Skip; the
+                        // waiter's renewal or completion resolves the row.
+                        // Post-crash the set is empty and the reclaim
+                        // proceeds as before.
+                        if request
+                            .live_waiter_occurrence_ids
+                            .contains(&occurrence.occurrence_id)
+                        {
+                            continue;
+                        }
                         if claimed.len() >= limit {
                             continue;
                         }

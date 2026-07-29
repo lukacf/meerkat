@@ -5,7 +5,7 @@ use meerkat::surface::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
     build_dispatch_from_accepted, immediate_delivery_failure,
-    recover_mob_member_identity_from_session_target, schedule_attempt_idempotency_key,
+    recover_mob_member_identity_from_session_target, schedule_delivery_idempotency_key,
     schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
@@ -441,7 +441,7 @@ impl SessionRuntime {
             meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;
         prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
-            schedule_attempt_idempotency_key(occurrence),
+            schedule_delivery_idempotency_key(occurrence),
         ));
         prompt_input.header.correlation_id = Some(meerkat_runtime::CorrelationId::from_uuid(
             occurrence.occurrence_id.0,
@@ -505,7 +505,7 @@ impl SessionRuntime {
                 durability: meerkat_runtime::input::InputDurability::Durable,
                 visibility: meerkat_runtime::input::InputVisibility::default(),
                 idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(
-                    schedule_attempt_idempotency_key(occurrence),
+                    schedule_delivery_idempotency_key(occurrence),
                 )),
                 supersession_key: None,
                 correlation_id: Some(meerkat_runtime::CorrelationId::from_uuid(

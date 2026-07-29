@@ -811,6 +811,8 @@ pub enum OccurrenceLifecycleInputVariant {
     ResolveDueMisfire,
     #[serde(rename = "Supersede")]
     Supersede,
+    #[serde(rename = "RenewLease")]
+    RenewLease,
     #[serde(rename = "LeaseExpired")]
     LeaseExpired,
     #[serde(rename = "ReleaseLeaseForPausedSchedule")]
@@ -840,6 +842,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::ResolveTargetProbe => "ResolveTargetProbe",
             Self::ResolveDueMisfire => "ResolveDueMisfire",
             Self::Supersede => "Supersede",
+            Self::RenewLease => "RenewLease",
             Self::LeaseExpired => "LeaseExpired",
             Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
             Self::ClassifyTransitionFailure => "ClassifyTransitionFailure",
@@ -868,6 +871,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "ResolveTargetProbe" => Ok(Self::ResolveTargetProbe),
             "ResolveDueMisfire" => Ok(Self::ResolveDueMisfire),
             "Supersede" => Ok(Self::Supersede),
+            "RenewLease" => Ok(Self::RenewLease),
             "LeaseExpired" => Ok(Self::LeaseExpired),
             "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
             "ClassifyTransitionFailure" => Ok(Self::ClassifyTransitionFailure),
@@ -1612,6 +1616,12 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RenewLease {
+        pub claim_token: ClaimToken,
+        pub lease_expires_at_utc_ms: u64,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {
         pub at_utc_ms: u64,
     }
@@ -1649,6 +1659,7 @@ pub enum Input {
     ResolveTargetProbe(inputs::ResolveTargetProbe),
     ResolveDueMisfire(inputs::ResolveDueMisfire),
     Supersede(inputs::Supersede),
+    RenewLease(inputs::RenewLease),
     LeaseExpired(inputs::LeaseExpired),
     ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
     ClassifyTransitionFailure(inputs::ClassifyTransitionFailure),
@@ -1678,6 +1689,7 @@ impl Input {
             Self::ResolveTargetProbe(_) => InputKind::ResolveTargetProbe,
             Self::ResolveDueMisfire(_) => InputKind::ResolveDueMisfire,
             Self::Supersede(_) => InputKind::Supersede,
+            Self::RenewLease(_) => InputKind::RenewLease,
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
             Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
             Self::ClassifyTransitionFailure(_) => InputKind::ClassifyTransitionFailure,
@@ -1704,6 +1716,7 @@ pub enum InputKind {
     ResolveTargetProbe,
     ResolveDueMisfire,
     Supersede,
+    RenewLease,
     LeaseExpired,
     ReleaseLeaseForPausedSchedule,
     ClassifyTransitionFailure,
@@ -1759,6 +1772,8 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LeaseRenewed {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TransitionFailureClassified {
         pub phase: OccurrenceLifecycleState,
         pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
@@ -1795,6 +1810,7 @@ pub enum Effect {
     CompletionSupersessionClassified(effects::CompletionSupersessionClassified),
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
+    LeaseRenewed(effects::LeaseRenewed),
     TransitionFailureClassified(effects::TransitionFailureClassified),
     LateCompletionResolutionRecorded(effects::LateCompletionResolutionRecorded),
     StaleCompletionArrivalClassified(effects::StaleCompletionArrivalClassified),
@@ -1818,6 +1834,7 @@ pub enum EffectKind {
     CompletionSupersessionClassified,
     DeliveryFailed,
     LeaseExpired,
+    LeaseRenewed,
     TransitionFailureClassified,
     LateCompletionResolutionRecorded,
     StaleCompletionArrivalClassified,
@@ -2020,6 +2037,8 @@ pub enum TransitionId {
     LateRuntimeCompletionInternalErrorAfterSupersession,
     LateDeliveryCompletionFailureAfterSupersession,
     LateDeliveryFailureAfterSupersession,
+    RenewLeaseFromDispatching,
+    RenewLeaseFromAwaitingCompletion,
     LeaseExpiredFromClaimed,
     LeaseExpiredFromDispatching,
     LeaseExpiredFromAwaitingCompletion,

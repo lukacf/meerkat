@@ -31,7 +31,7 @@ use meerkat::surface::{
     AcceptedScheduledInput, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
     SurfaceScheduleMobHost, SurfaceScheduleSessionHost, build_dispatch_from_accepted,
     immediate_delivery_failure, recover_mob_member_identity_from_session_target,
-    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    schedule_delivery_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -12363,7 +12363,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-            schedule_attempt_idempotency_key(occurrence),
+            schedule_delivery_idempotency_key(occurrence),
         ));
         prompt_input.header.correlation_id =
             Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
@@ -12442,7 +12442,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
-                idempotency_key: Some(IdempotencyKey::new(schedule_attempt_idempotency_key(
+                idempotency_key: Some(IdempotencyKey::new(schedule_delivery_idempotency_key(
                     occurrence,
                 ))),
                 supersession_key: None,

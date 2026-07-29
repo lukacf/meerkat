@@ -277,6 +277,7 @@ async fn sqlite_claim_due_canonical_phase_decides_within_the_column_prefilter()
             owner_id: "sqlite-canonical-phase-test".to_string(),
             limit: 1,
             lease_duration: Duration::minutes(5),
+            live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
         })
         .await?;
 

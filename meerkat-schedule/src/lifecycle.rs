@@ -419,6 +419,17 @@ pub enum OccurrenceLifecycleInput {
         superseded_by_revision: ScheduleRevision,
         at_utc: DateTime<Utc>,
     },
+    /// Lease renewal presented by the live claim-token holder while its
+    /// delivery is in flight (2026-07 P0: a fixed lease with no renewal
+    /// reclaimed every delivery longer than the lease mid-flight). The
+    /// occurrence authority accepts it only from Dispatching /
+    /// AwaitingCompletion, only when `claim_token` matches the machine-owned
+    /// token, and only as a monotonic extension.
+    RenewLease {
+        claim_token: Uuid,
+        lease_expires_at_utc: DateTime<Utc>,
+        at_utc: DateTime<Utc>,
+    },
     LeaseExpired {
         at_utc: DateTime<Utc>,
     },
@@ -492,6 +503,9 @@ pub enum OccurrenceLifecycleEffect {
     },
     DeliveryFailed,
     LeaseExpired,
+    /// The current claim-token holder extended its own lease while its
+    /// delivery is still in flight. Acknowledgement only; no receipt.
+    LeaseRenewed,
     /// 0.7.2 D2a: a delivery resolution arrived after this occurrence was
     /// superseded and was recorded as a typed late-arrival fact. The driver
     /// mirrors this to know the arrival landed as a late record (no fresh
@@ -1298,6 +1312,18 @@ fn convert_occurrence_input(
             superseded_by_revision: superseded_by_revision.0,
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
+        OccurrenceLifecycleInput::RenewLease {
+            claim_token,
+            lease_expires_at_utc,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::RenewLease {
+            claim_token: occ_dsl::ClaimToken(claim_token.to_string()),
+            lease_expires_at_utc_ms: occurrence_datetime_to_millis(
+                *lease_expires_at_utc,
+                "lease_expires_at_utc",
+            )?,
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
         OccurrenceLifecycleInput::LeaseExpired { at_utc } => {
             occ_dsl::OccurrenceLifecycleInput::LeaseExpired {
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
@@ -1823,6 +1849,7 @@ fn map_occurrence_effect(
             OccurrenceLifecycleEffect::DeliveryFailed
         }
         occ_dsl::OccurrenceLifecycleEffect::LeaseExpired => OccurrenceLifecycleEffect::LeaseExpired,
+        occ_dsl::OccurrenceLifecycleEffect::LeaseRenewed => OccurrenceLifecycleEffect::LeaseRenewed,
         occ_dsl::OccurrenceLifecycleEffect::LateCompletionResolutionRecorded { resolution } => {
             OccurrenceLifecycleEffect::LateCompletionResolutionRecorded {
                 resolution: late_completion_resolution_class_from_dsl(*resolution),
@@ -3005,6 +3032,101 @@ mod tests {
             .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
             .expect("completion should pass generated authority")
             .into_occurrence()
+    }
+
+    /// Lease renewal is machine authority (2026-07 P0): only the current
+    /// claim-token holder may extend its own in-flight lease, the extension
+    /// is monotonic, and everything else is a typed NotLeaseHolding refusal.
+    #[test]
+    fn lease_renewal_extends_only_for_current_token_holder_in_flight() {
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence();
+        let token = dispatching.claim_token().expect("claimed token");
+        let initial_expiry = dispatching
+            .lease_expires_at_utc
+            .expect("claimed occurrence must hold a lease");
+
+        // Current token holder extends from Dispatching.
+        let extended_to = initial_expiry + Duration::seconds(60);
+        let mutator = dispatching
+            .clone()
+            .apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: token,
+                lease_expires_at_utc: extended_to,
+                at_utc: Utc::now(),
+            })
+            .expect("token-holder renewal must pass generated authority");
+        assert!(
+            mutator
+                .effects
+                .contains(&OccurrenceLifecycleEffect::LeaseRenewed),
+            "renewal must emit the machine's LeaseRenewed acknowledgement"
+        );
+        let renewed = mutator.into_occurrence();
+        assert_eq!(renewed.phase, OccurrencePhase::Dispatching);
+        assert_eq!(renewed.lease_expires_at_utc, Some(extended_to));
+        assert_eq!(renewed.attempt_count, dispatching.attempt_count);
+
+        // And again from AwaitingCompletion.
+        let awaiting = renewed
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+            .expect("await should pass generated authority")
+            .into_occurrence();
+        let later = extended_to + Duration::seconds(60);
+        let renewed = awaiting
+            .apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: token,
+                lease_expires_at_utc: later,
+                at_utc: Utc::now(),
+            })
+            .expect("in-flight renewal must pass generated authority")
+            .into_occurrence();
+        assert_eq!(renewed.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(renewed.lease_expires_at_utc, Some(later));
+
+        // A non-holder token is refused (typed NotLeaseHolding).
+        assert!(matches!(
+            renewed.clone().apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: Uuid::now_v7(),
+                lease_expires_at_utc: later + Duration::seconds(60),
+                at_utc: Utc::now(),
+            }),
+            Err(OccurrenceLifecycleError::NotLeaseHolding)
+        ));
+
+        // A shrinking "renewal" is refused: extensions are monotonic.
+        assert!(matches!(
+            renewed.apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: token,
+                lease_expires_at_utc: later - Duration::seconds(1),
+                at_utc: Utc::now(),
+            }),
+            Err(OccurrenceLifecycleError::NotLeaseHolding)
+        ));
+
+        // Renewal is not legal before dispatch (Claimed: nothing in flight)
+        // or after terminality.
+        assert!(matches!(
+            sample_claimed_occurrence().apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: token,
+                lease_expires_at_utc: later,
+                at_utc: Utc::now(),
+            }),
+            Err(OccurrenceLifecycleError::NotLeaseHolding)
+        ));
+        assert!(matches!(
+            sample_completed_occurrence().apply(OccurrenceLifecycleInput::RenewLease {
+                claim_token: token,
+                lease_expires_at_utc: later,
+                at_utc: Utc::now(),
+            }),
+            Err(OccurrenceLifecycleError::NotLeaseHolding)
+        ));
     }
 
     #[test]

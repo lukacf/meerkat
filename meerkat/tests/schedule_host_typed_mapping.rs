@@ -4,7 +4,7 @@
 //! two scheduled-completion-future mappings". In wave-c the canonical
 //! translation primitives live at the facade surface level —
 //! `meerkat::surface::{immediate_delivery_failure,
-//! schedule_attempt_idempotency_key, immediate_completed_dispatch,
+//! schedule_delivery_idempotency_key, immediate_completed_dispatch,
 //! async_completion_dispatch}` — and every binding surface (CLI, REST,
 //! RPC) routes through them. This test pins the typed shape of those
 //! functions so a refactor that drops a field, swaps a receipt stage,
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use meerkat::surface::{
     async_completion_dispatch, immediate_completed_dispatch, immediate_delivery_failure,
-    schedule_attempt_idempotency_key,
+    schedule_delivery_idempotency_key,
 };
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
@@ -64,30 +64,36 @@ fn sample_occurrence(attempt_count: u32) -> Occurrence {
 }
 
 #[test]
-fn idempotency_key_encodes_schedule_occurrence_and_attempt() {
-    let occ = sample_occurrence(3);
-    let key = schedule_attempt_idempotency_key(&occ);
+fn idempotency_key_is_occurrence_level_and_attempt_agnostic() {
+    let mut occ = sample_occurrence(3);
+    let key = schedule_delivery_idempotency_key(&occ);
 
     let expected = format!(
-        "schedule:{}:occurrence:{}:attempt:3",
+        "schedule:{}:occurrence:{}",
         occ.schedule_id, occ.occurrence_id
     );
     assert_eq!(key, expected, "idempotency key shape must be stable");
 
-    // Changing attempt_count must produce a distinct key — this is what
-    // makes the key safe to use as the de-dup fingerprint for retries.
-    let occ_other = sample_occurrence(4);
-    // Same schedule+occurrence would require identical IDs; instead we
-    // assert by rebuilding the key against a new attempt count directly
-    // on the same occurrence struct via a parallel fixture with the
-    // same schedule_id/occurrence_id is impossible without internals,
-    // so we verify the attempt-count segment is what varies.
-    let key_other = schedule_attempt_idempotency_key(&occ_other);
-    assert!(
-        key_other.ends_with(":attempt:4"),
-        "attempt segment must match attempt_count; got {key_other:?}"
+    // The attempt count is deliberately EXCLUDED from the runtime-facing
+    // delivery identity (2026-07 P0): the runtime dedupes admissions on the
+    // exact key string, so an attempt-varying key admitted every
+    // lease-expiry reclaim as a fresh input while the previous attempt's
+    // turn was still running — the production fleet's 57s delivery against
+    // the fixed 60s lease turned every long turn into a duplicate turn
+    // (CatchUpWithin) or a false misfire (Skip). Same occurrence => same
+    // key, whatever the attempt; attempt counts stay store-side claim
+    // fencing only.
+    occ.attempt_count = 4;
+    assert_eq!(
+        schedule_delivery_idempotency_key(&occ),
+        key,
+        "a reclaim retry must dedupe at runtime admission, so the key must \
+         not vary with attempt_count"
     );
-    assert!(key.ends_with(":attempt:3"));
+    assert!(
+        !key.contains(":attempt:"),
+        "delivery identity must not carry an attempt segment; got {key:?}"
+    );
 }
 
 #[tokio::test]
@@ -205,7 +211,7 @@ fn idempotency_key_is_stable_across_calls_for_same_occurrence() {
     let occ = sample_occurrence(1);
     // Calling the function twice with the same occurrence must return
     // byte-identical strings — anything less defeats de-dup by key.
-    let a = schedule_attempt_idempotency_key(&occ);
-    let b = schedule_attempt_idempotency_key(&occ);
+    let a = schedule_delivery_idempotency_key(&occ);
+    let b = schedule_delivery_idempotency_key(&occ);
     assert_eq!(a, b);
 }

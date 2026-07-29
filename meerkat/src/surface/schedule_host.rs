@@ -1356,10 +1356,22 @@ pub fn immediate_delivery_failure(
     }
 }
 
-pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
+/// Runtime-facing delivery identity for a scheduled occurrence: schedule +
+/// occurrence ONLY.
+///
+/// `attempt_count` is deliberately excluded (2026-07 P0, renamed from
+/// `schedule_attempt_idempotency_key`): the runtime dedupes admissions on
+/// this exact string, so an attempt-varying key admitted every lease-expiry
+/// reclaim as a brand-new input while the previous attempt's turn was still
+/// running — a duplicate turn per reclaim. With the occurrence-level key, a
+/// retry of a live or already-ran delivery deduplicates at admission and
+/// attaches to the existing input's completion instead. Attempt counts and
+/// claim tokens remain store-side claim FENCING only (stale-completion
+/// screening is unchanged).
+pub fn schedule_delivery_idempotency_key(occurrence: &Occurrence) -> String {
     format!(
-        "schedule:{}:occurrence:{}:attempt:{}",
-        occurrence.schedule_id, occurrence.occurrence_id, occurrence.attempt_count
+        "schedule:{}:occurrence:{}",
+        occurrence.schedule_id, occurrence.occurrence_id
     )
 }
 

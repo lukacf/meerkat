@@ -4126,6 +4126,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "ResolveTargetProbe",
                     "ResolveDueMisfire",
                     "Supersede",
+                    "RenewLease",
                     "LeaseExpired",
                     "ReleaseLeaseForPausedSchedule",
                     "ClassifyTransitionFailure",

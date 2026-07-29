@@ -42,6 +42,19 @@ via cargo-semver-checks against the published baselines).
   `WriteLimitExceeded { max_blob_bytes, actual_encoded_bytes }` variant —
   the typed store-side refusal of an oversized write. Downstream exhaustive
   matches must add an arm.
+- `meerkat::surface::schedule_attempt_idempotency_key` is renamed to
+  `schedule_delivery_idempotency_key` and the key it mints drops the
+  `:attempt:{n}` segment (occurrence-level delivery identity; see the P0
+  lease fix under **Fixed**). Hosts that persisted or matched on the old
+  attempt-bearing key shape must treat the occurrence-level key as the
+  delivery identity.
+- `meerkat_schedule::ClaimDueRequest` adds the required
+  `live_waiter_occurrence_ids: BTreeSet<OccurrenceId>` field (the driver's
+  live-waiter registry snapshot; pass `BTreeSet::new()` for callers with no
+  in-process delivery waiters).
+- `meerkat_schedule::OccurrenceLifecycleInput` adds the `RenewLease` variant
+  and `OccurrenceLifecycleEffect` adds `LeaseRenewed`. Downstream exhaustive
+  matches must add arms.
 
 ### Billing-affecting default change
 
@@ -87,6 +100,36 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- **P0: scheduled deliveries longer than the 60s lease were reclaimed
+  mid-flight**, dispatching a duplicate turn every ~60s under
+  `MisfirePolicy::CatchUpWithin` and false-misfiring a still-running delivery
+  under `MisfirePolicy::Skip` (a production fleet measured its largest
+  delivery at 57s against the fixed 60s lease; a routine multi-minute session
+  turn was guaranteed to trip it). Three coordinated changes:
+  - **Lease renewal is machine authority.** `OccurrenceLifecycleMachine`
+    gains a `RenewLease` input (guarded: only the current claim-token holder,
+    only from `Dispatching`/`AwaitingCompletion`, only monotonic extensions)
+    and a `LeaseRenewed` effect; the schedule driver's completion waiter
+    renews at ~lease/2 cadence while the delivery runs. A renewal that fails
+    typed (row reclaimed, superseded, or terminal) stops renewing and the
+    waiter's completion takes the existing stale-screening path. A lease that
+    genuinely expires now means the deliverer is presumed dead — reclaim
+    semantics after a crash are unchanged.
+  - **Delivery identity is occurrence-level.** The runtime-facing
+    idempotency key drops the `:attempt:{n}` segment (now
+    `schedule:{schedule}:occurrence:{occurrence}`), so a reclaim retry of a
+    live or already-ran turn deduplicates at runtime admission and attaches
+    to the existing input's completion instead of admitting a duplicate turn.
+    Attempt counts and claim tokens remain store-side claim fencing only;
+    stale-completion screening (`ClassifyStaleCompletionArrival`) is
+    untouched.
+  - **The claim scan respects live in-process waiters.**
+    `ClaimDueRequest.live_waiter_occurrence_ids` carries the driver's waiter
+    registry snapshot; both stores (memory, sqlite) skip lease-expiry reclaim
+    AND misfire terminalization for rows whose delivery waiter is verifiably
+    alive in the calling process — closing the Skip-policy false-misfire arm
+    where the reclaim was refused past the misfire deadline. Post-crash the
+    registry is empty, so crash recovery behaves exactly as before.
 - Slim session loads verify the transcript digest on every row-assembled
   materialization again. A process-global Boolean memo keyed on (session id,
   head revision, message count) let `SessionHead::into_session` skip digest

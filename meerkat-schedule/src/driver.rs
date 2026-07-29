@@ -13,10 +13,12 @@ use crate::types::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::Future;
+use futures::future::{self, Either};
 use meerkat_core::SessionId;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 pub type DeliveryCompletion =
     Pin<Box<dyn Future<Output = Result<DeliveryTerminal, ScheduleDomainError>> + Send + 'static>>;
@@ -220,6 +222,40 @@ enum TerminalizeOutcome {
     StaleClaim,
 }
 
+/// In-process registry of occurrences whose delivery waiter task is alive.
+/// The driver registers an occurrence when it spawns the completion waiter
+/// and deregisters it after the waiter's resolution is fully committed, so a
+/// concurrent tick can never observe "expired lease" and conclude "dead
+/// deliverer" for a delivery this process is still running.
+type LiveWaiterRegistry = Arc<StdMutex<BTreeSet<OccurrenceId>>>;
+
+/// Deregisters an occurrence from the live-waiter registry on drop, so the
+/// registration cannot leak even if the waiter task unwinds.
+struct LiveWaiterGuard {
+    registry: LiveWaiterRegistry,
+    occurrence_id: OccurrenceId,
+}
+
+impl LiveWaiterGuard {
+    fn register(registry: LiveWaiterRegistry, occurrence_id: OccurrenceId) -> Self {
+        if let Ok(mut waiters) = registry.lock() {
+            waiters.insert(occurrence_id.clone());
+        }
+        Self {
+            registry,
+            occurrence_id,
+        }
+    }
+}
+
+impl Drop for LiveWaiterGuard {
+    fn drop(&mut self) {
+        if let Ok(mut waiters) = self.registry.lock() {
+            waiters.remove(&self.occurrence_id);
+        }
+    }
+}
+
 pub struct ScheduleDriver {
     service: ScheduleService,
     store: Arc<dyn ScheduleStore>,
@@ -227,6 +263,7 @@ pub struct ScheduleDriver {
     delivery: Arc<dyn ScheduleTargetDelivery>,
     owner_id: String,
     config: ScheduleDriverConfig,
+    live_waiters: LiveWaiterRegistry,
 }
 
 impl ScheduleDriver {
@@ -245,7 +282,17 @@ impl ScheduleDriver {
             delivery,
             owner_id: owner_id.into(),
             config,
+            live_waiters: Arc::new(StdMutex::new(BTreeSet::new())),
         }
+    }
+
+    /// Snapshot of the occurrences whose delivery waiter is alive in this
+    /// process right now.
+    fn live_waiter_snapshot(&self) -> BTreeSet<OccurrenceId> {
+        self.live_waiters
+            .lock()
+            .map(|waiters| waiters.clone())
+            .unwrap_or_default()
     }
 
     pub async fn tick_once(&self) -> Result<ScheduleTickReport, ScheduleDomainError> {
@@ -276,6 +323,7 @@ impl ScheduleDriver {
                 owner_id: self.owner_id.clone(),
                 limit: self.config.claim_limit,
                 lease_duration: self.config.lease_duration,
+                live_waiter_occurrence_ids: self.live_waiter_snapshot(),
             })
             .await?;
         report.claimed_occurrences = claimed.claimed.len();
@@ -603,8 +651,24 @@ impl ScheduleDriver {
         let store = self.store.clone();
         let schedule_id = occurrence.schedule_id.clone();
         let occurrence_id = occurrence.occurrence_id.clone();
+        let lease_duration = self.config.lease_duration;
+        // Register BEFORE the task starts so the very next tick already sees
+        // the waiter; the guard deregisters after the waiter's resolution is
+        // fully committed (or the task unwinds).
+        let guard = LiveWaiterGuard::register(
+            Arc::clone(&self.live_waiters),
+            occurrence.occurrence_id.clone(),
+        );
         crate::tokio::spawn(async move {
-            let result = complete_dispatched_occurrence(store, occurrence, completion.await).await;
+            let _live = guard;
+            // While the delivery runs, keep the machine-owned lease alive at
+            // ~lease/2 cadence through the RenewLease authority input. A
+            // lease that genuinely expires from here on means this waiter is
+            // gone (process death) — reclaim stays legal.
+            let completion =
+                run_completion_with_lease_renewal(&store, &occurrence, lease_duration, completion)
+                    .await;
+            let result = complete_dispatched_occurrence(store, occurrence, completion).await;
             // All legitimate interleaving paths (late arrivals, stale claims,
             // idempotent no-ops) are classified as Ok by the time they reach
             // here. A residual Err is a real internal fault.
@@ -617,6 +681,107 @@ impl ScheduleDriver {
                 );
             }
         });
+    }
+}
+
+/// Drive the delivery's completion future while renewing the occurrence's
+/// lease at ~half the lease duration (2026-07 P0: the fixed 60s lease was
+/// never renewed, so every delivery longer than the lease — a routine
+/// session turn — was reclaimed mid-flight as a presumed-dead deliverer).
+///
+/// Renewal goes through the claim-screened store seam with the machine's
+/// `RenewLease` input: only the current claim-token holder can extend, only
+/// while the row is in flight. A renewal that fails typed (claim evidence
+/// revoked, row superseded or terminal) stops renewing and lets the waiter's
+/// eventual completion take the stale-screening path.
+async fn run_completion_with_lease_renewal(
+    store: &Arc<dyn ScheduleStore>,
+    occurrence: &Occurrence,
+    lease_duration: Duration,
+    mut completion: DeliveryCompletion,
+) -> Result<DeliveryTerminal, ScheduleDomainError> {
+    let Some(interval) = lease_renewal_interval(lease_duration) else {
+        return completion.await;
+    };
+    let Some(claim_token) = occurrence.claim_token() else {
+        // No claim token on a dispatched occurrence is unreachable through
+        // the claim path; without one the machine cannot authorize renewal.
+        return completion.await;
+    };
+    loop {
+        let tick = Box::pin(crate::tokio::time::sleep(interval));
+        match future::select(completion, tick).await {
+            Either::Left((result, _tick)) => return result,
+            Either::Right(((), waiting)) => {
+                completion = waiting;
+                if !renew_lease_once(store, occurrence, claim_token, lease_duration).await {
+                    return completion.await;
+                }
+            }
+        }
+    }
+}
+
+/// Renewal cadence: half the lease, so one missed tick still leaves a full
+/// half-lease of slack before expiry. `None` disables renewal for
+/// non-positive leases.
+fn lease_renewal_interval(lease_duration: Duration) -> Option<std::time::Duration> {
+    let half_ms = lease_duration.num_milliseconds() / 2;
+    if half_ms <= 0 {
+        return None;
+    }
+    u64::try_from(half_ms)
+        .ok()
+        .map(std::time::Duration::from_millis)
+}
+
+/// One renewal tick. Returns `false` when renewal must stop: the claim
+/// evidence no longer matches the durable row (reclaimed or released), the
+/// occurrence authority refused the renewal (superseded or terminal), or the
+/// store failed — in every case the waiter keeps running and its completion
+/// is screened against the durable claim evidence as usual.
+async fn renew_lease_once(
+    store: &Arc<dyn ScheduleStore>,
+    occurrence: &Occurrence,
+    claim_token: uuid::Uuid,
+    lease_duration: Duration,
+) -> bool {
+    let result: Result<bool, ScheduleDomainError> = async {
+        let now_utc = store.get_store_time_utc().await?;
+        let renewed = store
+            .transition_occurrence_if_current(
+                &occurrence.occurrence_id,
+                occurrence.attempt_count,
+                Some(claim_token),
+                OccurrenceLifecycleInput::RenewLease {
+                    claim_token,
+                    lease_expires_at_utc: now_utc + lease_duration,
+                    at_utc: now_utc,
+                },
+            )
+            .await?;
+        Ok(renewed.is_some())
+    }
+    .await;
+    match result {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::debug!(
+                occurrence_id = %occurrence.occurrence_id,
+                attempt = occurrence.attempt_count,
+                "lease renewal stopped: claim evidence no longer current"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::debug!(
+                occurrence_id = %occurrence.occurrence_id,
+                attempt = occurrence.attempt_count,
+                %error,
+                "lease renewal stopped: occurrence authority or store refused the renewal"
+            );
+            false
+        }
     }
 }
 
@@ -2395,14 +2560,19 @@ mod tests {
         Ok(())
     }
 
+    /// P0 2026-07 contract: a long-running delivery keeps its lease alive
+    /// through machine-authorized renewal, so later ticks neither reclaim it
+    /// (no attempt 2, no second dispatch) nor misfire it while the waiter is
+    /// registered in this process. Pre-fix, this exact setup dispatched
+    /// attempt 2 while attempt 1's waiter was provably unresolved.
     #[tokio::test]
-    async fn driver_reclaims_expired_awaiting_completion_occurrences()
+    async fn lease_renewal_keeps_long_running_delivery_claimed_without_reclaim()
     -> Result<(), ScheduleDomainError> {
         let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store.clone());
         let schedule = service
             .create(CreateScheduleRequest {
-                name: Some("reclaim-now".into()),
+                name: Some("renew-long-delivery".into()),
                 description: None,
                 trigger: TriggerSpec::Once {
                     due_at_utc: Utc::now() - Duration::seconds(1),
@@ -2431,24 +2601,351 @@ mod tests {
 
         driver.tick_once().await?;
         wait_for_sender_count(&delivery, 1).await;
-        wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
+        let dispatched = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
+        let initial_expiry = dispatched
+            .lease_expires_at_utc
+            .expect("dispatched occurrence must hold a lease");
+        assert!(
+            driver
+                .live_waiter_snapshot()
+                .contains(&dispatched.occurrence_id),
+            "the delivery waiter must be registered while the delivery runs"
+        );
 
-        sleep(std::time::Duration::from_millis(35)).await;
+        // The waiter's renewal loop (~lease/2 cadence) must extend the
+        // machine-owned lease while the delivery is still running.
+        let mut renewed = None;
+        for _ in 0..100 {
+            let current = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
+            if current
+                .lease_expires_at_utc
+                .is_some_and(|at| at > initial_expiry)
+            {
+                renewed = current.lease_expires_at_utc;
+                break;
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            renewed.is_some(),
+            "lease renewal must extend lease_expires_at while the delivery runs"
+        );
+
+        // Run well past several lease periods: no reclaim, no second
+        // dispatch, no lease-expired receipt, attempt stays 1.
+        sleep(std::time::Duration::from_millis(60)).await;
         driver.tick_once().await?;
-        wait_for_sender_count(&delivery, 2).await;
-        let occurrence = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
-
+        driver.tick_once().await?;
+        let occurrence = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
+        assert_eq!(occurrence.attempt_count, 1, "no reclaim while renewing");
         assert_eq!(occurrence.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(
+            delivery.senders.lock().await.len(),
+            1,
+            "a live delivery must never be dispatched a second time"
+        );
         let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
         assert!(
-            receipts
+            !receipts
                 .iter()
                 .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
-            "lease expiry reclaim should append a lease-expired receipt"
+            "no lease-expired receipt may be minted while the deliverer is alive"
+        );
+
+        // Completion lands normally on attempt 1.
+        let sender = delivery.senders.lock().await.remove(0);
+        sender
+            .send(DeliveryTerminal::completed(None))
+            .expect("completion receiver should be open");
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
+        assert_eq!(completed.attempt_count, 1);
+        for _ in 0..50 {
+            if driver.live_waiter_snapshot().is_empty() {
+                break;
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            driver.live_waiter_snapshot().is_empty(),
+            "the waiter registration must be released after resolution"
         );
         Ok(())
     }
 
+    /// Crash-recovery semantics are unchanged: a genuinely dead deliverer
+    /// (claimed + dispatched, but no live waiter and no renewal — as after a
+    /// process crash) is reclaimed once its lease expires, in the same
+    /// transaction as attempt+1, with the lease-expired receipt minted.
+    #[tokio::test]
+    async fn expired_lease_without_live_waiter_is_reclaimed() -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("dead-deliverer-reclaim".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+
+        // Simulate a deliverer from a crashed process: claim + dispatch +
+        // await through the store seams, with NO waiter task and NO renewal
+        // in this process.
+        let occurrence =
+            claim_and_dispatch_without_waiter(&store, Duration::milliseconds(25)).await?;
+
+        sleep(std::time::Duration::from_millis(35)).await;
+
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let reclaimed = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
+        assert_eq!(reclaimed.occurrence_id, occurrence.occurrence_id);
+        assert_eq!(reclaimed.phase, OccurrencePhase::AwaitingCompletion);
+        let receipts = store.list_receipts(&reclaimed.occurrence_id).await?;
+        assert!(
+            receipts
+                .iter()
+                .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
+            "reclaiming a dead deliverer must mint the lease-expired receipt"
+        );
+        Ok(())
+    }
+
+    /// Skip-policy arm of the live-waiter gate: an expired lease past the
+    /// misfire deadline must NOT reclaim-refuse into a false misfire while
+    /// the original waiter is registered in this process; once no waiter is
+    /// live (post-crash semantics), the current behavior stands.
+    #[tokio::test]
+    async fn live_waiter_gate_blocks_expiry_reclaim_and_false_misfire()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let _schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("live-waiter-gate".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+
+        let occurrence =
+            claim_and_dispatch_without_waiter(&store, Duration::milliseconds(25)).await?;
+        sleep(std::time::Duration::from_millis(35)).await;
+
+        // With the occurrence's waiter declared live, the expired lease is
+        // neither reclaimed nor expired: the row stays with attempt 1.
+        let gated = store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 8,
+                lease_duration: Duration::milliseconds(25),
+                live_waiter_occurrence_ids: [occurrence.occurrence_id.clone()]
+                    .into_iter()
+                    .collect(),
+            })
+            .await?;
+        assert!(
+            gated.claimed.is_empty(),
+            "an expired lease with a live in-process waiter must not be reclaimed"
+        );
+        let current = store
+            .get_occurrence(&occurrence.occurrence_id)
+            .await?
+            .expect("occurrence should exist");
+        assert_eq!(current.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(current.attempt_count, 1);
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        assert!(
+            !receipts
+                .iter()
+                .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
+            "the gate must prevent the lease-expired receipt while the waiter lives"
+        );
+        assert!(
+            !receipts
+                .iter()
+                .any(|receipt| receipt.stage == DeliveryReceiptStage::Misfired),
+            "the gate must prevent a false misfire while the waiter lives"
+        );
+
+        // Without a live waiter (post-crash), the reclaim proceeds.
+        let reclaimed = store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 8,
+                lease_duration: Duration::milliseconds(25),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
+            })
+            .await?;
+        assert_eq!(
+            reclaimed.claimed.len(),
+            1,
+            "a dead deliverer's expired lease must still be reclaimed"
+        );
+        assert_eq!(reclaimed.claimed[0].attempt_count, 2);
+        Ok(())
+    }
+
+    /// Misfire arm of the live-waiter gate in the memory store (sqlite
+    /// parity lives in `meerkat-store/tests/schedule_live_waiter_gate.rs`):
+    /// a Pending occurrence past the Skip policy's misfire deadline is NOT
+    /// terminalized as misfired while its delivery waiter is registered in
+    /// this process; without a live waiter (post-crash) the misfire
+    /// proceeds as before.
+    #[tokio::test]
+    async fn live_waiter_gate_blocks_misfire_terminalization_in_memory_store()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let create_mutator = crate::Schedule::apply(
+            None,
+            crate::ScheduleLifecycleInput::Create(CreateScheduleRequest {
+                name: Some("misfire-gate".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(40),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            }),
+        )
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let schedule = create_mutator.schedule.clone();
+        store
+            .commit_schedule_write(create_mutator.into_authorized_write())
+            .await?;
+        // Pending and 10s past the Skip policy's 30s misfire grace.
+        let write = Occurrence::planned_write_from_schedule(
+            &schedule,
+            crate::OccurrenceOrdinal(0),
+            Utc::now() - Duration::seconds(40),
+        )
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let occurrence = write.occurrence().clone();
+        store.commit_occurrence_write(write).await?;
+
+        // Gate on: not terminalized while the waiter is registered live.
+        let gated = store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 8,
+                lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: [occurrence.occurrence_id.clone()]
+                    .into_iter()
+                    .collect(),
+            })
+            .await?;
+        assert!(gated.claimed.is_empty());
+        let current = store
+            .get_occurrence(&occurrence.occurrence_id)
+            .await?
+            .expect("occurrence should exist");
+        assert_eq!(
+            current.phase,
+            OccurrencePhase::Pending,
+            "a live delivery must not be false-misfired while its waiter is registered"
+        );
+
+        // Gate off (post-crash): the misfire proceeds as before.
+        store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "driver-owner".into(),
+                limit: 8,
+                lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
+            })
+            .await?;
+        let misfired = store
+            .get_occurrence(&occurrence.occurrence_id)
+            .await?
+            .expect("occurrence should exist");
+        assert_eq!(misfired.phase, OccurrencePhase::Misfired);
+        Ok(())
+    }
+
+    /// Claim an occurrence through the store and drive it to
+    /// AwaitingCompletion through the occurrence authority without spawning
+    /// a waiter task — the durable footprint of a deliverer that crashed (or
+    /// lives in another process).
+    async fn claim_and_dispatch_without_waiter(
+        store: &Arc<dyn ScheduleStore>,
+        lease_duration: Duration,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let claimed = store
+            .claim_due_occurrences(ClaimDueRequest {
+                owner_id: "other-process".into(),
+                limit: 1,
+                lease_duration,
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
+            })
+            .await?;
+        let occurrence = claimed
+            .claimed
+            .into_iter()
+            .next()
+            .ok_or_else(|| ScheduleDomainError::Internal("expected a claim".to_string()))?;
+        let dispatch_mutator = occurrence
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("other-process-dispatch".into()),
+                at_utc: claimed.store_now_utc,
+            })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let dispatching = dispatch_mutator.occurrence.clone();
+        store
+            .commit_occurrence_write(dispatch_mutator.into_authorized_write())
+            .await?;
+        let await_mutator = dispatching
+            .apply(OccurrenceLifecycleInput::AwaitCompletion {
+                at_utc: claimed.store_now_utc,
+            })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let awaiting = await_mutator.occurrence.clone();
+        store
+            .commit_occurrence_write(await_mutator.into_authorized_write())
+            .await?;
+        Ok(awaiting)
+    }
+
+    /// Stale-completion FENCING still holds under the renewal contract: when
+    /// a genuinely dead deliverer's attempt (no live waiter in this process)
+    /// is reclaimed, a late completion arriving with the expired attempt's
+    /// claim evidence must not overwrite the reclaimed attempt.
     #[tokio::test]
     async fn late_completion_from_expired_attempt_does_not_overwrite_reclaimed_attempt()
     -> Result<(), ScheduleDomainError> {
@@ -2470,6 +2967,15 @@ mod tests {
                 planning_horizon_occurrences: Some(1),
             })
             .await?;
+
+        // Attempt 1 belongs to a "crashed" deliverer: dispatched durably,
+        // but with no live waiter and no renewal in this process. Keep its
+        // stale snapshot to replay the zombie completion later.
+        let stale_attempt =
+            claim_and_dispatch_without_waiter(&store, Duration::milliseconds(25)).await?;
+        sleep(std::time::Duration::from_millis(35)).await;
+
+        // The driver reclaims the expired attempt and dispatches attempt 2.
         let delivery = Arc::new(ControlledCompletionDelivery::default());
         let driver = ScheduleDriver::new(
             service.clone(),
@@ -2479,28 +2985,21 @@ mod tests {
             "driver-owner",
             ScheduleDriverConfig {
                 claim_limit: 8,
-                lease_duration: Duration::milliseconds(25),
+                lease_duration: Duration::seconds(30),
             },
         );
-
         driver.tick_once().await?;
         wait_for_sender_count(&delivery, 1).await;
-        wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
-
-        sleep(std::time::Duration::from_millis(35)).await;
-        driver.tick_once().await?;
-        wait_for_sender_count(&delivery, 2).await;
         wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
 
-        let mut senders = delivery.senders.lock().await;
-        let first_attempt = senders.remove(0);
-        let second_attempt = senders.remove(0);
-        drop(senders);
-
-        first_attempt
-            .send(DeliveryTerminal::completed(None))
-            .expect("first attempt sender should be open");
-        sleep(std::time::Duration::from_millis(20)).await;
+        // The zombie deliverer's completion arrives bearing attempt 1's
+        // claim evidence; the store screen must reject it.
+        complete_dispatched_occurrence(
+            store.clone(),
+            stale_attempt,
+            Ok(DeliveryTerminal::completed(None)),
+        )
+        .await?;
 
         let after_stale_completion = service
             .list_occurrences(&schedule.schedule_id)
@@ -2514,25 +3013,14 @@ mod tests {
             OccurrencePhase::AwaitingCompletion
         );
 
+        let second_attempt = delivery.senders.lock().await.remove(0);
         second_attempt
             .send(DeliveryTerminal::completed(None))
             .expect("second attempt sender should be open");
 
-        let completed = loop {
-            let occurrence = service
-                .list_occurrences(&schedule.schedule_id)
-                .await?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    ScheduleDomainError::Internal("occurrence should exist".to_string())
-                })?;
-            if occurrence.phase == OccurrencePhase::Completed {
-                break occurrence;
-            }
-            sleep(std::time::Duration::from_millis(10)).await;
-        };
-
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
         assert_eq!(completed.attempt_count, 2);
         let receipts = store.list_receipts(&completed.occurrence_id).await?;
         assert_eq!(
@@ -2582,6 +3070,7 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let occurrence = claimed
@@ -2658,6 +3147,7 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let occurrence = claimed
@@ -2727,6 +3217,7 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let occurrence = claimed
@@ -3063,6 +3554,7 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let occurrence = claimed
@@ -3152,19 +3644,23 @@ mod tests {
             },
         );
 
-        driver.tick_once().await?;
-        wait_for_sender_count(&delivery, 1).await;
-        wait_for_occurrence_attempt(&service, &schedule.schedule_id, 1).await?;
-
+        // Attempt 1 belongs to a "crashed" deliverer (no live waiter, no
+        // renewal in this process); the driver reclaims it for attempt 2.
+        let stale_attempt =
+            claim_and_dispatch_without_waiter(&store, Duration::milliseconds(25)).await?;
         sleep(std::time::Duration::from_millis(35)).await;
         driver.tick_once().await?;
-        wait_for_sender_count(&delivery, 2).await;
+        wait_for_sender_count(&delivery, 1).await;
         wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
 
-        let first_attempt = delivery.senders.lock().await.remove(0);
-        first_attempt
-            .send(DeliveryTerminal::completed(None))
-            .expect("first attempt sender should be open");
+        // The zombie deliverer's completion arrives bearing attempt 1's
+        // claim evidence.
+        complete_dispatched_occurrence(
+            store.clone(),
+            stale_attempt,
+            Ok(DeliveryTerminal::completed(None)),
+        )
+        .await?;
 
         let recorded = loop_until_stale_arrival_recorded(&service, &schedule.schedule_id).await?;
         assert_eq!(

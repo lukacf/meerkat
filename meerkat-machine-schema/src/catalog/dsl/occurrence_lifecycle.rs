@@ -214,6 +214,18 @@ machine! {
             },
             ResolveDueMisfire { detail: Option<String>, at_utc_ms: u64 },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
+            // Lease renewal (2026-07 P0: the firing host granted a fixed 60s
+            // lease and NOTHING renewed it, while a session-target delivery
+            // holds the lease across an entire turn — minutes are routine.
+            // The expired-lease reclaim then dispatched a duplicate turn
+            // under CatchUpWithin, or false-misfired a still-running
+            // delivery under Skip). The live deliverer presents its claim
+            // token; only the current token holder may extend its own lease,
+            // and only while the delivery is actually in flight
+            // (Dispatching / AwaitingCompletion). A lease that genuinely
+            // expires therefore means the deliverer is presumed dead and
+            // reclaim stays legal.
+            RenewLease { claim_token: ClaimToken, lease_expires_at_utc_ms: u64, at_utc_ms: u64 },
             LeaseExpired { at_utc_ms: u64 },
             ReleaseLeaseForPausedSchedule { at_utc_ms: u64 },
             ClassifyTransitionFailure {
@@ -278,6 +290,10 @@ machine! {
             },
             DeliveryFailed,
             LeaseExpired,
+            // The current claim-token holder extended its own lease while its
+            // delivery is still in flight. Pure acknowledgement for the
+            // renewing shell; no receipt and no owner realization.
+            LeaseRenewed,
             TransitionFailureClassified {
                 phase: Enum<OccurrenceLifecycleState>,
                 refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
@@ -357,6 +373,9 @@ machine! {
         disposition CompletionSupersessionClassified => local seam NoOwnerRealization,
         disposition DeliveryFailed => external seam SurfaceResultAlignment,
         disposition LeaseExpired => external seam SurfaceResultAlignment,
+        // Lease renewal acknowledgement: the renewing driver observes it via
+        // the store seam's returned effects; no receipt is minted for it.
+        disposition LeaseRenewed => local seam NoOwnerRealization,
         disposition TransitionFailureClassified => local seam SurfaceResultAlignment,
         // Late-arrival record: the driver mirrors it to align its receipt /
         // waiter-resolution behavior with the machine's verdict (the arrival
@@ -577,6 +596,7 @@ machine! {
                 (
                     trigger == OccurrenceLifecycleInputVariant::LeaseExpired
                     || trigger == OccurrenceLifecycleInputVariant::ReleaseLeaseForPausedSchedule
+                    || trigger == OccurrenceLifecycleInputVariant::RenewLease
                 )
                 && (
                     refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
@@ -1903,6 +1923,49 @@ machine! {
             emit LateCompletionResolutionRecorded {
                 resolution: LateCompletionResolutionClass::DeliveryFailed
             }
+        }
+
+        // --- Lease renewal (one per in-flight phase, self-loop) ---
+        //
+        // 2026-07 P0: a fixed lease with no renewal input in this machine's
+        // vocabulary meant every delivery longer than the lease was reclaimed
+        // mid-flight. Renewal is guarded on the presented claim token
+        // matching the machine-owned token (idiom:
+        // `self.claim_token == Some(claim_token)`) so only the live claim
+        // holder can extend, and on monotonic extension so a stale renewal
+        // can never shrink the lease. Renewal is deliberately NOT legal from
+        // Claimed: nothing is in flight before DispatchStarted, so a Claimed
+        // occurrence whose lease expires had a dead dispatcher and must be
+        // reclaimed.
+
+        transition RenewLeaseFromDispatching {
+            on input RenewLease { claim_token, lease_expires_at_utc_ms, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching }
+            guard "claim_token_matches" { self.claim_token == Some(claim_token) }
+            guard "extension_is_monotonic" {
+                self.lease_expires_at_utc_ms == None
+                || self.lease_expires_at_utc_ms.get("value") <= lease_expires_at_utc_ms
+            }
+            update {
+                self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);
+            }
+            to Dispatching
+            emit LeaseRenewed
+        }
+
+        transition RenewLeaseFromAwaitingCompletion {
+            on input RenewLease { claim_token, lease_expires_at_utc_ms, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "claim_token_matches" { self.claim_token == Some(claim_token) }
+            guard "extension_is_monotonic" {
+                self.lease_expires_at_utc_ms == None
+                || self.lease_expires_at_utc_ms.get("value") <= lease_expires_at_utc_ms
+            }
+            update {
+                self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);
+            }
+            to AwaitingCompletion
+            emit LeaseRenewed
         }
 
         // --- Lease expired (one per source phase, returns to Pending) ---

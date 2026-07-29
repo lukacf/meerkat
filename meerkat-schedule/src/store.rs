@@ -10,7 +10,7 @@ use crate::types::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -24,6 +24,16 @@ pub struct ClaimDueRequest {
     pub owner_id: String,
     pub limit: usize,
     pub lease_duration: Duration,
+    /// Occurrences whose delivery waiter is verifiably alive in the calling
+    /// process (the driver owns the waiter registry and snapshots it per
+    /// tick). The claim scan must neither reclaim (`LeaseExpired`) nor
+    /// misfire these rows: an expired lease on a row with a live in-process
+    /// waiter means the renewal is late, not that the deliverer is dead
+    /// (2026-07 P0: the reclaim dispatched a duplicate turn under
+    /// `CatchUpWithin` and false-misfired a still-running delivery under
+    /// `Skip`). Post-crash the registry is empty, so genuinely dead
+    /// deliverers are reclaimed exactly as before.
+    pub live_waiter_occurrence_ids: BTreeSet<OccurrenceId>,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +770,17 @@ impl ScheduleStore for MemoryScheduleStore {
             };
             match action {
                 Some(OccurrenceDueAction::MisfireRequired) => {
+                    // A live in-process waiter means the delivery is still
+                    // running; terminalizing it as misfired would lie about a
+                    // turn that is actually executing. Leave the row for a
+                    // later tick (once the waiter resolves, the completion —
+                    // or a then-legitimate misfire — accounts for it).
+                    if request
+                        .live_waiter_occurrence_ids
+                        .contains(&existing.occurrence_id)
+                    {
+                        continue;
+                    }
                     let detail = Some(existing.due_misfire_detail_at(store_now_utc));
                     let mut updated =
                         match existing
@@ -829,6 +850,19 @@ impl ScheduleStore for MemoryScheduleStore {
                     claimed.push(updated);
                 }
                 Some(OccurrenceDueAction::LeaseExpired) => {
+                    // A live in-process waiter means the deliverer is not
+                    // dead — only its lease renewal is late. Reclaiming here
+                    // would mint attempt N+1 while attempt N's turn still
+                    // runs (duplicate delivery) or, past the misfire
+                    // deadline, false-misfire it. Skip; the waiter's renewal
+                    // or completion resolves the row. Post-crash the set is
+                    // empty and the reclaim proceeds as before.
+                    if request
+                        .live_waiter_occurrence_ids
+                        .contains(&existing.occurrence_id)
+                    {
+                        continue;
+                    }
                     if claimed.len() >= request.limit {
                         continue;
                     }

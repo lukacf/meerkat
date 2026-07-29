@@ -144,6 +144,7 @@ async fn seed_store(store: &SqliteScheduleStore) -> (Schedule, Schedule) {
             owner_id: "pushdown-test".to_string(),
             limit: 16,
             lease_duration: Duration::seconds(60),
+            live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
         })
         .await
         .expect("claim");

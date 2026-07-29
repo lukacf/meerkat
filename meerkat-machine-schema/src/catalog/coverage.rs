@@ -893,6 +893,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AwaitCompletionFromDispatching",
                         "RuntimeCompletionCompleted",
                         "DueMisfirePending",
+                        "RenewLeaseFromDispatching",
+                        "RenewLeaseFromAwaitingCompletion",
                         "LeaseExpiredFromClaimed",
                         "LeaseExpiredFromDispatching",
                         "LeaseExpiredFromAwaitingCompletion",
@@ -909,6 +911,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "DueLeaseExpired",
                         "DeliveryFailed",
                         "LeaseExpired",
+                        "LeaseRenewed",
                     ]),
             )],
             &[
@@ -968,13 +971,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "occurrence_lease_recovery",
-                    "classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery",
+                    "classify due no action, due claim eligible, due misfire required, due lease expired, lease renewal by the live claim-token holder from dispatching or awaiting completion, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery",
                     CoverageClaims::none()
                         .transitions(&[
                             "ClassifyDueClaimedLeaseExpired",
                             "ClassifyDueDispatchingLeaseExpired",
                             "ClassifyDueAwaitingCompletionLeaseExpired",
                             "AwaitCompletionFromDispatching",
+                            "RenewLeaseFromDispatching",
+                            "RenewLeaseFromAwaitingCompletion",
                             "LeaseExpiredFromClaimed",
                             "LeaseExpiredFromDispatching",
                             "LeaseExpiredFromAwaitingCompletion",
@@ -986,6 +991,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DueMisfireRequired",
                             "DueLeaseExpired",
                             "LeaseExpired",
+                            "LeaseRenewed",
                         ]),
                 ),
             ],

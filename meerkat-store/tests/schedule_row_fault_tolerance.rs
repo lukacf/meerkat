@@ -103,6 +103,7 @@ fn claim_request() -> ClaimDueRequest {
         owner_id: "row-fault-test".to_string(),
         limit: 16,
         lease_duration: Duration::seconds(60),
+        live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
     }
 }
 

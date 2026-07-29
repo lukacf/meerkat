@@ -982,6 +982,7 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
+                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let in_flight = claimed

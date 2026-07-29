@@ -969,6 +969,77 @@ fn log_tick_health(action: TickHealthLog) {
     }
 }
 
+/// Consecutive no-progress ticks tolerated at the base interval before the
+/// host starts backing off (errors escalate immediately). Sits beside the
+/// driver policy literals (`claim_limit`, `lease_duration`) in
+/// [`spawn_schedule_host`] as the host's tick-pacing policy.
+const IDLE_TICKS_BEFORE_BACKOFF: u32 = 8;
+
+/// Exponential tick pacing for the schedule host loop (2026-07-29 incident:
+/// a failing or no-progress tick retried at a fixed 4Hz forever — on a
+/// remote store that is query spam priced in currency; a BigQuery-store
+/// consumer flagged it as a parity blocker).
+///
+/// Policy: a failing tick escalates immediately; a run of
+/// `idle_grace_ticks` no-progress ticks starts escalating too (doubling,
+/// capped); any tick that moves work snaps back to the base interval.
+struct TickBackoff {
+    base: Duration,
+    cap: Duration,
+    idle_grace_ticks: u32,
+    current: Duration,
+    consecutive_unproductive: u32,
+}
+
+impl TickBackoff {
+    fn new(base: Duration, cap: Duration, idle_grace_ticks: u32) -> Self {
+        Self {
+            base,
+            cap,
+            idle_grace_ticks,
+            current: base,
+            consecutive_unproductive: 0,
+        }
+    }
+
+    /// Observe one tick outcome and return the delay to sleep before the
+    /// next tick.
+    fn observe(
+        &mut self,
+        outcome: &Result<
+            meerkat_schedule::ScheduleTickReport,
+            meerkat_schedule::ScheduleDomainError,
+        >,
+    ) -> Duration {
+        match outcome {
+            // A failing tick is retried with immediate escalation: at the
+            // fixed interval every retry hammered the failing store.
+            Err(_) => {
+                self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
+                self.escalate();
+            }
+            Ok(report) if report.made_progress() => {
+                self.consecutive_unproductive = 0;
+                self.current = self.base;
+            }
+            // Successful but unproductive (idle store, or every row
+            // faulting): keep the fast cadence through the grace run so
+            // freshly created work is picked up promptly, then back off.
+            Ok(_) => {
+                self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
+                if self.consecutive_unproductive > self.idle_grace_ticks {
+                    self.escalate();
+                }
+            }
+        }
+        self.current
+    }
+
+    fn escalate(&mut self) {
+        self.current = self.current.saturating_mul(2).min(self.cap);
+    }
+}
+
 pub fn spawn_schedule_host(
     schedule_service: ScheduleService,
     adapter: Arc<SharedScheduleTargetAdapter>,
@@ -986,10 +1057,14 @@ pub fn spawn_schedule_host(
             lease_duration: ChronoDuration::seconds(60),
         },
     ));
-    let poll_interval = if cfg!(test) {
-        Duration::from_millis(50)
+    // Tick pacing: base interval while work flows, exponential backoff to
+    // the cap while ticks fail or make no progress (see `TickBackoff`). The
+    // in-crate test profile keeps both bounds small so host tests never wait
+    // on an escalated interval.
+    let (base_interval, backoff_cap) = if cfg!(test) {
+        (Duration::from_millis(50), Duration::from_millis(400))
     } else {
-        Duration::from_millis(250)
+        (Duration::from_millis(250), Duration::from_secs(30))
     };
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     #[cfg(not(target_arch = "wasm32"))]
@@ -1000,15 +1075,16 @@ pub fn spawn_schedule_host(
         {
             tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
         }
-        let mut interval = tokio::time::interval(poll_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
+        let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
+        let mut delay = base_interval;
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
-                _ = interval.tick() => {
+                () = tokio::time::sleep(delay) => {
                     let outcome = driver.tick_once().await;
                     log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
+                    delay = backoff.observe(&outcome);
                 }
             }
         }
@@ -1021,14 +1097,16 @@ pub fn spawn_schedule_host(
         {
             tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
         }
-        let mut interval = tokio_with_wasm::alias::time::interval(poll_interval);
         let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
+        let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
+        let mut delay = base_interval;
         loop {
             tokio_with_wasm::alias::select! {
                 _ = &mut shutdown_rx => break,
-                () = interval.tick() => {
+                () = tokio_with_wasm::alias::time::sleep(delay) => {
                     let outcome = driver.tick_once().await;
                     log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
+                    delay = backoff.observe(&outcome);
                 }
             }
         }
@@ -1420,6 +1498,74 @@ mod tests {
             TickHealthLog::Recovered { after } => assert_eq!(after, 6),
             other => panic!("expected recovery, got {other:?}"),
         }
+    }
+
+    /// 2026-07-29 incident: a failing tick retried at the fixed 4Hz interval
+    /// forever (query spam priced in currency on remote stores). The backoff
+    /// must escalate immediately on every failing tick, cap, and snap back
+    /// to the base interval on the first progressing tick.
+    #[test]
+    fn tick_backoff_escalates_on_failing_ticks_and_resets_on_progress() {
+        let base = Duration::from_millis(250);
+        let cap = Duration::from_secs(30);
+        let mut backoff = TickBackoff::new(base, cap, 8);
+        let failure: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
+            meerkat_schedule::ScheduleDomainError::Internal("store unavailable".to_string()),
+        );
+
+        // Each failing tick doubles: 500ms, 1s, 2s, ...
+        assert_eq!(backoff.observe(&failure), Duration::from_millis(500));
+        assert_eq!(backoff.observe(&failure), Duration::from_millis(1000));
+        assert_eq!(backoff.observe(&failure), Duration::from_millis(2000));
+        // ... until the cap holds.
+        for _ in 0..16 {
+            assert!(backoff.observe(&failure) <= cap);
+        }
+        assert_eq!(backoff.observe(&failure), cap);
+
+        // A progressing tick resets to the base interval at once.
+        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport {
+                claimed_occurrences: 1,
+                ..meerkat_schedule::ScheduleTickReport::default()
+            });
+        assert_eq!(backoff.observe(&progressing), base);
+        // And the next failure starts escalating from the base again.
+        assert_eq!(backoff.observe(&failure), Duration::from_millis(500));
+    }
+
+    /// Idle (successful but zero-progress) ticks keep the fast cadence
+    /// through the grace run — freshly created work must be picked up
+    /// promptly — then escalate, and any progressing tick resets both the
+    /// interval and the grace counter.
+    #[test]
+    fn tick_backoff_tolerates_idle_grace_then_escalates_and_resets() {
+        let base = Duration::from_millis(250);
+        let cap = Duration::from_secs(30);
+        let grace = 3;
+        let mut backoff = TickBackoff::new(base, cap, grace);
+        let idle: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport::default());
+        let progressing: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport {
+                planned_occurrences: 1,
+                ..meerkat_schedule::ScheduleTickReport::default()
+            });
+
+        // Grace run: the base interval holds for `grace` idle ticks.
+        for _ in 0..grace {
+            assert_eq!(backoff.observe(&idle), base);
+        }
+        // Past the grace run, idle ticks escalate.
+        assert_eq!(backoff.observe(&idle), Duration::from_millis(500));
+        assert_eq!(backoff.observe(&idle), Duration::from_millis(1000));
+
+        // Progress resets the interval AND re-arms the grace run.
+        assert_eq!(backoff.observe(&progressing), base);
+        for _ in 0..grace {
+            assert_eq!(backoff.observe(&idle), base);
+        }
+        assert_eq!(backoff.observe(&idle), Duration::from_millis(500));
     }
 
     /// Ask 16 regression, loop-level: the spawned schedule host loop must

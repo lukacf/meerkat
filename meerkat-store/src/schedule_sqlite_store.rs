@@ -13,6 +13,7 @@ use meerkat_schedule::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 fn migration_0001_schedule_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -37,28 +38,13 @@ pub const SCHEDULE_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::
     }],
 };
 
-/// Per-operation connection: fence guard lives exactly as long as the
-/// connection it admits.
-struct ScheduleConn {
-    conn: Connection,
-    _guard: meerkat_sqlite::OperationGuard,
-}
-
-impl std::ops::Deref for ScheduleConn {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
-        &self.conn
-    }
-}
-
-impl std::ops::DerefMut for ScheduleConn {
-    fn deref_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
-}
-
-fn open_schedule_connection(path: &Path) -> Result<ScheduleConn, StoreError> {
-    let guard = meerkat_sqlite::OperationGuard::for_database(path)?;
+/// Open + migrate the schedule database. Runs under its own per-operation
+/// fence guard (released on return); the returned connection is long-lived
+/// and every subsequent store operation takes a fresh guard, so the fence
+/// stays enforceable per operation even though the connection is not
+/// reopened per operation (meerkat-sqlite fence module contract).
+fn open_schedule_connection(path: &Path) -> Result<Connection, StoreError> {
+    let _guard = meerkat_sqlite::OperationGuard::for_database(path)?;
     let mut conn = meerkat_sqlite::open_with(
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
@@ -72,10 +58,7 @@ fn open_schedule_connection(path: &Path) -> Result<ScheduleConn, StoreError> {
     )
     .map_err(StoreError::from)?;
     meerkat_sqlite::apply_domain_migrations(&mut conn, &SCHEDULE_STORE_DOMAIN)?;
-    Ok(ScheduleConn {
-        conn,
-        _guard: guard,
-    })
+    Ok(conn)
 }
 
 const CREATE_SCHEDULES_TABLE_SQL: &str = r"
@@ -125,28 +108,56 @@ ON schedule_receipts(occurrence_id, recorded_at_ms ASC)";
 
 pub struct SqliteScheduleStore {
     path: PathBuf,
+    /// One long-lived connection shared by every operation (2026-07-29
+    /// incident: opening a fresh connection per operation — full WAL close +
+    /// shm purge each time — was hot in a production lldb capture). The
+    /// maintenance fence stays per-operation: each op takes its own
+    /// [`meerkat_sqlite::OperationGuard`] before touching the connection.
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SqliteScheduleStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
         let conn = open_schedule_connection(&path)?;
-        drop(conn);
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Run one store operation on the blocking pool against the held
+    /// connection, under a fresh per-operation maintenance-fence guard (the
+    /// fence must fail every op typed while maintenance holds it, so the
+    /// guard can never be amortized the way the connection is).
+    async fn with_conn<T, F>(&self, op: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        let path = self.path.clone();
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)?;
+            let mut conn = conn.lock().map_err(|_| {
+                StoreError::Internal("schedule store connection mutex poisoned".to_string())
+            })?;
+            op(&mut conn)
+        })
+        .await
+        .map_err(StoreError::Join)?
+    }
+
     async fn commit_schedule_write_impl(
         &self,
         write: AuthorizedScheduleWrite,
     ) -> Result<(), StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             reject_standalone_supersession_write(&write)?;
             verify_authorized_schedule_write_in_txn(&tx, &write)?;
             let schedule = write.into_schedule();
@@ -155,17 +166,14 @@ impl SqliteScheduleStore {
             Ok(())
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn get_schedule_impl(
         &self,
         schedule_id: &meerkat_schedule::ScheduleId,
     ) -> Result<Option<Schedule>, StoreError> {
-        let path = self.path.clone();
         let schedule_id = schedule_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
+        self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
                 params![schedule_id],
@@ -176,16 +184,13 @@ impl SqliteScheduleStore {
             .transpose()
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn list_schedules_impl(
         &self,
         filter: ScheduleFilter,
     ) -> Result<Vec<Schedule>, StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
+        self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
@@ -223,16 +228,13 @@ impl SqliteScheduleStore {
             Ok(schedules)
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn list_schedules_with_row_faults_impl(
         &self,
         filter: ScheduleFilter,
     ) -> Result<(Vec<Schedule>, Vec<ScheduleStoreRowFault>), StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
+        self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
@@ -278,17 +280,14 @@ impl SqliteScheduleStore {
             Ok((schedules, row_faults))
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn commit_occurrence_write_impl(
         &self,
         write: AuthorizedOccurrenceWrite,
     ) -> Result<(), StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             verify_authorized_occurrence_write_in_txn(&tx, &write)?;
             let occurrence = write.into_occurrence();
             write_occurrence_in_txn(&tx, &occurrence)?;
@@ -296,17 +295,14 @@ impl SqliteScheduleStore {
             Ok(())
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn commit_occurrence_writes_impl(
         &self,
         writes: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<(), StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             for write in &writes {
                 verify_authorized_occurrence_write_in_txn(&tx, write)?;
             }
@@ -318,17 +314,14 @@ impl SqliteScheduleStore {
             Ok(())
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn get_occurrence_impl(
         &self,
         occurrence_id: &meerkat_schedule::OccurrenceId,
     ) -> Result<Option<Occurrence>, StoreError> {
-        let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
+        self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
                 params![occurrence_id],
@@ -339,21 +332,26 @@ impl SqliteScheduleStore {
             .transpose()
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn list_occurrences_impl(
         &self,
         filter: OccurrenceFilter,
     ) -> Result<Vec<Occurrence>, StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT occurrence_json FROM schedule_occurrences ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
-            )?;
-            let rows =
-                stmt.query_map([], |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()))?;
+        self.with_conn(move |conn| {
+            // Ask 19's claim-scan doctrine, applied to the listing (2026-07-29
+            // incident: the unbounded `SELECT *` deserialized every row ever
+            // written, so accumulated terminal history made every list call
+            // O(all rows) — a past deployment's operator remedy was wiping
+            // the tables). The indexed columns are write-coherent projections
+            // of the canonical JSON, so SQL prefilters the scan; the Rust
+            // chain below is retained unchanged as the deciding authority for
+            // every row the prefilter admits.
+            let (sql, sql_params) = occurrence_list_query(&filter);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(sql_params), |row| {
+                Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
+            })?;
             let mut occurrences = Vec::new();
             for row in rows {
                 let bytes = row?;
@@ -392,31 +390,25 @@ impl SqliteScheduleStore {
             Ok(occurrences)
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn append_receipt_impl(&self, receipt: DeliveryReceipt) -> Result<(), StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             let canonical_receipt = record_occurrence_receipt_in_txn(&tx, &receipt)?;
             write_receipt_in_txn(&tx, &canonical_receipt)?;
             tx.commit()?;
             Ok(())
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn list_receipts_impl(
         &self,
         occurrence_id: &meerkat_schedule::OccurrenceId,
     ) -> Result<Vec<DeliveryReceipt>, StoreError> {
-        let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = open_schedule_connection(&path)?;
+        self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT receipt_json FROM schedule_receipts WHERE occurrence_id = ?1 ORDER BY recorded_at_ms ASC, receipt_id ASC",
             )?;
@@ -431,17 +423,14 @@ impl SqliteScheduleStore {
             Ok(receipts)
         })
         .await
-        .map_err(StoreError::Join)?
     }
 
     async fn claim_due_occurrences_impl(
         &self,
         request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, StoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             let store_now_ms = select_store_now_ms(&tx)?;
             let store_now_utc = utc_from_millis(store_now_ms);
 
@@ -603,7 +592,6 @@ impl SqliteScheduleStore {
             })
         })
         .await
-        .map_err(StoreError::Join)?
     }
 }
 
@@ -614,15 +602,9 @@ impl ScheduleStore for SqliteScheduleStore {
     }
 
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || -> Result<DateTime<Utc>, StoreError> {
-            let conn = open_schedule_connection(&path)?;
-            Ok(utc_from_millis(select_store_now_ms(&conn)?))
-        })
-        .await
-        .map_err(StoreError::Join)
-        .and_then(|result| result)
-        .map_err(into_schedule_store_error)
+        self.with_conn(move |conn| Ok(utc_from_millis(select_store_now_ms(conn)?)))
+            .await
+            .map_err(into_schedule_store_error)
     }
 
     async fn commit_schedule_write(
@@ -684,10 +666,8 @@ impl ScheduleStore for SqliteScheduleStore {
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<Schedule, ScheduleStoreError> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             verify_authorized_schedule_write_in_txn(&tx, &schedule)?;
             for occurrence in &occurrences {
                 verify_authorized_occurrence_write_in_txn(&tx, occurrence)?;
@@ -713,8 +693,6 @@ impl ScheduleStore for SqliteScheduleStore {
             Ok(committed_schedule)
         })
         .await
-        .map_err(StoreError::Join)
-        .and_then(|result| result)
         .map_err(into_schedule_store_error)
     }
 
@@ -767,11 +745,9 @@ impl ScheduleStore for SqliteScheduleStore {
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
     ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError> {
-        let path = self.path.clone();
         let occurrence_id = occurrence_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             let current = tx
                 .query_row(
                     "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
@@ -805,8 +781,6 @@ impl ScheduleStore for SqliteScheduleStore {
             Ok(Some((updated, effects)))
         })
         .await
-        .map_err(StoreError::Join)
-        .and_then(|result| result)
         .map_err(into_schedule_store_error)
     }
 
@@ -818,11 +792,9 @@ impl ScheduleStore for SqliteScheduleStore {
         transition: OccurrenceLifecycleInput,
         runtime_outcome: Option<RuntimeDeliveryOutcome>,
     ) -> Result<Option<Occurrence>, ScheduleStoreError> {
-        let path = self.path.clone();
         let occurrence_id = occurrence_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = open_schedule_connection(&path)?;
-            let tx = begin_immediate_transaction(&mut conn)?;
+        self.with_conn(move |conn| {
+            let tx = begin_immediate_transaction(conn)?;
             let Some(current) = read_occurrence_in_txn(&tx, &occurrence_id)? else {
                 tx.commit()?;
                 return Ok(None);
@@ -861,8 +833,6 @@ impl ScheduleStore for SqliteScheduleStore {
             Ok(Some(updated))
         })
         .await
-        .map_err(StoreError::Join)
-        .and_then(|result| result)
         .map_err(into_schedule_store_error)
     }
 }
@@ -1297,6 +1267,68 @@ fn live_occurrence_phase_sql_list() -> String {
     out
 }
 
+/// Build the occurrence-listing query with every filter predicate SQL can
+/// express pushed onto the indexed projection columns, in canonical order.
+///
+/// Pushdown honesty notes (the Rust chain in `list_occurrences_impl` stays
+/// the deciding authority for every admitted row):
+/// - `schedule_id` and `phase` columns are write-coherent projections of the
+///   canonical JSON (`write_occurrence_in_txn` sets them from the same
+///   occurrence), so those predicates are exact.
+/// - terminal exclusion uses the live-phase label set as a superset
+///   prefilter: `Occurrence::is_terminal()` is machine-owned and fails
+///   closed, so a live-phase row the machine refuses to classify is still
+///   dropped by the retained Rust check.
+/// - the due bounds compare truncated milliseconds while the Rust check
+///   compares full-precision timestamps, so they are conservative supersets
+///   (`millis` floors, and flooring is monotone).
+/// - `LIMIT` is pushed only when every active predicate is exact in SQL —
+///   a limit over a conservative superset could return fewer rows than the
+///   unpushed path even though more matching rows exist.
+fn occurrence_list_query(filter: &OccurrenceFilter) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+    let mut sql = String::from("SELECT occurrence_json FROM schedule_occurrences");
+    let mut sql_params: Vec<Value> = Vec::new();
+    let mut conditions: Vec<String> = Vec::new();
+    if let Some(schedule_id) = &filter.schedule_id {
+        sql_params.push(Value::Text(schedule_id.to_string()));
+        conditions.push(format!("schedule_id = ?{}", sql_params.len()));
+    }
+    if let Some(phase) = filter.phase {
+        sql_params.push(Value::Text(occurrence_phase_label(phase).to_string()));
+        conditions.push(format!("phase = ?{}", sql_params.len()));
+    }
+    if !filter.include_terminal {
+        conditions.push(format!(
+            "phase IN ({live_phases})",
+            live_phases = live_occurrence_phase_sql_list()
+        ));
+    }
+    if let Some(due_after) = filter.due_after_utc {
+        sql_params.push(Value::Integer(millis(due_after)));
+        conditions.push(format!("due_at_ms >= ?{}", sql_params.len()));
+    }
+    if let Some(due_before) = filter.due_before_utc {
+        sql_params.push(Value::Integer(millis(due_before)));
+        conditions.push(format!("due_at_ms <= ?{}", sql_params.len()));
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC");
+    let limit_pushdown_is_exact = filter.include_terminal
+        && filter.due_after_utc.is_none()
+        && filter.due_before_utc.is_none();
+    if let Some(limit) = filter.limit
+        && limit_pushdown_is_exact
+    {
+        sql_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
+        sql.push_str(&format!(" LIMIT ?{}", sql_params.len()));
+    }
+    (sql, sql_params)
+}
+
 fn select_store_now_ms(conn: &Connection) -> Result<i64, StoreError> {
     conn.query_row(
         "SELECT CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)",
@@ -1367,6 +1399,139 @@ mod tests {
         assert!(
             matches!(err, ScheduleStoreError::Internal(_)),
             "unexpected error: {err:?}"
+        );
+    }
+
+    fn sample_schedule_mutator() -> meerkat_schedule::ScheduleLifecycleMutator {
+        Schedule::apply(
+            None,
+            meerkat_schedule::ScheduleLifecycleInput::Create(
+                meerkat_schedule::CreateScheduleRequest {
+                    name: Some("held-connection".to_string()),
+                    description: None,
+                    trigger: meerkat_schedule::TriggerSpec::Interval(
+                        meerkat_schedule::IntervalTriggerSpec {
+                            start_at_utc: Utc::now(),
+                            every_seconds: 60,
+                            end_at_utc: None,
+                        },
+                    ),
+                    target: meerkat_schedule::TargetBinding::session(
+                        meerkat_schedule::SessionTargetBinding::ExactSession {
+                            session_id: meerkat_core::SessionId::new(),
+                            action: meerkat_schedule::ScheduledSessionAction::Prompt {
+                                prompt: meerkat_core::ContentInput::from("scheduled prompt"),
+                                system_prompt: None,
+                                render_metadata: None,
+                                skill_refs: Vec::new(),
+                                additional_instructions: Vec::new(),
+                            },
+                        },
+                    ),
+                    misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                    overlap_policy: meerkat_schedule::OverlapPolicy::SkipIfRunning,
+                    missing_target_policy: meerkat_schedule::MissingTargetPolicy::MarkMisfired,
+                    labels: std::collections::BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                },
+            ),
+        )
+        .expect("sample schedule creation should pass generated authority")
+    }
+
+    /// 2026-07-29 incident regression: every store operation opened (and
+    /// fully closed) a fresh WAL connection — hot in a production lldb
+    /// capture. `PRAGMA data_version` is the observable: it is
+    /// per-connection and only moves when ANOTHER connection commits, so if
+    /// any store op below opened its own connection to write, the held
+    /// connection's data_version would bump.
+    #[tokio::test]
+    async fn store_operations_reuse_the_held_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schedule.sqlite3");
+        let store = SqliteScheduleStore::open(&path).expect("open store");
+        let data_version = |store: &SqliteScheduleStore| -> i64 {
+            store
+                .conn
+                .lock()
+                .expect("connection mutex")
+                .pragma_query_value(None, "data_version", |row| row.get(0))
+                .expect("data_version")
+        };
+        let before = data_version(&store);
+
+        let mutator = sample_schedule_mutator();
+        let schedule = mutator.schedule.clone();
+        store
+            .commit_schedule_write(mutator.into_authorized_write())
+            .await
+            .expect("commit schedule");
+        store
+            .get_schedule(&schedule.schedule_id)
+            .await
+            .expect("get schedule");
+        store
+            .list_occurrences(OccurrenceFilter::default())
+            .await
+            .expect("list occurrences");
+
+        assert_eq!(
+            data_version(&store),
+            before,
+            "a data_version bump means a store op committed over a fresh \
+             connection instead of the held one"
+        );
+
+        // Probe validation (the assertion above must not be vacuous): a
+        // commit from a genuinely foreign connection DOES bump data_version.
+        let foreign = Connection::open(&path).expect("foreign connection");
+        foreign
+            .execute_batch("CREATE TABLE data_version_probe (x INTEGER)")
+            .expect("foreign write");
+        drop(foreign);
+        assert_ne!(
+            data_version(&store),
+            before,
+            "the data_version probe must detect foreign-connection commits"
+        );
+    }
+
+    /// The SQL predicates `occurrence_list_query` builds must mirror the
+    /// filter exactly, and LIMIT must only be pushed when every active
+    /// predicate is exact in SQL (a limit over a conservative superset could
+    /// under-return).
+    #[test]
+    fn occurrence_list_query_pushes_only_exact_limits() {
+        let unbounded = occurrence_list_query(&OccurrenceFilter {
+            include_terminal: true,
+            limit: Some(5),
+            ..OccurrenceFilter::default()
+        });
+        assert!(unbounded.0.contains("LIMIT"), "{}", unbounded.0);
+
+        // Terminal exclusion is a fail-closed superset (machine-owned
+        // `is_terminal`), so a limit must not be pushed under it.
+        let live_only = occurrence_list_query(&OccurrenceFilter {
+            limit: Some(5),
+            ..OccurrenceFilter::default()
+        });
+        assert!(!live_only.0.contains("LIMIT"), "{}", live_only.0);
+        assert!(live_only.0.contains("phase IN ("), "{}", live_only.0);
+
+        // Due bounds compare truncated milliseconds (conservative), so a
+        // limit must not be pushed alongside them either.
+        let due_bounded = occurrence_list_query(&OccurrenceFilter {
+            include_terminal: true,
+            due_after_utc: Some(Utc::now()),
+            limit: Some(5),
+            ..OccurrenceFilter::default()
+        });
+        assert!(!due_bounded.0.contains("LIMIT"), "{}", due_bounded.0);
+        assert!(
+            due_bounded.0.contains("due_at_ms >= ?"),
+            "{}",
+            due_bounded.0
         );
     }
 }

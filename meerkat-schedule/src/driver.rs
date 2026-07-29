@@ -142,6 +142,19 @@ pub struct ScheduleTickReport {
 }
 
 impl ScheduleTickReport {
+    /// Whether this tick moved any work: planned, claimed, or terminalized
+    /// at least one occurrence. Hosts use this as the pacing signal — a run
+    /// of ticks with no progress (idle store, or a stuck one) is safe to
+    /// poll less aggressively, and on a remote store every needless tick is
+    /// billed (2026-07-29 incident: a no-progress tick retried at 4Hz
+    /// forever; a BigQuery-store consumer flagged the query spam as a
+    /// parity blocker).
+    pub fn made_progress(&self) -> bool {
+        self.planned_occurrences > 0
+            || self.claimed_occurrences > 0
+            || self.terminalized_occurrences > 0
+    }
+
     /// Total typed faults this tick surfaced (rows skipped or schedules
     /// whose refill failed). Non-zero means an operator-visible incident
     /// even though the tick itself succeeded for healthy rows.

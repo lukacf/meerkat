@@ -581,7 +581,7 @@ mod tests {
 
         let bytes_first = CompactionContext {
             estimated_request_bytes: 8_000_000,
-            ..neither.clone()
+            ..neither
         };
         assert!(
             c.should_compact(&bytes_first),

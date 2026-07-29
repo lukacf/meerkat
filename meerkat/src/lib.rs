@@ -395,6 +395,13 @@ pub use meerkat_client::OpenAiClient;
 #[cfg(feature = "gemini")]
 pub use meerkat_client::GeminiClient;
 
+// Blob seam vocabulary plus the REQUIRED content-addressing function.
+// External `BlobStore` implementations must mint ids via `content_blob_id`
+// (first-consumer feedback: with only the trait re-exported, implementors
+// re-derived the addressing by hand and silently diverged from core's
+// read-back verification).
+pub use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStoreError, content_blob_id};
+
 // Re-export store types (trait + filter + error from core, backend error from meerkat-store)
 pub use meerkat_store::{
     MemoryBlobStore, SessionFilter, SessionStore, SessionStoreError, StoreError,

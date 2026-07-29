@@ -3345,6 +3345,10 @@ fn pending_blob_is_definitively_invalid(error: &meerkat_core::ImageBlobIntegrity
             meerkat_core::BlobStoreError::InvalidId(_)
                 | meerkat_core::BlobStoreError::NotFound(_)
                 | meerkat_core::BlobStoreError::ReadLimitExceeded { .. }
+                // A store-side write bound is deterministic for a given
+                // payload: retrying the same oversized pending blob can
+                // never succeed, so treat the refusal as definitive.
+                | meerkat_core::BlobStoreError::WriteLimitExceeded { .. }
                 | meerkat_core::BlobStoreError::Corrupt { .. }
         ),
     }

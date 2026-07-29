@@ -120,7 +120,7 @@ pub use auth::{
 };
 pub use blob::{
     BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ImageBlobIntegrityError,
-    VerifiedImageBlob, ensure_stored_image_blob, validate_image_blob_payload,
+    VerifiedImageBlob, content_blob_id, ensure_stored_image_blob, validate_image_blob_payload,
     verify_stored_image_blob,
 };
 pub use budget::{

@@ -100,6 +100,30 @@ impl fmt::Display for BlobId {
 /// before hashing, so cosmetic string differences (e.g. `image/PNG` vs
 /// `image/png`, or a trailing `; charset=...`) never mint divergent blob ids for
 /// identical bytes.
+///
+/// # Required addressing for external stores
+///
+/// This function is the REQUIRED content addressing for every [`BlobStore`]
+/// implementation, external backends included: ids are
+/// `sha256(canonical_media_type || 0x00 || base64_payload)` over the exact
+/// base64 string handed to [`BlobStore::put_image`], rendered as
+/// `sha256:<64 lowercase hex digits>`. Mint ids by calling this function
+/// rather than re-deriving the recipe — first-consumer feedback showed a
+/// hand-rolled derivation silently diverging, which fails read-back
+/// verification ([`verify_stored_image_blob`]) and splits transcript-identity
+/// digests from the store's view of the same image.
+///
+/// Known-answer vector (also pinned as a unit test, since doc-tests are
+/// skipped in the fast lanes):
+///
+/// ```
+/// use meerkat_core::blob::content_blob_id;
+///
+/// assert_eq!(
+///     content_blob_id("image/png", "iVBORw0KGgo=").as_str(),
+///     "sha256:37ecc430eadc708f3fbefa16496b3303baced1942eb4ca298422a5b90d1b8f2d",
+/// );
+/// ```
 pub fn content_blob_id(media_type: &str, data: &str) -> BlobId {
     use sha2::{Digest, Sha256};
     let canonical_media_type = crate::image_generation::MediaType::canonical_str(media_type);
@@ -295,6 +319,14 @@ pub enum BlobStoreError {
         /// materializing a copy. Filesystem metadata preflight may not know it.
         actual_encoded_bytes: Option<usize>,
     },
+    #[error(
+        "blob payload of {actual_encoded_bytes} encoded bytes exceeds the store's write limit of {max_blob_bytes} bytes"
+    )]
+    WriteLimitExceeded {
+        /// The store's advertised bound (see [`BlobStore::max_blob_bytes`]).
+        max_blob_bytes: u64,
+        actual_encoded_bytes: u64,
+    },
     #[error("blob store write refused: maintenance fence held on {path}")]
     MaintenanceFenceHeld { path: std::path::PathBuf },
     #[error("blob store read failed: {0}")]
@@ -362,6 +394,26 @@ mod tests {
             content_blob_id("image/png", data),
             "surrounding whitespace must not change blob identity"
         );
+    }
+
+    #[test]
+    fn content_blob_id_matches_published_known_answer_vector() {
+        // The exact vector published in the `content_blob_id` docs. External
+        // BlobStore implementations verify their re-implementation against
+        // it; doc-tests are skipped in the fast lanes, so the vector is
+        // pinned here as well. This value is a stored-identity contract —
+        // it must never change.
+        assert_eq!(
+            content_blob_id("image/png", "iVBORw0KGgo=").as_str(),
+            "sha256:37ecc430eadc708f3fbefa16496b3303baced1942eb4ca298422a5b90d1b8f2d",
+        );
+    }
+
+    #[test]
+    fn blob_store_max_blob_bytes_defaults_to_unbounded() {
+        // Pre-existing external implementations must keep compiling and keep
+        // their unbounded-write semantics when they do not override the hint.
+        assert_eq!(NeverReadBlobStore.max_blob_bytes(), None);
     }
 
     #[test]
@@ -495,4 +547,19 @@ pub trait BlobStore: Send + Sync {
 
     /// Whether the store is persistent across process restarts.
     fn is_persistent(&self) -> bool;
+
+    /// Advertised upper bound, in encoded (base64) payload bytes, that a
+    /// single [`Self::put_image`]/[`Self::put_artifact`] call accepts.
+    ///
+    /// `None` (the default) declares no store-side bound. Backends with hard
+    /// request or row limits — remote object stores reject multi-megabyte
+    /// inserts once base64 inflation is applied — should override this so
+    /// callers can refuse or spool oversized payloads before attempting the
+    /// write. Independent of the advertised hint, `put_image`/`put_artifact`
+    /// may refuse an oversized payload with the typed
+    /// [`BlobStoreError::WriteLimitExceeded`] rather than an opaque
+    /// [`BlobStoreError::WriteFailed`] from the backend.
+    fn max_blob_bytes(&self) -> Option<u64> {
+        None
+    }
 }

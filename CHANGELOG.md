@@ -38,6 +38,10 @@ via cargo-semver-checks against the published baselines).
   snapshot with fabricated classification receipt facts and mint false
   durable receipt evidence. In-tree construction was honest; this closes the
   public authority-boundary footgun.
+- `meerkat_core::BlobStoreError` adds the exhaustive
+  `WriteLimitExceeded { max_blob_bytes, actual_encoded_bytes }` variant —
+  the typed store-side refusal of an oversized write. Downstream exhaustive
+  matches must add an arm.
 
 ### Billing-affecting default change
 
@@ -93,6 +97,25 @@ via cargo-semver-checks against the published baselines).
   content rather than blessing it) remains the only verification fast path,
   and a passing first-sight verification now warms it so repeated loads of
   identical rows stay off the re-hash path.
+### Added
+
+- **Blob content addressing exported for external stores.**
+  `content_blob_id` — the REQUIRED
+  `sha256(canonical_media_type || 0x00 || base64_payload)` addressing every
+  `BlobStore` implementation must mint byte-for-byte — is now re-exported
+  from the `meerkat_core` crate root and the `meerkat` facade (alongside
+  `BlobId`, `BlobRef`, `BlobPayload`, and `BlobStoreError`), with a published
+  known-answer vector in its docs. First-consumer feedback: with only the
+  trait re-exported, an external store re-derived the addressing by hand and
+  silently diverged from core's read-back verification.
+- **`BlobStore::max_blob_bytes` size contract.** New defaulted trait method
+  (`None` = unbounded) advertising the store's per-write bound on the encoded
+  (base64) payload. Backends with hard request/row limits can refuse an
+  oversized `put_image`/`put_artifact` with the typed
+  `BlobStoreError::WriteLimitExceeded` instead of an opaque backend
+  `WriteFailed`; the pending-blob retry classifier treats that refusal as
+  definitive (deterministic for a given payload) rather than retrying it
+  forever.
 
 ### Changed
 

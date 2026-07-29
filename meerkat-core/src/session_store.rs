@@ -112,59 +112,27 @@ pub fn session_projection_cas_token(session: &Session) -> Result<String, Session
     Ok(format!("row-sha256:{:x}", Sha256::digest(bytes)))
 }
 
-/// Shared append-only guard for `SessionStore::save` implementations.
-///
-/// Backends call this at the top of their `save` method with the new
-/// session and the previously persisted row (or `None` if no prior row
-/// exists). Returns
-/// [`SessionStoreError::MonotonicityViolation`] when the new row's
-/// message count is strictly smaller than the previously persisted one
-/// without a transcript graph edge that proves a core-owned mutation.
-///
-/// The guard also rejects equal/longer saves whose retained prefix no longer
-/// matches the persisted transcript. A plain save may append or update
-/// metadata; same-session replacement must go through
-/// [`transcript_rewrite_save_guard`].
-/// Process-lifetime bounded memo of slim-materialization verifications:
-/// (session id, head revision digest, message count) triples whose full
-/// transcript hash was already proven this process. FIFO-bounded; eviction
-/// only costs a re-verification.
-fn slim_verification_memo()
--> &'static std::sync::Mutex<std::collections::VecDeque<(String, String, u64)>> {
-    static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::VecDeque<(String, String, u64)>>,
-    > = std::sync::OnceLock::new();
-    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
-}
-
-const SLIM_VERIFICATION_MEMO_BOUND: usize = 4096;
-
-fn slim_materialization_verified(id: &SessionId, revision: &str, count: u64) -> bool {
-    slim_verification_memo()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .any(|(mid, mrev, mcount)| mid == &id.to_string() && mrev == revision && *mcount == count)
-}
-
-fn record_slim_materialization_verified(id: &SessionId, revision: &str, count: u64) {
-    let mut memo = slim_verification_memo()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if memo.len() >= SLIM_VERIFICATION_MEMO_BOUND {
-        memo.pop_front();
-    }
-    memo.push_back((id.to_string(), revision.to_string(), count));
-}
+// A process-global Boolean memo of slim-materialization verifications —
+// (session id, head revision, message count) triples marked "already
+// verified" — used to live here and let `SessionHead::into_session` skip its
+// digest check on a tuple hit. It was DELETED as a verification bypass: the
+// tuple never bound the ROW BYTES, so "load valid rows once (memo warms) ->
+// corrupt a strand row while the head row stays intact (key unchanged) ->
+// reload" served the corrupted transcript unverified. Do not reintroduce a
+// skip-verification memo keyed on a non-binding tuple; the only sound fast
+// path is the byte-exact substitution memo below.
 
 /// Process-global SUBSTITUTION memo for slim materialization: the exact
 /// message vector (shared `Arc`, O(1) to record) plus its proven digest
 /// midstates, keyed by `(session id, head revision, message count)`.
 ///
-/// The head writer proves `digest(messages) == head_revision` when it mints
-/// the head row; recording that proven vector lets `into_session` SERVE it
-/// on the next materialization of the same `(id, revision, count)` instead
-/// of re-hashing the row-assembled vector — substitution, never blessing:
+/// Two producers hold the required proof: the head writer proves
+/// `digest(messages) == head_revision` when it mints the head row
+/// (`from_session`), and a slim reader proves the same equality when its
+/// first-sight verification passes (`into_session`). Recording that proven
+/// vector lets `into_session` SERVE it on the next materialization of the
+/// same `(id, revision, count)` instead of re-hashing the row-assembled
+/// vector — substitution, never blessing:
 /// a hit discards whatever the rows materialized to and serves content the
 /// producer proved, so corrupt rows are displaced, not trusted (the same
 /// semantics as the transcript-graph decode memo). Debug builds compare the
@@ -339,6 +307,19 @@ fn incoming_carries_previous_history_witness(
     Ok(derived == *carried.digest())
 }
 
+/// Shared append-only guard for `SessionStore::save` implementations.
+///
+/// Backends call this at the top of their `save` method with the new
+/// session and the previously persisted row (or `None` if no prior row
+/// exists). Returns
+/// [`SessionStoreError::MonotonicityViolation`] when the new row's
+/// message count is strictly smaller than the previously persisted one
+/// without a transcript graph edge that proves a core-owned mutation.
+///
+/// The guard also rejects equal/longer saves whose retained prefix no longer
+/// matches the persisted transcript. A plain save may append or update
+/// metadata; same-session replacement must go through
+/// [`transcript_rewrite_save_guard`].
 pub fn append_only_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
@@ -2189,18 +2170,22 @@ impl SessionHead {
                 ))
             });
         }
-        // The head revision IS the transcript content digest, so one full
-        // verification per (session, revision, count) per process proves the
-        // pair; re-hashing on every slim materialization made every store
-        // read O(transcript) (the idle-burn / slow-boot class). A mutated
-        // transcript changes the revision -> new key -> full re-verify.
-        let verify =
-            !slim_materialization_verified(&self.id, &self.head_revision, self.message_count);
+        // The head revision IS the transcript content digest; verify it on
+        // EVERY row-assembled materialization. A process-global Boolean memo
+        // keyed on (session id, head revision, message count) used to skip
+        // this hash after one valid load, but that tuple never bound the row
+        // BYTES: load valid rows (memo warms), corrupt a strand row while the
+        // head row stays intact (same key), reload — the substitution path
+        // above misses on bytes, the tuple still hits, and the corrupted
+        // transcript is served unverified. A verification bypass keyed on a
+        // non-binding tuple is a corruption-blessing device; do not bring it
+        // back as an optimization. The sound fast path is the substitution
+        // memo above (byte-exact identity with a vector whose digest was
+        // proven), which the verification below warms for the next load.
         let SessionHead {
             id,
             version,
             head_revision,
-            message_count,
             created_at,
             updated_at,
             usage,
@@ -2225,14 +2210,25 @@ impl SessionHead {
         // the incremental accumulator instead of being computed and thrown
         // away: the mandatory first-sight hash now also pays for every later
         // save guard on this in-memory session.
-        if verify {
-            let digest = session
-                .transcript_content_digest()
-                .map_err(SessionStoreError::from)?;
-            if digest != head_revision {
-                return Err(SessionStoreError::Corrupted(id));
-            }
-            record_slim_materialization_verified(&id, &head_revision, message_count);
+        let digest = session
+            .transcript_content_digest()
+            .map_err(SessionStoreError::from)?;
+        if digest != head_revision {
+            return Err(SessionStoreError::Corrupted(id));
+        }
+        // The digest above just proved `digest(messages) == head_revision`
+        // for exactly this vector — the same evidence the head producer holds
+        // in `from_session` — so admit it to the substitution memo: the next
+        // materialization of identical rows serves it via the byte-exact
+        // compare instead of re-hashing (different bytes still fall through
+        // to this verification).
+        if let Some(snapshot) = session.shared_transcript_snapshot() {
+            record_slim_materialization_snapshot(
+                session.id(),
+                &head_revision,
+                session.messages().len() as u64,
+                snapshot,
+            );
         }
         Ok(session)
     }
@@ -5943,6 +5939,64 @@ mod tests {
         // Wrong count.
         assert!(matches!(
             head.into_session(Vec::new()),
+            Err(SessionStoreError::Corrupted(_))
+        ));
+    }
+
+    /// Strand-row tamper AFTER a fully verified load of the same head must
+    /// still fail closed `Corrupted`.
+    ///
+    /// Regression test for a deleted verification bypass: a process-global
+    /// Boolean memo keyed on (session id, head revision, message count) let
+    /// `into_session` skip digest verification once the tuple had been proven
+    /// this process. The tuple never bound the row bytes, so the sequence
+    /// "load valid rows (memo warms) -> corrupt a strand row, head row
+    /// untouched (key unchanged) -> reload" served the corrupted transcript
+    /// unverified. The sibling test above corrupts BEFORE any verified load,
+    /// so it never exercised this sequence.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_head_into_session_detects_strand_tamper_after_verified_load() {
+        let mut session = Session::new();
+        session.push(Message::System(SystemMessage::new("base system")));
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.push(Message::User(UserMessage::text("world".to_string())));
+        let head = SessionHead::from_session(&session, TranscriptStrandId::root(), 0)
+            .expect("head projection");
+
+        // Model the fresh-process reader (restart -> resume from durable
+        // rows), where the substitution memo is necessarily cold:
+        // `from_session` above recorded this session's proven vector in the
+        // process-global memo, which would satisfy the valid load below via
+        // byte-exact substitution and mask the verification sequence under
+        // test. Displace that entry through the memo's own same-id retain
+        // with a key no lookup can match.
+        if let Some(snapshot) = session.shared_transcript_snapshot() {
+            record_slim_materialization_snapshot(
+                session.id(),
+                "reader-model-displaced",
+                u64::MAX,
+                snapshot,
+            );
+        }
+
+        // Full valid load: first-sight verification passes (this is the step
+        // that warmed the deleted Boolean memo).
+        let loaded = head
+            .clone()
+            .into_session(session.messages().to_vec())
+            .expect("valid rows must materialize");
+        assert_eq!(loaded.messages(), session.messages());
+
+        // Corrupt ONE strand row; the head row (id, revision, count) is
+        // untouched, so the deleted memo's tuple key still matched.
+        let mut corrupted = session.messages().to_vec();
+        corrupted[1] = Message::User(UserMessage::text("tampered strand row".to_string()));
+        assert_eq!(corrupted.len() as u64, head.message_count);
+
+        // Reload after tamper: the corruption must be DETECTED, not served.
+        assert!(matches!(
+            head.into_session(corrupted),
             Err(SessionStoreError::Corrupted(_))
         ));
     }

@@ -62,6 +62,19 @@ via cargo-semver-checks against the published baselines).
   or any other mutation before the breakpoint can still produce repeated
   billable writes with no reads.
 
+### Fixed
+
+- Slim session loads verify the transcript digest on every row-assembled
+  materialization again. A process-global Boolean memo keyed on (session id,
+  head revision, message count) let `SessionHead::into_session` skip digest
+  verification after one valid load of the same head; because the tuple never
+  bound the row bytes, corrupting a strand row while leaving the head row
+  intact was served unverified on reload. The memo is deleted; the byte-exact
+  vector substitution memo (which displaces row content with producer-proven
+  content rather than blessing it) remains the only verification fast path,
+  and a passing first-sight verification now warms it so repeated loads of
+  identical rows stay off the re-hash path.
+
 ### Changed
 
 - Typed peer terminal-response facts now persist as deduplicated

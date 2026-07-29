@@ -2143,14 +2143,32 @@ fn materialize_bazel_plan(
     let plan = plan_for_selection(selection)?;
     let mut manifest = ArtifactManifest::default();
 
+    // Build provenance: with a stable warm output base, a path under
+    // bazel-bin can hold a stale binary from an OLDER invocation (or from a
+    // target the foundation selector never built), and an exists+executable
+    // check cannot tell it from a fresh one. When the driving script records
+    // the foundation build's Build Event Protocol stream
+    // (`MEERKAT_E2E_BAZEL_BUILD_EVENTS`, written by
+    // scripts/buildbuddy-bazel-poc and required by scripts/e2e-smoke-lane),
+    // every bazel artifact served from this directory must be an output of
+    // that invocation. The runfiles-based remote flow
+    // (scripts/buildbuddy-e2e-smoke-remote-test) deliberately does not set
+    // the variable: there the artifacts are declared inputs of the running
+    // bazel test action, so bazel itself guarantees their freshness.
+    let built_outputs = match std::env::var("MEERKAT_E2E_BAZEL_BUILD_EVENTS") {
+        Ok(path) => Some(bazel_build_event_output_names(Path::new(&path))?),
+        Err(_) => None,
+    };
+
     for requirement in &plan.requirements {
         match requirement {
             ArtifactRequirement::RustBin(requirement) => {
-                let path = bazel_rust_bin_path(bazel_bin_dir, requirement)?;
+                let path = bazel_rust_bin_path(bazel_bin_dir, built_outputs.as_ref(), requirement)?;
                 manifest.rust_bins.insert(requirement.bin.clone(), path);
             }
             ArtifactRequirement::RustTest(requirement) => {
-                let path = bazel_rust_test_path(bazel_bin_dir, requirement)?;
+                let path =
+                    bazel_rust_test_path(bazel_bin_dir, built_outputs.as_ref(), requirement)?;
                 manifest.rust_tests.insert(requirement.key(), path);
             }
             ArtifactRequirement::NodeBuild { cwd } => materialize_node_build(cwd)?,
@@ -2160,6 +2178,72 @@ fn materialize_bazel_plan(
 
     write_artifact_manifest(manifest_path, &manifest)?;
     Ok(plan)
+}
+
+/// Bazel-bin-relative output names recorded by a build's Build Event
+/// Protocol JSON stream (`--build_event_json_file`): every `namedSetOfFiles`
+/// event's `files[].name`. Nested file sets each appear as their own event
+/// in the stream, so a flat scan sees every output file of the invocation.
+fn bazel_build_event_output_names(bep_path: &Path) -> Result<BTreeSet<String>, String> {
+    let raw = std::fs::read_to_string(bep_path).map_err(|error| {
+        format!(
+            "failed to read Bazel build-event provenance {}: {error}",
+            bep_path.display()
+        )
+    })?;
+    let mut names = BTreeSet::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "Bazel build-event provenance {} carries a non-JSON event line: {error}",
+                bep_path.display()
+            )
+        })?;
+        if let Some(files) = event
+            .get("namedSetOfFiles")
+            .and_then(|set| set.get("files"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for file in files {
+                if let Some(name) = file.get("name").and_then(serde_json::Value::as_str) {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err(format!(
+            "Bazel build-event provenance {} records no output files; the foundation \
+             build did not produce artifacts, so nothing under bazel-bin can be trusted",
+            bep_path.display()
+        ));
+    }
+    Ok(names)
+}
+
+/// Refuse an artifact path the recorded foundation invocation did not
+/// produce: whatever file sits there is stale output from an earlier build.
+fn require_built_by_recorded_invocation(
+    built_outputs: Option<&BTreeSet<String>>,
+    relative: &str,
+    label: &str,
+) -> Result<(), String> {
+    let Some(outputs) = built_outputs else {
+        return Ok(());
+    };
+    if outputs.contains(relative) {
+        return Ok(());
+    }
+    Err(format!(
+        "Bazel e2e artifact for {label} ({relative}) is not an output of the foundation \
+         build recorded in MEERKAT_E2E_BAZEL_BUILD_EVENTS; any file at that path is a \
+         stale binary from an earlier invocation. Add the target to the e2e-smoke-rbe \
+         selector in scripts/buildbuddy-bazel-poc and rebuild the foundation"
+    ))
 }
 
 fn write_artifact_manifest(
@@ -2184,54 +2268,64 @@ fn write_artifact_manifest(
     })
 }
 
+fn bazel_rust_bin_relative(bin: &str) -> Option<&'static str> {
+    match bin {
+        "rkat" => Some("meerkat-cli/rkat"),
+        "rkat-mcp" => Some("meerkat-mcp-server/rkat_mcp_bin"),
+        "rkat-rest" => Some("meerkat-rest/rkat_rest_bin"),
+        "rkat-rpc" => Some("meerkat-rpc/rkat_rpc_bin"),
+        _ => None,
+    }
+}
+
 fn bazel_rust_bin_path(
     bazel_bin_dir: &Path,
+    built_outputs: Option<&BTreeSet<String>>,
     requirement: &RustBinRequirement,
 ) -> Result<PathBuf, String> {
-    let relative = match requirement.bin.as_str() {
-        "rkat" => "meerkat-cli/rkat",
-        "rkat-mcp" => "meerkat-mcp-server/rkat_mcp_bin",
-        "rkat-rest" => "meerkat-rest/rkat_rest_bin",
-        "rkat-rpc" => "meerkat-rpc/rkat_rpc_bin",
-        other => {
-            return Err(format!(
-                "no Bazel e2e artifact mapping for Rust bin {} ({})",
-                other,
-                requirement.key()
-            ));
-        }
-    };
+    let relative = bazel_rust_bin_relative(&requirement.bin).ok_or_else(|| {
+        format!(
+            "no Bazel e2e artifact mapping for Rust bin {} ({})",
+            requirement.bin,
+            requirement.key()
+        )
+    })?;
+    require_built_by_recorded_invocation(built_outputs, relative, &requirement.key())?;
     require_executable_artifact(bazel_bin_dir.join(relative), &requirement.key())
+}
+
+fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
+    match key {
+        "meerkat-integration-tests:smoke_shared_realm" => {
+            Ok("tests/integration/smoke_shared_realm_test")
+        }
+        "meerkat-comms:e2e" => Ok("meerkat-comms/e2e_test"),
+        "meerkat-mob:smoke_mob_flow_runtime" => Ok("meerkat-mob/smoke_mob_flow_runtime_test"),
+        "meerkat-mob:smoke_mob_generated_image_comms" => {
+            Ok("meerkat-mob/smoke_mob_generated_image_comms_test")
+        }
+        "meerkat-mob:smoke_mob_idle_burn" => Ok("meerkat-mob/smoke_mob_idle_burn_test"),
+        "meerkat-mob:smoke_mob_turn_latency" => Ok("meerkat-mob/smoke_mob_turn_latency_test"),
+        "meerkat-mob:smoke_mob_pictionary" => Ok("meerkat-mob/smoke_mob_pictionary_test"),
+        "meerkat-mob:smoke_mob_resume" => Ok("meerkat-mob/smoke_mob_resume_test"),
+        "meerkat:live_meerkat_regression" => Ok("meerkat/live_meerkat_regression_test"),
+        "meerkat-rpc:live_smoke_rpc" => Ok("meerkat-rpc/live_smoke_rpc_test"),
+        "rkat:cli_mobpack_live_smoke" => Ok("meerkat-cli/cli_mobpack_live_smoke_test"),
+        "rkat:live_smoke_cli" => Ok("meerkat-cli/live_smoke_cli_test"),
+        other => Err(format!(
+            "no Bazel e2e artifact mapping for Rust test {other}"
+        )),
+    }
 }
 
 fn bazel_rust_test_path(
     bazel_bin_dir: &Path,
+    built_outputs: Option<&BTreeSet<String>>,
     requirement: &RustTestRequirement,
 ) -> Result<PathBuf, String> {
     let key = requirement.key();
-    let relative = match key.as_str() {
-        "meerkat-integration-tests:smoke_shared_realm" => {
-            "tests/integration/smoke_shared_realm_test"
-        }
-        "meerkat-comms:e2e" => "meerkat-comms/e2e_test",
-        "meerkat-mob:smoke_mob_flow_runtime" => "meerkat-mob/smoke_mob_flow_runtime_test",
-        "meerkat-mob:smoke_mob_generated_image_comms" => {
-            "meerkat-mob/smoke_mob_generated_image_comms_test"
-        }
-        "meerkat-mob:smoke_mob_idle_burn" => "meerkat-mob/smoke_mob_idle_burn_test",
-        "meerkat-mob:smoke_mob_turn_latency" => "meerkat-mob/smoke_mob_turn_latency_test",
-        "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
-        "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
-        "meerkat:live_meerkat_regression" => "meerkat/live_meerkat_regression_test",
-        "meerkat-rpc:live_smoke_rpc" => "meerkat-rpc/live_smoke_rpc_test",
-        "rkat:cli_mobpack_live_smoke" => "meerkat-cli/cli_mobpack_live_smoke_test",
-        "rkat:live_smoke_cli" => "meerkat-cli/live_smoke_cli_test",
-        other => {
-            return Err(format!(
-                "no Bazel e2e artifact mapping for Rust test {other}"
-            ));
-        }
-    };
+    let relative = bazel_rust_test_relative(&key)?;
+    require_built_by_recorded_invocation(built_outputs, relative, &key)?;
     require_executable_artifact(bazel_bin_dir.join(relative), &key)
 }
 
@@ -5291,9 +5385,10 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
-        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, build_commands_for_mode,
-        normalize_command_with_env, order_smoke_specs_for_runtime, plan_for_selection,
-        pre_command_lock_mode, repo_cargo, sanitize_artifact_key, scenario_spec,
+        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, bazel_build_event_output_names,
+        build_commands_for_mode, normalize_command_with_env, order_smoke_specs_for_runtime,
+        plan_for_selection, pre_command_lock_mode, repo_cargo,
+        require_built_by_recorded_invocation, sanitize_artifact_key, scenario_spec,
         smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key, suite_spec,
     };
     use std::collections::BTreeSet;
@@ -5301,6 +5396,110 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn build_event_provenance_collects_named_set_output_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bep = temp.path().join("build-events.json");
+        std::fs::write(
+            &bep,
+            concat!(
+                r#"{"id":{"started":{}},"started":{"uuid":"abc"}}"#,
+                "\n",
+                r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#,
+                "\n",
+                r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat"}],"fileSets":[{"id":"0"}]}}"#,
+                "\n",
+                r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#,
+                "\n",
+            ),
+        )
+        .expect("write BEP fixture");
+        let names = bazel_build_event_output_names(&bep).expect("parse BEP");
+        assert!(names.contains("meerkat-mob/smoke_mob_turn_latency_test"));
+        assert!(names.contains("meerkat-cli/rkat"));
+        assert!(
+            require_built_by_recorded_invocation(Some(&names), "meerkat-cli/rkat", "rkat").is_ok()
+        );
+        let refusal = require_built_by_recorded_invocation(
+            Some(&names),
+            "meerkat-mob/smoke_mob_idle_burn_test",
+            "meerkat-mob:smoke_mob_idle_burn",
+        )
+        .expect_err("artifact absent from the invocation must refuse");
+        assert!(refusal.contains("stale binary"), "{refusal}");
+        // No recorded provenance (runfiles flow): the check stands down.
+        assert!(require_built_by_recorded_invocation(None, "anything", "label").is_ok());
+    }
+
+    #[test]
+    fn build_event_provenance_refuses_an_empty_stream() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bep = temp.path().join("build-events.json");
+        std::fs::write(&bep, "{\"id\":{\"started\":{}}}\n").expect("write BEP fixture");
+        let error = bazel_build_event_output_names(&bep)
+            .expect_err("a BEP stream with no output files must refuse");
+        assert!(error.contains("records no output files"), "{error}");
+    }
+
+    /// Every artifact the smoke-lane plan can require from bazel-bin must be
+    /// built by the standard e2e-smoke foundation selector in
+    /// scripts/buildbuddy-bazel-poc — an omission means the lane either
+    /// fails at materialize time (with BEP provenance) or, before that
+    /// check existed, silently ran a stale binary from the warm output
+    /// base. This pins the script's target list against the requirement
+    /// map.
+    #[test]
+    fn smoke_foundation_selector_covers_every_smoke_plan_bazel_artifact() {
+        let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/buildbuddy-bazel-poc");
+        let Ok(script) = std::fs::read_to_string(&script_path) else {
+            // The Bazel unit target's runfiles do not carry scripts/; the
+            // Cargo unit lane runs this drift gate on every CI push.
+            eprintln!(
+                "skipping selector coverage: {} not present in this sandbox",
+                script_path.display()
+            );
+            return;
+        };
+        let selector_line = script
+            .lines()
+            .filter(|line| line.trim_start().starts_with("default_target="))
+            .find(|line| line.contains("e2e_smoke_lane_test"))
+            .expect("e2e-smoke-rbe selector line present");
+
+        // Bin-dir-relative "pkg/target" → bazel label "//pkg:target".
+        let label_of = |relative: &str| {
+            let (package, target) = relative
+                .rsplit_once('/')
+                .expect("bazel-bin-relative artifact path has a package prefix");
+            format!("//{package}:{target}")
+        };
+
+        let selection = E2eSelection::Lane(Lane::Smoke);
+        let plan = plan_for_selection(&selection).expect("smoke plan");
+        for requirement in &plan.requirements {
+            let label = match requirement {
+                ArtifactRequirement::RustBin(requirement) => label_of(
+                    super::bazel_rust_bin_relative(&requirement.bin)
+                        .unwrap_or_else(|| panic!("unmapped Rust bin {}", requirement.bin)),
+                ),
+                ArtifactRequirement::RustTest(requirement) => label_of(
+                    super::bazel_rust_test_relative(&requirement.key())
+                        .expect("smoke plan requires a mapped Rust test"),
+                ),
+                ArtifactRequirement::NodeBuild { .. } | ArtifactRequirement::PythonEnv { .. } => {
+                    continue;
+                }
+            };
+            assert!(
+                selector_line.contains(&label),
+                "smoke plan requires {label}, but the e2e-smoke-rbe foundation selector \
+                 in scripts/buildbuddy-bazel-poc does not build it — a warm output base \
+                 would serve a stale binary (or fail provenance) for it"
+            );
+        }
+    }
 
     #[test]
     fn artifact_keys_are_stable_for_scenario_targets() {

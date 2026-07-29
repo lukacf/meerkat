@@ -112,6 +112,21 @@ if buildbuddy_enabled; then
   if artifact_bin="$(buildbuddy_e2e_artifacts_bin)"; then
     e2e_artifacts_cmd=("${artifact_bin}")
     export MEERKAT_E2E_BAZEL_BIN_DIR="$(cd "$(dirname "${artifact_bin}")/../.." && pwd)"
+    # Build provenance: the warm lane output base can hold stale binaries
+    # from earlier invocations at exactly the paths the materializer
+    # resolves, so serving artifacts on an exists+executable check alone can
+    # silently run old code. Require the foundation build's Build Event
+    # Protocol stream (written by scripts/buildbuddy-bazel-poc for
+    # e2e-smoke-rbe) and hand it to the materializer, which refuses any
+    # artifact that is not an output of that invocation.
+    bep_file="${MEERKAT_E2E_BAZEL_BUILD_EVENTS:-$(buildbuddy_output_base)/meerkat-e2e-smoke-build-events.json}"
+    if [[ ! -s "${bep_file}" ]]; then
+      echo "error: no build-event provenance for the BuildBuddy e2e-smoke foundation at ${bep_file}" >&2
+      echo "Refusing to materialize from a warm output base without proof the artifacts came from the current foundation build." >&2
+      echo "Run MEERKAT_BUILDBUDDY=1 make e2e-smoke (scripts/buildbuddy-dev e2e-smoke) to rebuild the foundation with provenance." >&2
+      exit 1
+    fi
+    export MEERKAT_E2E_BAZEL_BUILD_EVENTS="${bep_file}"
     if [[ -z "${RKAT_WASM_PACK_BIN:-}" && -z "${WASM_PACK:-}" ]] &&
       wasm_pack_bin="$(buildbuddy_wasm_pack_bin)"; then
       export RKAT_WASM_PACK_BIN="${wasm_pack_bin}"

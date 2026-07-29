@@ -124,6 +124,30 @@ via cargo-semver-checks against the published baselines).
   leading system prompt. Active-turn delivery commits the notice to the
   canonical transcript, and cold resume migrates legacy terminal blocks out
   of the system prompt without losing their applied/idempotency records.
+- Evidence honesty across the perf/restart suites (no product behavior
+  change):
+  - the mob smoke flatness gate is renamed
+    `e2e_smoke_mob_turn_digest_preimage_flatness_gate` and its assertion
+    message claims exactly what it observes — canonical digest-preimage
+    bytes per turn are document-size independent — with the deliberately
+    unmeasured axes (copies, memo-hit decodes, store reads, WAL bytes,
+    O(document) boundary encode, CPU/wall) listed on the gate; the stale
+    "flatness recorded, not asserted" lane-catalog description is gone;
+  - the cold-restart resume suites document the same-process caveat
+    (process-global decode/materialization memos survive the simulated
+    restart; teardown is graceful, not a kill) and the base contract is
+    re-proven memo-free in a re-exec child born with
+    `MEERKAT_DISABLE_GRAPH_DECODE_MEMO`;
+  - the BuildBuddy e2e-smoke foundation selector now builds the previously
+    omitted `smoke_mob_idle_burn`, `smoke_mob_turn_latency`, and
+    `live_meerkat_regression` targets, records the foundation build's BEP
+    stream, and the smoke materializer refuses any bazel-bin artifact that
+    is not an output of that recorded invocation — a warm lane output base
+    can no longer serve stale binaries through the exists+executable check;
+  - `meerkat-core/tests/fixtures/README.md` states what the committed
+    0.8.8 digest-evidence corpus does and does not cover (it is not an
+    upgrade-boundary realm fixture) and sketches the full-realm capture a
+    real N-1 corpus needs.
 
 ## [0.8.10] - 2026-07-28
 

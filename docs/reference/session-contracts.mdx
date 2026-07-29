@@ -248,12 +248,17 @@ While a session is held or quarantined, its content is retained intact and
 resume fails typed rather than with internal-error prose:
 
 - `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` — the durable tail exists but
-  machine-authorized recovery has not promoted it yet.
+  machine-authorized recovery has not promoted it yet; it awaits
+  reconciliation.
+- `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` — machine-authorized recovery was
+  refused by conflicting persisted runtime facts (another live runtime, or
+  boundary receipts that already cover or contradict the tail); retry after
+  the conflicting runtime quiesces.
 - `SESSION_DURABLE_EVIDENCE_QUARANTINED` — the durable evidence is forked or
   unverifiable; the session is quarantined from resume.
 
-Both carry the typed `durable_resume_hold` structured payload so callers can
-distinguish the hold class without parsing messages. Ownership of the
+All three carry the typed `durable_resume_hold` structured payload so callers
+can distinguish the hold class without parsing messages. Ownership of the
 pipeline (SessionDocumentMachine classifies, MeerkatMachine authorizes,
 RuntimeStore realizes) is documented in
 [Machine Authority](/reference/machine-authority#durable-tail-recovery-ownership).

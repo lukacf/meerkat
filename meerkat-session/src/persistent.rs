@@ -5337,8 +5337,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Attempt a machine-owned recovery of an uncommitted verified durable
     /// descendant. Returns the recovered document when the recovery boundary
-    /// committed; `None` when the machines held or refused. The durable tail
-    /// is retained intact on every path — nothing here discards content.
+    /// committed; `None` when the machines held the tail for reconciliation
+    /// (the caller surfaces the typed `DurableTailHeldForRecovery` hold); a
+    /// machine REFUSAL surfaces as the distinct typed
+    /// `DurableTailRecoveryRefused`. The durable tail is retained intact on
+    /// every path — nothing here discards content.
     ///
     /// Ownership: SessionDocumentMachine classifies the tail; MeerkatMachine
     /// authorizes; `RuntimeStore::atomic_apply` realizes snapshot + receipt +
@@ -5659,8 +5662,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
                 Ok(Some(recovered))
             }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held
-            | meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => Ok(None),
+            // Held: ambiguous or unattributable tail evidence awaiting
+            // reconciliation — the caller maps `None` to the typed
+            // `DurableTailHeldForRecovery` hold.
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => Ok(None),
+            // Refused: conflicting persisted runtime facts (a live or
+            // undecodable runtime lifecycle, or receipts that already cover
+            // or contradict the candidate). A different operator condition
+            // with different remediation — retry after the conflicting
+            // runtime quiesces — so it must not be collapsed into "held".
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => {
+                Err(SessionError::DurableTailRecoveryRefused { id: id.clone() })
+            }
         }
     }
 
@@ -34304,6 +34317,128 @@ mod tests {
             retained.messages().len(),
             head.messages().len(),
             "the held tail must be retained byte-count intact"
+        );
+    }
+
+    /// A machine REFUSAL is not a hold: when durable receipts contradict the
+    /// candidate (or another live runtime owns the session), the machine
+    /// emits `RefuseRecovery`, and the session layer must surface the
+    /// distinct typed `DurableTailRecoveryRefused` — never collapse it into
+    /// `DurableTailHeldForRecovery`, whose "await reconciliation" remediation
+    /// is wrong for a refusal. The held negatives above pin the Held mapping;
+    /// this pins Refused, so the two machine verdicts stay distinguishable
+    /// at the operator surface.
+    #[tokio::test]
+    async fn refused_durable_tail_recovery_surfaces_the_distinct_refused_error() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        // Clean run-bound completed tail: without the contradiction below
+        // this exact shape is a committable CompletedCandidate.
+        let tail_run = meerkat_core::RunId::new();
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run.clone());
+        head.push(Message::BlockAssistant(assistant));
+        let (head, _) = with_checkpoint_successor(
+            head,
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&head).await.expect("seed durable store head");
+
+        // The contradiction: a durably committed boundary receipt for the
+        // candidate run recording DIFFERENT content at the candidate's own
+        // message count — neither an ancestor of the tail nor a prior
+        // success of this recovery. The machine's prior-commit guard judges
+        // this `DivergesFromCandidate` and refuses.
+        runtime_store
+            .atomic_apply(
+                &runtime_id,
+                None,
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id: tail_run.clone(),
+                    boundary: RunApplyBoundary::Immediate,
+                    contributing_input_ids: vec![],
+                    conversation_digest: Some("sha256:divergent-committed-content".to_string()),
+                    message_count: head.messages().len(),
+                    sequence: 1,
+                },
+                vec![],
+                None,
+            )
+            .await
+            .expect("seed the contradicting committed boundary receipt");
+
+        let error = service
+            .load_authoritative_session(&id)
+            .await
+            .expect_err("a machine-refused recovery must not serve the tail");
+        assert!(
+            matches!(error, SessionError::DurableTailRecoveryRefused { id: ref refused } if *refused == id),
+            "expected the typed recovery refusal, got {error:?}"
+        );
+        assert_eq!(
+            error.durable_resume_hold(),
+            Some(meerkat_core::service::DurableResumeHold::RecoveryRefused),
+            "a refusal must surface its own hold class, not the held-for-recovery one"
+        );
+
+        // Refusal retains everything: the durable row survives intact and no
+        // recovered boundary was minted past the contradicting receipt.
+        let retained = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("durable row must survive the refusal");
+        assert_eq!(
+            retained.messages().len(),
+            head.messages().len(),
+            "the refused tail must be retained byte-count intact"
+        );
+        assert!(
+            runtime_store
+                .load_boundary_receipt(&runtime_id, &tail_run, 2)
+                .await
+                .expect("receipt read succeeds")
+                .is_none(),
+            "a refused candidate must not commit any recovery receipt"
         );
     }
 

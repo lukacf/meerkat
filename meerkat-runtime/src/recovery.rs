@@ -70,7 +70,11 @@ pub use mm_dsl::{DurableTailRecoveryClass, DurableTailRecoveryDisposition};
 /// SessionDocumentMachine's own `DurableTailClassified` effect: the class and
 /// the candidate identity are READ OUT of the classifier verdict rather than
 /// asserted by the caller, so a `RuntimeStore` holder cannot claim
-/// `CompletedCandidate` for a candidate no classifier ever judged.
+/// `CompletedCandidate` for a candidate no classifier ever judged. The
+/// receipt facts — session identity, conversation digest, and message count —
+/// are DERIVED from the recovered snapshot bytes at construction: supplied
+/// values that the bytes themselves do not prove are a typed error, so no
+/// caller can pair a valid descendant snapshot with fabricated receipt facts.
 #[derive(Debug)]
 pub struct DurableTailRecoveryRequest {
     session_id: SessionId,
@@ -99,10 +103,20 @@ impl DurableTailRecoveryRequest {
     /// recovery class are taken from it, never from the caller. Any other
     /// effect is a typed authority error.
     ///
-    /// Residual: the verdict binds CLASS to CANDIDATE ID, not to the recovered
-    /// bytes — the effect carries no content digest. Closing that requires the
-    /// classification effect itself to carry the head digest the classifier
-    /// judged.
+    /// The receipt facts are BOUND to `recovered_snapshot`: the snapshot bytes
+    /// are decoded (one cold-path JSON parse over bytes already in hand) and
+    /// the session identity, conversation digest, and message count are
+    /// recomputed from the decoded document. A `session_id`,
+    /// `conversation_digest`, or `message_count` the bytes do not prove is
+    /// rejected as [`DurableTailRecoveryError::UnboundReceiptFacts`] — the
+    /// authority never records receipt facts it did not derive.
+    ///
+    /// Residual: the verdict still binds CLASS to CANDIDATE ID, not to these
+    /// bytes — the classification effect carries no content digest, so a
+    /// caller holding two classified candidates could pair one candidate's
+    /// verdict with the other's (internally consistent) snapshot. Closing
+    /// that requires the classification effect itself to carry the head
+    /// digest the classifier judged.
     pub fn from_classification(
         verdict: &meerkat_core::session_document::SessionDocumentEffect,
         session_id: SessionId,
@@ -140,6 +154,39 @@ impl DurableTailRecoveryRequest {
             }
             ClassifiedClass::Ambiguous => DurableTailRecoveryClass::Ambiguous,
         };
+
+        // Bind the receipt facts to the exact snapshot bytes this request
+        // will commit. The digest and count recorded on the recovered
+        // boundary receipt are the durable evidence every later prior-commit
+        // classification judges; deriving them here — instead of trusting
+        // the caller — closes the pairing of a valid descendant snapshot
+        // with fabricated receipt facts.
+        let recovered =
+            meerkat_core::Session::from_persisted_bytes(&recovered_snapshot).map_err(|error| {
+                DurableTailRecoveryError::UnboundReceiptFacts(format!(
+                    "recovered snapshot bytes do not decode as a session document: {error}"
+                ))
+            })?;
+        if recovered.id() != &session_id {
+            return Err(DurableTailRecoveryError::UnboundReceiptFacts(format!(
+                "recovered snapshot is session {}, not the requested session {session_id}",
+                recovered.id()
+            )));
+        }
+        let derived_digest = recovered.transcript_content_digest().map_err(|error| {
+            DurableTailRecoveryError::UnboundReceiptFacts(format!(
+                "recovered snapshot transcript digest could not be derived: {error}"
+            ))
+        })?;
+        let derived_count = recovered.messages().len();
+        if derived_digest != conversation_digest || derived_count != message_count {
+            return Err(DurableTailRecoveryError::UnboundReceiptFacts(format!(
+                "supplied receipt facts (digest {conversation_digest}, {message_count} \
+                 messages) are not the facts derived from the recovered snapshot (digest \
+                 {derived_digest}, {derived_count} messages)"
+            )));
+        }
+
         Ok(Self {
             session_id,
             candidate_id: candidate_id.clone(),
@@ -194,6 +241,13 @@ pub enum DurableTailRecoveryOutcome {
 pub enum DurableTailRecoveryError {
     #[error("recovery authorization could not be driven: {0}")]
     Authority(String),
+    /// The caller-supplied receipt facts (session identity, conversation
+    /// digest, message count) are not the facts derived from the recovered
+    /// snapshot bytes — or the bytes do not decode as a session document at
+    /// all. A classification verdict may never be paired with receipt facts
+    /// the snapshot itself does not prove.
+    #[error("recovery receipt facts are not derived from the recovered snapshot: {0}")]
+    UnboundReceiptFacts(String),
     #[error("recovery commit failed: {0}")]
     Store(#[from] RuntimeStoreError),
 }

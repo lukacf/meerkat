@@ -87,6 +87,23 @@ pub enum SessionError {
     )]
     DurableTailHeldForRecovery { id: SessionId },
 
+    /// Machine-authorized recovery REFUSED to commit the durable tail:
+    /// persisted runtime facts conflict with the candidate (a non-quiescent
+    /// or undecodable lifecycle row, a persisted current-run fact — typically
+    /// another live process owning the runtime — or durable boundary receipts
+    /// that already cover or contradict the candidate). The content is intact
+    /// and retained. Distinct from [`Self::DurableTailHeldForRecovery`]: a
+    /// hold awaits reconciliation of ambiguous tail evidence, a refusal
+    /// clears by retrying after the conflicting runtime quiesces — or, for
+    /// contradictory receipts, needs operator investigation.
+    #[error(
+        "session {id} has a durable transcript tail whose machine-authorized recovery was \
+         refused by conflicting persisted runtime facts (another live runtime, or boundary \
+         receipts that already cover or contradict the tail); it is preserved intact — retry \
+         after the conflicting runtime quiesces"
+    )]
+    DurableTailRecoveryRefused { id: SessionId },
+
     /// The durable evidence for this session is forked or unverifiable, so no
     /// head can be served as authority. The bytes are retained intact; resume
     /// is refused rather than guessed.
@@ -118,7 +135,8 @@ pub enum SessionError {
 
 /// Why a durable session refuses to serve a resume while its content stays
 /// intact on disk. Typed companion of
-/// [`SessionError::DurableTailHeldForRecovery`] and
+/// [`SessionError::DurableTailHeldForRecovery`],
+/// [`SessionError::DurableTailRecoveryRefused`], and
 /// [`SessionError::DurableEvidenceQuarantined`] so surfaces route "held,
 /// nothing lost" separately from "the service faulted" without parsing prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +147,12 @@ pub enum DurableResumeHold {
     /// Only the recovery commit may promote or repair it; serving past it
     /// would assert runtime facts that never committed.
     TailHeldForRecovery,
+    /// Machine-authorized recovery refused to commit the verified durable
+    /// tail because persisted runtime facts conflict with it (a live or
+    /// undecodable runtime lifecycle, or receipts that already cover or
+    /// contradict the candidate). Retry after the conflicting runtime
+    /// quiesces.
+    RecoveryRefused,
     /// Durable evidence is forked or unverifiable, so no head is trustworthy
     /// enough to serve as authority.
     EvidenceQuarantined,
@@ -139,6 +163,7 @@ impl DurableResumeHold {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TailHeldForRecovery => "tail_held_for_recovery",
+            Self::RecoveryRefused => "recovery_refused",
             Self::EvidenceQuarantined => "evidence_quarantined",
         }
     }
@@ -146,9 +171,13 @@ impl DurableResumeHold {
     /// Inverse of [`Self::as_str`] over the one token table. An unknown token
     /// fails closed as `None` rather than guessing a hold class.
     pub fn from_wire_str(value: &str) -> Option<Self> {
-        [Self::TailHeldForRecovery, Self::EvidenceQuarantined]
-            .into_iter()
-            .find(|hold| hold.as_str() == value)
+        [
+            Self::TailHeldForRecovery,
+            Self::RecoveryRefused,
+            Self::EvidenceQuarantined,
+        ]
+        .into_iter()
+        .find(|hold| hold.as_str() == value)
     }
 }
 
@@ -299,6 +328,7 @@ impl SessionError {
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::DurableTailHeldForRecovery { .. } => "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
+            Self::DurableTailRecoveryRefused { .. } => "SESSION_DURABLE_TAIL_RECOVERY_REFUSED",
             Self::DurableEvidenceQuarantined { .. } => "SESSION_DURABLE_EVIDENCE_QUARANTINED",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
@@ -313,6 +343,9 @@ impl SessionError {
             Self::DurableTailHeldForRecovery { id } => {
                 Some(self.durable_resume_hold_data(DurableResumeHold::TailHeldForRecovery, id))
             }
+            Self::DurableTailRecoveryRefused { id } => {
+                Some(self.durable_resume_hold_data(DurableResumeHold::RecoveryRefused, id))
+            }
             Self::DurableEvidenceQuarantined { id } => {
                 Some(self.durable_resume_hold_data(DurableResumeHold::EvidenceQuarantined, id))
             }
@@ -326,6 +359,7 @@ impl SessionError {
     pub fn durable_resume_hold(&self) -> Option<DurableResumeHold> {
         match self {
             Self::DurableTailHeldForRecovery { .. } => Some(DurableResumeHold::TailHeldForRecovery),
+            Self::DurableTailRecoveryRefused { .. } => Some(DurableResumeHold::RecoveryRefused),
             Self::DurableEvidenceQuarantined { .. } => Some(DurableResumeHold::EvidenceQuarantined),
             _ => None,
         }
@@ -2602,6 +2636,11 @@ mod tests {
                 "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
             ),
             (
+                SessionError::DurableTailRecoveryRefused { id: id.clone() },
+                DurableResumeHold::RecoveryRefused,
+                "SESSION_DURABLE_TAIL_RECOVERY_REFUSED",
+            ),
+            (
                 SessionError::DurableEvidenceQuarantined { id: id.clone() },
                 DurableResumeHold::EvidenceQuarantined,
                 "SESSION_DURABLE_EVIDENCE_QUARANTINED",
@@ -2623,10 +2662,16 @@ mod tests {
                 "the hold message must name the session it holds"
             );
         }
-        assert_ne!(
+        let tokens = [
             DurableResumeHold::TailHeldForRecovery.as_str(),
-            DurableResumeHold::EvidenceQuarantined.as_str()
-        );
+            DurableResumeHold::RecoveryRefused.as_str(),
+            DurableResumeHold::EvidenceQuarantined.as_str(),
+        ];
+        for (i, a) in tokens.iter().enumerate() {
+            for b in &tokens[i + 1..] {
+                assert_ne!(a, b, "hold wire tokens must stay pairwise distinct");
+            }
+        }
         assert_eq!(
             SessionError::durable_resume_hold_from_data(&serde_json::json!({})),
             None

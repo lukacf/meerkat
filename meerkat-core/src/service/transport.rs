@@ -17,6 +17,7 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
         SessionError::Unsupported(_) => -32007,
         SessionError::DurableTailHeldForRecovery { .. } => -32008,
         SessionError::DurableEvidenceQuarantined { .. } => -32009,
+        SessionError::DurableTailRecoveryRefused { .. } => -32010,
         SessionError::Agent(_) | SessionError::FailedWithData { .. } => -32000,
     }
 }
@@ -28,6 +29,7 @@ pub fn http_status(err: &SessionError) -> u16 {
         SessionError::Busy { .. }
         | SessionError::NotRunning { .. }
         | SessionError::DurableTailHeldForRecovery { .. }
+        | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::DurableEvidenceQuarantined { .. } => 409,
         SessionError::PersistenceDisabled
         | SessionError::CompactionDisabled

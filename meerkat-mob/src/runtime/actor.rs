@@ -321,8 +321,9 @@ fn identity_session_load_error_class(
             | None => IdentitySessionLoadErrorClass::Unavailable,
         },
         // Forked/unverifiable durable evidence is a permanent corruption
-        // verdict; a tail held for reconciliation is a temporary hold the
-        // identity machine may retry after the hold clears.
+        // verdict; a tail held for reconciliation — or a recovery refused by
+        // a still-live conflicting runtime — is a temporary hold the identity
+        // machine may retry after the hold clears.
         SessionError::DurableEvidenceQuarantined { .. } => IdentitySessionLoadErrorClass::Malformed,
         SessionError::NotFound { .. }
         | SessionError::Busy { .. }
@@ -330,6 +331,7 @@ fn identity_session_load_error_class(
         | SessionError::NotRunning { .. }
         | SessionError::Agent(_)
         | SessionError::DurableTailHeldForRecovery { .. }
+        | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::FailedWithData { .. } => IdentitySessionLoadErrorClass::Unavailable,
     }
 }

@@ -10410,6 +10410,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         // as "durably present, not runnable" and let the typed
         // `durable_resume_hold` payload carry which hold applies.
         SessionError::DurableTailHeldForRecovery { .. }
+        | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::DurableEvidenceQuarantined { .. } => error::SESSION_NOT_RUNNING,
         SessionError::Agent(agent_err) => match agent_err {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
@@ -10483,6 +10484,9 @@ fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionE
     {
         return match hold {
             DurableResumeHold::TailHeldForRecovery => SessionError::DurableTailHeldForRecovery {
+                id: session_id.clone(),
+            },
+            DurableResumeHold::RecoveryRefused => SessionError::DurableTailRecoveryRefused {
                 id: session_id.clone(),
             },
             DurableResumeHold::EvidenceQuarantined => SessionError::DurableEvidenceQuarantined {
@@ -26108,6 +26112,10 @@ mod tests {
             (
                 SessionError::DurableTailHeldForRecovery { id: id.clone() },
                 DurableResumeHold::TailHeldForRecovery,
+            ),
+            (
+                SessionError::DurableTailRecoveryRefused { id: id.clone() },
+                DurableResumeHold::RecoveryRefused,
             ),
             (
                 SessionError::DurableEvidenceQuarantined { id: id.clone() },

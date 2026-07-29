@@ -1268,3 +1268,117 @@ async fn retain_inputs_recovery_terminalizes_proven_bound_rows_and_retains_unbou
         );
     }
 }
+
+/// Level 0 — the recovery request's own authority binding: the receipt facts
+/// recorded on the recovered boundary (session identity, conversation digest,
+/// message count) are DERIVED from the recovered snapshot bytes at
+/// construction, never trusted from the caller. A valid classifier verdict
+/// paired with a valid descendant snapshot but FABRICATED receipt facts is a
+/// typed `UnboundReceiptFacts` rejection — the footgun where an external
+/// `RuntimeStore` holder could mint false durable receipt evidence is closed
+/// at the constructor.
+#[test]
+fn recovery_request_rejects_receipt_facts_the_snapshot_does_not_prove() {
+    use meerkat_core::session_document::{
+        DurableTailRecoveryClass as ClassifiedTailRecoveryClass, SessionDocumentEffect,
+    };
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+    };
+    use meerkat_runtime::recovery::{DurableTailRecoveryError, DurableTailRecoveryRequest};
+
+    let candidate_run = RunId::new();
+    let mut recovered = meerkat_core::Session::new();
+    recovered.push(Message::User(UserMessage::text(
+        "committed turn".to_string(),
+    )));
+    recovered.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::Text {
+            text: "durable tail reply".to_string(),
+            meta: None,
+        }],
+        stop_reason: StopReason::EndTurn,
+        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+        created_at: meerkat_core::types::message_timestamp_now(),
+    }));
+    let session_id = recovered.id().clone();
+    let recovered_snapshot = serde_json::to_vec(&recovered).unwrap();
+    let honest_digest = recovered.transcript_content_digest().unwrap();
+    let honest_count = recovered.messages().len();
+    let verdict = SessionDocumentEffect::DurableTailClassified {
+        candidate_id: "binding-candidate".to_string(),
+        class: ClassifiedTailRecoveryClass::CompletedCandidate,
+    };
+
+    // Honest construction still works: facts derived from the exact bytes.
+    DurableTailRecoveryRequest::from_classification(
+        &verdict,
+        session_id.clone(),
+        candidate_run.clone(),
+        recovered_snapshot.clone(),
+        honest_digest.clone(),
+        honest_count,
+    )
+    .expect("receipt facts derived from the snapshot must construct");
+
+    let expect_unbound = |result: Result<DurableTailRecoveryRequest, DurableTailRecoveryError>,
+                          what: &str| {
+        match result {
+            Err(DurableTailRecoveryError::UnboundReceiptFacts(detail)) => detail,
+            other => panic!("{what} must be a typed UnboundReceiptFacts rejection, got {other:?}"),
+        }
+    };
+
+    // Fabricated digest over valid bytes: the false receipt fact the
+    // constructor exists to refuse.
+    expect_unbound(
+        DurableTailRecoveryRequest::from_classification(
+            &verdict,
+            session_id.clone(),
+            candidate_run.clone(),
+            recovered_snapshot.clone(),
+            "sha256:fabricated-digest".to_string(),
+            honest_count,
+        ),
+        "a fabricated conversation digest",
+    );
+
+    // Fabricated message count over valid bytes.
+    expect_unbound(
+        DurableTailRecoveryRequest::from_classification(
+            &verdict,
+            session_id.clone(),
+            candidate_run.clone(),
+            recovered_snapshot.clone(),
+            honest_digest.clone(),
+            honest_count + 1,
+        ),
+        "a fabricated message count",
+    );
+
+    // A session identity the snapshot does not carry.
+    expect_unbound(
+        DurableTailRecoveryRequest::from_classification(
+            &verdict,
+            SessionId::new(),
+            candidate_run.clone(),
+            recovered_snapshot,
+            honest_digest.clone(),
+            honest_count,
+        ),
+        "a session identity the snapshot does not carry",
+    );
+
+    // Bytes that are not a session document at all prove nothing.
+    expect_unbound(
+        DurableTailRecoveryRequest::from_classification(
+            &verdict,
+            session_id,
+            candidate_run,
+            b"not a session document".to_vec(),
+            honest_digest,
+            honest_count,
+        ),
+        "undecodable snapshot bytes",
+    );
+}

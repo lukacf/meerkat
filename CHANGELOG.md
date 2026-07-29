@@ -19,6 +19,25 @@ via cargo-semver-checks against the published baselines).
   `WireAnthropicCacheControlPolicy` add the `Automatic` variant.
 - `OpenAiProviderTag` adds the `prompt_cache_enabled` field.
 - `WireProviderTag::OpenAi` adds the `prompt_cache_enabled` field.
+- `SessionError` adds the `DurableTailRecoveryRefused` variant (code
+  `SESSION_DURABLE_TAIL_RECOVERY_REFUSED`), `DurableResumeHold` adds
+  `RecoveryRefused` (wire token `recovery_refused`), and
+  `meerkat_runtime::recovery::DurableTailRecoveryError` adds
+  `UnboundReceiptFacts`. A machine-REFUSED durable-tail recovery
+  (conflicting persisted runtime facts: another live runtime, or boundary
+  receipts that already cover or contradict the tail) no longer surfaces as
+  `DurableTailHeldForRecovery` — operators now get the refusal's own cause
+  and remediation (retry after the conflicting runtime quiesces) instead of
+  the hold's "await reconciliation".
+- `DurableTailRecoveryRequest::from_classification` now DERIVES the receipt
+  facts from the recovered snapshot bytes: a supplied session identity,
+  conversation digest, or message count the bytes do not prove — or bytes
+  that do not decode as a session document — is a typed
+  `UnboundReceiptFacts` rejection. Previously the classifier verdict did not
+  bind the bytes, so a `RuntimeStore` holder could pair a valid descendant
+  snapshot with fabricated classification receipt facts and mint false
+  durable receipt evidence. In-tree construction was honest; this closes the
+  public authority-boundary footgun.
 
 ### Billing-affecting default change
 

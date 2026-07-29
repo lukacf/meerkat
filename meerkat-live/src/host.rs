@@ -878,6 +878,7 @@ impl LiveProjectionError {
             SessionError::Store(_)
             | SessionError::Agent(_)
             | SessionError::DurableTailHeldForRecovery { .. }
+            | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
@@ -1536,6 +1537,7 @@ impl LiveToolDispatchError {
             SessionError::Store(_)
             | SessionError::Agent(_)
             | SessionError::DurableTailHeldForRecovery { .. }
+            | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }

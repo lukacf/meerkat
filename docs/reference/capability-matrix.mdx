@@ -55,6 +55,7 @@ The table below is the current **session transport** mapping (`SessionError::cod
 | `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32603 | tool error | exit 1 |
 | `NotRunning` | `SESSION_NOT_RUNNING` | -32603 | tool error | exit 1 |
 | `DurableTailHeldForRecovery` | `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` | -32003 | tool error | exit 1 |
+| `DurableTailRecoveryRefused` | `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` | -32003 | tool error | exit 1 |
 | `DurableEvidenceQuarantined` | `SESSION_DURABLE_EVIDENCE_QUARANTINED` | -32003 | tool error | exit 1 |
 | `Store` | `SESSION_STORE_ERROR` | -32603 | tool error | exit 1 |
 | `Unsupported` | `SESSION_UNSUPPORTED` | -32603 | tool error | exit 1 |
@@ -65,14 +66,15 @@ The table below is the current **session transport** mapping (`SessionError::cod
 failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
 -32005, config errors -32602, everything else -32603.
 
-The two durable resume holds are not service faults: the session exists, its
+The durable resume holds are not service faults: the session exists, its
 content is retained intact, and no runnable authority is handed out until
 machine-authorized recovery or reconciliation clears it. They classify as
 "durably present, not runnable" — the canonical `SessionNotRunning` wire code
 (JSON-RPC -32003, HTTP 409) — and carry a typed `durable_resume_hold`
-structured payload (`tail_held_for_recovery` / `evidence_quarantined`, plus
-`session_error_code`, `session_id`, and `content_retained: true`) so callers
-distinguish the hold class without parsing messages.
+structured payload (`tail_held_for_recovery` / `recovery_refused` /
+`evidence_quarantined`, plus `session_error_code`, `session_id`, and
+`content_retained: true`) so callers distinguish the hold class without
+parsing messages.
 
 ### Transport error mapping summary
 

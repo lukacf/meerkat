@@ -478,6 +478,26 @@ pub struct TranscriptReplayCursor {
     /// load, i.e. paying for the evidence with the very quantity this cursor
     /// exists to reduce.
     pub last_commit_revision: Option<String>,
+    /// Log sequence of the rewrite record that established
+    /// [`Self::last_commit_revision`] — the cursor's positively-verifiable
+    /// anchor in the log itself.
+    ///
+    /// [`Self::seq`] and the count/boundary answer questions about the GRAPH
+    /// and about how far the log was observed; neither can be checked against
+    /// the log without re-reading it, so an inflated `seq` whose tail happens
+    /// to hold no rewrite records used to be accepted vacuously (the empty
+    /// tail attaches trivially and the audit verifier's unreconciled slice is
+    /// empty). This field is checkable in O(rows since the last rewrite): the
+    /// reader starts its tail read AT this sequence and requires the row here
+    /// to be a rewrite record whose commit revision equals
+    /// [`Self::last_commit_revision`] before trusting anything else the
+    /// cursor claims.
+    ///
+    /// `None` on documents written before this field existed. Such a cursor
+    /// carries no verifiable anchor and is not trusted: the reader re-reads
+    /// the whole log once and the restamp carries the anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit_seq: Option<u64>,
 }
 
 /// Typed session-local transcript revision graph state.
@@ -722,12 +742,19 @@ impl TranscriptHistoryState {
     /// using this: every log record at or below `seq` folded into this graph,
     /// and every one of this graph's commits present in the log. Stamping on
     /// anything weaker is the one way this mechanism can lose a record.
+    ///
+    /// `last_commit_seq` is the log sequence of the rewrite record whose
+    /// commit is this graph's LAST commit, positively identified in that same
+    /// load — the anchor the next load verifies against the log before
+    /// trusting the cursor. Stamping a sequence whose row is not that record
+    /// only costs the next load a full read (the anchor check refuses).
     #[must_use]
-    pub fn replay_cursor_at(&self, seq: u64) -> TranscriptReplayCursor {
+    pub fn replay_cursor_at(&self, seq: u64, last_commit_seq: u64) -> TranscriptReplayCursor {
         TranscriptReplayCursor {
             seq,
             commits: self.commits.len(),
             last_commit_revision: self.commits.last().map(|commit| commit.revision.clone()),
+            last_commit_seq: Some(last_commit_seq),
         }
     }
 
@@ -802,7 +829,19 @@ impl TranscriptHistoryState {
             // post-prune graph. Substituting it serves content that was
             // fully validated in this process, so a hit skips validation
             // AND pruning without ever trusting the incoming bodies.
+            //
+            // The replay cursor is deliberately NOT substituted: it is
+            // reader-side log state that `validate_transcript_history_state`
+            // never proves, and the shape key deliberately does not bind it
+            // (two documents differing ONLY in cursor must share an entry).
+            // Substituting the memo entry's cursor would resurrect another
+            // document's log position onto this one — a stale or foreign
+            // claim that could skip unseen rewrite records indefinitely — so
+            // the incoming document's own claim is preserved and left to the
+            // reader-side cursor verification, exactly as on a memo miss.
+            let replay_cursor = self.replay_cursor.take();
             *self = TranscriptHistoryState::clone(&proved);
+            self.replay_cursor = replay_cursor;
             return Ok(());
         }
         validate_transcript_history_state(self)?;
@@ -1330,7 +1369,7 @@ mod tests {
     #[test]
     fn a_cursor_survives_the_hand_written_round_trip() {
         let mut state = rebuild(&rewrite_chain(3));
-        state.replay_cursor = Some(state.replay_cursor_at(41));
+        state.replay_cursor = Some(state.replay_cursor_at(41, 40));
         let decoded: TranscriptHistoryState =
             serde_json::from_value(serde_json::to_value(&state).expect("graph serializes"))
                 .expect("graph decodes");
@@ -1377,7 +1416,7 @@ mod tests {
     #[test]
     fn a_cursor_admits_exactly_the_commits_after_its_prefix() {
         let state = rebuild(&rewrite_chain(4));
-        let cursor = state.replay_cursor_at(9);
+        let cursor = state.replay_cursor_at(9, 8);
         assert_eq!(cursor.commits, 4);
         assert_eq!(
             state
@@ -1392,6 +1431,7 @@ mod tests {
             seq: 4,
             commits: 2,
             last_commit_revision: Some(state.commits[1].revision.clone()),
+            last_commit_seq: Some(3),
         };
         let beyond = state
             .commits_beyond_replay_cursor(&earlier)
@@ -1409,7 +1449,7 @@ mod tests {
     #[test]
     fn a_cursor_that_does_not_describe_the_graph_is_refused() {
         let state = rebuild(&rewrite_chain(3));
-        let valid = state.replay_cursor_at(7);
+        let valid = state.replay_cursor_at(7, 6);
 
         let too_high = TranscriptReplayCursor {
             commits: valid.commits + 1,
@@ -1447,6 +1487,7 @@ mod tests {
             seq: 1,
             commits: 0,
             last_commit_revision: None,
+            last_commit_seq: None,
         };
         assert_eq!(
             state
@@ -1454,6 +1495,56 @@ mod tests {
                 .expect("an honestly empty prefix is describable"),
             state.commits.as_slice(),
             "a cursor that reconciled nothing leaves every commit to check"
+        );
+    }
+
+    /// A validated-memo hit substitutes the PROVEN post-prune graph — but the
+    /// replay cursor is reader-side log state the proof never covered, and
+    /// the shape key deliberately does not bind it (two documents differing
+    /// only in cursor share an entry). The substitution must keep the
+    /// INCOMING document's cursor: resurrecting the memoized document's
+    /// cursor would graft a stale or foreign log position onto a different
+    /// document, which the reader-side cursor checks cannot always
+    /// distinguish from an honest one.
+    ///
+    /// (Under `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` the second decode misses
+    /// and re-validates, which also preserves the incoming cursor — the
+    /// assertion holds on both paths; the memo path is the one that used to
+    /// fail it.)
+    #[test]
+    fn a_memo_hit_keeps_the_incoming_documents_cursor() {
+        let records = rewrite_chain(2);
+        let mut first = rebuild(&records);
+        first.replay_cursor = Some(first.replay_cursor_at(40, 39));
+
+        let mut second = first.clone();
+        let incoming = second.replay_cursor_at(7, 6);
+        second.replay_cursor = Some(incoming.clone());
+
+        first
+            .compact_mechanical_revision_bodies_for(TranscriptGraphValidationMode::DecodeMemoized)
+            .expect("first decode validates in full and records the proven graph");
+        second
+            .compact_mechanical_revision_bodies_for(TranscriptGraphValidationMode::DecodeMemoized)
+            .expect("second decode substitutes the memoized graph");
+        assert_eq!(
+            second.replay_cursor,
+            Some(incoming),
+            "a memo hit must serve the proven CONTENT but keep the incoming \
+             document's own replay cursor, never the recorded document's"
+        );
+
+        // The unclaiming direction too: a document with NO cursor must not
+        // gain one from the memo — `None` means "read the whole log", and
+        // granting it a foreign position would skip records outright.
+        let mut third = first.clone();
+        third.replay_cursor = None;
+        third
+            .compact_mechanical_revision_bodies_for(TranscriptGraphValidationMode::DecodeMemoized)
+            .expect("third decode substitutes the memoized graph");
+        assert_eq!(
+            third.replay_cursor, None,
+            "a cursorless document must stay cursorless across a memo hit"
         );
     }
 

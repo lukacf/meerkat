@@ -50,6 +50,12 @@ pub(super) const TRANSCRIPT_GRAPH_FACT_VALIDATED: u8 = 2;
 /// deliberately does not count as a content-digest computation. The `fact`
 /// tag namespaces the two memos so one can never satisfy a consult for the
 /// other.
+///
+/// The `replay_cursor` also stays unpinned, for the opposite reason: it is
+/// reader-side log state that validation never proves, so two documents
+/// differing only in cursor SHOULD share an entry — and the substitution site
+/// preserves the incoming document's cursor instead of the memo entry's, so
+/// an unpinned cursor can never be resurrected onto a different document.
 pub(super) fn transcript_graph_shape_key(
     fact: u8,
     digest_format: u32,

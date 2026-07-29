@@ -9775,6 +9775,8 @@ impl MobBuilder {
                 identity_reconcile_queue: VecDeque::new(),
                 identity_reconcile_enqueued: BTreeSet::new(),
                 identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
+                identity_reconcile_backoff: BTreeMap::new(),
+                identity_reconcile_parked: BTreeMap::new(),
                 identity_reconcile_holder_id,
                 identity_reconcile_incarnation_id,
                 supervisor_bridge,

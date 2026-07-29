@@ -1417,6 +1417,13 @@ struct MockSessionService {
     archived_session_ids: RwLock<HashSet<SessionId>>,
     /// Sessions whose create_session (re-materialization) should fail.
     create_fail_sessions: RwLock<HashSet<SessionId>>,
+    /// Optional custom failure detail per failing session (presence implies
+    /// failure). Lets tests model provider-specific failure prose such as the
+    /// rpc-gateway's "callback transport closed".
+    create_fail_details: RwLock<HashMap<SessionId, String>>,
+    /// Timestamps of every refused create_session attempt, per session, so
+    /// retry-schedule tests can assert real attempt spacing.
+    create_fail_attempts: RwLock<HashMap<SessionId, Vec<std::time::Instant>>>,
     /// Sessions whose create_session should materialize live state but return
     /// the already-active comms identity error observed in the #37 deliver race.
     create_identity_already_active_sessions: RwLock<HashSet<SessionId>>,
@@ -1529,6 +1536,8 @@ impl MockSessionService {
             archived_peer_lifecycle_max_in_flight: RwLock::new(HashMap::new()),
             archived_session_ids: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
+            create_fail_details: RwLock::new(HashMap::new()),
+            create_fail_attempts: RwLock::new(HashMap::new()),
             create_identity_already_active_sessions: RwLock::new(HashSet::new()),
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
@@ -1843,6 +1852,34 @@ impl MockSessionService {
             .insert(session_id.clone());
     }
 
+    /// Make any (re-)materialization of `session_id` via create_session fail
+    /// with the given detail prose (e.g. the rpc-gateway's "callback
+    /// transport closed").
+    async fn set_create_session_failure_detail(&self, session_id: &SessionId, detail: &str) {
+        self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+        self.create_fail_details
+            .write()
+            .await
+            .insert(session_id.clone(), detail.to_string());
+    }
+
+    /// Timestamps of every refused create_session attempt for `session_id`,
+    /// in attempt order.
+    async fn create_fail_attempt_instants(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<std::time::Instant> {
+        self.create_fail_attempts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     async fn set_create_session_identity_already_active(&self, session_id: &SessionId) {
         self.create_identity_already_active_sessions
             .write()
@@ -1866,6 +1903,7 @@ impl MockSessionService {
 
     async fn clear_create_session_failure(&self, session_id: &SessionId) {
         self.create_fail_sessions.write().await.remove(session_id);
+        self.create_fail_details.write().await.remove(session_id);
     }
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
@@ -2195,11 +2233,22 @@ impl MockSessionService {
             .unwrap_or_default();
         let session_id = session.id().clone();
         if self.create_fail_sessions.read().await.contains(&session_id) {
+            self.create_fail_attempts
+                .write()
+                .await
+                .entry(session_id.clone())
+                .or_default()
+                .push(std::time::Instant::now());
             self.create_session_in_flight
                 .fetch_sub(1, Ordering::Relaxed);
-            return Err(SessionError::Store(Box::new(std::io::Error::other(
-                "mock create_session failure",
-            ))));
+            let detail = self
+                .create_fail_details
+                .read()
+                .await
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_else(|| "mock create_session failure".to_string());
+            return Err(SessionError::Store(Box::new(std::io::Error::other(detail))));
         }
         // Production-faithful "already active" failure: the inproc comms-claim
         // acquire fails INSIDE build_agent, before any live session handle is
@@ -6905,6 +6954,85 @@ async fn test_verified_legacy_declaration_manifest(
     (manifest, session)
 }
 
+/// Like [`test_verified_legacy_declaration_manifest`], but the persisted
+/// legacy session carries the durable member metadata (comms name, peer meta,
+/// realm id, mob binding) that member re-materialization requires, so
+/// reconcile actuation reaches the session-service create path instead of
+/// failing on "missing durable comms_name for resumed mob member".
+async fn test_materializable_legacy_declaration_manifest(
+    service: &MockSessionService,
+    mob_id: &MobId,
+    scope: &str,
+    operation_id: meerkat_core::ops::OperationId,
+    identity: AgentIdentity,
+) -> (crate::identity::IdentityDeclarationManifest, Session) {
+    let session_id = SessionId::new();
+    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
+    let mut session = factory_policy_session(
+        Session::with_id(session_id.clone()),
+        "claude-sonnet-4-5".to_string(),
+        4096,
+    );
+    let mut metadata = session.session_metadata().expect("seed session metadata");
+    metadata.comms_name = Some(test_comms_name_for(mob_id, "worker", identity.as_str()));
+    metadata.peer_meta = Some(
+        meerkat_core::PeerMeta::default()
+            .with_label("mob_id", mob_id.as_str())
+            .with_label("role", "worker")
+            .with_label("member_id", identity.as_str()),
+    );
+    metadata.realm_id =
+        Some(meerkat_core::RealmId::parse(format!("mob.{mob_id}")).expect("valid mob realm id"));
+    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+        mob_id: mob_id.as_str().to_string(),
+        role: "worker".to_string(),
+        member: identity.as_str().to_string(),
+    });
+    session
+        .set_session_metadata(metadata)
+        .expect("install durable member metadata");
+    session.push_batch(vec![meerkat_core::Message::User(
+        meerkat_core::types::UserMessage::text("retained legacy history"),
+    )]);
+    let legacy_bytes = serde_json::to_vec(&session).expect("serialize legacy session");
+    let checkpoint = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
+        &session,
+        &legacy_bytes,
+        meerkat_core::SessionGeneration::INITIAL,
+        meerkat_core::SessionCheckpointRevision::new(1),
+    )
+    .expect("mint exact recovery-migration checkpoint");
+    session
+        .install_checkpoint_stamp(checkpoint.clone())
+        .expect("install exact recovery-migration checkpoint");
+    service
+        .persisted_sessions
+        .write()
+        .await
+        .insert(session_id.clone(), session.clone());
+
+    let mut manifest = test_identity_declaration_manifest(scope, operation_id, identity.clone());
+    let declaration = manifest
+        .members
+        .get_mut(&identity)
+        .expect("legacy declaration member");
+    declaration.session_authority_policy =
+        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
+    declaration.initial_message = None;
+    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
+        session: crate::identity::DesiredSessionTarget {
+            session_id,
+            lineage_id,
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        checkpoint,
+        continuity_epoch_highwater: 7,
+        snapshot_fence_audit: 3,
+    });
+    (manifest, session)
+}
+
 #[tokio::test]
 async fn identity_declaration_actor_apply_reads_and_replays_exact_sealed_target() {
     let definition = with_unique_mob_id(sample_definition(), "identity-declaration-actor");
@@ -8424,6 +8552,330 @@ async fn identity_local_external_tools_failures_map_to_output_status() {
             .await
             .expect("shutdown identity local services test mob");
     }
+}
+
+/// Minimal thread-scoped tracing capture: records every INFO+ meerkat-mob
+/// event as one "field=value" line so per-spawn outcome logging can be
+/// asserted without a tracing-subscriber registry. Works under the
+/// current-thread test runtime because every actor task polls on the test
+/// thread while the `set_default` guard is held.
+#[derive(Clone, Default)]
+struct SpawnOutcomeLogCapture {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl SpawnOutcomeLogCapture {
+    fn lines_containing(&self, needle: &str) -> Vec<String> {
+        self.lines
+            .lock()
+            .expect("spawn outcome log capture mutex")
+            .iter()
+            .filter(|line| line.contains(needle))
+            .cloned()
+            .collect()
+    }
+}
+
+struct SpawnOutcomeLogVisitor<'a> {
+    line: &'a mut String,
+}
+
+impl tracing::field::Visit for SpawnOutcomeLogVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let _ = write!(self.line, " {}={value:?}", field.name());
+    }
+}
+
+impl tracing::Subscriber for SpawnOutcomeLogCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::INFO && metadata.target().starts_with("meerkat_mob")
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = String::new();
+        let mut visitor = SpawnOutcomeLogVisitor { line: &mut line };
+        event.record(&mut visitor);
+        self.lines
+            .lock()
+            .expect("spawn outcome log capture mutex")
+            .push(line);
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Identity-reconcile member actuation failures must retry on the real
+/// exponential backoff schedule, not the pre-fix hot loop (2026-07-29
+/// incident: terminal-disposition requeue + 25ms tick re-ran full session
+/// provisioning at up to 40Hz per identity, forever).
+#[tokio::test]
+async fn identity_reconcile_member_actuation_backoff_bounds_retry_rate() {
+    let capture = SpawnOutcomeLogCapture::default();
+    let _capture_guard = tracing::subscriber::set_default(capture.clone());
+
+    let definition = with_unique_mob_id(sample_definition(), "identity-actuation-backoff");
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    service.set_runtime_adapter(Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store),
+    ));
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create identity backoff test mob");
+
+    let identity = AgentIdentity::from("backoff-worker");
+    let (manifest, legacy_session) = test_materializable_legacy_declaration_manifest(
+        service.as_ref(),
+        &mob_id,
+        "identity-actuation-backoff",
+        meerkat_core::ops::OperationId::new(),
+        identity.clone(),
+    )
+    .await;
+    let session_id = legacy_session.id().clone();
+    service
+        .set_create_session_failure_detail(&session_id, "mock member build failure")
+        .await;
+    let started = Instant::now();
+    handle
+        .apply_identity_declaration_manifest(manifest)
+        .await
+        .expect("seal identity backoff declaration");
+
+    // Wait for three failed attempts. Without real backoff the loop produced
+    // dozens of attempts per second; three attempts arriving on the schedule
+    // is the regression signal.
+    let attempts = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let attempts = service.create_fail_attempt_instants(&session_id).await;
+            if attempts.len() >= 3 {
+                break attempts;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("three backoff-scheduled actuation attempts");
+    let observation_window = started.elapsed();
+
+    // Schedule lower bounds: after consecutive failure n, the next attempt
+    // may not start before 250ms * 2^(n-1). Scan-cadence latency only ever
+    // lengthens the gap, so the lower bound is timing-stable.
+    let first_gap = attempts[1].duration_since(attempts[0]);
+    let second_gap = attempts[2].duration_since(attempts[1]);
+    assert!(
+        first_gap >= Duration::from_millis(250),
+        "first retry arrived {first_gap:?} after the first failure, inside the 250ms backoff deadline"
+    );
+    assert!(
+        second_gap >= Duration::from_millis(500),
+        "second retry arrived {second_gap:?} after the second failure, inside the 500ms backoff deadline"
+    );
+
+    // Bounded attempt rate overall: the 1s intent scan plus the schedule
+    // admits at most about one attempt per second early on.
+    let all_attempts = service.create_fail_attempt_instants(&session_id).await;
+    let max_attempts = usize::try_from(observation_window.as_secs())
+        .unwrap_or(usize::MAX)
+        .saturating_add(2);
+    assert!(
+        all_attempts.len() <= max_attempts,
+        "expected a bounded retry rate, observed {} attempts in {observation_window:?}",
+        all_attempts.len()
+    );
+
+    // The reconcile lane detaches its spawn reply waiter, so the terminal
+    // outcome log is the only per-attempt visibility (the 42-minute
+    // production diagnosis this closes). Every completed failed attempt must
+    // have logged one "spawn failed" line; the newest attempt's completion
+    // may still be in flight when this reads.
+    let failed_lines = capture.lines_containing("spawn failed");
+    assert!(
+        failed_lines.len() >= all_attempts.len().saturating_sub(1),
+        "expected one spawn-failed outcome log per completed attempt, got {} lines for {} attempts",
+        failed_lines.len(),
+        all_attempts.len()
+    );
+    let first_line = failed_lines.first().expect("at least one spawn-failed log");
+    assert!(
+        first_line.contains("backoff-worker")
+            && first_line.contains("mock member build failure")
+            && first_line.contains("elapsed_ms"),
+        "spawn-failed outcome log must carry identity, error, and elapsed time: {first_line}"
+    );
+
+    // Success resets: once the build stops failing, the scan re-admits the
+    // identity after its deadline and convergence completes.
+    service.clear_create_session_failure(&session_id).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let converged = matches!(
+                handle
+                    .identity_convergence_status(&identity)
+                    .await
+                    .expect("read identity backoff status"),
+                crate::identity::IdentityStoredObservation::Valid(status)
+                    if status.decision
+                        == Some(crate::identity::IdentityReconcileDecision::Converged)
+            );
+            if converged {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("identity converges after the failure clears");
+    assert!(
+        !capture.lines_containing("spawn built").is_empty(),
+        "successful spawn must log its terminal outcome"
+    );
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown identity backoff test mob");
+}
+
+/// A closed callback transport fails builds instantly and can never recover
+/// in-process, so it must park the identity (typed status, zero further
+/// attempts) instead of joining the backoff-retry schedule.
+#[tokio::test]
+async fn identity_reconcile_parks_on_closed_callback_transport() {
+    let capture = SpawnOutcomeLogCapture::default();
+    let _capture_guard = tracing::subscriber::set_default(capture.clone());
+
+    let definition = with_unique_mob_id(sample_definition(), "identity-transport-parked");
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    service.set_runtime_adapter(Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store),
+    ));
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create identity parked test mob");
+
+    let identity = AgentIdentity::from("parked-worker");
+    let (manifest, legacy_session) = test_materializable_legacy_declaration_manifest(
+        service.as_ref(),
+        &mob_id,
+        "identity-transport-parked",
+        meerkat_core::ops::OperationId::new(),
+        identity.clone(),
+    )
+    .await;
+    let session_id = legacy_session.id().clone();
+    // The exact prose the rpc-gateway callback bridge emits for a closed
+    // stdio transport; parked classification string-matches it today.
+    service
+        .set_create_session_failure_detail(&session_id, "callback transport closed")
+        .await;
+    handle
+        .apply_identity_declaration_manifest(manifest)
+        .await
+        .expect("seal identity parked declaration");
+
+    // The typed parked projection lands after the first attempt.
+    let parked = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                handle
+                    .identity_convergence_status(&identity)
+                    .await
+                    .expect("read identity parked status"),
+                crate::identity::IdentityStoredObservation::Valid(status)
+                    if status.decision
+                        == Some(crate::identity::IdentityReconcileDecision::RepairBlocked)
+                        && status.detail.as_deref().is_some_and(|detail| {
+                            detail.contains("parked")
+                                && detail.contains("callback transport closed")
+                        })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if parked.is_err() {
+        let status = handle
+            .identity_convergence_status(&identity)
+            .await
+            .expect("read timed-out parked status");
+        let attempts = service.create_fail_attempt_instants(&session_id).await;
+        let create_requests = service.recorded_create_requests().await;
+        panic!(
+            "closed callback transport should park the identity as typed RepairBlocked; status={status:?}, refused_attempts={}, create_requests={}",
+            attempts.len(),
+            create_requests.len(),
+        );
+    }
+
+    // Let any already-admitted attempt settle before snapshotting the count.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let attempts_at_park = service
+        .create_fail_attempt_instants(&session_id)
+        .await
+        .len();
+    assert!(
+        attempts_at_park >= 1,
+        "parking requires at least the observed fatal attempt"
+    );
+
+    // Multiple intent-scan cycles later, a parked identity must not have been
+    // re-actuated (the pre-fix loop retried instantly, forever).
+    tokio::time::sleep(Duration::from_millis(2600)).await;
+    let attempts_after_wait = service
+        .create_fail_attempt_instants(&session_id)
+        .await
+        .len();
+    assert_eq!(
+        attempts_at_park, attempts_after_wait,
+        "parked identity must not be re-attempted"
+    );
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read parked identity member")
+            .is_none(),
+        "a parked identity must not materialize a member"
+    );
+
+    // The fatal outcome is visible per attempt despite the detached reply.
+    let failed_lines = capture.lines_containing("spawn failed");
+    assert!(
+        !failed_lines.is_empty()
+            && failed_lines[0].contains("parked-worker")
+            && failed_lines[0].contains("callback transport closed"),
+        "parked spawn failure must log its terminal outcome: {failed_lines:?}"
+    );
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown identity parked test mob");
 }
 
 #[tokio::test]

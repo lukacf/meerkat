@@ -127,6 +127,14 @@ const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(1
 const IDENTITY_RECONCILE_LEASE_TTL_MS: u64 = crate::identity::IDENTITY_LEASE_MAX_TTL_MS;
 const IDENTITY_RECONCILE_TICK_INTERVAL: Duration = Duration::from_millis(25);
 const IDENTITY_RECONCILE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+/// Exponential actuation-backoff schedule for identities whose member
+/// actuation keeps failing. Before this existed, the "Backoff" disposition
+/// was a status label over an immediate requeue: the terminal-completion
+/// requeue plus the 25ms tick re-ran full session provisioning at up to 40Hz
+/// per identity, forever (2026-07-29 incident: a fleet of identities against
+/// a closed callback transport burned a core with zero durable progress).
+const IDENTITY_RECONCILE_BACKOFF_BASE: Duration = Duration::from_millis(250);
+const IDENTITY_RECONCILE_BACKOFF_CAP: Duration = Duration::from_secs(60);
 /// Upper bound on how long a converged identity may substitute its cached,
 /// already-verified session observation for a fresh document read. Session
 /// documents can be large (the HomeCore fixture is 82 MB); re-verifying an
@@ -676,9 +684,46 @@ mod identity_session_observation_tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IdentityMemberActuationDisposition {
     Applied,
-    Conflict { detail: String },
-    RepairBlocked { detail: String },
-    Backoff { detail: String },
+    Conflict {
+        detail: String,
+    },
+    RepairBlocked {
+        detail: String,
+    },
+    Backoff {
+        detail: String,
+    },
+    /// The process-local callback transport is closed, so every in-process
+    /// build attempt fails instantly and can never recover without a new
+    /// declaration or a process restart. Retrying is pure waste (2026-07-29
+    /// incident); the identity is parked instead.
+    ParkedTransportClosed {
+        detail: String,
+    },
+}
+
+/// The rpc-gateway callback bridge reports a permanently closed stdio
+/// transport with exactly this prose; no typed marker crosses the bridge
+/// boundary today, so classification string-matches. Follow-up seam: carry a
+/// typed transport-closed cause through the bridge error instead of prose.
+const CALLBACK_TRANSPORT_CLOSED_MARKER: &str = "callback transport closed";
+
+/// Volatile per-identity actuation-backoff record. Scheduling custody only —
+/// never persisted machine state; a cold actor incarnation restarts with a
+/// clean slate and re-observes desired state.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IdentityReconcileBackoffState {
+    consecutive_failures: u32,
+    next_attempt_at: Instant,
+}
+
+fn identity_reconcile_backoff_delay(consecutive_failures: u32) -> Duration {
+    // 250ms base, doubling per consecutive failure, capped at 60s. The shift
+    // is clamped well below the cap-saturating exponent so it cannot overflow.
+    let exponent = consecutive_failures.saturating_sub(1).min(16);
+    IDENTITY_RECONCILE_BACKOFF_BASE
+        .saturating_mul(1u32 << exponent)
+        .min(IDENTITY_RECONCILE_BACKOFF_CAP)
 }
 
 fn identity_member_actuation_disposition(
@@ -688,9 +733,11 @@ fn identity_member_actuation_disposition(
         return IdentityMemberActuationDisposition::Applied;
     };
     let MobError::StorageError(source) = error else {
-        return IdentityMemberActuationDisposition::Backoff {
-            detail: error.to_string(),
-        };
+        let detail = error.to_string();
+        if detail.contains(CALLBACK_TRANSPORT_CLOSED_MARKER) {
+            return IdentityMemberActuationDisposition::ParkedTransportClosed { detail };
+        }
+        return IdentityMemberActuationDisposition::Backoff { detail };
     };
     match source.downcast_ref::<crate::store::MobStoreError>() {
         Some(crate::store::MobStoreError::CasConflict(detail)) => {
@@ -3173,6 +3220,9 @@ pub(super) struct PendingSpawn {
     /// Remote (host-materialized) spawn facts opened at enqueue; `None`
     /// for every local/external path.
     pub(super) remote: Option<Box<RemoteSpawnExec>>,
+    /// Enqueue instant for per-spawn outcome logging. Volatile scheduling
+    /// custody, never recovered machine state.
+    pub(super) enqueued_at: Instant,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
 
@@ -4682,6 +4732,17 @@ pub(super) struct MobActor {
     /// Volatile actuator diagnostics only. They are never classifier input or
     /// restart authority; the next cold process simply re-observes.
     pub(super) identity_reconcile_failures: Arc<RwLock<BTreeMap<AgentIdentity, String>>>,
+    /// Volatile per-identity actuation-backoff deadlines. Both the tick drain
+    /// and the periodic intent scan refuse to re-actuate an identity before
+    /// its deadline; success (or a fresh declaration) resets it. Scheduling
+    /// custody only, never persisted machine state — guards the 2026-07-29
+    /// hot-retry incident where every failure requeued immediately.
+    pub(super) identity_reconcile_backoff: BTreeMap<AgentIdentity, IdentityReconcileBackoffState>,
+    /// Identities parked after a fatal in-process actuation failure (closed
+    /// callback transport). Parked identities are skipped by the tick drain
+    /// and the intent scan; a fresh declaration manifest or a process restart
+    /// clears the park. Volatile scheduling custody only.
+    pub(super) identity_reconcile_parked: BTreeMap<AgentIdentity, String>,
     /// Stable logical controller id plus this process-local incarnation.
     /// Neither value is checkpoint content authority.
     pub(super) identity_reconcile_holder_id: String,
@@ -16618,6 +16679,11 @@ impl MobActor {
         outcome: &crate::identity::IdentityDeclarationManifestApplyOutcome,
     ) {
         for identity in outcome.identities.keys() {
+            // A fresh declaration is explicit operator input: clear any fatal
+            // park and backoff debt so the new desired state gets an
+            // immediate attempt.
+            self.identity_reconcile_parked.remove(identity);
+            self.identity_reconcile_backoff.remove(identity);
             self.enqueue_identity_reconcile(identity.clone());
         }
     }
@@ -16699,23 +16765,30 @@ impl MobActor {
         lease_epoch: u64,
         disposition: IdentityMemberActuationDisposition,
     ) {
-        match disposition {
+        let requeue_now = match disposition {
             IdentityMemberActuationDisposition::Applied => {
                 self.identity_reconcile_failures
                     .write()
                     .await
                     .remove(identity);
+                self.identity_reconcile_backoff.remove(identity);
+                self.identity_reconcile_parked.remove(identity);
+                true
             }
             IdentityMemberActuationDisposition::Conflict { detail } => {
                 self.identity_reconcile_failures
                     .write()
                     .await
                     .remove(identity);
+                // A CAS conflict is progress evidence from another actuator,
+                // not a repeated failure; re-observe without backoff debt.
+                self.identity_reconcile_backoff.remove(identity);
                 tracing::debug!(
                     agent_identity = %identity,
                     detail = %detail,
                     "identity member CAS conflicted; re-observing the target"
                 );
+                true
             }
             IdentityMemberActuationDisposition::RepairBlocked { detail } => {
                 self.identity_reconcile_failures
@@ -16730,12 +16803,31 @@ impl MobActor {
                     Some(detail),
                 )
                 .await;
+                true
             }
             IdentityMemberActuationDisposition::Backoff { detail } => {
                 self.identity_reconcile_failures
                     .write()
                     .await
                     .insert(identity.clone(), detail.clone());
+                let now = Instant::now();
+                let entry = self
+                    .identity_reconcile_backoff
+                    .entry(identity.clone())
+                    .or_insert(IdentityReconcileBackoffState {
+                        consecutive_failures: 0,
+                        next_attempt_at: now,
+                    });
+                entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+                let delay = identity_reconcile_backoff_delay(entry.consecutive_failures);
+                entry.next_attempt_at = now.checked_add(delay).unwrap_or(now);
+                tracing::warn!(
+                    agent_identity = %identity,
+                    consecutive_failures = entry.consecutive_failures,
+                    retry_delay_ms = delay.as_millis() as u64,
+                    detail = %detail,
+                    "identity member actuation failed; backing off before the next attempt"
+                );
                 self.replace_identity_reconcile_status(
                     identity,
                     Some(intent_revision),
@@ -16744,15 +16836,60 @@ impl MobActor {
                     Some(detail),
                 )
                 .await;
+                // Deliberately no immediate requeue: the periodic intent scan
+                // re-admits this identity once its backoff deadline passes.
+                // An immediate requeue here plus the 25ms tick was the
+                // 2026-07-29 hot-retry loop.
+                false
             }
-        }
+            IdentityMemberActuationDisposition::ParkedTransportClosed { detail } => {
+                self.identity_reconcile_failures
+                    .write()
+                    .await
+                    .insert(identity.clone(), detail.clone());
+                self.identity_reconcile_parked
+                    .insert(identity.clone(), detail.clone());
+                tracing::error!(
+                    agent_identity = %identity,
+                    detail = %detail,
+                    "callback transport is closed; parking identity reconciliation until a new declaration or process restart"
+                );
+                self.replace_identity_reconcile_status(
+                    identity,
+                    Some(intent_revision),
+                    Some(lease_epoch),
+                    crate::identity::IdentityReconcileDecision::RepairBlocked,
+                    Some(format!(
+                        "parked: {detail}; the callback transport cannot recover in-process"
+                    )),
+                )
+                .await;
+                false
+            }
+        };
 
-        // Terminal completion is the causal wake. It is serialized by this
-        // actor before best-effort reply delivery, so a dropped reply cannot
-        // strand convergence until the periodic intent scan.
-        self.enqueue_identity_reconcile(identity.clone());
-        #[cfg(test)]
-        IDENTITY_RECONCILE_COMPLETION_REQUEUES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if requeue_now {
+            // Terminal completion is the causal wake. It is serialized by this
+            // actor before best-effort reply delivery, so a dropped reply
+            // cannot strand convergence until the periodic intent scan.
+            self.enqueue_identity_reconcile(identity.clone());
+            #[cfg(test)]
+            IDENTITY_RECONCILE_COMPLETION_REQUEUES
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Whether reconcile scheduling may admit this identity right now. Parked
+    /// identities never re-enter; identities under an actuation-backoff
+    /// deadline re-enter only once the deadline has passed.
+    fn identity_reconcile_admittable(&self, identity: &AgentIdentity) -> bool {
+        if self.identity_reconcile_parked.contains_key(identity) {
+            return false;
+        }
+        match self.identity_reconcile_backoff.get(identity) {
+            Some(backoff) => Instant::now() >= backoff.next_attempt_at,
+            None => true,
+        }
     }
 
     fn identity_unobserved_facts(
@@ -17382,7 +17519,12 @@ impl MobActor {
                 for (identity, observation) in intents {
                     match observation {
                         crate::identity::IdentityStoredObservation::Valid(_) => {
-                            self.enqueue_identity_reconcile(identity);
+                            // The scan respects the same park/backoff gate as
+                            // the tick drain, so it cannot resurrect the
+                            // hot-retry loop at 1Hz.
+                            if self.identity_reconcile_admittable(&identity) {
+                                self.enqueue_identity_reconcile(identity);
+                            }
                         }
                         crate::identity::IdentityStoredObservation::Unsupported {
                             evidence_digest,
@@ -17440,6 +17582,13 @@ impl MobActor {
             return;
         };
         self.identity_reconcile_enqueued.remove(&identity);
+        // The park/backoff gate covers EVERY admission path (declaration
+        // enqueue, terminal-completion requeue, intent scan): a queued
+        // identity that is not admittable is dropped here and re-admitted by
+        // the periodic scan once its deadline passes.
+        if !self.identity_reconcile_admittable(&identity) {
+            return;
+        }
         match self
             .reconcile_identity_once(&identity, session_witnesses)
             .await
@@ -21864,6 +22013,7 @@ impl MobActor {
             pending_recipient_trust_peer_id: None,
             observations: SpawnExecObservations::default(),
             remote: None,
+            enqueued_at: Instant::now(),
             reply_tx,
         };
         let started = started.start(&pending)?;
@@ -22823,6 +22973,7 @@ impl MobActor {
             pending_recipient_trust_peer_id,
             observations,
             remote: None,
+            enqueued_at: Instant::now(),
             reply_tx,
         };
         let spawn_started = match generated_self_owned_operation_owner.start(&pending) {
@@ -24381,6 +24532,7 @@ impl MobActor {
                 resolved_spec_digest: compiled.digest,
                 pending_carrier: pending_carrier.clone(),
             })),
+            enqueued_at: Instant::now(),
             reply_tx,
         };
         // Publish the operation owner before any bridge I/O can begin.  A
@@ -24571,10 +24723,10 @@ impl MobActor {
                 }
                 continue;
             };
-            pending_items.push((pending, result));
+            pending_items.push((spawn_ticket, pending, result));
         }
 
-        for (pending, result) in pending_items {
+        for (spawn_ticket, pending, result) in pending_items {
             tracing::debug!("MobActor::handle_spawn_provisioned_batch finalizing pending spawn");
             let PendingSpawn {
                 profile_name,
@@ -24600,6 +24752,7 @@ impl MobActor {
                 pending_recipient_trust_peer_id,
                 observations,
                 remote,
+                enqueued_at,
                 reply_tx,
             } = pending;
             let identity_reconcile_authority = identity_member_permit
@@ -24928,6 +25081,24 @@ impl MobActor {
                 },
                 (reply, _) => reply,
             };
+            // Per-spawn outcome observability: the reply waiter may be
+            // detached (identity reconcile deliberately drops it), so the
+            // terminal provisioning outcome is logged here unconditionally.
+            match &reply {
+                Ok(_) => tracing::info!(
+                    spawn_ticket,
+                    agent_identity = %agent_identity,
+                    elapsed_ms = enqueued_at.elapsed().as_millis() as u64,
+                    "spawn built"
+                ),
+                Err(error) => tracing::info!(
+                    spawn_ticket,
+                    agent_identity = %agent_identity,
+                    elapsed_ms = enqueued_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "spawn failed"
+                ),
+            }
             if let Some((intent_revision, lease_epoch)) = identity_reconcile_authority {
                 let disposition = identity_member_actuation_disposition(&reply);
                 self.record_identity_member_terminal_disposition(
@@ -25170,6 +25341,7 @@ impl MobActor {
             pending_recipient_trust_peer_id: None,
             observations: observations.clone(),
             remote: None,
+            enqueued_at: Instant::now(),
             reply_tx: pending_reply_tx,
         };
         let pending_task = tokio::spawn(async {
@@ -35150,6 +35322,7 @@ impl MobActor {
             // (phase-2 hardwired) observation set is preserved here.
             observations: SpawnExecObservations::default(),
             remote: None,
+            enqueued_at: Instant::now(),
             reply_tx: respawn_inline_reply_tx,
         };
         let respawn_inline_task = tokio::spawn(async {

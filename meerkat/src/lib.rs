@@ -375,7 +375,9 @@ pub use meerkat_session::{
 // machine-owned storage maintenance (bulk legacy-checkpoint adoption).
 pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use meerkat_session::{LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport};
+pub use meerkat_session::{
+    CommittedBoundaryRecovery, LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport,
+};
 // Memory store implementation, re-exported for maintenance verbs that stamp
 // the memory database's schema ledger through its normal constructor.
 #[cfg(feature = "memory-store-session")]

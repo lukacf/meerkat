@@ -1057,6 +1057,39 @@ pub struct LegacyCheckpointAdoptionOptions {
     pub only_cursor_free: bool,
 }
 
+/// Typed outcome of [`PersistentSessionService::recover_committed_boundary`].
+///
+/// `Unprovable` is a terminal VERDICT, not an error: the durable evidence
+/// cannot prove a committed boundary, and calling again cannot change that
+/// without new durable facts. Consumer repair loops must surface it to
+/// operators instead of retrying — retrying it is exactly the closed
+/// heal→resume-reject→re-break loop of the 2026-07-29 incident. Mechanical
+/// failures (store I/O, serialization, commit races) stay on the ordinary
+/// [`SessionError`] tier, where retry is legitimate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum CommittedBoundaryRecovery {
+    /// The durable head already resolves to committed checkpoint authority —
+    /// strict resume accepts it as-is. Nothing was written.
+    AlreadyCommitted,
+    /// A machine-authorized recovery proved the intra-turn durable head
+    /// against the committed runtime authority and PERSISTED a
+    /// boundary-commit-provenance head. Strict resume now accepts.
+    Recovered {
+        /// Provenance of the committed head that now leads the lineage.
+        provenance: meerkat_core::SessionCheckpointProvenance,
+        /// Message count of the committed head document.
+        message_count: usize,
+    },
+    /// The proof inputs are absent or insufficient: no committed runtime
+    /// authority survives to digest-prove a boundary against, or the machine
+    /// held/refused the tail (unprovable run identity, unattributable input
+    /// evidence, divergent content). All durable copies are retained intact.
+    Unprovable {
+        /// Operator-facing statement of the missing proof.
+        reason: String,
+    },
+}
+
 /// The committed runtime snapshot classified for authority resolution: absent,
 /// fully verified, or a pre-typed legacy document eligible for the one-time
 /// recovery migration. Malformed evidence and intra-turn rows still error.
@@ -13182,6 +13215,254 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         self.load_authoritative_session_base(id).await
+    }
+
+    /// Repair verb for the intra-turn durable-head trap (2026-07-29
+    /// incident): an identity whose durable head is an intra-turn projection
+    /// rejects strict resume typed, the consumer repair loop "heals" by
+    /// resetting entry state only, and the next materialization rejects
+    /// again — a closed loop, because the durable head is never repaired and
+    /// the identity can never take the turn that would commit the boundary
+    /// its resume requires.
+    ///
+    /// This entry point drives the SAME machine-owned verdicts the ordinary
+    /// read/save paths use — nothing here mints a stamp by hand or decides
+    /// anything itself:
+    ///
+    /// - A head that resolves to committed authority the way strict resume
+    ///   resolves it is a cheap typed no-op
+    ///   ([`CommittedBoundaryRecovery::AlreadyCommitted`]); this also routes
+    ///   pre-typed legacy copies through the existing machine-owned one-time
+    ///   migration.
+    /// - An intra-turn head recording a digest-proven durable tail past the
+    ///   committed authority engages the machine-owned durable-tail recovery
+    ///   arm (SessionDocumentMachine classification + MeerkatMachine
+    ///   authorization + atomic RuntimeStore commit), which proves and
+    ///   PERSISTS a boundary-commit-provenance head.
+    /// - An intra-turn head the committed authority supersedes (the
+    ///   machine's `ConvergeSupersededProjection` verdict) is converged by
+    ///   re-projecting the committed authority document through the
+    ///   ordinary CAS-guarded authoritative-projection save — a no-op
+    ///   boundary save that mints no stamp and invents no content.
+    /// - Absent or insufficient proof inputs (no committed runtime
+    ///   authority survives; the machine holds or refuses the tail) is the
+    ///   typed terminal [`CommittedBoundaryRecovery::Unprovable`] verdict —
+    ///   NOT an error, so callers do not mistake it for a retryable
+    ///   failure. Every durable copy is retained intact on that path.
+    ///
+    /// Idempotent: after a successful recovery the head is committed, so a
+    /// repeated call takes the `AlreadyCommitted` no-op; `Unprovable` is
+    /// stable across calls until the durable evidence itself changes.
+    pub async fn recover_committed_boundary(
+        &self,
+        id: &SessionId,
+    ) -> Result<CommittedBoundaryRecovery, SessionError> {
+        const ROLE: &str = "committed-boundary recovery";
+        // An in-process live session legitimately owns an intra-turn head
+        // mid-turn; repairing under it would race the very boundary commit
+        // the head is waiting for.
+        if self.inner.has_live_session(id).await? {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        // Outer recovery gate: serialize with archive and lazy rehydration.
+        // The durable-tail recovery arm below takes its own inner
+        // per-session fence (`durable_tail_recovery_gates`), so holding the
+        // outer gate here mirrors the read paths that already do both.
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock_owned().await;
+        if self.inner.has_live_session(id).await? {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+
+        // Resolve committed authority exactly the way strict resume does. A
+        // pre-typed legacy copy is migrated by this same call before it can
+        // fail.
+        let authority_error = match self.load_committed_checkpoint_authority(id, ROLE).await {
+            Ok(Some(authority)) => {
+                // Strict resume resolves — but an intra-turn row that
+                // directly names this authority may still record a
+                // digest-proven durable tail past it (the lost-boundary
+                // shape). The authority loader tolerates that row while the
+                // authoritative READ refuses to serve it until the boundary
+                // is recovered, so reporting it healthy here would leave the
+                // identity re-breaking on its next materialization. Engage
+                // the recovery arm for exactly that shape; everything else
+                // is the cheap typed no-op.
+                let store_head = self
+                    .store
+                    .load(id)
+                    .await
+                    .map_err(|error| SessionError::Store(Box::new(error)))?;
+                let Some(head) = store_head else {
+                    return Ok(CommittedBoundaryRecovery::AlreadyCommitted);
+                };
+                let head_is_intra_turn = matches!(
+                    head.try_checkpoint_state()
+                        .map_err(session_checkpoint_read_error)?,
+                    meerkat_core::SessionCheckpointState::Verified(stamp)
+                        if stamp.provenance()
+                            == meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+                );
+                if !head_is_intra_turn
+                    || durable_head_relation(&authority.session, &head)
+                        .map_err(|error| SessionError::Store(Box::new(error)))?
+                        != DurableHeadRelation::VerifiedStrictDescendant
+                {
+                    return Ok(CommittedBoundaryRecovery::AlreadyCommitted);
+                }
+                return self
+                    .recover_boundary_from_durable_tail(id, &authority, head)
+                    .await;
+            }
+            Ok(None) => return Err(SessionError::NotFound { id: id.clone() }),
+            Err(error) => error,
+        };
+
+        // Strict resume rejects. Only the intra-turn durable-head trap is
+        // repairable here; every other rejection propagates as the real
+        // failure it is (conflicting committed pairs, malformed evidence).
+        let store_head = self
+            .store
+            .load(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let Some(head) = store_head else {
+            return Err(authority_error);
+        };
+        let head_stamp = match head
+            .try_checkpoint_state()
+            .map_err(session_checkpoint_read_error)?
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            // The authority loader above already drove the machine-owned
+            // legacy migration; a still-legacy head means the migration
+            // itself refused, and that typed refusal is the truth.
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                return Err(authority_error);
+            }
+        };
+        if head_stamp.provenance() != meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint
+        {
+            return Err(authority_error);
+        }
+
+        let authority =
+            match load_runtime_checkpoint_copy(self.runtime_store.as_ref(), id, ROLE).await? {
+                CommittedCheckpointCopy::Verified(authority) => authority,
+                // The production trap's unprovable arm: the only durable
+                // copy is the intra-turn projection. No committed authority
+                // document survives to digest-prove a boundary against, and
+                // adopting the projection on content alone could mark an
+                // incomplete turn completed — the exact lie the durable-tail
+                // recovery rule forbids. Terminal verdict; the projection is
+                // retained intact.
+                CommittedCheckpointCopy::Absent => {
+                    return Ok(CommittedBoundaryRecovery::Unprovable {
+                        reason: format!(
+                            "the only durable checkpoint for session {id} is an intra-turn \
+                             projection and no committed runtime authority survives to prove \
+                             a boundary against; restore the RuntimeStore evidence or \
+                             hand-repair the session"
+                        ),
+                    });
+                }
+                // See the legacy note above: the authority loader migrates
+                // legacy copies before failing, so reaching one here means
+                // the migration refused.
+                CommittedCheckpointCopy::Legacy { .. } => return Err(authority_error),
+            };
+
+        // The canonical SessionDocumentMachine owns the disposition between
+        // the committed authority document and the intra-turn row
+        // (digest-verified relation + stamp facts). This shell only mirrors
+        // the verdict.
+        match runtime_projection_conflict_disposition(&authority.session, &head)
+            .map_err(|error| SessionError::Store(Box::new(error)))?
+        {
+            // The row records a digest-proven durable tail past the
+            // committed authority: the durable-tail recovery arm proves,
+            // authorizes, and atomically commits the recovered boundary
+            // (runtime snapshot + receipt + restamped projection row).
+            RuntimeProjectionConflictDisposition::RetainForRecovery => {
+                self.recover_boundary_from_durable_tail(id, &authority, head)
+                    .await
+            }
+            // The committed authority supersedes the projection row (its own
+            // run superseded it, or the authority moved past a stale
+            // checkpointer sidecar). Re-project the committed authority
+            // document over the row through the ordinary CAS-guarded
+            // authoritative-projection save. No stamp is minted: the
+            // authority document already carries its committed stamp.
+            RuntimeProjectionConflictDisposition::ConvergeSupersededProjection => {
+                let expected = meerkat_core::session_store::session_projection_cas_token(&head)
+                    .map_err(|error| SessionError::Store(Box::new(error)))?;
+                self.store
+                    .save_authoritative_projection_if_current_revision(
+                        &authority.session,
+                        Some(expected),
+                    )
+                    .await
+                    .map_err(|error| SessionError::Store(Box::new(error)))?;
+                Ok(CommittedBoundaryRecovery::Recovered {
+                    provenance: authority.stamp.provenance(),
+                    message_count: authority.session.messages().len(),
+                })
+            }
+            // Divergent evidence the machine refuses to converge: a fork is
+            // not provable as a boundary. Both copies stay intact for
+            // reconciliation.
+            RuntimeProjectionConflictDisposition::RejectDivergent => {
+                Ok(CommittedBoundaryRecovery::Unprovable {
+                    reason: format!(
+                        "the intra-turn projection for session {id} diverges from the \
+                         committed runtime authority and cannot be digest-proven a \
+                         boundary; both copies are retained for reconciliation"
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Shared heal arm: engage the machine-owned durable-tail recovery for a
+    /// digest-proven intra-turn descendant and mirror the outcome onto the
+    /// heal vocabulary. `None` from the arm (machine hold or refusal) is the
+    /// stable [`CommittedBoundaryRecovery::Unprovable`] verdict — never an
+    /// error, so the consumer repair loop cannot mistake it for retryable.
+    async fn recover_boundary_from_durable_tail(
+        &self,
+        id: &SessionId,
+        authority: &VerifiedCheckpointAuthority,
+        head: Session,
+    ) -> Result<CommittedBoundaryRecovery, SessionError> {
+        match self
+            .attempt_durable_tail_recovery(id, &authority.session, head)
+            .await?
+        {
+            Some(recovered) => {
+                let recovered_stamp = verified_checkpoint_stamp_for_read(
+                    &recovered,
+                    id,
+                    "committed-boundary recovery",
+                )
+                .map_err(session_checkpoint_read_error)?;
+                Ok(CommittedBoundaryRecovery::Recovered {
+                    provenance: recovered_stamp.provenance(),
+                    message_count: recovered.messages().len(),
+                })
+            }
+            // Held or refused: the machines could not prove the tail from
+            // durable facts (identity-less tail on a modern row,
+            // unattributable input evidence, non-quiescent persisted
+            // lifecycle). Stable terminal verdict; the tail is retained for
+            // reconciliation.
+            None => Ok(CommittedBoundaryRecovery::Unprovable {
+                reason: format!(
+                    "the durable tail for session {id} was held intact: its run \
+                     identity or input evidence cannot be proven from durable \
+                     facts; the tail is retained for reconciliation"
+                ),
+            }),
+        }
     }
 
     /// Whether this service owns any durable carrier for `id`, without the
@@ -33321,6 +33602,561 @@ mod tests {
                 .is_none(),
             "a run-id-bearing tail takes the modern recovery path, never legacy adoption"
         );
+    }
+
+    /// Heal verb, provable shape (2026-07-29 incident, recovery-arm vehicle):
+    /// the durable head is an intra-turn projection anchored to a LOST
+    /// intermediate committed boundary, one COMPLETED run-id-bearing turn
+    /// past the committed runtime authority. Strict resume rejects typed
+    /// (the projection does not name the current runtime authority; the read
+    /// path refuses the unproven ancestry), so before this verb existed the
+    /// consumer repair loop could only reset entry state and re-break.
+    /// `recover_committed_boundary` must engage the machine-owned
+    /// durable-tail recovery arm, persist a boundary-commit-provenance head,
+    /// and be a typed no-op afterwards.
+    #[tokio::test]
+    async fn recover_committed_boundary_proves_and_commits_recoverable_intra_turn_head() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // Committed runtime authority at revision 0.
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        // A committed boundary at revision 1 that the incident LOST (its
+        // runtime snapshot never survived): only its stamp lineage remains,
+        // named by the intra-turn head below.
+        let (_lost_boundary, lost_boundary_stamp) = with_checkpoint_successor(
+            snapshot.clone(),
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+
+        // Durable head: one COMPLETED turn (user + EndTurn assistant with a
+        // concrete run identity), stamped INTRA-TURN over the lost boundary.
+        let tail_run = meerkat_core::RunId::new();
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run.clone());
+        head.push(Message::BlockAssistant(assistant));
+        let (head, _) = with_checkpoint_successor(
+            head,
+            &lost_boundary_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&head).await.expect("seed durable store head");
+
+        // THE TRAP, pinned: strict-resume authority resolution rejects typed
+        // — the intra-turn projection names a boundary the runtime store no
+        // longer carries — and the authoritative read fails closed on the
+        // unproven ancestry. This is the closed loop the heal verb exists
+        // to break.
+        let prepare_error = match service
+            .load_committed_checkpoint_authority(&id, "strict resume prepare")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("strict resume must reject the orphaned intra-turn head"),
+        };
+        assert!(
+            prepare_error
+                .to_string()
+                .contains("does not name the current runtime authority"),
+            "expected the typed intra-turn rejection, got {prepare_error}"
+        );
+        service
+            .load_authoritative_session(&id)
+            .await
+            .expect_err("the authoritative load must reject the unproven ancestry");
+
+        // Heal: the machine arm proves the digest-verified tail and commits
+        // the recovered boundary.
+        let outcome = service
+            .recover_committed_boundary(&id)
+            .await
+            .expect("heal must not fail mechanically");
+        assert_eq!(
+            outcome,
+            CommittedBoundaryRecovery::Recovered {
+                provenance: meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+                message_count: head.messages().len(),
+            },
+            "the provable intra-turn head must recover as a committed boundary"
+        );
+
+        // Strict resume and the authoritative load both accept now.
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "strict resume prepare")
+            .await
+            .expect("post-heal authority resolution succeeds")
+            .expect("committed authority exists");
+        assert_eq!(
+            authority.stamp.provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+        );
+        let loaded = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("post-heal authoritative load succeeds")
+            .expect("session exists");
+        assert_eq!(
+            loaded.messages().len(),
+            head.messages().len(),
+            "recovery must preserve every durable message"
+        );
+        // The durable ROW itself now carries the boundary-commit provenance:
+        // the head is strict-resume-acceptable on its own, not merely
+        // shadowed by the runtime copy.
+        let row = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("row exists");
+        assert_eq!(
+            verified_checkpoint_stamp(&row).provenance(),
+            meerkat_core::SessionCheckpointProvenance::RecoveredRunBoundaryCommit,
+        );
+        assert!(
+            runtime_store
+                .load_boundary_receipt(&runtime_id, &tail_run, 1)
+                .await
+                .expect("receipt read succeeds")
+                .is_some(),
+            "the recovered boundary must commit a durable receipt for the tail run"
+        );
+
+        // Idempotent: the healed head is a cheap typed no-op.
+        assert_eq!(
+            service
+                .recover_committed_boundary(&id)
+                .await
+                .expect("repeat heal must not fail"),
+            CommittedBoundaryRecovery::AlreadyCommitted,
+        );
+    }
+
+    /// Heal verb, provable shape (no-op boundary-save vehicle): the durable
+    /// head is a STALE intra-turn projection the committed runtime authority
+    /// has moved past (a checkpointer sidecar frozen mid-turn two boundaries
+    /// ago). Strict resume rejects typed — the projection names neither the
+    /// current authority nor its base — and the heal converges the row onto
+    /// the committed authority document through the ordinary CAS-guarded
+    /// projection save, minting nothing.
+    #[tokio::test]
+    async fn recover_committed_boundary_converges_stale_superseded_intra_turn_head() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // Lineage: root (rev 0) -> boundary 1 (rev 1, full turn) ->
+        // boundary 2 (rev 2, lifecycle-only commit). Boundary 2 is the
+        // current committed runtime authority.
+        let id = SessionId::new();
+        let mut root = Session::with_id(id.clone());
+        root.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (root, root_stamp) = with_checkpoint_root(root);
+
+        let mut boundary_one = root.clone();
+        boundary_one.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        boundary_one.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        let (boundary_one, boundary_one_stamp) = with_checkpoint_successor(
+            boundary_one,
+            &root_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let (boundary_two, boundary_two_stamp) = with_checkpoint_successor(
+            boundary_one.clone(),
+            &boundary_one_stamp,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        );
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&boundary_two)
+                        .expect("serialize committed authority"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        // Durable row: the checkpointer's mid-turn projection of the turn
+        // boundary 1 later committed — root content plus only the user
+        // message, stamped intra-turn over ROOT. The committed chain moved
+        // two boundaries past it.
+        let mut stale_row = root.clone();
+        stale_row.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        let (stale_row, _) = with_checkpoint_successor(
+            stale_row,
+            &root_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&stale_row).await.expect("seed stale store row");
+
+        // THE TRAP, pinned: the stale projection names neither the current
+        // authority nor its base, so strict-resume authority resolution
+        // rejects typed.
+        let prepare_error = match service
+            .load_committed_checkpoint_authority(&id, "strict resume prepare")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("strict resume must reject the stale intra-turn row"),
+        };
+        assert!(
+            prepare_error
+                .to_string()
+                .contains("does not name the current runtime authority"),
+            "expected the typed intra-turn rejection, got {prepare_error}"
+        );
+
+        // Heal: the machine's ConvergeSupersededProjection verdict converges
+        // the row onto the committed authority document.
+        let outcome = service
+            .recover_committed_boundary(&id)
+            .await
+            .expect("heal must not fail mechanically");
+        assert_eq!(
+            outcome,
+            CommittedBoundaryRecovery::Recovered {
+                provenance: meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+                message_count: boundary_two.messages().len(),
+            },
+            "the superseded projection must converge onto the committed authority"
+        );
+
+        let authority = service
+            .load_committed_checkpoint_authority(&id, "strict resume prepare")
+            .await
+            .expect("post-heal authority resolution succeeds")
+            .expect("committed authority exists");
+        assert_eq!(authority.stamp, boundary_two_stamp);
+        let row = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("row exists");
+        assert_eq!(verified_checkpoint_stamp(&row), boundary_two_stamp);
+
+        assert_eq!(
+            service
+                .recover_committed_boundary(&id)
+                .await
+                .expect("repeat heal must not fail"),
+            CommittedBoundaryRecovery::AlreadyCommitted,
+        );
+    }
+
+    /// Heal verb, unprovable shape (the 2026-07-29 production message
+    /// verbatim): the ONLY durable copy is the intra-turn projection — the
+    /// RuntimeStore carries no committed authority to digest-prove a
+    /// boundary against. The verb must return the typed `Unprovable`
+    /// verdict, stably across repeated calls, mutating nothing — never an
+    /// error that invites the repair loop to retry forever.
+    #[tokio::test]
+    async fn recover_committed_boundary_is_stably_unprovable_without_committed_authority() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // The committed base existed once (the stamp lineage proves it) but
+        // no runtime copy survives — only the intra-turn projection row.
+        let id = SessionId::new();
+        let mut base = Session::with_id(id.clone());
+        base.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (base, base_stamp) = with_checkpoint_root(base);
+        let mut head = base;
+        head.push(Message::User(UserMessage::text(
+            "reply with the single word ACK".to_string(),
+        )));
+        head.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ACK".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        let (head, _) = with_checkpoint_successor(
+            head,
+            &base_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&head).await.expect("seed orphaned store head");
+
+        // THE TRAP, pinned with the exact production message.
+        let prepare_error = match service
+            .load_committed_checkpoint_authority(&id, "strict resume prepare")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("strict resume must reject the orphaned projection"),
+        };
+        assert!(
+            prepare_error
+                .to_string()
+                .contains("the only durable checkpoint is an intra-turn projection"),
+            "expected the production intra-turn rejection, got {prepare_error}"
+        );
+
+        let token_before =
+            meerkat_core::session_store::session_projection_cas_token(&head).expect("cas token");
+        // Bounded and stable: every call returns the same terminal verdict,
+        // and nothing is written — the loop the incident measured
+        // (heal -> resume-reject -> re-break) terminates in ONE typed
+        // verdict the caller can surface.
+        for _ in 0..3 {
+            let outcome = service
+                .recover_committed_boundary(&id)
+                .await
+                .expect("unprovable is a verdict, not an error");
+            let CommittedBoundaryRecovery::Unprovable { reason } = outcome else {
+                panic!("expected Unprovable, got {outcome:?}");
+            };
+            assert!(
+                reason.contains("no committed runtime authority survives"),
+                "reason must name the missing proof, got {reason}"
+            );
+        }
+        let row = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("the projection row must be retained intact");
+        assert_eq!(
+            meerkat_core::session_store::session_projection_cas_token(&row).expect("cas token"),
+            token_before,
+            "unprovable verdicts must not mutate the durable row"
+        );
+        assert!(
+            runtime_store
+                .load_session_snapshot(&runtime_id_unused_probe(&id))
+                .await
+                .expect("runtime read succeeds")
+                .is_none(),
+            "unprovable verdicts must not fabricate a runtime authority"
+        );
+    }
+
+    /// Heal verb, machine-held shape: a committed authority exists, but the
+    /// digest-proven tail carries a dangling tool call, so the machines hold
+    /// it (a dangling call proves intent, not execution). The verb mirrors
+    /// the hold as the stable typed `Unprovable` verdict instead of the
+    /// read path's `DurableTailHeldForRecovery` error — terminal for the
+    /// repair loop, tail retained intact.
+    #[tokio::test]
+    async fn recover_committed_boundary_reports_machine_hold_as_unprovable() {
+        use meerkat_core::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let mut snapshot = Session::with_id(id.clone());
+        snapshot.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (snapshot, snapshot_stamp) = with_checkpoint_root(snapshot);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+
+        let tail_run = meerkat_core::RunId::new();
+        let mut head = snapshot.clone();
+        head.push(Message::User(UserMessage::text("run the tool".to_string())));
+        let mut assistant = BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Text {
+                    text: "running it".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "call-heal-1".to_string(),
+                    name: "external_tool".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("raw args"),
+                    meta: None,
+                },
+            ],
+            StopReason::EndTurn,
+        );
+        assistant.identity = assistant.identity.with_run_id(tail_run);
+        head.push(Message::BlockAssistant(assistant));
+        let (head, _) = with_checkpoint_successor(
+            head,
+            &snapshot_stamp,
+            meerkat_core::SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        store.save(&head).await.expect("seed durable store head");
+
+        for _ in 0..2 {
+            let outcome = service
+                .recover_committed_boundary(&id)
+                .await
+                .expect("a machine hold is a verdict, not an error");
+            let CommittedBoundaryRecovery::Unprovable { reason } = outcome else {
+                panic!("expected Unprovable, got {outcome:?}");
+            };
+            assert!(
+                reason.contains("held intact"),
+                "reason must name the hold, got {reason}"
+            );
+        }
+        let retained = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("the held tail must be retained intact");
+        assert_eq!(retained.messages().len(), head.messages().len());
+    }
+
+    /// Heal verb, healthy and missing shapes: a committed durable head is a
+    /// cheap typed no-op that writes nothing, and an unknown session is the
+    /// ordinary typed NotFound error.
+    #[tokio::test]
+    async fn recover_committed_boundary_is_noop_on_healthy_head_and_not_found_on_missing() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let mut session = Session::with_id(id.clone());
+        session.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let (session, _) = with_checkpoint_root(session);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)
+                        .expect("serialize committed snapshot"),
+                },
+            )
+            .await
+            .expect("seed committed runtime snapshot");
+        store.save(&session).await.expect("seed committed row");
+
+        let token_before =
+            meerkat_core::session_store::session_projection_cas_token(&session).expect("cas token");
+        assert_eq!(
+            service
+                .recover_committed_boundary(&id)
+                .await
+                .expect("healthy heal must not fail"),
+            CommittedBoundaryRecovery::AlreadyCommitted,
+        );
+        let row = store
+            .load(&id)
+            .await
+            .expect("store read succeeds")
+            .expect("row exists");
+        assert_eq!(
+            meerkat_core::session_store::session_projection_cas_token(&row).expect("cas token"),
+            token_before,
+            "a healthy no-op must not rewrite the durable row"
+        );
+
+        let missing = SessionId::new();
+        let error = service
+            .recover_committed_boundary(&missing)
+            .await
+            .expect_err("an unknown session is a typed error");
+        assert!(
+            matches!(error, SessionError::NotFound { id: ref found } if *found == missing),
+            "expected NotFound, got {error:?}"
+        );
+    }
+
+    /// Probe helper: the runtime id for a session, named to make the
+    /// unprovable test's "no fabricated authority" assertion read clearly.
+    fn runtime_id_unused_probe(id: &SessionId) -> meerkat_runtime::LogicalRuntimeId {
+        meerkat_runtime::LogicalRuntimeId::for_session(id)
     }
 
     /// Level-4 pin for the 0.8.8->0.8.9 upgrade-boundary wedge (HomeCore

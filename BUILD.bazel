@@ -581,6 +581,7 @@ test_suite(
         "//meerkat-store:rct_contracts_test",
         "//meerkat-store:schedule_atomic_mutation_test",
         "//meerkat-store:schedule_machine_state_projection_test",
+        "//meerkat-store:schedule_occurrence_list_pushdown_test",
         "//meerkat-store:schedule_receipt_projection_test",
         "//meerkat-store:schedule_row_fault_tolerance_test",
         "//meerkat-store:stress_high_concurrency_test",

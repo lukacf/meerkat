@@ -373,6 +373,60 @@ rust_test(
 )
 
 rust_test(
+    name = "schedule_live_waiter_gate_test",
+    aliases = aliases(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "schedule_live_waiter_gate",
+    crate_root = "tests/schedule_live_waiter_gate.rs",
+    crate_features = [
+        "jsonl",
+        "memory",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/schedule_live_waiter_gate.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.10",
+        "CARGO_BIN_NAME": "schedule_live_waiter_gate",
+        "CARGO_MANIFEST_DIR": "./meerkat-store",
+    },
+    tags = [
+        "live",
+    ],
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-store",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "schedule_machine_state_projection_test",
     aliases = aliases(
         package_name = "meerkat-store",
@@ -399,6 +453,61 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.10",
         "CARGO_BIN_NAME": "schedule_machine_state_projection",
+        "CARGO_MANIFEST_DIR": "./meerkat-store",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-store",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-sqlite:meerkat_sqlite",
+        "//meerkat-store-conformance:meerkat_store_conformance",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "schedule_occurrence_list_pushdown_test",
+    aliases = aliases(
+        package_name = "meerkat-store",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "schedule_occurrence_list_pushdown",
+    crate_root = "tests/schedule_occurrence_list_pushdown.rs",
+    crate_features = [
+        "jsonl",
+        "memory",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/schedule_occurrence_list_pushdown.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.10",
+        "CARGO_BIN_NAME": "schedule_occurrence_list_pushdown",
         "CARGO_MANIFEST_DIR": "./meerkat-store",
     },
     tags = [
@@ -601,6 +710,7 @@ test_suite(
         ":rct_contracts_test",
         ":schedule_atomic_mutation_test",
         ":schedule_machine_state_projection_test",
+        ":schedule_occurrence_list_pushdown_test",
         ":schedule_receipt_projection_test",
         ":schedule_row_fault_tolerance_test",
         ":stress_high_concurrency_test",

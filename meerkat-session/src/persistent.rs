@@ -1340,30 +1340,116 @@ fn session_materialized_at_transcript_revision(
     Ok(materialized)
 }
 
+/// One boundary save's rewrite-chain-search memo.
+///
+/// Threaded through BOTH invocations the save callers perform (raw previous,
+/// then blob-normalized previous) and through every core re-entry the
+/// wrapper's per-commit fallback performs, so a continuation verdict is
+/// computed at most once per unique (revision, ancestor) content pair.
+/// Verdict keys are revision digests over a sealed (digest-verified) graph
+/// with a fixed blob store, so reuse is content-true. Lives and dies within
+/// one save operation — never process-global.
+#[derive(Default)]
+struct NormalizedChainSearchMemo {
+    core: meerkat_core::session_store::RewriteChainSearchMemo,
+    /// `(incoming_revision, ancestor body revision)` ->
+    /// [`transcript_revision_preserves_storage_normalized_append_prefix`]
+    /// verdict.
+    normalized_continuation: std::collections::HashMap<(String, String), bool>,
+}
+
+impl NormalizedChainSearchMemo {
+    fn digests_computed(&self) -> u64 {
+        self.core.digests_computed()
+    }
+}
+
+/// Emit the `MEERKAT_TRACE_REWRITE_MATERIALIZE`-gated entry line for one
+/// rewrite-chain-search wrapper invocation. Emitted BEFORE any digest work:
+/// a search that never returns still shows the graph shape it was handed
+/// (the 2026-07 fleet-boot burn sat exactly here, upstream of every existing
+/// chain-loop line).
+fn trace_rewrite_chain_search_entry(
+    previous: &Session,
+    incoming_revision: &str,
+    state: &meerkat_core::TranscriptHistoryState,
+) {
+    tracing::info!(
+        session_id = %previous.id(),
+        incoming_revision,
+        state_commits = state.commits.len(),
+        state_revisions = state.revisions.len(),
+        previous_messages = previous.messages().len(),
+        "rewrite-chain-search: entering"
+    );
+}
+
+/// Emit the `MEERKAT_TRACE_REWRITE_MATERIALIZE`-gated summary line for one
+/// rewrite-chain-search wrapper invocation.
+fn trace_rewrite_chain_search_summary(
+    session_id: &SessionId,
+    outcome: &str,
+    chain_len: Option<usize>,
+    commits_examined: u64,
+    digests_computed: u64,
+    started: std::time::Instant,
+) {
+    tracing::info!(
+        session_id = %session_id,
+        outcome,
+        chain_len = ?chain_len,
+        commits_examined,
+        digests_computed,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "rewrite-chain-search: summary"
+    );
+}
+
 async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization<'a>(
     blob_store: &dyn BlobStore,
     sealed: &'a meerkat_core::ValidatedTranscriptHistory,
     previous: &Session,
     incoming_revision: &str,
     incoming_messages: &[meerkat_core::Message],
+    memo: &mut NormalizedChainSearchMemo,
 ) -> Result<Option<Vec<&'a meerkat_core::TranscriptRewriteCommit>>, SessionStoreError> {
+    let trace = rewrite_materialize_trace_enabled();
+    let started = std::time::Instant::now();
+    let digests_before = memo.digests_computed();
     let state = sealed.state();
+    if trace {
+        trace_rewrite_chain_search_entry(previous, incoming_revision, state);
+    }
     if let Some(commits) =
-        meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session(
+        meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session_with_memo(
             sealed,
             previous,
             incoming_revision,
+            &mut memo.core,
         )?
     {
+        if trace {
+            trace_rewrite_chain_search_summary(
+                previous.id(),
+                "hit-direct",
+                Some(commits.len()),
+                0,
+                memo.digests_computed().saturating_sub(digests_before),
+                started,
+            );
+        }
         return Ok(Some(commits));
     }
 
+    let mut commits_examined = 0u64;
     for commit in state.commits.iter().rev() {
+        commits_examined = commits_examined.saturating_add(1);
         let Some(commits) =
-            meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session(
+            meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session_with_memo(
                 sealed,
                 previous,
                 &commit.revision,
+                &mut memo.core,
             )?
         else {
             continue;
@@ -1378,32 +1464,57 @@ async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_nor
         else {
             continue;
         };
-        let incoming_extends_commit =
-            transcript_state_revision_extends(state, incoming_revision, &commit.revision)
-                || transcript_revision_preserves_storage_normalized_append_prefix(
-                    blob_store,
-                    state,
-                    incoming_revision,
-                    incoming_messages,
-                    &revision_body.messages,
-                )
-                .await?;
-        if !incoming_extends_commit {
-            continue;
-        }
-        if transcript_revision_preserves_storage_normalized_append_prefix(
-            blob_store,
-            state,
-            incoming_revision,
-            incoming_messages,
-            &revision_body.messages,
-        )
-        .await?
-        {
+        // Decision note: the previous spelling computed a structural
+        // `transcript_state_revision_extends` arm ORed with this predicate,
+        // then re-evaluated the IDENTICAL predicate to gate the return — so
+        // the per-commit decision was always exactly the predicate
+        // (`P && (structural || P) == P`). Evaluating it once keeps the
+        // decision bit-for-bit while deleting both the duplicated
+        // full-document digest evaluation and the decision-irrelevant
+        // structural walk.
+        let key = (incoming_revision.to_string(), commit.revision.clone());
+        let preserves = if let Some(&verdict) = memo.normalized_continuation.get(&key) {
+            verdict
+        } else {
+            let mut digest_passes = 0u64;
+            let verdict = transcript_revision_preserves_storage_normalized_append_prefix(
+                blob_store,
+                state,
+                incoming_revision,
+                incoming_messages,
+                &revision_body.messages,
+                &mut digest_passes,
+            )
+            .await?;
+            memo.core.record_external_digests(digest_passes);
+            memo.normalized_continuation.insert(key, verdict);
+            verdict
+        };
+        if preserves {
+            if trace {
+                trace_rewrite_chain_search_summary(
+                    previous.id(),
+                    "hit-fallback",
+                    Some(commits.len()),
+                    commits_examined,
+                    memo.digests_computed().saturating_sub(digests_before),
+                    started,
+                );
+            }
             return Ok(Some(commits));
         }
     }
 
+    if trace {
+        trace_rewrite_chain_search_summary(
+            previous.id(),
+            "miss",
+            None,
+            commits_examined,
+            memo.digests_computed().saturating_sub(digests_before),
+            started,
+        );
+    }
     Ok(None)
 }
 
@@ -1413,6 +1524,7 @@ async fn transcript_revision_preserves_storage_normalized_append_prefix(
     revision: &str,
     current_messages: &[meerkat_core::Message],
     ancestor_messages: &[meerkat_core::Message],
+    digest_passes: &mut u64,
 ) -> Result<bool, SessionStoreError> {
     let mut revision_messages = if revision == state.head {
         current_messages.to_vec()
@@ -1422,13 +1534,16 @@ async fn transcript_revision_preserves_storage_normalized_append_prefix(
         .find(|body| body.revision == revision)
     {
         body.messages.clone()
-    } else if meerkat_core::transcript_messages_digest(current_messages)
-        .map_err(SessionStoreError::from)?
-        == revision
-    {
-        current_messages.to_vec()
     } else {
-        return Ok(false);
+        *digest_passes = digest_passes.saturating_add(1);
+        if meerkat_core::transcript_messages_digest(current_messages)
+            .map_err(SessionStoreError::from)?
+            == revision
+        {
+            current_messages.to_vec()
+        } else {
+            return Ok(false);
+        }
     };
     let mut normalized_ancestor = ancestor_messages.to_vec();
     externalize_messages_from(blob_store, &mut normalized_ancestor, 0)
@@ -1448,6 +1563,7 @@ async fn transcript_revision_preserves_storage_normalized_append_prefix(
     if revision_messages.len() < normalized_ancestor.len() {
         return Ok(false);
     }
+    *digest_passes = digest_passes.saturating_add(2);
     let ancestor_revision = meerkat_core::transcript_messages_digest(&normalized_ancestor)
         .map_err(SessionStoreError::from)?;
     let prefix_revision =
@@ -2240,6 +2356,19 @@ async fn save_session_projection_allowing_internal_rewrite(
     };
     let state = sealed.state();
     let mut normalized_previous_for_chain = None;
+    // One memo per save operation, shared by both search invocations below
+    // (and by every per-commit core re-entry inside the wrapper), so no
+    // continuation verdict over the same content is ever digested twice.
+    let mut chain_search_memo = NormalizedChainSearchMemo::default();
+    let search_trace = rewrite_materialize_trace_enabled();
+    let search_started = std::time::Instant::now();
+    if search_trace {
+        tracing::info!(
+            session_id = %session.id(),
+            caller = "save_session_projection_allowing_internal_rewrite",
+            "rewrite-chain-search: caller entering"
+        );
+    }
     let mut commits =
         find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
             blob_store,
@@ -2247,9 +2376,11 @@ async fn save_session_projection_allowing_internal_rewrite(
             &previous,
             &incoming_revision,
             session.messages(),
+            &mut chain_search_memo,
         )
         .await
         .map_err(|err| SessionError::Store(Box::new(err)))?;
+    let mut search_invocations = 1u64;
     if commits.is_none() {
         let mut normalized_previous = previous.clone();
         normalized_previous
@@ -2269,6 +2400,7 @@ async fn save_session_projection_allowing_internal_rewrite(
             )))
         })?;
         if normalized_revision != previous_revision {
+            search_invocations = 2;
             commits =
                 find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                     blob_store,
@@ -2276,6 +2408,7 @@ async fn save_session_projection_allowing_internal_rewrite(
                     &normalized_previous,
                     &incoming_revision,
                     session.messages(),
+                    &mut chain_search_memo,
                 )
                 .await
                 .map_err(|err| SessionError::Store(Box::new(err)))?;
@@ -2283,6 +2416,18 @@ async fn save_session_projection_allowing_internal_rewrite(
                 normalized_previous_for_chain = Some(normalized_previous);
             }
         }
+    }
+    if search_trace {
+        tracing::info!(
+            session_id = %session.id(),
+            caller = "save_session_projection_allowing_internal_rewrite",
+            invocations = search_invocations,
+            outcome = if commits.is_some() { "hit" } else { "miss" },
+            chain_len = ?commits.as_ref().map(Vec::len),
+            digests_computed = chain_search_memo.digests_computed(),
+            elapsed_ms = u64::try_from(search_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "rewrite-chain-search: caller summary"
+        );
     }
     let Some(commits) = commits else {
         return save_session_projection_with_storage_normalization_bridge(
@@ -2443,6 +2588,7 @@ async fn save_session_projection_after_verified_rewrite_chain(
                         incoming_revision,
                         session.messages(),
                         previous.messages(),
+                        &mut 0,
                     )
                     .await?)
             {
@@ -2630,6 +2776,7 @@ async fn save_verified_transcript_history_projection(
             &incoming_revision,
             session.messages(),
             previous.messages(),
+            &mut 0,
         )
         .await?
     {
@@ -10034,6 +10181,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         else {
             return Ok(plan(Vec::new()));
         };
+        // One memo per save operation, shared by both search invocations
+        // below (and every per-commit core re-entry inside the wrapper).
+        let mut chain_search_memo = NormalizedChainSearchMemo::default();
+        let search_trace = rewrite_materialize_trace_enabled();
+        let search_started = std::time::Instant::now();
+        if search_trace {
+            tracing::info!(
+                session_id = %session.id(),
+                caller = "transcript_rewrite_commit_chain_for_persistence",
+                "rewrite-chain-search: caller entering"
+            );
+        }
         let mut commits =
             find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                 self.blob_store.as_ref(),
@@ -10041,9 +10200,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 &previous,
                 &incoming_revision,
                 session.messages(),
+                &mut chain_search_memo,
             )
             .await
             .map_err(|err| SessionError::Store(Box::new(err)))?;
+        let mut search_invocations = 1u64;
         if commits.is_none() {
             let mut normalized_previous = previous.clone();
             normalized_previous
@@ -10063,16 +10224,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
             if normalized_revision != previous_revision {
+                search_invocations = 2;
                 commits = find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
                     self.blob_store.as_ref(),
                     &sealed,
                     &normalized_previous,
                     &incoming_revision,
                     session.messages(),
+                    &mut chain_search_memo,
                 )
                 .await
                 .map_err(|err| SessionError::Store(Box::new(err)))?;
             }
+        }
+        if search_trace {
+            tracing::info!(
+                session_id = %session.id(),
+                caller = "transcript_rewrite_commit_chain_for_persistence",
+                invocations = search_invocations,
+                outcome = if commits.is_some() { "hit" } else { "miss" },
+                chain_len = ?commits.as_ref().map(Vec::len),
+                digests_computed = chain_search_memo.digests_computed(),
+                elapsed_ms =
+                    u64::try_from(search_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "rewrite-chain-search: caller summary"
+            );
         }
         Ok(plan(
             commits.unwrap_or_default().into_iter().cloned().collect(),
@@ -39059,6 +39235,160 @@ mod tests {
             row.lifecycle_terminal(),
             Some(SessionLifecycleTerminal::Archived),
             "the archived terminal must survive the refusal untouched"
+        );
+    }
+
+    /// Exploratory scaling probe for the fleet-boot burn (task #38): a legacy
+    /// durable document (v1 row + runtime snapshot, commits=0, no transcript
+    /// graph) resumed by a boot that mints a system-prompt refresh rewrite,
+    /// then boundary-saved.
+    #[tokio::test]
+    async fn resume_mint_over_legacy_document_scaling_probe() {
+        async fn measure(
+            message_count: usize,
+            refresh_count: usize,
+        ) -> (std::time::Duration, u64, u64) {
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+            let service = legacy_migration_service(&store, &runtime_store);
+
+            let mut legacy = Session::new();
+            legacy.set_system_prompt("legacy base prompt".to_string());
+            let payload = "x".repeat(4_000);
+            for turn in 0..message_count {
+                legacy.push(user_message(&format!("turn {turn}: {payload}")));
+            }
+            let legacy = with_legacy_checkpoint_marker(&legacy, true);
+            let id = legacy.id().clone();
+            seed_legacy_runtime_snapshot(&runtime_store, &legacy).await;
+            store.save(&legacy).await.expect("legacy row should save");
+
+            let mut incoming = service
+                .load_committed_checkpoint_authority(&id, "fleet boot resume probe")
+                .await
+                .expect("legacy authority should migrate")
+                .expect("migrated authority should exist")
+                .session;
+            for refresh in 0..refresh_count {
+                incoming
+                    .reconcile_resumed_system_prompt(
+                        format!("refreshed base prompt {refresh}"),
+                        Some("agent-factory/resume".to_string()),
+                    )
+                    .expect("resume reconciliation should mint a rewrite");
+            }
+
+            let bytes_before = meerkat_core::global_session_content_digest_bytes();
+            let passes_before = meerkat_core::session_content_digest_computations();
+            let start = std::time::Instant::now();
+            service
+                .save_normalized_session(incoming)
+                .await
+                .expect("boundary save should succeed");
+            let elapsed = start.elapsed();
+            (
+                elapsed,
+                meerkat_core::global_session_content_digest_bytes() - bytes_before,
+                meerkat_core::session_content_digest_computations() - passes_before,
+            )
+        }
+        for (count, refreshes) in [(16usize, 1usize), (64, 1), (16, 8)] {
+            let (elapsed, bytes, passes) = measure(count, refreshes).await;
+            println!(
+                "{count} msgs x {refreshes} refreshes: {elapsed:?}, digest bytes {bytes}, passes {passes}"
+            );
+        }
+    }
+
+    /// The rewrite-chain SEARCH must not grind superlinearly in retained
+    /// refresh commits on the miss path (task #38, the 2026-07 fleet-boot
+    /// burn: large legacy members spun at 100% CPU inside chain discovery,
+    /// upstream of every chain-persistence log line).
+    ///
+    /// Shape: a resumed legacy transcript that chained `refresh_count`
+    /// system-prompt refresh rewrites, searched against a previous row whose
+    /// final conversation turn diverged (so no graph edge and no content
+    /// equivalence connects it). The direct search misses after digesting
+    /// every refresh commit's parent once, then the storage-normalization
+    /// fallback re-enters the core search once per retained commit.
+    /// Un-memoized, those re-entries recompute the same full-document
+    /// continuation digests per commit — quadratic in the commit count; the
+    /// per-save memo bounds the whole search linearly.
+    #[tokio::test]
+    async fn rewrite_chain_search_miss_path_digest_passes_scale_linearly_in_commits() {
+        async fn measure_search(
+            message_count: usize,
+            refresh_count: usize,
+        ) -> (std::time::Duration, u64) {
+            let blob_store = memory_blob_store();
+            let payload = "x".repeat(2_000);
+            let mut incoming = Session::new();
+            incoming.set_system_prompt("legacy base prompt".to_string());
+            for turn in 0..message_count {
+                incoming.push(user_message(&format!("turn {turn}: {payload}")));
+            }
+            for refresh in 0..refresh_count {
+                incoming
+                    .reconcile_resumed_system_prompt(
+                        format!("refreshed base prompt {refresh}"),
+                        Some("agent-factory/resume".to_string()),
+                    )
+                    .expect("resume reconciliation should mint a rewrite");
+            }
+            let incoming_revision = meerkat_core::transcript_messages_digest(incoming.messages())
+                .expect("incoming transcript should digest");
+            let sealed = incoming
+                .validated_transcript_history_state()
+                .expect("incoming graph should read")
+                .expect("chained refreshes should retain a graph");
+
+            // Same length, divergent final conversation turn: every
+            // continuation check must fall through its digest arms and fail
+            // on content, never on shape.
+            let mut previous = Session::new();
+            previous.set_system_prompt("legacy base prompt".to_string());
+            for turn in 0..message_count {
+                if turn + 1 == message_count {
+                    previous.push(user_message("divergent durable-only content"));
+                } else {
+                    previous.push(user_message(&format!("turn {turn}: {payload}")));
+                }
+            }
+
+            let mut memo = NormalizedChainSearchMemo::default();
+            let passes_before = meerkat_core::session_content_digest_computations();
+            let start = std::time::Instant::now();
+            let commits =
+                find_transcript_rewrite_commit_chain_extending_session_with_storage_normalization(
+                    blob_store.as_ref(),
+                    &sealed,
+                    &previous,
+                    &incoming_revision,
+                    incoming.messages(),
+                    &mut memo,
+                )
+                .await
+                .expect("chain search must complete");
+            let elapsed = start.elapsed();
+            let passes = meerkat_core::session_content_digest_computations() - passes_before;
+            assert!(
+                commits.is_none(),
+                "a divergent previous row must not admit a rewrite chain"
+            );
+            (elapsed, passes)
+        }
+
+        let (elapsed_small, passes_small) = measure_search(24, 6).await;
+        let (elapsed_large, passes_large) = measure_search(24, 12).await;
+        println!(
+            "search miss path: 6 refreshes => {passes_small} passes in {elapsed_small:?}, \
+             12 refreshes => {passes_large} passes in {elapsed_large:?}"
+        );
+        assert!(
+            passes_large <= passes_small.saturating_mul(3),
+            "miss-path chain search digest passes must scale linearly in retained commits: \
+             6 refreshes cost {passes_small} passes, 12 refreshes cost {passes_large} \
+             (quadratic growth would be >= 4x)"
         );
     }
 

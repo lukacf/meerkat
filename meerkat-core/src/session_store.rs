@@ -1451,6 +1451,142 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
     }
 }
 
+/// Per-save-operation memo for the rewrite-chain search.
+///
+/// The search is re-entered many times per boundary save: the
+/// storage-normalization wrapper re-runs the core walk once per retained
+/// commit on a direct miss, and the save callers run the whole wrapper twice
+/// (raw previous, then blob-normalized previous). Without a memo every
+/// re-entry recomputes the same full-document continuation digests, which is
+/// the superlinear grind behind the 2026-07 fleet-boot save burn (task #38).
+///
+/// Soundness: verdicts are keyed by revision DIGEST strings, and a sealed
+/// graph digest-verifies every retained body
+/// (`validate_transcript_history_state` hashes each body against its
+/// `revision`), so a memoized verdict is a fact about canonical content, not
+/// about graph position. Body PRESENCE is not content-addressed, so the memo
+/// additionally binds to the exact sealed graph it first observed
+/// ([`Self::bind_state`]) and self-clears if handed a different one.
+///
+/// Lifecycle rule: a memo must live and die within ONE save operation and
+/// may only be shared by search invocations that observe the same sealed
+/// graph and the same blob store. Never hold one process-globally — a
+/// process-global verification memo was deleted this same wave for blessing
+/// corrupted bytes.
+#[derive(Debug, Default)]
+pub struct RewriteChainSearchMemo {
+    /// Identity of the sealed graph the cached facts were derived from.
+    state_tag: Option<usize>,
+    /// `(revision, ancestor_revision, allow_leading_system_refresh)` ->
+    /// [`revision_body_preserves_append_continuation_prefix`] verdict.
+    continuation: std::collections::HashMap<(String, String, bool), bool>,
+    /// Descendant revision -> every ancestor its parent chain reaches
+    /// (the [`transcript_history_revision_extends`] relation, computed once
+    /// per descendant instead of one linear graph walk per query).
+    ancestors: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Full content-digest passes computed by searches under this memo.
+    digests_computed: u64,
+}
+
+impl RewriteChainSearchMemo {
+    /// Full content-digest passes computed by searches under this memo so
+    /// far. Observability for the `MEERKAT_TRACE_REWRITE_MATERIALIZE` trace
+    /// lines; a memo hit costs zero.
+    #[must_use]
+    pub fn digests_computed(&self) -> u64 {
+        self.digests_computed
+    }
+
+    /// Count digest passes performed by a caller-side (non-core) predicate
+    /// evaluation against this memo's total.
+    pub fn record_external_digests(&mut self, passes: u64) {
+        self.digests_computed = self.digests_computed.saturating_add(passes);
+    }
+
+    /// Bind the memo to the exact sealed graph in play; facts derived from a
+    /// different graph are discarded (body presence is not content-addressed,
+    /// so cross-graph reuse would not be identity-preserving).
+    fn bind_state(&mut self, state: &TranscriptHistoryState) {
+        let tag = std::ptr::from_ref(state) as usize;
+        if self.state_tag != Some(tag) {
+            self.continuation.clear();
+            self.ancestors.clear();
+            self.state_tag = Some(tag);
+        }
+    }
+
+    /// Memoized [`transcript_history_revision_extends`]. The first query for
+    /// a descendant materializes its full ancestor set with one bounded
+    /// parent-chain walk; every later query is a set lookup.
+    fn revision_extends(
+        &mut self,
+        state: &TranscriptHistoryState,
+        descendant: &str,
+        ancestor: &str,
+    ) -> bool {
+        if descendant == ancestor {
+            return true;
+        }
+        if !self.ancestors.contains_key(descendant) {
+            let mut ancestors = std::collections::HashSet::new();
+            let mut visited = std::collections::HashSet::new();
+            let mut cursor = descendant;
+            while let Some(body) = state.revisions.iter().find(|body| body.revision == cursor) {
+                // Parent pointers are metadata, not digest-covered: bound the
+                // walk so a cyclic parent chain terminates (exactly the
+                // fail-closed bound of the unmemoized walk).
+                if !visited.insert(body.revision.clone()) {
+                    break;
+                }
+                let Some(parent) = body.parent_revision.as_deref() else {
+                    break;
+                };
+                ancestors.insert(parent.to_string());
+                cursor = parent;
+            }
+            self.ancestors.insert(descendant.to_string(), ancestors);
+        }
+        self.ancestors[descendant].contains(ancestor)
+    }
+
+    /// Memoized [`revision_body_preserves_append_continuation_prefix`].
+    ///
+    /// `ancestor_messages` MUST be content whose transcript digest is
+    /// `ancestor_revision` (every call site passes either a digest-verified
+    /// retained body or the previous transcript whose digest was computed at
+    /// search entry), so the verdict is fully determined by the key.
+    fn continuation_preserved(
+        &mut self,
+        state: &TranscriptHistoryState,
+        revision: &str,
+        ancestor_messages: &[Message],
+        ancestor_revision: &str,
+        allow_leading_system_refresh: bool,
+    ) -> Result<bool, SessionStoreError> {
+        let key = (
+            revision.to_string(),
+            ancestor_revision.to_string(),
+            allow_leading_system_refresh,
+        );
+        if let Some(&verdict) = self.continuation.get(&key) {
+            return Ok(verdict);
+        }
+        let digests_before = crate::checkpoint::session_content_digest_computations();
+        let verdict = revision_body_preserves_append_continuation_prefix(
+            state,
+            revision,
+            ancestor_messages,
+            ancestor_revision,
+            allow_leading_system_refresh,
+        )?;
+        self.digests_computed = self.digests_computed.saturating_add(
+            crate::checkpoint::session_content_digest_computations().saturating_sub(digests_before),
+        );
+        self.continuation.insert(key, verdict);
+        Ok(verdict)
+    }
+}
+
 /// Find a rewrite chain whose first parent may be an append-only continuation
 /// of a previously persisted snapshot.
 ///
@@ -1472,9 +1608,37 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
     previous: &Session,
     incoming_revision: &str,
 ) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
+    let mut memo = RewriteChainSearchMemo::default();
+    find_transcript_rewrite_commit_chain_extending_session_with_memo(
+        state,
+        previous,
+        incoming_revision,
+        &mut memo,
+    )
+}
+
+/// [`find_transcript_rewrite_commit_chain_extending_session`] with a
+/// caller-owned [`RewriteChainSearchMemo`], so the repeated invocations one
+/// boundary save performs (per-commit wrapper fallback, raw-then-normalized
+/// previous) share continuation verdicts and ancestor walks instead of
+/// recomputing full-document digests per re-entry. The decision function is
+/// unchanged: same inputs yield the same chain (or refusal) as the
+/// memo-less form.
+///
+/// # Errors
+///
+/// Propagates digest failures over the previous transcript or a retained
+/// revision body, exactly as the memo-less form does.
+pub fn find_transcript_rewrite_commit_chain_extending_session_with_memo<'a>(
+    state: &'a ValidatedTranscriptHistory,
+    previous: &Session,
+    incoming_revision: &str,
+    memo: &mut RewriteChainSearchMemo,
+) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
     let _digest_site =
         crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_REWRITE_CHAIN_WALK);
     let state = state.state();
+    memo.bind_state(state);
     let previous_revision = previous
         .transcript_content_digest()
         .map_err(SessionStoreError::from)?;
@@ -1508,7 +1672,7 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
             if commit.revision == cursor || visited.contains(&commit.revision) {
                 continue;
             }
-            if !transcript_history_revision_extends(state, incoming_revision, &commit.revision) {
+            if !memo.revision_extends(state, incoming_revision, &commit.revision) {
                 continue;
             }
             if commit.parent_revision == cursor {
@@ -1529,7 +1693,7 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
         // (chained resume refreshes with no turn in between, the idle mob
         // member roster-drift shape).
         if selected.is_none() {
-            if revision_body_preserves_append_continuation_prefix(
+            if memo.continuation_preserved(
                 state,
                 incoming_revision,
                 cursor_messages,
@@ -1546,11 +1710,10 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
                 if commit.revision == cursor || visited.contains(&commit.revision) {
                     continue;
                 }
-                if !transcript_history_revision_extends(state, incoming_revision, &commit.revision)
-                {
+                if !memo.revision_extends(state, incoming_revision, &commit.revision) {
                     continue;
                 }
-                if revision_body_preserves_append_continuation_prefix(
+                if memo.continuation_preserved(
                     state,
                     &commit.parent_revision,
                     cursor_messages,

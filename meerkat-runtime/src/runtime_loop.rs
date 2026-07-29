@@ -8615,8 +8615,7 @@ mod tests {
     /// quiescence obtains, the same feed and cursors must consume that held
     /// completion exactly once.
     #[tokio::test]
-    async fn maybe_inject_feed_wake_non_quiescent_holds_completion_then_injects_after_quiescence()
-    {
+    async fn maybe_inject_feed_wake_non_quiescent_holds_completion_then_injects_after_quiescence() {
         let driver = make_shared_ephemeral_driver("feed-held-non-quiescent");
         {
             let mut guard = driver.lock().await;
@@ -8917,7 +8916,9 @@ mod tests {
             "held completion must remain visible in the feed"
         );
         let observed_cursor = registry
-            .completion_cursor(meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved)
+            .completion_cursor(
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+            )
             .unwrap()
             .unwrap_or(0);
         assert!(

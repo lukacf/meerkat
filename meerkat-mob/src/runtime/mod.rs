@@ -251,6 +251,7 @@ mod mob_member_lifecycle_projection;
 mod mob_runtime_bridge_authority;
 mod mobpack_execution;
 mod ops_adapter;
+mod panic_capture;
 pub mod path;
 mod pending_spawn_lineage;
 mod placed_carrier_cleanup;

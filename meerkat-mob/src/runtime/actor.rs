@@ -4743,6 +4743,12 @@ pub(super) struct MobActor {
     /// and the intent scan; a fresh declaration manifest or a process restart
     /// clears the park. Volatile scheduling custody only.
     pub(super) identity_reconcile_parked: BTreeMap<AgentIdentity, String>,
+    /// Once-per-distinct-payload panic log gate for spawn provisioning tasks
+    /// (see `panic_capture` for the 2026-07-29 incident WHY): the
+    /// identity-reconcile requeue can re-run a panicking provision
+    /// indefinitely, so the recovered payload is logged on transition, never
+    /// per iteration.
+    pub(super) spawn_panic_log_ledger: Arc<super::panic_capture::SpawnPanicLogLedger>,
     /// Stable logical controller id plus this process-local incarnation.
     /// Neither value is checkpoint content authority.
     pub(super) identity_reconcile_holder_id: String,
@@ -22988,9 +22994,21 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let session_service = self.session_service.clone();
         let command_tx = self.command_tx.clone();
+        let panic_log_ledger = Arc::clone(&self.spawn_panic_log_ledger);
+        let panic_mob_id = self.definition.id.clone();
         let task = tokio::spawn(async move {
             let panic_member_identity = spawn_member_identity.clone();
-            let provision_result = std::panic::AssertUnwindSafe(async {
+            // Panic boundary (see `panic_capture` for the 2026-07-29 incident
+            // WHY): recover + log the payload once per distinct payload and
+            // feed the typed SpawnProvisioned failure path — never a silent
+            // `Err(_)` that the identity-reconcile requeue can retry into a
+            // 99%-CPU panic/symbolication furnace.
+            let provision_result = super::panic_capture::run_spawn_provision_guarded(
+                panic_log_ledger.as_ref(),
+                &panic_mob_id,
+                "spawn provisioning task",
+                &panic_member_identity,
+                async {
                 let provision_request = provision_input.into_request(session_service).await?;
                 let spawn_receipt = provisioner.provision_member(provision_request).await?;
                 if let Some(bridge_session_id) =
@@ -23030,15 +23048,9 @@ impl MobActor {
                     return Err(capability_error);
                 }
                 Ok(spawn_receipt)
-            })
-            .catch_unwind()
+                },
+            )
             .await;
-            let provision_result = match provision_result {
-                Ok(result) => result,
-                Err(_) => Err(MobError::Internal(format!(
-                    "spawn provisioning task panicked for '{panic_member_identity}'"
-                ))),
-            };
 
             if let Err(send_error) = command_tx
                 .send(RoutedMobCommand::internal(MobCommand::SpawnProvisioned {
@@ -24580,32 +24592,37 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let command_tx = self.command_tx.clone();
         let spawn_member_identity = agent_identity.clone();
+        let panic_log_ledger = Arc::clone(&self.spawn_panic_log_ledger);
+        let panic_mob_id = self.definition.id.clone();
         let task = tokio::spawn(async move {
             let panic_member_identity = spawn_member_identity.clone();
-            let provision_result = std::panic::AssertUnwindSafe(async {
-                let materialized = provisioner
-                    .materialize_member(super::provisioner::MaterializeMemberRequest {
-                        host_peer,
-                        payload,
-                        peer_name,
-                        owner_bridge_session_id: owner_session,
-                        ops_registry,
-                        provision_operation_id,
-                        operation_anchor:
-                            super::provisioner::PlacedProvisionOperationAnchor::NewPending,
-                        timeout: super::provisioner::MATERIALIZE_BRIDGE_TIMEOUT,
-                    })
-                    .await?;
-                Ok(materialized.receipt)
-            })
-            .catch_unwind()
+            // Panic boundary (see `panic_capture` for the 2026-07-29 incident
+            // WHY): recover + log the payload once per distinct payload and
+            // feed the typed SpawnProvisioned failure path — never a silent
+            // `Err(_)` that an eager requeue can retry into a furnace.
+            let provision_result = super::panic_capture::run_spawn_provision_guarded(
+                panic_log_ledger.as_ref(),
+                &panic_mob_id,
+                "remote spawn dispatch task",
+                &panic_member_identity,
+                async {
+                    let materialized = provisioner
+                        .materialize_member(super::provisioner::MaterializeMemberRequest {
+                            host_peer,
+                            payload,
+                            peer_name,
+                            owner_bridge_session_id: owner_session,
+                            ops_registry,
+                            provision_operation_id,
+                            operation_anchor:
+                                super::provisioner::PlacedProvisionOperationAnchor::NewPending,
+                            timeout: super::provisioner::MATERIALIZE_BRIDGE_TIMEOUT,
+                        })
+                        .await?;
+                    Ok(materialized.receipt)
+                },
+            )
             .await;
-            let provision_result = match provision_result {
-                Ok(result) => result,
-                Err(_) => Err(MobError::Internal(format!(
-                    "remote spawn dispatch task panicked for '{panic_member_identity}'"
-                ))),
-            };
             if let Err(send_error) = command_tx
                 .send(RoutedMobCommand::internal(MobCommand::SpawnProvisioned {
                     spawn_ticket,
@@ -27910,11 +27927,7 @@ impl MobActor {
         target: &MemberLiveMutationTarget,
         payload: Box<dyn std::any::Any + Send>,
     ) -> MobError {
-        let detail = payload
-            .downcast_ref::<&str>()
-            .map(|value| (*value).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let detail = super::panic_capture::panic_payload_detail(payload.as_ref());
         MobError::Internal(format!(
             "actor-owned member-live {operation} panicked for member '{agent_identity}' at {target:?}: {detail}"
         ))

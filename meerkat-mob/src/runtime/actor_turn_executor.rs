@@ -175,9 +175,15 @@ impl ActorFlowTurnExecutor {
             }
         };
 
-        if AssertUnwindSafe(reconcile).catch_unwind().await.is_err() {
+        // Recover the payload (see `panic_capture` for the 2026-07-29
+        // incident WHY): a swallowed panic payload at an actor task boundary
+        // left a provisioning furnace invisible in the field. This join runs
+        // once per detached turn (no retry), so no rate limit is needed.
+        if let Err(payload) = AssertUnwindSafe(reconcile).catch_unwind().await {
+            let panic_detail = super::panic_capture::panic_payload_detail(payload.as_ref());
             tracing::error!(
                 run_id = %run_id,
+                panic = %panic_detail,
                 "panic while joining detached timed-out turn"
             );
         }

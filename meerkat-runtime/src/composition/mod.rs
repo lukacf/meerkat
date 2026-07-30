@@ -451,7 +451,8 @@ impl FieldValue<'_> {
 /// (rather than a generic on the method) keeps the trait dyn-safe — a
 /// `MeerkatMachine` can hold `Arc<dyn CompositionDispatcher<Effect = ...>>`
 /// without leaking the machine kernel's monomorphization concerns.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait CompositionDispatcher: Send + Sync {
     /// Seam-effect sum this dispatcher handles. Matches the codegen-emitted
     /// `{Composition}Effect` enum.
@@ -761,7 +762,8 @@ impl<S: ProducerSignal> CatalogCompositionSignalDispatcher<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<E: ProducerEffect> CompositionDispatcher for CatalogCompositionDispatcher<E> {
     type Effect = E;
 

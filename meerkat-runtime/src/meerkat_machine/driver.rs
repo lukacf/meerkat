@@ -2831,11 +2831,13 @@ impl DriverEntry {
                     "interaction terminal owner {candidate_owner_input_id} lost its completion recipients before publication"
                 ),
             })?;
-        let persisted_input_ids: std::collections::BTreeSet<_> =
-            completion_input_ids.iter().cloned().collect();
+        let persisted_input_ids: std::collections::BTreeSet<_> = completion_input_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let outbox_input_ids: std::collections::BTreeSet<_> = outboxes
             .iter()
-            .map(|outbox| outbox.input_id.clone())
+            .map(|outbox| outbox.input_id.to_string())
             .collect();
         if persisted_input_ids != outbox_input_ids {
             return Err(RuntimeDriverError::ValidationFailed {

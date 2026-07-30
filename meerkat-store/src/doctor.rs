@@ -768,58 +768,46 @@ fn diagnose_realm_dir(
         }
     }
 
-    match backend {
-        Some("sqlite") => {
-            let sessions_db = realm_dir.join("sessions.sqlite3");
-            if sessions_db_swept {
-                // No schema preflight: doctor must open future files to
-                // report them (module safety contract).
-                match meerkat_sqlite::open(
-                    &sessions_db,
-                    meerkat_sqlite::ConnectionProfile::ReadOnly,
-                ) {
-                    Ok(conn) => {
-                        // One deferred read transaction so the blob sweep and
-                        // storage-footprint census observe a single SQLite
-                        // snapshot: a live
-                        // legacy-to-strand migration landing between separate
-                        // autocommit queries could otherwise move a session
-                        // out of both views (or let the footprint census
-                        // charge one session both its strand rows and the
-                        // blob row those rows were just built from). The
-                        // first SELECT inside the transaction establishes the
-                        // snapshot.
-                        match conn.unchecked_transaction() {
-                            Ok(tx) => {
-                                sweep_dangling_blobs(
-                                    &tx,
-                                    realm_dir,
-                                    &sessions_db,
-                                    realm,
-                                    diagnosis,
-                                );
-                                census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
-                            }
-                            Err(err) => {
-                                diagnosis.findings.push(
-                                    StorageFinding::new(
-                                        FindingSeverity::Error,
-                                        FINDING_DATABASE_UNREADABLE,
-                                        format!("cannot begin read-snapshot transaction: {err}"),
-                                    )
-                                    .with_path(sessions_db.clone())
-                                    .with_realm(realm),
-                                );
-                            }
+    if let Some("sqlite") = backend {
+        let sessions_db = realm_dir.join("sessions.sqlite3");
+        if sessions_db_swept {
+            // No schema preflight: doctor must open future files to
+            // report them (module safety contract).
+            match meerkat_sqlite::open(&sessions_db, meerkat_sqlite::ConnectionProfile::ReadOnly) {
+                Ok(conn) => {
+                    // One deferred read transaction so the blob sweep and
+                    // storage-footprint census observe a single SQLite
+                    // snapshot: a live
+                    // legacy-to-strand migration landing between separate
+                    // autocommit queries could otherwise move a session
+                    // out of both views (or let the footprint census
+                    // charge one session both its strand rows and the
+                    // blob row those rows were just built from). The
+                    // first SELECT inside the transaction establishes the
+                    // snapshot.
+                    match conn.unchecked_transaction() {
+                        Ok(tx) => {
+                            sweep_dangling_blobs(&tx, realm_dir, &sessions_db, realm, diagnosis);
+                            census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
+                        }
+                        Err(err) => {
+                            diagnosis.findings.push(
+                                StorageFinding::new(
+                                    FindingSeverity::Error,
+                                    FINDING_DATABASE_UNREADABLE,
+                                    format!("cannot begin read-snapshot transaction: {err}"),
+                                )
+                                .with_path(sessions_db.clone())
+                                .with_realm(realm),
+                            );
                         }
                     }
-                    Err(_) => {
-                        // Already reported by inspect_database above.
-                    }
+                }
+                Err(_) => {
+                    // Already reported by inspect_database above.
                 }
             }
         }
-        _ => {}
     }
 
     sweep_artifacts(realm_dir, realm, diagnosis);
@@ -1127,7 +1115,7 @@ fn sweep_dangling_blobs(
                         collect_message_blob_refs(&message, &mut refs);
                         collector.record(&blobs_root, &session_id, refs);
                     }
-                    Err(_) => undecodable += 1,
+                    Err(()) => undecodable += 1,
                 }
             }
         }

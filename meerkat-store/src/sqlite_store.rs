@@ -1201,9 +1201,10 @@ fn reconcile_head_metadata_transition_in_txn(
             } else if projection.mutations().len()
                 != usize::try_from(successor_identity.entry_count())
                     .map_err(|_| SessionStoreError::Corrupted(id.clone()))?
-                || projection.mutations().first().map_or(true, |mutation| {
-                    !mutation.predecessor_identity().is_canonical_empty()
-                })
+                || projection
+                    .mutations()
+                    .first()
+                    .is_none_or(|mutation| !mutation.predecessor_identity().is_canonical_empty())
             {
                 return Err(SessionStoreError::Corrupted(id.clone()));
             }
@@ -1529,9 +1530,10 @@ fn persist_standalone_metadata_snapshot_in_txn(
     } else if projection.mutations().len()
         != usize::try_from(identity.entry_count())
             .map_err(|_| SessionStoreError::Corrupted(id.clone()))?
-        || projection.mutations().first().map_or(true, |mutation| {
-            !mutation.predecessor_identity().is_canonical_empty()
-        })
+        || projection
+            .mutations()
+            .first()
+            .is_none_or(|mutation| !mutation.predecessor_identity().is_canonical_empty())
     {
         return Err(SessionStoreError::Corrupted(id.clone()));
     }
@@ -1682,7 +1684,7 @@ fn prune_converged_metadata_history_in_txn(
 
     let physical_state = metadata_state_in_txn(tx, id, &physical.state_id)?
         .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
-    let retained_predecessor = physical_state.predecessor_state_id.clone();
+    let retained_predecessor = physical_state.predecessor_state_id;
     let mut delete_states = Vec::new();
     let mut candidates = BTreeSet::new();
     let mut cursor = match retained_predecessor.as_deref() {
@@ -4523,9 +4525,8 @@ pub fn ensure_head_canonical_for_runtime_in_txn(
     let Some((head, token)) = ensure_head_canonical_for_write_in_txn(tx, id)? else {
         return Ok(None);
     };
-    match head.realtime_event_prefix.as_ref() {
-        Some(_) => return Ok(Some((head, token))),
-        None => {}
+    if head.realtime_event_prefix.is_some() {
+        return Ok(Some((head, token)));
     }
     let links = strand_links_in_txn(tx, id)?;
     validate_strand_links_acyclic(id, &links)?;
@@ -6068,19 +6069,19 @@ fn verify_prepared_head_canonical_rewrite_rows_named_in_txn(
         None => return Err(SessionStoreError::Corrupted(id.clone())),
         Some(_) => {}
     }
-    if matches!(metadata_owner, HeadMetadataProjectionOwner::PhysicalHead) {
-        if let Some(final_link) = final_link {
-            if final_link.splice.strand_len != mutation.tail_base_seq() {
-                return Err(SessionStoreError::Corrupted(id.clone()));
-            }
-            verify_linked_strand_physical_shape_in_txn(
-                tx,
-                id,
-                &successor_head.strand,
-                &final_link,
-                successor_head.message_count,
-            )?;
+    if matches!(metadata_owner, HeadMetadataProjectionOwner::PhysicalHead)
+        && let Some(final_link) = final_link
+    {
+        if final_link.splice.strand_len != mutation.tail_base_seq() {
+            return Err(SessionStoreError::Corrupted(id.clone()));
         }
+        verify_linked_strand_physical_shape_in_txn(
+            tx,
+            id,
+            &successor_head.strand,
+            &final_link,
+            successor_head.message_count,
+        )?;
     }
     if let Some(suffix) = mutation.realtime_suffix() {
         verify_prepared_component_suffix_rows_in_txn(tx, suffix, false)?;
@@ -6154,8 +6155,7 @@ pub fn apply_prepared_head_canonical_rewrite_mutation_in_txn(
             return Err(SessionStoreError::TranscriptContinuityViolation {
                 id: id.clone(),
                 previous_revision: format!(
-                    "strand:{} logical-rows:{expected_source_len}",
-                    expected_source
+                    "strand:{expected_source} logical-rows:{expected_source_len}"
                 ),
                 incoming_revision: format!("rewrite-parent-base:{}", step.parent_base_seq()),
                 reason: "prepared rewrite parent bridge does not begin at the sealed strand tip"
@@ -7002,12 +7002,12 @@ impl IncrementalSessionStore for SqliteSessionStore {
                 .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
             let current_token = session_head_cas_token(&current)?;
             if current_token != stored_token {
-                return Err(SessionStoreError::Corrupted(expected.id.clone()));
+                return Err(SessionStoreError::Corrupted(expected.id));
             }
             let expected_token = session_head_cas_token(&expected)?;
             if expected_token != current_token {
                 return Err(SessionStoreError::TranscriptRevisionConflict {
-                    id: expected.id.clone(),
+                    id: expected.id,
                     expected: expected_token,
                     actual: current_token,
                 });
@@ -7041,7 +7041,7 @@ impl IncrementalSessionStore for SqliteSessionStore {
             let end =
                 usize::try_from(range.end).map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
             if start > end || end > rows.len() {
-                return Err(SessionStoreError::Corrupted(id.clone()));
+                return Err(SessionStoreError::Corrupted(id));
             }
             Ok(rows[start..end].to_vec())
         })

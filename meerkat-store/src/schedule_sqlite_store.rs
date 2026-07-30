@@ -248,7 +248,6 @@ fn initialize_schedule_database(path: &Path) -> Result<(), StoreError> {
             // before the Primary profile's WAL conversion.
             schema_preflight: &[&SCHEDULE_STORE_DOMAIN],
             busy_timeout: Some(SCHEDULE_BUSY_TIMEOUT),
-            ..meerkat_sqlite::OpenOptions::default()
         },
     )
     .map_err(StoreError::from)?;
@@ -848,6 +847,11 @@ impl ScheduleConnectionWorker {
     }
 }
 
+enum ScheduleRefillDeadlineProjection {
+    Derive,
+    Exact(Option<DateTime<Utc>>),
+}
+
 pub struct SqliteScheduleStore {
     path: PathBuf,
     worker: ScheduleConnectionWorker,
@@ -910,7 +914,7 @@ impl SqliteScheduleStore {
         &self,
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
-        next_refill_at_utc: Option<Option<DateTime<Utc>>>,
+        refill_deadline: ScheduleRefillDeadlineProjection,
     ) -> Result<Schedule, StoreError> {
         self.with_conn(move |conn| {
             let tx = begin_immediate_transaction(conn)?;
@@ -935,7 +939,7 @@ impl SqliteScheduleStore {
                     .map_err(|error| StoreError::Internal(error.to_string()))?;
                 write_schedule_in_txn(&tx, &committed_schedule)?;
             }
-            if let Some(next_refill_at_utc) = next_refill_at_utc {
+            if let ScheduleRefillDeadlineProjection::Exact(next_refill_at_utc) = refill_deadline {
                 set_schedule_refill_deadline_in_txn(&tx, &committed_schedule, next_refill_at_utc)?;
             }
             tx.commit()?;
@@ -1622,9 +1626,13 @@ impl ScheduleStore for SqliteScheduleStore {
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<Schedule, ScheduleStoreError> {
-        self.commit_schedule_mutation_impl(schedule, occurrences, None)
-            .await
-            .map_err(into_schedule_store_error)
+        self.commit_schedule_mutation_impl(
+            schedule,
+            occurrences,
+            ScheduleRefillDeadlineProjection::Derive,
+        )
+        .await
+        .map_err(into_schedule_store_error)
     }
 
     async fn commit_schedule_refill(
@@ -1633,9 +1641,13 @@ impl ScheduleStore for SqliteScheduleStore {
         occurrences: Vec<AuthorizedOccurrenceWrite>,
         next_refill_at_utc: Option<DateTime<Utc>>,
     ) -> Result<Schedule, ScheduleStoreError> {
-        self.commit_schedule_mutation_impl(schedule, occurrences, Some(next_refill_at_utc))
-            .await
-            .map_err(into_schedule_store_error)
+        self.commit_schedule_mutation_impl(
+            schedule,
+            occurrences,
+            ScheduleRefillDeadlineProjection::Exact(next_refill_at_utc),
+        )
+        .await
+        .map_err(into_schedule_store_error)
     }
 
     async fn record_refill_deadline_if_current(

@@ -2008,7 +2008,7 @@ pub enum RecoveryCommitStatus {
 }
 
 /// Result of an atomic prepared session-boundary commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRuntimeSessionCommitResult {
     profile: RuntimeSessionPersistenceProfile,
     outcome: PreparedRuntimeSessionCommitOutcome,

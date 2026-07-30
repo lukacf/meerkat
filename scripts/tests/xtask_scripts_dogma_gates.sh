@@ -17,13 +17,14 @@ ok()  { printf '  OK:   %s\n' "$*"; pass=$((pass + 1)); }
 bad() { printf '  FAIL: %s\n' "$*"; fail=$((fail + 1)); }
 
 # ── #285: schema freshness gate must not mutate artifacts while validating ───
-# The emitter is run with cwd=TEMP_ROOT and the committed-vs-fresh diff happens
-# inside the temp dir, so the workspace tree is never written.
+# The emitter receives an explicit temp output directory and the
+# committed-vs-fresh diff happens against that directory, so the workspace
+# tree is never written.
 echo "#285 verify-schema-freshness leaves the workspace clean:"
-if grep -Fq 'cd "$TEMP_ROOT" && "$CARGO" run -p meerkat-contracts' scripts/verify-schema-freshness.sh; then
-  ok "emit-schemas runs with cwd=TEMP_ROOT"
+if grep -Fq -- '-- "$FRESH_DIR"' scripts/verify-schema-freshness.sh; then
+  ok "emit-schemas receives an explicit temp output directory"
 else
-  bad "emit-schemas is not run with cwd=TEMP_ROOT"
+  bad "emit-schemas does not receive an explicit temp output directory"
 fi
 if grep -Fq 'fresh="$FRESH_DIR/$fname"' scripts/verify-schema-freshness.sh \
   && ! grep -Fq 'git show HEAD:"artifacts/schemas/$fname"' scripts/verify-schema-freshness.sh; then

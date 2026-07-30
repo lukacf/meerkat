@@ -366,6 +366,24 @@ pub trait AgentRunner: Send {
     ) -> Result<RunResult, AgentError>;
 }
 
+fn preflight_client_transcript_for_wire<C>(
+    client: &C,
+    messages: &[Message],
+) -> Result<(), AgentError>
+where
+    C: AgentLlmClient + ?Sized,
+{
+    let capability = client.system_message_wire_capability();
+    if let Some(incompatible_index) = capability.first_incompatible_index(messages) {
+        return Err(AgentError::SystemMessageWireIncompatible {
+            provider: client.provider(),
+            capability,
+            incompatible_index,
+        });
+    }
+    Ok(())
+}
+
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized,
@@ -762,7 +780,7 @@ where
     /// rebuilding the agent. The new client takes effect on the next
     /// `run()` / `run_with_events()` call.
     pub fn replace_client(&mut self, client: Arc<C>) -> Result<(), AgentError> {
-        Self::preflight_client_transcript(client.as_ref(), self.session.messages())?;
+        preflight_client_transcript_for_wire(client.as_ref(), self.session.messages())?;
         self.client = client;
         Ok(())
     }
@@ -813,7 +831,7 @@ where
                     .to_string(),
             ));
         }
-        Self::preflight_client_transcript(client.as_ref(), self.session.messages())?;
+        preflight_client_transcript_for_wire(client.as_ref(), self.session.messages())?;
 
         let target_profile = self
             .effective_model_registry
@@ -1195,25 +1213,13 @@ where
         &mut self.session
     }
 
-    fn preflight_client_transcript(client: &C, messages: &[Message]) -> Result<(), AgentError> {
-        let capability = client.system_message_wire_capability();
-        if let Some(incompatible_index) = capability.first_incompatible_index(messages) {
-            return Err(AgentError::SystemMessageWireIncompatible {
-                provider: client.provider(),
-                capability,
-                incompatible_index,
-            });
-        }
-        Ok(())
-    }
-
     /// Validate the full canonical transcript against the active concrete
     /// provider wire without changing agent or session state.
     ///
     /// Builders use this after restoring a durable session so an incompatible
     /// provider/config selection fails before the session is materialized.
     pub fn preflight_active_client_transcript(&self) -> Result<(), AgentError> {
-        Self::preflight_client_transcript(self.client.as_ref(), self.session.messages())
+        preflight_client_transcript_for_wire(self.client.as_ref(), self.session.messages())
     }
 
     fn preflight_turn_appends(&self, appends: &[ConversationAppend]) -> Result<(), AgentError> {

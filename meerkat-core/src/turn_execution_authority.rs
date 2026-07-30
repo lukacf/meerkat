@@ -208,7 +208,9 @@ impl TurnFailureSourceKind {
             AgentError::OperationNotFound(_) => Self::OperationNotFound,
             AgentError::DepthLimitExceeded { .. } => Self::DepthLimitExceeded,
             AgentError::ConcurrencyLimitExceeded => Self::ConcurrencyLimitExceeded,
-            AgentError::ConfigError(_) => Self::ConfigError,
+            AgentError::ConfigError(_) | AgentError::SystemMessageWireIncompatible { .. } => {
+                Self::ConfigError
+            }
             AgentError::InvalidToolAccess { .. } => Self::InvalidToolAccess,
             AgentError::SkillResolutionFailed { .. } => Self::SkillResolutionFailed,
             AgentError::InternalError(_) => Self::InternalError,

@@ -142,6 +142,7 @@ pub enum HeadCanonicalDeferredProjectionSource {
 }
 
 /// Exact bounded request sent to the actor that owns the live Session.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct HeadCanonicalRuntimeBoundaryPrepareRequest {
     authority: HeadCanonicalRuntimeBoundaryAuthority,
     observed_head: Option<meerkat_core::session_store::SessionHead>,
@@ -150,6 +151,7 @@ pub struct HeadCanonicalRuntimeBoundaryPrepareRequest {
     blob_store: Arc<dyn meerkat_core::BlobStore>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl HeadCanonicalRuntimeBoundaryPrepareRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -1818,6 +1820,7 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) async fn preflight_detached_system_message_append(
         &self,
         session: &meerkat_core::Session,

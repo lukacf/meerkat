@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-llm-core = { workspace = true }
+meerkat-models = { workspace = true }
 # meerkat-auth-core's resolver is wasm-compatible; needed so the
 # provider runtime can resolve inline-secret bindings in the browser
 # (Cluster C in the smoke-fix track).
@@ -39,7 +40,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
-meerkat-models = { workspace = true }
 tempfile = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-auth-core = { workspace = true, features = ["oauth", "gcp-auth"] }

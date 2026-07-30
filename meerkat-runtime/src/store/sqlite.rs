@@ -15,6 +15,7 @@ mod inner {
 
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
     use crate::input_state::{InputStatePersistenceRecord, InputStateSeed, StoredInputState};
+    use crate::runtime_state::RuntimeState;
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
         CommittedWholeBlobSnapshot, ExactInputStateObservation, FencedInputStateBatchCasOutcome,

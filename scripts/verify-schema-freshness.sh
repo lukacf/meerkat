@@ -68,6 +68,12 @@ done
 
 echo ""
 if [ $FAIL -ne 0 ]; then
+    if [ -n "${MEERKAT_SCHEMA_DIAGNOSTIC_DIR:-}" ]; then
+        rm -rf "$MEERKAT_SCHEMA_DIAGNOSTIC_DIR"
+        mkdir -p "$MEERKAT_SCHEMA_DIAGNOSTIC_DIR"
+        cp "$FRESH_DIR"/*.json "$MEERKAT_SCHEMA_DIAGNOSTIC_DIR"/
+        red "Fresh schemas preserved at: $MEERKAT_SCHEMA_DIAGNOSTIC_DIR"
+    fi
     red "Schema freshness check FAILED"
     red "Run: ./scripts/repo-cargo run -p meerkat-contracts --features schema --bin emit-schemas"
     red "Then: python3 tools/sdk-codegen/generate.py"

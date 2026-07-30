@@ -1469,7 +1469,6 @@ fn attach_head_metadata_projection(
             .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
         let Some(predecessor_state_id) = state.predecessor_state_id else {
             cells = materialize_standalone_metadata_state_in_txn(tx, &head.id, &target_state_id)?;
-            state_id = target_state_id.clone();
             break;
         };
         for delta in metadata_state_deltas_in_txn(tx, &head.id, &state_id)? {
@@ -6975,7 +6974,7 @@ impl IncrementalSessionStore for SqliteSessionStore {
     ) -> Result<String, SessionStoreError> {
         let mutation = mutation.clone();
         self.in_write_txn(move |tx| {
-            apply_prepared_head_canonical_mutation_in_txn(tx, &mutation)?;
+            let _ = apply_prepared_head_canonical_mutation_in_txn(tx, &mutation)?;
             Ok(mutation.successor_head_token().to_string())
         })
         .await
@@ -6987,7 +6986,7 @@ impl IncrementalSessionStore for SqliteSessionStore {
     ) -> Result<String, SessionStoreError> {
         let mutation = mutation.clone();
         self.in_write_txn(move |tx| {
-            apply_prepared_head_canonical_rewrite_mutation_in_txn(tx, &mutation)?;
+            let _ = apply_prepared_head_canonical_rewrite_mutation_in_txn(tx, &mutation)?;
             Ok(mutation.successor_head_token().to_string())
         })
         .await

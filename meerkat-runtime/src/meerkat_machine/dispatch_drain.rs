@@ -45,11 +45,10 @@ impl MeerkatMachine {
                     .await?;
 
                 if let Some(expected) = expected_attachment.as_ref() {
-                    let exact_attachment = if let Some(gate) = gate.as_ref() {
+                    let exact_attachment = {
                         let sessions = self.sessions.read().await;
                         sessions.get(&session_id).is_some_and(|entry| {
-                            Arc::ptr_eq(&entry.mutation_gate, gate)
-                                && entry.epoch_id == expected.epoch_id
+                            entry.epoch_id == expected.epoch_id
                                 && entry.generated_executor_registration_active()
                                 && matches!(
                                     &entry.attachment_slot,
@@ -59,8 +58,6 @@ impl MeerkatMachine {
                                             && !attachment.effect_tx.is_closed()
                                 )
                         })
-                    } else {
-                        false
                     };
                     if !exact_attachment {
                         return Err(RuntimeDriverError::StaleAuthority {

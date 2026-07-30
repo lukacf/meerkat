@@ -242,7 +242,9 @@ impl PersistentRuntimeDriver {
         let mut exact_observations = Vec::with_capacity(rows.len());
         for (bundle, row_digest) in rows {
             let disposition =
-                crate::meerkat_machine::machine_classify_recovered_input_durability(&bundle.state)?;
+                crate::meerkat_machine::driver::machine_classify_recovered_input_durability(
+                    &bundle.state,
+                )?;
             exact_observations.push((bundle.state.input_id.clone(), row_digest, disposition));
             observed.push(bundle);
         }
